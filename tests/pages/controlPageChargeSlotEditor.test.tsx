@@ -14,7 +14,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, within, cleanup } from '@testing-library/react';
 import ControlPage from '../../src/pages/ControlPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
-import { apiGet } from '../../src/lib/api';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
 vi.mock('../../src/lib/api', () => ({

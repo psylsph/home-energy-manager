@@ -5,32 +5,25 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 ## General rules
 
 - **Never close GitHub issues or PRs** without explicit permission from the project owner.
-- **GitHub issue comments should read like a person wrote them.** That means no bullet-point recaps, no `**What changed**` / `**Verified**` / `**Why**` headings, no verification-checklist blocks at the end. Same goes for PR descriptions and review replies. Write the way you'd actually reply to a colleague in chat — acknowledge what they said, explain the substance, point at the fix. Technical detail is fine; changelog formatting is not.
-- **Always add tests for any new behaviour.** Every bug fix and every new feature ships with test coverage. Frontend logic goes in `tests/lib/*.test.ts` (pure helpers) or `tests/pages/*.test.tsx` (component / page tests); Rust logic goes inline as `#[cfg(test)] mod tests` next to the code. Mirror the patterns already in those directories (the existing `tests/lib/deviceCapabilities.test.ts`, `tests/pages/settingsPageGridLines.test.tsx`, and the `poll.rs` `MAX_CONSECUTIVE_TIMEOUTS` test are good templates). If you're adding a new endpoint, a new state-machine branch, a new UI toggle, a new sanitization rule, or a new setting field, there must be a test that exercises it — including the failure / edge-case paths. "I'll add tests later" is not acceptable; tests are part of the change, not a follow-up.
-- **Fix flaky tests, never tolerate them.** A test that passes or fails depending on when it runs, network timing, or random seed isn't green — it's a latent CI failure. Make it deterministic (fixed dates/clocks, injected `now`, seeded inputs, hermetic servers). Never "fix" a flake by re-running until green, skipping it, or widening an assertion. The planner's `sunny_48h` test shipped anchoring its simulation on `Local::now()` and only passed in daytime CI runs for weeks before an evening release run caught it — time-dependent tests must pin their clock (see `fixed_48h`/`fixed_72h` in `forecast/planner.rs`).
-- **Use TDD wherever applicable.** Write a failing test first (RED), then the minimal fix to make it pass (GREEN), then refactor. Commit the RED test and the GREEN fix as separate logical commits. For concurrency/race bugs, the failing test must be *concurrent* — a sequential test can never reproduce a lost update or a race, so drive the fix with a test that actually exercises the interleaving (e.g. two writers on disjoint fields, or a poll writer racing an API save). Verify with the full suite (`cargo test` + `cargo clippy` for Rust, `npm run test` for frontend) before committing. Never neuter a RED test (e.g. replacing a real assertion with `if true { return }`) to make it pass — that hides the bug instead of fixing it.
-- **Tests must never read from or write to the live config directory or `~/.givenergy-local`.** Any test that loads or saves settings, constructs `AppState`, or starts the backend must use a unique temporary directory via `GIVENERGY_LOCAL_CONFIG_DIR`; spawned processes must also receive a temporary `HOME`. Test teardown must restore any previous environment values rather than clearing a caller-provided safe override.
-- **Don't leave long-running processes behind.** Do not start `npm run dev`, `cargo tauri dev`, or other dev servers for testing unless explicitly asked — the project's test commands (`cargo test`, `npm run test:e2e`, `npm run build`) run to completion on their own. If you do start a long-running process for a legitimate reason, you must stop it yourself before finishing, and verify the port is freed. Never leave a process bound to a port (5173, 7337, etc.) after the task ends.
+- **GitHub issue/PR comments should read like a person wrote them.** No bullet-point recaps, no `**What changed**` / `**Verified**` / `**Why**` headings, no verification-checklist blocks. Write the way you'd reply to a colleague in chat — acknowledge what they said, explain the substance, point at the fix.
+- **Always add tests for any new behaviour.** Every bug fix and feature ships with coverage, including failure/edge-case paths. Frontend logic → `tests/lib/*.test.ts` (pure helpers) or `tests/pages/*.test.tsx` (components); Rust logic → inline `#[cfg(test)] mod tests` next to the code. "I'll add tests later" is not acceptable.
+- **Fix flaky tests, never tolerate them.** Make them deterministic (fixed dates/clocks, injected `now`, seeded inputs, hermetic servers). Never "fix" a flake by re-running, skipping, or widening assertions. Time-dependent tests must pin their clock (see `fixed_48h`/`fixed_72h` in `forecast/planner.rs`).
+- **Use TDD wherever applicable.** Failing test first (RED), minimal fix (GREEN), refactor; commit RED and GREEN as separate logical commits. Concurrency/race bugs need a *concurrent* failing test — a sequential test can never reproduce a lost update (e.g. two writers on disjoint fields, or a poll writer racing an API save). Never neuter a RED test to make it pass. Verify with the full suite (`cargo test` + `cargo clippy`, `npm run test`) before committing.
+- **Tests must never read from or write to the live config directory or `~/.givenergy-local`.** Tests that load/save settings, construct `AppState`, or start the backend must use a unique temp dir via `GIVENERGY_LOCAL_CONFIG_DIR`; spawned processes must also receive a temporary `HOME`. Teardown must restore previous env values rather than clearing a caller-provided safe override.
+- **Don't leave long-running processes behind.** Don't start `npm run dev`, `cargo tauri dev`, or other dev servers for testing unless explicitly asked — the project's test commands run to completion on their own. If you start one legitimately, stop it before finishing and verify the port (5173, 7337, etc.) is freed.
 
 ## Stack
 
 - **Frontend**: React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
-- **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
-- **Testing**: Rust unit tests (inline `#[cfg(test)] mod tests` throughout `src-tauri/src/`) + integration tests with mock TCP server + Playwright end-to-end tests. Local-only E2E use [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator)
-- **References**: Local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding
+- **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) and [GivTCP](https://github.com/dewet22/giv_tcp)
+- **Testing**: inline Rust unit tests + mock-TCP integration tests + Playwright E2E (local-only E2E use the [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator))
+- **References**: local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding
 
 ## Prerequisites
 
-- **Node.js** + npm
-- **Rust** toolchain (stable; `rustup default stable`)
-- **Tauri CLI**: `cargo install tauri-cli`
-- **Linux desktop build dependencies** (Debian/Ubuntu/LMDE):
-  `sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev libgtk-3-dev
-  libayatana-appindicator3-dev`. These match the CI build environment. Install
-  `rpm` as well when creating an RPM bundle. Tauri's `tray-icon` feature needs
-  the appindicator pkg-config metadata during `cargo tauri build`; runtime-only
-  packages are not sufficient.
+- Node.js + npm; Rust toolchain (stable); Tauri CLI (`cargo install tauri-cli`)
+- **Linux desktop build deps** (Debian/Ubuntu/LMDE, matches CI): `sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev` (also `rpm` for RPMs; the appindicator pkg-config metadata is needed by Tauri's `tray-icon` feature)
 
 ## Commands
 
@@ -39,138 +32,63 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run dev` | Vite dev server on port 5173 |
 | `npm run build` | `tsc -b && vite build` (full typecheck + bundle) |
 | `npm run lint` | `eslint .` |
-| `npm run lint:md` | Lint all markdown (`markdownlint`); run after significant .md edits |
+| `npm run lint:md` | Markdown lint; run after significant .md edits |
 | `npm run check:versions` | Verify `package.json` / `Cargo.toml` / `tauri.conf.json` agree |
-| `npm run test` | Vitest + all `tests/scripts/*.test.sh` smoke tests (incl. `check-versions`) |
-| `npm run preview` | `vite preview` (preview the production build locally) |
-| `cargo test` (in `src-tauri/`) | Run all Rust unit tests |
-| `cargo clippy` (in `src-tauri/`) | Run Rust linter |
-| `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
-| `cargo tauri build` | Production build |
-| `docker build .` | Docker container build |
-| `npm run test:e2e` | Playwright E2E (requires `npm run build` + `cargo build --release` first) |
-| `npm run test:local` | Local-only E2E using simulator at `~/repos/givenergy-simulator/target/release/sim-api` |
-| `npm run test:local:headed` | Same as above with visible browser |
-
-### Dongle misbehaviour tests
-
-The simulator supports `--dongle-misbehaviour` to simulate various dongle failure modes:
-
-| Mode | Behaviour | What it tests |
-|---|---|---|
-| `Off` | Normal operation | Baseline |
-| `DropConnection` | Drops TCP immediately on accept | Hard error → reconnect |
-| `Intermittent` | ~50% zeros, 50% real data | Per-block retry on timeout |
-| `EmptyData` | All registers return 0 | Sanitizer zero detection |
-| `StaleData` | Frozen register values (snapshot on first read) | Stale data detection |
-| `GarbageData` | Random u16 values for every register | Sanitizer garbage rejection |
-
-Tests in `e2e/local-dongle-misbehaviour.spec.ts` start their own simulator +
-backend per misbehaviour mode, so they don't interfere with the main local
-E2E suite. They run as part of `npm run test:local` (the `local-*.spec.ts`
-glob in `playwright.local.config.ts` catches them).
-
-Each test verifies that the backend's per-block retry and sanitization layers
-handle the failure mode correctly:
-
-- **DropConnection**: backend enters Reconnecting state, reconnects on retry
-- **Intermittent**: backend stays Connected, snapshot eventually returns valid data
-- **EmptyData**: backend stays Connected, snapshot shows zero power fields
-- **StaleData**: backend stays Connected, snapshot values are frozen across polls
+| `npm run test` | Vitest + `tests/scripts/*.test.sh` smoke tests |
+| `cargo test` (in `src-tauri/`) | Rust unit tests |
+| `cargo clippy` (in `src-tauri/`) | Rust linter |
+| `cargo tauri dev` / `build` | Dev mode with hot-reload / production build |
+| `docker build .` | Container build |
+| `npm run test:e2e` | Playwright E2E (needs `npm run build` + `cargo build --release` first) |
+| `npm run test:local[:headed]` | Local-only E2E via simulator at `~/repos/givenergy-simulator/target/release/sim-api` |
 
 Full verification order: `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` → `cargo test` → `npm run test:e2e` → `docker build .`
 
+### Dongle misbehaviour tests
+
+`npm run test:local` also runs `e2e/local-dongle-misbehaviour.spec.ts`; each test starts its own simulator + backend with `--dongle-misbehaviour <mode>`, exercising the backend's per-block retry and sanitization layers: `DropConnection` (→ Reconnecting, then reconnects), `Intermittent` (~50% zeros; stays Connected, valid data eventually), `EmptyData` (all-zero registers; snapshot shows zero power fields), `StaleData` (frozen values across polls), `GarbageData` (random u16s rejected).
+
 ## Linting rules
 
-### Rust (clippy)
-
-All clippy warnings must be fixed. Common patterns: `empty_line_after_doc_comments`, `field_reassign_with_default`, `manual_flatten`, `match_like_matches_macro`, `derivable_impls`, `new_without_default`, `same_item_push`, `manual_clamp`. Run: `cd src-tauri && cargo clippy`
-
-### TypeScript / ESLint
-
-- `verbatimModuleSyntax: true` — use `import type` for type-only imports
-- `erasableSyntaxOnly: true` — no `enum`, no `namespace`, no constructor parameter properties
-- `noUnusedLocals` / `noUnusedParameters` — both on
-- `react-hooks/set-state-in-effect` — do not call `setState` directly inside `useEffect`; use key-based remounting or derived values instead
-
-Run: `npm run lint`
-
-### Markdown
-
-Run `npm run lint:md` after significant .md edits.
+- **Clippy**: all warnings must be fixed (`cd src-tauri && cargo clippy`).
+- **ESLint** (`npm run lint`): `verbatimModuleSyntax` — use `import type` for type-only imports; `erasableSyntaxOnly` — no `enum`, `namespace`, or constructor parameter properties; `noUnusedLocals`/`noUnusedParameters`; `react-hooks/set-state-in-effect` — don't call setState directly inside `useEffect`, use key-based remounting or derived values.
+- **Markdown**: `npm run lint:md` after significant .md edits.
 
 ## Coverage
 
-Rust code coverage is generated with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) against the `nightly` toolchain (source-based coverage is stable on nightly). Requires the `llvm-tools-preview` and `rustfmt` components and the `cargo-llvm-cov` subcommand (`rustup component add llvm-tools-preview --toolchain nightly && cargo +nightly install cargo-llvm-cov`).
+From `src-tauri/`: `cargo +nightly llvm-cov --no-default-features` (add `--show-missing-lines` for uncovered lines inline, `--html` for `target/llvm-cov/html/`, `--lcov --output-path lcov.info`, or `--all-targets` to include integration tests). Needs nightly `llvm-tools-preview` + `rustfmt` components and `cargo-llvm-cov`.
 
-From `src-tauri/`:
+Pitfalls: never drive the pipeline by hand with `RUSTFLAGS="-C instrument-coverage"` (the test binary's profraw is never written, so every file reports 0%) — `cargo-llvm-cov` wires `RUSTFLAGS`/`LLVM_PROFILE_FILE` correctly. `--no-default-features` is required (the `tauri` feature pulls webview deps and slows the run).
 
-| Goal | Command |
-|---|---|
-| Run lib + integration tests, print a per-file summary table | `cargo +nightly llvm-cov --no-default-features` |
-| Show uncovered lines inline in the terminal | `cargo +nightly llvm-cov --no-default-features --show-missing-lines` |
-| Write HTML report to `target/llvm-cov/html/` | `cargo +nightly llvm-cov --no-default-features --html` |
-| Write `lcov.info` (for codecov, IDE plugins, etc.) | `cargo +nightly llvm-cov --no-default-features --lcov --output-path lcov.info` |
-| Include integration tests (default `cargo test` doesn't run them) | `cargo +nightly llvm-cov --no-default-features --all-targets` |
-
-**Pitfalls to avoid:**
-
-- **Do not use `RUSTFLAGS="-C instrument-coverage"` manually.** The two-arg `LLVM_PROFILE_FILE=...profraw` + manual `llvm-profdata merge` pipeline only captures data for binaries cargo *links directly* (i.e. `main.rs`); the test binary's per-process profraw is never written under that scheme, and `llvm-cov report` ends up showing 0% for every project file. `cargo-llvm-cov` wires `RUSTFLAGS` / `LLVM_PROFILE_FILE` correctly per binary and merges everything.
-- **`--no-default-features` is required** for the lib tests. The `tauri` feature pulls in webview / windowing deps that don't matter for pure-Rust tests and slow the run.
-- **`-C link-dead-code` is not needed** — `cargo-llvm-cov` adds it automatically.
-
-Reference numbers from the last full run (1096 tests passing — 1084 lib + 11 integration harness + 1 subprocess smoke, `--all-targets`): aggregate line coverage **86.85%**, with the well-exercised modules (`modbus/framer.rs` 99.65%, `modbus/registers.rs` 99.21%, `inverter/encoder.rs` 98.55%, `inverter/decoder.rs` 98.51%) at the top and the integration-test-light paths (`weather/mod.rs` 26.73%, `inverter/poll.rs` 28.37%, `server/ws.rs` 52.30%, `lib.rs` 69.71%) at the bottom.
-
-`tests/e2e_mock.rs` is the in-process integration harness (no socket bind — uses `tower::ServiceExt::oneshot` against `server::create_router`) that drives the HTTP layer the Playwright E2E would otherwise be the only thing exercising. It currently covers `GET /api/snapshot`, `/api/status`, `/api/settings`, `/api/logs`, `/api/log-level`, `/api/evc/status`, the `PUT /api/log-level` round-trip and validation paths, and the catch-all 404. Use it as a template for adding more in-process API coverage cheaply.
-
-`tests/headless_smoke.rs` is the non-destructive subprocess integration test for `lib.rs` wiring. It spawns the real `givenergy-local --headless` binary on an ephemeral port, polls via raw TCP until the bind succeeds, then hits four endpoints to confirm `init_tracing` + `run_headless` reached a usable state. It also covers the `resolve_dist_dir` "no dist found" branch (omits `--dist` deliberately). Skips cleanly with a printed reason if the binary hasn't been built yet, so a fresh checkout's `cargo test` never fails for this reason. The test always kills and reaps the subprocess before reporting so a port leak can't break the next run.
+`tests/e2e_mock.rs` is the in-process HTTP integration harness (`tower::ServiceExt::oneshot` against `server::create_router`, no socket bind) — use it as a template for cheap API coverage. `tests/headless_smoke.rs` spawns the real `--headless` binary on an ephemeral port and skips cleanly (printed reason) when the binary isn't built; it always kills and reaps the subprocess.
 
 ## Architecture
 
 ### Frontend (`src/`)
 
-Entrypoint: `src/main.tsx`.
-
-- **Pages**: `StatusPage`, `BatteryPage`, `HistoryPage`, `ForecastPage` (issue #283 predictions), `ControlPage` (model-aware rate scaling, slot-labelling warnings), `InverterPage`, `PowerPage`, `SolarPage`, `MetersPage`, `OctopusPage` (issue #212 smart-meter dashboard — hidden until configured), `SettingsPage`, `LogsPage` (developer mode only)
-- **Components**: `EnergyOrbitDiagram` (radial SVG power flow; renamed from `EnergyFlowDiagram`), `BatteryPanel`, `BatteryGauge`, `SummaryTiles`, `SolarPowerChart`, `BatterySocChart`, `SeriesLegend`, `ColdBatteryWarning`
-- **Hooks**: `useWebSocket` — connects to `/ws`, reconnects on drop, fetches snapshot via REST
-- **Lib**: `api.ts` (fetch helpers), `format.ts` (formatters), `types.ts` (types), `evcLabel.ts` (EV Charger state → label picker: `Charging` / `Connected` / `Disconnected` / `Not Found`), `validators.ts` (`isValidIpv4Host` for the EVC Charger Address field)
-- **State**: Zustand store (`useInverterStore`) — snapshot, connectionState, connectedHost, developerMode (persisted to localStorage), EV Charger state (`evcHost`, `evcPower`, `evcCharging`, `evcConnected`, `evcEverConnected` latch). The latch distinguishes "charger was here, now offline" from "we've never successfully reached the host" so the diagram can show "Disconnected" vs "Not Found" (issue #138). `resetEvc()` clears the latch when the user saves a new host.
-- **Version**: `__APP_VERSION__` (from `vite.config.ts`)
-
-Frontend talks exclusively to the local Axum server — never directly to the inverter.
+Entrypoint `src/main.tsx`. **Pages**: Status, Battery, History, Forecast, Control (model-aware rate scaling, slot-labelling warnings), Inverter, Power, Solar, Meters, Octopus (hidden until configured), Settings, Logs (developer mode only). **Components**: `EnergyOrbitDiagram` (radial SVG power flow), battery panels/gauges, charts, `ColdBatteryWarning`. **Hooks**: `useWebSocket` — connects to `/ws`, reconnects on drop, fetches snapshot via REST. **Lib**: `api.ts`, `format.ts`, `types.ts`, `evcLabel.ts`, `validators.ts`. **State**: Zustand `useInverterStore` — snapshot, connectionState, developerMode (persisted), EV Charger state incl. the `evcEverConnected` latch distinguishing "charger was here, now offline" (`Disconnected`) from "never reached" (`Not Found`); `resetEvc()` clears it when the user saves a new host. The frontend talks exclusively to the local Axum server — never directly to the inverter.
 
 ### Backend (`src-tauri/src/`)
 
-- **`lib.rs`** — Tauri app setup + headless CLI; spawns Axum server + Modbus polling loop. Two independent tracing layers: `fmt` layer to stdout (level WARN, override via `RUST_LOG`) and `LogCaptureLayer` into in-memory `LogRing` for dev console (level WARN, runtime-adjustable via `PUT /api/log-level`).
-- **`history/`** — SQLite-backed history (`~/.givenergy-local/history.db`). `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG (or MAX for cumulative fields).
-- **`inverter/`** — data model, register decode/encode, discovery, poll loop, sanitization
-  - `model.rs` — `InverterSnapshot`, `ScheduleSlot`, `BatteryMode`, `BatteryState`, `DeviceType` enum (Gen1-4, AC-coupled, three-phase, AIO, HV Gen3/4, EMS) with model-aware helpers for slave addresses, poll blocks, slot counts, battery protocol selection.
-  - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; per-block decoders for holding registers 0-59, 60-119, 240-299 (extended 10-slot schedules), 300-359 (AC config), 1080-1124 (three-phase config).
-  - `encoder.rs` — translates `ControlCommand` into whitelist-validated `RegisterWrite` lists. Model-specific commands for AC-coupled and three-phase limits.
-  - `sanitizer.rs` — the register-corruption defense layer (absolute range checks, delta/rate checks, grace-period median-of-3 hardening). Formerly inline in `poll.rs`; now its own module — the "Data sanitization" section below documents its rules in detail.
-  - `poll.rs` — main polling loop: drain writes → read registers → sanitize (via `sanitizer.rs`) → broadcast snapshot. Features: dongle memory-leak fingerprint detection, model-aware slave address switching, carry-forward for optional blocks, two battery protocols (LV at 0x32+; HV at 0xA0→0x70+/0x50+), derived three-phase battery fields.
-  - `discovery.rs` — network scanning with GivEnergy Modbus protocol verification (validates 0x5959 magic header).
-  - `state_machines.rs` — connect/reconnect and battery-protocol state machines.
-- **`modbus/`** — GivEnergy Modbus TCP protocol
-  - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain, heartbeat handling (echoes dongle heartbeats). Default slave address `0x11`. `read_all_with_extras()` decides optional blocks by device type.
-  - `framer.rs` — proprietary frame encode/decode (MBAP header + transparent sub-frame + CRC)
-  - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode. Standard blocks: `IR(0,60)`, `HR(0,60)`, `HR(60,60)`, `IR(180,4)` (alternative battery lifetime/daily totals for Gen1 Hybrid). Per-battery BMS reads (`BATTERY_1_POLL_BLOCK`, `BATTERY_POLL_BLOCK` = `IR(60,60)`) and HV stack reads (`HV_BCU_POLL_BLOCK` = `IR(60,60)` at device `0x70+`, BMU blocks at `0x50+`) are polled separately, not part of `STANDARD_POLL_BLOCKS`. Optional blocks (conditionally polled by device type): `EXTENDED_SLOTS_BLOCK` (HR 240-299), `AC_CONFIG_BLOCK` (HR 300-359), `THREE_PHASE_HIGH_CONFIG_BLOCK` (HR 1000-1079), `THREE_PHASE_CONFIG_BLOCK` (HR 1080-1124), seven `THREE_PHASE_INPUT_BLOCKS` (IR 1000-1413), five `GATEWAY_INPUT_BLOCKS` (IR 1600-1859).
-- **`server/`** — Axum HTTP layer: `api.rs` (REST endpoints), `ws.rs` (WebSocket snapshot stream), `logs.rs` (LogRing + `GET /api/logs`), `mod.rs` (router + graceful bind). EVC endpoints: `GET /api/evc/discover` (network scan), `GET /api/evc/status` (current reachability + cached snapshot, used by the frontend on page load to seed `evcEverConnected` before the next WS broadcast).
-- **`evc/`** — EV Charger (OCPP/Modbus) client + poll loop. Standard Modbus TCP on port 502; broadcasts `PollMessage::Evc` on every successful snapshot, `PollMessage::EvcConnected` immediately on TCP handshake (before first register read), and `PollMessage::EvcDisconnected` on invalid-host parse error or connect failure. Invalid-host parsing also clears `latest_evc` so the frontend's `/api/evc/status` reports the right `reachable=false`.
-- **`settings/`** — persisted JSON config (`~/.givenergy-local/settings.json`)
-- **`forecast/`** — solar forecast subsystem (issue #283). Fetches hourly Open-Meteo radiation + cloud cover on a 3 h tick that rides the weather loop, persists the forward window to `history.db::forecast_values` (upsert per timestamp+variable+source), and self-calibrates a site performance ratio (median of daily actual-vs-insolation ratios, rejecting dark / partial-poll / dead days; ≥ 5 usable days required) so the model never needs panel geometry. `consumption.rs` fits an hour-of-day consumption profile (median + p25/p75) from home-energy counters with gap/midnight/negative guardrails. `simulate.rs` projects battery SOC hourly (efficiency, rate caps, reserve floor). `planner.rs` consumes the SOC trajectory plus the user's import-tariff config and returns a `PlanRecommendation` (NoChargeNeeded / Charge / NoPlan), cheapest-window selection with forward wrap so off-peak slots are always reachable. `GET /api/forecast/plan` serialises the recommendation + an `apply` payload that mirrors the Control page's existing control endpoints. `SolarForecastProvider` trait leaves room for alternative sources.
-- **`octopus.rs`** — Octopus Energy account integration (issue #212). Fetches authenticated half-hourly supplier intervals (electricity import/export, gas) with a user API key and stores them separately from inverter history, because supplier data arrives late and may be corrected (gas units are preserved as returned — SMETS1 kWh vs SMETS2 m³). Powers the Octopus dashboard (`/api/octopus/*`: billing costs, HEM-vs-supplier comparison, CSV/PDF export). The Cosy/Agile tariff automation is separate: it rides the poll loop and `inverter/state_machines.rs`, with slot helpers in `settings/mod.rs`.
-- **`alerts/`** — alert evaluation engine + push notifications. Evaluates each sanitized `InverterSnapshot` against user thresholds (battery temperature high/low, battery SOC high/low, solar-clipping ceiling, inverter battery-warning flag, grid offline) with per-type cooldown and consecutive-read confirmation, then delivers via the **Telegram Bot API**, **ntfy.sh** (including self-hosted ntfy), and/or **Pushover**. Also generates/sends the daily consumption report and polls Telegram for `/status`, `/today`, `/report` commands. **This covers GitHub issue #85 (critical-condition notifications) — implemented as Telegram + ntfy push notifications rather than email.**
-- **`update.rs`** — "new version available" detection. A background `run_update_loop` polls the GitHub Releases API (`api.github.com`) every 6h (gated by the `check_for_updates` setting, default on) and caches the latest release tag in `AppState::update`. `GET /api/latest-version` also triggers a non-blocking background refresh when the cache is stale (60s minimum interval), so poking the endpoint forces a fresh check without waiting for the 6h loop. Tests stay hermetic because the on-demand refresh is gated on `loop_registered` (set only when the loop starts). The frontend compares `current_version` (`CARGO_PKG_VERSION`) against the cached `latest_version` and shows a dismissible banner.
+- **`lib.rs`** — Tauri setup + headless CLI; spawns Axum server + Modbus poll loop. Two tracing layers: stdout `fmt` (WARN, `RUST_LOG` override) and `LogCaptureLayer` into the in-memory `LogRing` (runtime-adjustable via `PUT /api/log-level`).
+- **`history/`** — SQLite (`~/.givenergy-local/history.db`); `HistoryDb`, `insert_reading()`, time-bucketed `query_history()` (AVG, or MAX for cumulative fields).
+- **`inverter/`** — `model.rs` (`InverterSnapshot`, `DeviceType` Gen1-4 / AC-coupled / three-phase / AIO / HV Gen3-4 / EMS, with model-aware slave addresses, poll blocks, slot counts, battery-protocol selection); `decoder.rs`/`encoder.rs` (register ↔ snapshot / `ControlCommand` → whitelist-validated writes); `sanitizer.rs` (corruption defense, see below); `poll.rs` (drain writes → read → sanitize → broadcast; dongle memory-leak fingerprinting, model-aware slave switching, carry-forward, LV battery protocol at 0x32+ vs HV at 0xA0→0x70+/0x50+); `discovery.rs` (network scan validating the 0x5959 magic header); `state_machines.rs` (connect/reconnect, battery protocol, tariff automation).
+- **`modbus/`** — `client.rs` (`ModbusClient`: FC6 writes, stale-frame drain, dongle heartbeat echo, default slave `0x11`; `read_all_with_extras()` picks optional blocks by device type); `framer.rs` (proprietary MBAP + transparent sub-frame + CRC); `registers.rs` (addresses, poll blocks, safe-write whitelist, HHMM codec; per-battery BMS reads and HV stack reads polled separately from `STANDARD_POLL_BLOCKS`).
+- **`server/`** — Axum: `api.rs` (REST), `ws.rs` (snapshot stream), `logs.rs` (`GET /api/logs`), `mod.rs` (router + graceful bind). EVC endpoints: `/api/evc/discover`, `/api/evc/status` (reachability + cached snapshot, seeds `evcEverConnected` on page load).
+- **`evc/`** — EV Charger client (standard Modbus TCP port 502); broadcasts `PollMessage::Evc` per snapshot, `EvcConnected` on TCP handshake, `EvcDisconnected` on invalid host or connect failure (also clears `latest_evc` so `/api/evc/status` reports `reachable=false`).
+- **`settings/`** — persisted JSON (`~/.givenergy-local/settings.json`).
+- **`forecast/`** — solar forecast (issue #283): hourly Open-Meteo fetch on a 3h tick riding the weather loop, persisted to `history.db::forecast_values`; self-calibrating site performance ratio (median daily actual-vs-insolation, ≥5 usable days); `consumption.rs` hour-of-day profile (median + p25/p75); `simulate.rs` hourly battery SOC projection; `planner.rs` cheapest-window `PlanRecommendation` with forward wrap; `GET /api/forecast/plan` returns the plan plus an `apply` payload mirroring Control endpoints. `SolarForecastProvider` trait allows alternative sources.
+- **`octopus.rs`** — Octopus account integration (issue #212): authenticated half-hourly import/export/gas intervals stored separately from inverter history (supplier data arrives late and may be corrected; gas units preserved as returned — SMETS1 kWh vs SMETS2 m³); powers `/api/octopus/*` (billing costs, HEM-vs-supplier comparison, CSV/PDF export). Cosy/Agile tariff automation is separate, riding the poll loop via `state_machines.rs`.
+- **`alerts/`** — evaluates each sanitized snapshot against user thresholds (battery temp/SOC, solar clipping, inverter battery-warning flag, grid offline) with per-type cooldown + consecutive-read confirmation; delivers via Telegram Bot API, ntfy (incl. self-hosted), Pushover; daily consumption report; Telegram `/status` `/today` `/report` commands. Covers issue #85.
+- **`update.rs`** — GitHub Releases poll every 6h (gated by `check_for_updates`), cached in `AppState::update`; `GET /api/latest-version` triggers a non-blocking refresh when stale (60s min interval; gated on `loop_registered` so tests stay hermetic).
 
 ### Shared state (`AppState`)
 
-`Arc<Mutex<…>>` shared between poll loop, API handlers, and WebSocket: `latest_snapshot`, `connection_state`, `pending_writes`, `write_notify` (wakes poll loop), `settings`, `history`, `log_ring` (2000-entry ring buffer), `update` (cached latest GitHub release for the "new version available" banner).
+`Arc<Mutex<…>>` shared between poll loop, API handlers, and WS: `latest_snapshot`, `connection_state`, `pending_writes`, `write_notify` (wakes poll loop), `settings`, `history`, `log_ring` (2000 entries), `update`.
 
 ## Data sanitization (register corruption defense)
 
-GivEnergy dongle frequently returns corrupted register values. The sanitizer (in `inverter/sanitizer.rs`; formerly inline in `poll.rs`) defends with multiple layers:
+GivEnergy dongles frequently return corrupted register values; `inverter/sanitizer.rs` defends in layers.
 
 ### Absolute range checks (always active)
 
@@ -197,22 +115,14 @@ GivEnergy dongle frequently returns corrupted register values. The sanitizer (in
 
 ### Connect sequence
 
-```
-Connect → 500ms delay → drain TCP → 1× warmup read (discarded)
-→ clear latest_snapshot → 3 grace readings (absolute check only)
-  └─ cumulative counters median-of-3 on final grace reading
-→ full absolute + delta checks
-```
+Connect → 500ms delay → drain TCP → 1× warmup read (discarded) → clear latest_snapshot → 3 grace readings (absolute checks only; cumulative counters median-of-3 on the final grace reading) → full absolute + delta checks.
 
-### History aggregation
-
-History API uses MAX (not AVG) for cumulative counters (`today_*_kwh`) — AVG understates monotonic values. Frontend `removeSpikes()` in `HistoryPage.tsx` applies a post-query spike filter.
+History API uses MAX (not AVG) for cumulative counters — AVG understates monotonic values; the frontend `removeSpikes()` in `HistoryPage.tsx` applies a post-query spike filter.
 
 ## Modbus write protocol
 
-- **FC6** (Write Single Holding Register) — one register per request
+- **FC6** (Write Single Holding Register) — one register per request; **CRC**: `CrcModbus(function_code + register + value)`
 - **Default device address `0x11`** — switches to `0x31` for AC-coupled/Gen1 after detection
-- **CRC**: `CrcModbus(function_code + register + value)`
 - **Slot clearing**: write `0` (`00:00–00:00` = disabled)
 - **Retry**: 6 attempts with 2s delay on exception 67 (dongle busy)
 
@@ -225,53 +135,29 @@ History API uses MAX (not AVG) for cumulative counters (`today_*_kwh`) — AVG u
 | Battery SOC reserve | HR110 | HR110 | HR1109 |
 | Charge target SOC | HR116 | HR116 | HR1111 |
 
-The API routes inspect `device_type` to choose the right command. The frontend (`ControlPage.tsx`) picks the correct register max (50 vs 100) and display formula based on device type code.
-
-Known limitation: register 32 (charge slot 2 end time) consistently returns exception 67 on some inverters despite being in the safe-write list. `enable_charge` flag still updates correctly.
+API routes inspect `device_type` to choose the command; `ControlPage.tsx` picks the register max (50 vs 100) and display formula. Known limitation: register 32 (charge slot 2 end) returns exception 67 on some inverters, though `enable_charge` still updates correctly.
 
 ## Battery power sign convention
 
-HEM convention (uniform across device families and the frontend):
-**`battery_power` positive = discharging, negative = charging.** The frontend
-labels (`PowerPage.tsx`: `value > 0 ? 'Discharging' : 'Charging'`), the
-`BatteryState` enum, history charting, and the gateway grid-power derivation
-all assume this.
+HEM convention, uniform across device families and frontend: **`battery_power` positive = discharging, negative = charging.**
 
 | Path | Raw register | Raw wire sign | Decode action |
 |---|---|---|---|
 | Single-phase | `p_battery` IR(52) | **+ = discharge** (reference) | verbatim |
 | Three-phase / HV | `p_discharge - p_charge` (IR 1136-1139) | derived | computed, + = discharge |
 | Gateway aggregate | `p_aio_total` IR(1702) | **+ = charging** (opposite!) | **negate** |
-| Gateway per-AIO | `p_aioN_inverter` IR(1816-1818) | **+ = charging** (same as p_aio_total) | **negate** |
+| Gateway per-AIO | `p_aioN_inverter` IR(1816-1818) | **+ = charging** | **negate** |
 
-The gateway exception is confirmed by `GivTCP/read.py:1556`:
-`Battery_Power = -GEInv.p_aio_total`. Forgetting the negate on gateway
-inverts the battery arrow AND the derived grid power (since
-`grid = solar + battery − home`), producing impossible readings like
-solar 6 kW / home 0.6 kW with battery "discharging" 5.5 kW and
-11 kW export (issue #78). See `decode_gateway_1660_1719` /
-`decode_gateway_1780_1830` and the gateway sign-convention tests in
-`decoder.rs` (`sign_convention_gateway_*`).
-
-## Build artifacts
-
-- `dist/` — Vite output
-- `src-tauri/target/` — Rust build output
-- `node_modules/.tmp/tsconfig.*.tsbuildinfo` — TypeScript incremental build info
+The gateway exception is confirmed by `GivTCP/read.py:1556` (`Battery_Power = -GEInv.p_aio_total`). Forgetting the negate inverts the battery arrow AND derived grid power (`grid = solar + battery − home`), producing impossible readings (issue #78). See the `sign_convention_gateway_*` tests in `decoder.rs`.
 
 ## Headless server mode (Linux)
 
-Run without Tauri window — just the Axum HTTP/WS server + Modbus poll loop.
-
 ```bash
-npm run build
-cd src-tauri && cargo build --release
-./target/release/givenergy-local --headless
-./target/release/givenergy-local --headless --port 8080
-./target/release/givenergy-local --headless --dist /path/to/dist
+npm run build && (cd src-tauri && cargo build --release)
+./target/release/givenergy-local --headless [--port 8080] [--dist /path/to/dist]
 ```
 
-`--dist` search order: `--dist` arg > `./dist/` (cwd) > `<exe_dir>/dist/` > `/usr/share/givenergy-local/dist/`. Runs API-only if no dist found.
+`--dist` search order: arg > `./dist/` (cwd) > `<exe_dir>/dist/` > `/usr/share/givenergy-local/dist/`; API-only if none found.
 
 ## Schedule slot register layout
 
@@ -291,58 +177,29 @@ cd src-tauri && cargo build --release
 | `gateway_ems_charge_slots` | HR 2053-2071 | Gateway / EMS plant-level charge slots |
 | `gateway_ems_discharge_slots` | HR 2040, 2044-2052 | Gateway / EMS plant-level discharge slots |
 
-Slots 3-10 (on supported models) live in HR 240-299, with per-slot target SOCs interleaved. Three-phase models use HR 1080-1124 for slot/target registers (mirroring the single-phase layout at different addresses). EMS / EmsCommercial plant-level scheduling uses HR 2040-2071 for charge and discharge slots. **The Gateway is single-phase-class for control** (issue #149): its Quick Actions / charge & discharge schedule write to the standard HR 94/95, 56/57, 96, 116 registers (forwarded to its child AIOs), NOT the three-phase HR 1080-1124 bank (which a real Gateway dongle has no registers for) nor the EMS HR 2040-2071 schedule. The Gateway *does* poll HR 2040-2075 for plant-level config (export limit, plant enable) read-back. **GE Cloud UI** labels slots in opposite order — the data is identical, only labels differ. `ControlPage.tsx` shows yellow callout banners for: (a) the slot naming mismatch (any 2+ slot hybrid), (b) legacy Gen3 firmware (ARM FW ≤ 302) where extended HR 240-299 may return stale data.
+Three-phase slot/target registers mirror the single-phase layout at HR 1080-1124; EMS plant-level scheduling uses HR 2040-2071. **The Gateway is single-phase-class for control** (issue #149): Quick Actions / schedules write the standard HR 94/95, 56/57, 96, 116 registers (forwarded to child AIOs), not the three-phase bank nor the EMS schedule — though it *does* poll HR 2040-2075 for plant-level config read-back. GE Cloud UI labels slots in opposite order; the data is identical. `ControlPage.tsx` shows callout banners for the slot-naming mismatch (any 2+ slot hybrid) and legacy Gen3 firmware (ARM FW ≤ 302) where extended HR 240-299 may return stale data.
 
 ### Discharge slot handling
 
-Timed Export is always visible regardless of battery mode. Saving an enabled Timed Export slot through `/api/control/discharge-slot` writes the slot and target SOC first, then arms Timed Export (`battery_power_mode=0`, `enable_discharge=1`), matching the Timed Discharge editor's save-and-enable behaviour. The Timed Export button is locked until at least one discharge slot is configured, and the backend rejects direct enable requests without a slot. When a persisted schedule backup is restored, slot writes precede `enable_discharge=1` (preventing an invalid no-window state). Disabling the last slot while Timed Export is armed returns the inverter to Eco. On reconnect, the poll loop also repairs an externally-created `enable_discharge=1` state with no configured slot. Switching from Timed Export to Eco clears all discharge slot registers.
+Saving an enabled Timed Export slot via `/api/control/discharge-slot` writes the slot + target SOC first, then arms Timed Export (`battery_power_mode=0`, `enable_discharge=1`); the button is locked until a slot exists and direct enables without a slot are rejected. Disabling the last slot while armed returns to Eco (clearing all discharge slot registers). Schedule-backup restores write slots before `enable_discharge=1`; on reconnect the poll loop repairs an externally-created armed-but-slotless state.
 
 ### Optional block carry-forward
 
-Multiple optional register blocks are conditionally polled, grouped by device type:
-
-| Block group | Range | Used by |
-|---|---|---|
-| `EXTENDED_SLOTS_BLOCK` | HR 240-299 | Gen3, AIO, HV Gen3, AC-three-phase |
-| `AC_CONFIG_BLOCK` | HR 300-359 | AC-coupled, AIO, AC-three-phase |
-| `THREE_PHASE_HIGH_CONFIG_BLOCK` | HR 1000-1079 | Three-phase (real-time control, battery reserve) |
-| `THREE_PHASE_CONFIG_BLOCK` | HR 1080-1124 | Three-phase (battery limits, charge/discharge slots) |
-| `THREE_PHASE_INPUT_BLOCKS` (×7) | IR 1000-1413 | Three-phase (real-time telemetry) |
-| `GATEWAY_INPUT_BLOCKS` (×5) | IR 1600-1859 | Gateway / EMS aggregation hub |
-
-When an optional block read fails, `carry_forward_optional_block_values()` preserves previous values rather than flashing defaults/zeros in the UI for one cycle.
+Optional blocks are conditionally polled by device type: `EXTENDED_SLOTS_BLOCK` HR 240-299 (Gen3, AIO, HV Gen3, AC-three-phase), `AC_CONFIG_BLOCK` HR 300-359 (AC-coupled, AIO, AC-three-phase), `THREE_PHASE_HIGH_CONFIG_BLOCK` HR 1000-1079 + `THREE_PHASE_CONFIG_BLOCK` HR 1080-1124 (three-phase control), `THREE_PHASE_INPUT_BLOCKS` ×7 IR 1000-1413, `GATEWAY_INPUT_BLOCKS` ×5 IR 1600-1859. When an optional block read fails, `carry_forward_optional_block_values()` preserves previous values instead of flashing zeros in the UI.
 
 ## Known issues
 
-### Linux toolbar icon not showing (GNOME Wayland)
-
-GNOME Wayland 43+ resolves the icon entirely through **application ID matching** (window GTK app ID must match a `.desktop` file ID). Fix: set `"enableGTKAppId": true` in `tauri.conf.json`. For dev mode, `npm run dev:desktop` (wired into Tauri's `beforeDevCommand`) writes / refreshes `~/.local/share/applications/com.givenergy.local.desktop` on every `cargo tauri dev` so the dock icon can't go stale if the repo moves. Packaged `.deb`/`.rpm` installs handle this automatically via their own .desktop file.
-
-### macOS minimum version: 10.15 (Catalina)
-
-The app sets `bundle.macOS.minimumSystemVersion` to `"10.15"` in `tauri.conf.json`. This is because Vite's default build target emits modern JS syntax (optional chaining, nullish coalescing, etc.) that Safari 12 / WebKit on macOS 10.14 (Mojave) cannot parse, resulting in a blank white screen. Users on 10.14 or earlier will see a clear macOS dialog explaining the requirement instead.
-
-Users on unsupported Macs can try [OpenCore Legacy Patcher](https://github.com/dortania/OpenCore-Legacy-Patcher) to install a newer macOS version.
-
-### macOS 26.5 blocks ad-hoc signed binaries
-
-macOS 26.5 blocks ad-hoc signed binaries inside `/Applications`. Three issues: (1) `/Applications` block — mitigated via one-time "Open Anyway" approval; (2) Gatekeeper on `open` — mitigated via `xattr -d com.apple.quarantine`; (3) x86_64 crashes under Rosetta — use aarch64 builds. The DMG workflow is standard; a `launch.command` script in the project root bypasses `/Applications` by searching Desktop first.
+- **GNOME Wayland toolbar icon**: resolved via app-ID matching — `"enableGTKAppId": true` in `tauri.conf.json`; `npm run dev:desktop` refreshes `~/.local/share/applications/com.givenergy.local.desktop` on every dev run. Packaged .deb/.rpm handle it via their own .desktop file.
+- **macOS minimum 10.15**: Vite's modern JS output can't parse on 10.14 WebKit (blank screen), so `bundle.macOS.minimumSystemVersion` is pinned to `10.15`.
+- **macOS 26.5 blocks ad-hoc signed binaries**: one-time "Open Anyway" for `/Applications`, `xattr -d com.apple.quarantine` for Gatekeeper, and x86_64 crashes under Rosetta (ship aarch64). `launch.command` in the repo root bypasses `/Applications`.
 
 ## Release process
 
-1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`. `npm run check:versions` (also a step in CI and the first check in `npm test`) fails if the three drift — this is the guard against the "bumped two, forgot one" mistake that shipped v0.33.2 with `tauri.conf.json` still reading `0.33.1`.
-2. Update `CHANGELOG.md` with a new heading
-3. Commit, then **immediately tag** (`vX.Y.Z`) — match the changelog heading exactly. Every version heading must have a corresponding git tag. Push both. The release build (`.github/workflows/build.yml`, triggered by `v*` tags) runs `check-versions` as a gating job before any platform build starts, so an out-of-sync tag fails fast instead of producing installers whose bundled version disagrees with the release name.
-4. GitHub Actions builds for macOS (ARM + x64), Linux, Windows and creates a GitHub Release. Platform jobs upload to a **draft**; a final `publish-release` job verifies every installer is present and only then publishes it, so `releases/latest` never points at a release with missing downloads (issue #291). If that job fails, the release stays a draft — fix the build and re-run rather than publishing by hand.
+1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` — `npm run check:versions` (gating step in CI and `npm test`) fails if the three drift.
+2. Update `CHANGELOG.md` with a new heading.
+3. Commit, then **immediately tag** (`vX.Y.Z`) matching the changelog heading exactly; push both. The `v*` tag triggers `.github/workflows/build.yml`, which runs `check-versions` as a gating job.
+4. GitHub Actions builds macOS (ARM + x64), Linux, Windows; platform jobs upload to a **draft** and a final `publish-release` job verifies every installer is present before publishing (issue #291). If it fails, fix and re-run — don't publish by hand.
 
 ### Changelog style
 
-The changelog is for users, not developers. Each entry should be a short
-bullet that leads with a bold one-line summary and adds one or two
-sentences of substance — what the user will notice, what they can now
-do, what stops being broken. Avoid exhaustive technical detail: no
-register numbers, no algorithm names, no `**What changed**` /
-`**Verified**` /`**Why**` headings, no "Files touched" lists. Reference
-issue/PR numbers only when the entry closes a specific user-reported
-issue. The existing entries in `CHANGELOG.md` are the canonical
-examples of the voice and length to match.
+The changelog is for users, not developers: short bullets leading with a bold one-line summary plus one or two sentences of substance — what the user will notice, what they can now do, what stops being broken. No register numbers, no algorithm names, no `**What changed**` / `**Verified**` headings, no "Files touched" lists; reference issue/PR numbers only when closing a user-reported issue. Existing entries are the canonical voice.

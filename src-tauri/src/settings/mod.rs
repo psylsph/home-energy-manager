@@ -1296,6 +1296,16 @@ pub struct Settings {
     /// restored at entry.
     #[serde(default)]
     pub timed_export_slots_require_clear: bool,
+    /// Durable "stop/exit pending" marker: a path disabled the managed
+    /// Timed Export schedule while the physical disarm was not yet
+    /// confirmed. The marker is set BEFORE the disable is persisted and
+    /// cleared only once the poll-loop reconciler settles back on a
+    /// confirmed Eco baseline (`Exiting` → `Off`). A crash in between must
+    /// not boot the machine as `Off` — populated physical slots would then
+    /// be misread as another controller's schedule and the still-armed
+    /// maximum-power export would never be repaired.
+    #[serde(default)]
+    pub timed_export_stop_pending: bool,
 
     // -- Solar array capacities (issue #110) --
     /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
@@ -1653,6 +1663,7 @@ impl Default for Settings {
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,
+            timed_export_stop_pending: false,
             // Issue #110: solar array capacities default to unset so a
             // fresh install (and every existing install on upgrade) sees
             // no behaviour change until the user opts in via Settings.
@@ -2019,6 +2030,7 @@ mod tests {
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,
+            timed_export_stop_pending: false,
             // Issue #110: solar array capacities must round-trip exactly.
             pv1_rated_kw: 6.0,
             pv2_rated_kw: 4.2,
@@ -2540,6 +2552,7 @@ mod tests {
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,
+            timed_export_stop_pending: false,
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),

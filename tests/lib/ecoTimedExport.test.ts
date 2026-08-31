@@ -318,6 +318,32 @@ describe('discharge ownership', () => {
         });
         expect(isForceDischargeActive(state, false, undefined, 17 * 60)).toBe(false);
     });
+
+    it('does not label Agile-owned export as Force Discharge (CODE_REVIEW.md)', () => {
+        // Agile arms the identical register shape and reports agile_active.
+        const state = snapshot({
+            battery_power_mode: 0,
+            enable_discharge: true,
+            agile_active: true,
+        });
+        expect(isForceDischargeActive(state, false, undefined, 17 * 60)).toBe(false);
+    });
+
+    it('does not label a pending schedule transition (Entering/Exiting) as Force Discharge', () => {
+        const state = snapshot({ battery_power_mode: 0, enable_discharge: true });
+        // A failed Timed Export stop leaves the export shape while the
+        // backend machine is still Exiting — the schedule owns the repair.
+        expect(
+            isForceDischargeActive(state, false, undefined, 17 * 60, { machineStateName: 'Exiting' })
+        ).toBe(false);
+        expect(
+            isForceDischargeActive(state, false, undefined, 17 * 60, { machineStateName: 'Entering' })
+        ).toBe(false);
+        // Any other machine state keeps the register-shape attribution.
+        expect(
+            isForceDischargeActive(state, false, undefined, 17 * 60, { machineStateName: 'Off' })
+        ).toBe(true);
+    });
 });
 
 describe('extractMachineStateName (legacy Debug-string fallback)', () => {

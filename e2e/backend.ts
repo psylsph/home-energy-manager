@@ -167,7 +167,6 @@ async function waitFor(probe: () => Promise<boolean>, label: string, timeoutMs: 
  * Idempotent — calls stopBackend() first so a stray instance can't linger.
  */
 export async function startBackend(): Promise<void> {
-  console.log('[backend] startBackend called from:\n' + new Error().stack);
   await stopBackend();
 
   if (!fs.existsSync(BINARY_PATH)) {

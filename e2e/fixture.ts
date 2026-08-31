@@ -64,15 +64,29 @@ async function adminPost(path: string, body?: unknown): Promise<any> {
  * drained so per-test write assertions start empty.
  */
 export async function resetHarness(baseUrl: string): Promise<void> {
-  // 1. Backend-owned schedule/machine/force-revert state → clean. Tolerate
-  // a down backend (specs without one).
+  // 1. Backend-owned schedule/machine/force-revert state → clean. Only an
+  // actual connection failure is tolerated (specs without a backend): a
+  // 404 or 500 means the reset did NOT happen, and continuing would leak
+  // desired slots or machine ownership into the next test — exactly the
+  // order-dependence this fixture exists to prevent.
   try {
-    await fetch(`${baseUrl}/api/test/reset`, {
+    const resp = await fetch(`${baseUrl}/api/test/reset`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     });
-  } catch {
+    const body: unknown = await resp.json().catch(() => null);
+    if (!resp.ok || (body as { ok?: unknown } | null)?.ok !== true) {
+      throw new Error(
+        `harness reset: /api/test/reset returned HTTP ${resp.status}: ${JSON.stringify(body)}`,
+      );
+    }
+  } catch (error) {
+    // fetch signals a connection failure as TypeError; anything else is our
+    // own assertion and must propagate.
+    if (!(error instanceof TypeError)) {
+      throw error;
+    }
     /* backend not running — nothing to reset */
   }
 

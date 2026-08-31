@@ -1732,6 +1732,13 @@ pub struct TimedExportConfig {
     /// Whether firmware has confirmed HR59 re-arm behaviour (slots must be
     /// cleared outside windows and restored at entry).
     pub device_rearm_confirmed: bool,
+    /// Durable stop/exit-pending marker (`Settings::timed_export_stop_pending`
+    /// mirrored through `AppState::timed_export_stop_pending`). Set before a
+    /// route disables the schedule and cleared only on a confirmed Eco
+    /// baseline — armed registers plus populated slots are then residue of
+    /// HEM's own incomplete stop and stay repairable, even across a restart.
+    #[serde(default)]
+    pub stop_pending: bool,
 }
 
 /// Decision output from the Timed Export state machine.
@@ -1962,6 +1969,41 @@ pub fn check_timed_export(
                 return exiting_decision(
                     state,
                     "Timed Export: repairing the stop that failed to disarm",
+                    build_timed_export_exit_writes(device_type, config),
+                );
+            }
+            return exiting_retry_decision(state, device_type, config, last_write_outcome);
+        }
+        // Durable stop/exit-pending marker (set before the disable was
+        // persisted, restored across restarts — CODE_REVIEW.md BLOCKER):
+        // the armed registers and populated slots are residue of HEM's own
+        // incomplete stop, not an external owner's schedule, so keep
+        // repairing until the Eco baseline is confirmed. Without the marker
+        // this stays suppressed below — a completed stop must never fight
+        // Agile/Cosy/manual Timed Discharge that armed the same shape
+        // afterwards.
+        if config.stop_pending && !eco_confirmed && !rearm_observation_in_progress {
+            if !matches!(state, TimedExportState::Exiting { .. }) {
+                *state = TimedExportState::Exiting {
+                    polls_waiting: 0,
+                    retries: 0,
+                };
+            }
+            // Same one-shot as the failed-stop path above: a just-armed or
+            // restart-restored `Exiting{0,0}` has no machine-issued batch in
+            // flight — re-issue the exit writes immediately rather than
+            // spending the confirm grace on a batch that never happened.
+            if matches!(
+                state,
+                TimedExportState::Exiting {
+                    polls_waiting: 0,
+                    retries: 0
+                }
+            ) && last_write_outcome == TimedExportWriteOutcome::NoneIssued
+            {
+                return exiting_decision(
+                    state,
+                    "Timed Export: repairing the stop/exit left pending (stop-pending marker)",
                     build_timed_export_exit_writes(device_type, config),
                 );
             }
@@ -2458,6 +2500,61 @@ pub fn build_timed_export_slot_restore_writes(
                     slot_num,
                     error
                 ),
+            }
+        }
+    }
+    out
+}
+
+/// Build whitelist-validated writes that drive the physical discharge slot
+/// registers back to the **prior physical schedule** `prior`: configured
+/// slots are rewritten with their window (and target SOC on extended
+/// models), unconfigured ones are cleared to 00:00–00:00.
+///
+/// Unlike [`build_timed_export_slot_restore_writes`] this also re-clears
+/// slots that were empty before the edit, so it is safe as the awaited
+/// compensating batch after a partially-applied slot mutation
+/// (CODE_REVIEW.md BLOCKER: a fail-fast rejection mid-batch leaves the
+/// earlier registers of the batch physically written — restoring only the
+/// desired schedule would leave the inverter's window corrupted).
+pub fn build_timed_export_slot_compensation_writes(
+    device_type: DeviceType,
+    prior: &[ScheduleSlot],
+) -> Vec<RegisterWrite> {
+    let mut out = Vec::new();
+    for slot in 1..=device_type.max_discharge_slots() {
+        let prior_slot = prior.get(slot as usize - 1).filter(|s| s.is_configured());
+        let (start, end) = match prior_slot {
+            Some(s) => (
+                encode_hhmm(s.start_hour, s.start_minute),
+                encode_hhmm(s.end_hour, s.end_minute),
+            ),
+            None => (0, 0),
+        };
+        match discharge_slot_command_for(device_type, slot, start, end) {
+            Ok(cmd) => match cmd.encode() {
+                Ok(mut w) => out.append(&mut w),
+                Err(e) => {
+                    tracing::warn!("Failed to encode discharge slot {slot} compensation: {e}")
+                }
+            },
+            Err(e) => tracing::warn!("Unsupported discharge slot {slot} on this model: {e}"),
+        }
+        if device_type.uses_extended_schedule_slots() {
+            if let Some(s) = prior_slot {
+                if s.target_soc > 0 {
+                    match (ControlCommand::SetDischargeTargetSocSlot {
+                        slot,
+                        soc: s.target_soc as u16,
+                    })
+                    .encode()
+                    {
+                        Ok(mut writes) => out.append(&mut writes),
+                        Err(error) => tracing::warn!(
+                            "Failed to encode discharge slot {slot} target SOC compensation: {error}"
+                        ),
+                    }
+                }
             }
         }
     }
@@ -5568,6 +5665,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let mut state = TimedExportState::Off;
 
@@ -5647,6 +5745,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let mut state = TimedExportState::Off;
 
@@ -5725,6 +5824,7 @@ mod tests {
                 },
             ],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let mut state = TimedExportState::Off;
 
@@ -5796,6 +5896,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let mut state = TimedExportState::Off;
 
@@ -5840,6 +5941,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let mut state = TimedExportState::Off;
 
@@ -5920,6 +6022,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let snap = InverterSnapshot {
             battery_power_mode: 1,
@@ -5958,6 +6061,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let snap = InverterSnapshot {
             battery_power_mode: 0,
@@ -5993,6 +6097,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let mut state = TimedExportState::Off;
 
@@ -6248,6 +6353,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: true,
+            stop_pending: false,
         };
         let writes = build_timed_export_entry_writes(DeviceType::Gen3Hybrid, &config);
 
@@ -6326,6 +6432,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: true,
+            stop_pending: false,
         };
         let writes = build_timed_export_exit_writes(DeviceType::Gen3Hybrid, &config);
 
@@ -6370,6 +6477,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
         let mut state = TimedExportState::Off;
 
@@ -6408,6 +6516,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         };
 
         // Snapshot with HR59=1 but HR27=1 (Timed Demand state)
@@ -6447,6 +6556,7 @@ mod tests {
                 target_soc: 4,
             }],
             device_rearm_confirmed: false,
+            stop_pending: false,
         }
     }
 

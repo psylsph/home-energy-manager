@@ -2684,17 +2684,22 @@ export default function ControlPage() {
   // check blind to the manual action whenever the schedule endpoint hasn't
   // loaded — leaving a running Force Discharge rendered as a start action
   // (CODE_REVIEW.md finding 1). An unknown schedule cannot own a window.
-  const forceDischargeActiveForState = isForceDischargeActive(
-    snapshot,
-    scheduleStateEnabled ?? false,
-    desiredExportSlots,
-    currentInverterMinute,
-  );
   const timedExportMachineStateName = timedExportSchedule
     ? extractMachineStateName(
         (timedExportSchedule as { machine_state?: unknown }).machine_state
       )
     : undefined;
+  // Backend ownership/machine state feeds the Force Discharge derivation
+  // (CODE_REVIEW.md): an export-shaped readback while the schedule machine is
+  // Entering/Exiting (a failed stop awaiting repair) belongs to the managed
+  // schedule, not to a manual action.
+  const forceDischargeActiveForState = isForceDischargeActive(
+    snapshot,
+    scheduleStateEnabled ?? false,
+    desiredExportSlots,
+    currentInverterMinute,
+    { machineStateName: timedExportMachineStateName },
+  );
   const ecoState: EcoPresentationState = deriveEcoState(
     snapshot,
     timedExportOwnsCurrentWindow && isTimedExportActive(snapshot),

@@ -1419,10 +1419,10 @@ async fn timed_export_reserve_write_rejection_fails_enable_without_persisting() 
 async fn timed_export_disable_rejection_reports_failure_instead_of_ok() {
     let (router, state) = fresh_router_with_state().await;
     // Physically exporting (HR27=0/HR59=1) — the disarm batch is required,
-    // so a rejecting inverter must surface its failure. (Against an
-    // already-in-Eco snapshot the stop is now idempotent and skips the
-    // disarm entirely — see
-    // `timed_export_stop_skips_disarm_when_inverter_already_in_eco`.)
+    // so a rejecting inverter must surface its failure. (The stop always
+    // queues the disarm now, even when readback already shows Eco, so a
+    // later poll-cycle transition cannot re-arm export under the user's
+    // nose — see `timed_export_stop_always_issues_disarm_even_when_eco_already_confirmed`.)
     seed_exporting_under_pause_snapshot(&state).await;
 
     // An enabled schedule is live: a Stop request against a rejecting
@@ -1500,14 +1500,15 @@ async fn timed_export_stop_disarm_batch_uses_manual_mode_owner() {
     );
 }
 
-/// Live-session follow-up: the stop is idempotent. In the reported session
-/// the schedule was configured for a *future* window, so the inverter
-/// already sat at the Eco baseline (HR27=1/HR59=0) — the stop's disarm
-/// writes were redundant, and queueing them anyway merely burned the 15 s
-/// completion timeout behind the pause. When readback already confirms
-/// Eco, the stop must skip the disarm batch entirely.
+/// Stop must always issue the disarm writes — even when the snapshot
+/// already shows the Eco baseline. Skipping the disarm left a window
+/// where a poll-cycle transition could re-arm export after the endpoint
+/// returned 200 OK. The disarm is idempotent (HR27 and the model-routed
+/// enable register are both safe to rewrite) and bounded by the
+/// completion timeout, so a future-window stop no longer than an
+/// in-window stop.
 #[tokio::test]
-async fn timed_export_stop_skips_disarm_when_inverter_already_in_eco() {
+async fn timed_export_stop_always_issues_disarm_even_when_eco_already_confirmed() {
     let (router, state) = fresh_router_with_state().await;
     // Eco snapshot (HR27=1, HR59=0) with an armed Timed Discharge pause —
     // exactly the live session's state when Stop was clicked.
@@ -1531,11 +1532,16 @@ async fn timed_export_stop_skips_disarm_when_inverter_already_in_eco() {
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
-    // No disarm writes queued at all: the inverter is already stopped.
+    // The disarm writes must be queued even though the snapshot already
+    // shows Eco: a poll-cycle transition between this response and the
+    // next poll could otherwise re-arm export while the user believes
+    // Timed Export is off.
     let writes = drain_pending_writes(&state).await;
+    let disarm_hr27 = writes.iter().any(|(a, v)| *a == 27 && *v == 1);
+    let disarm_hr59 = writes.iter().any(|(a, v)| *a == 59 && *v == 0);
     assert!(
-        !writes.iter().any(|(a, _)| *a == 27 || *a == 59),
-        "redundant disarm writes must be skipped when already in Eco: {writes:?}"
+        disarm_hr27 && disarm_hr59,
+        "Stop must always write HR27=1 and HR59=0; got {writes:?}"
     );
 }
 

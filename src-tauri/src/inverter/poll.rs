@@ -380,6 +380,14 @@ pub struct AppState {
     /// two concurrent API requests cannot arm both actions before either has
     /// recorded its revert state.
     pub force_action_lock: Arc<Mutex<()>>,
+    /// Serialises Timed Export schedule mutations (enable/disable, slot
+    /// edits, desired-slot restore from backup, test reset) so two
+    /// concurrent handlers cannot both load the desired vector, race through
+    /// the Modbus write queue, and overwrite each other's persistence +
+    /// in-memory mirror. Held for the whole mutation (resolve desired →
+    /// queue writes → await outcome → persist → update mirror), so the poll
+    /// loop always observes a coherent schedule/state pair between snapshots.
+    pub timed_export_action_lock: Arc<Mutex<()>>,
     /// SQLite history database (set after startup).
     pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
     /// Ring buffer of recent log lines for the developer console.
@@ -428,6 +436,13 @@ pub struct AppState {
     pub timed_export_state: Arc<Mutex<crate::inverter::state_machines::TimedExportState>>,
     /// Timed Export configuration (desired schedule from settings).
     pub timed_export_config: Arc<Mutex<crate::inverter::state_machines::TimedExportConfig>>,
+    /// In-memory mirror of `Settings::timed_export_stop_pending`: a Stop or
+    /// Eco-family route disabled the schedule while its disarm writes were
+    /// still unconfirmed. The machine is restored into `Exiting` from this
+    /// marker at startup; the poll loop clears it (settings + mirror) once
+    /// the reconciler settles back on a confirmed Eco baseline. The mirror
+    /// avoids a settings-file read/write on every poll.
+    pub timed_export_stop_pending: Arc<std::sync::atomic::AtomicBool>,
     /// HR59 re-arm detector (issue #289). Counts consecutive
     /// outside-window HR59=1 readbacks; on confirmation the device is
     /// classified as re-arming firmware and the slot clear/restore
@@ -503,6 +518,7 @@ impl AppState {
             force_charge_revert: Arc::new(Mutex::new(None)),
             force_discharge_revert: Arc::new(Mutex::new(None)),
             force_action_lock: Arc::new(Mutex::new(())),
+            timed_export_action_lock: Arc::new(Mutex::new(())),
             history: Arc::new(Mutex::new(None)),
             log_ring: Arc::new(crate::server::logs::LogRing::new(2000)),
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
@@ -531,21 +547,42 @@ impl AppState {
                     .map(|saved_reserve| DischargeFloorState::HeldFromRestart { saved_reserve })
                     .unwrap_or_default(),
             )),
-            timed_export_state: Arc::new(Mutex::new(
-                crate::inverter::state_machines::TimedExportState::default(),
-            )),
+            timed_export_state: Arc::new(Mutex::new({
+                let settings = crate::settings::Settings::load();
+                if settings.timed_export_stop_pending {
+                    // CODE_REVIEW.md BLOCKER: a Stop/Eco-family route
+                    // disabled the schedule but the process exited before the
+                    // disarm was confirmed by readback. Resume the exit
+                    // (`Exiting`) instead of booting `Off`, where the still-
+                    // populated physical slots would be misread as another
+                    // controller's schedule and the armed registers would
+                    // never be repaired.
+                    tracing::warn!(
+                        "Timed Export: restart with a stop/exit still pending — resuming the disarm"
+                    );
+                    crate::inverter::state_machines::TimedExportState::Exiting {
+                        polls_waiting: 0,
+                        retries: 0,
+                    }
+                } else {
+                    crate::inverter::state_machines::TimedExportState::default()
+                }
+            })),
             timed_export_rearm: Arc::new(Mutex::new(
                 crate::inverter::state_machines::TimedExportRearmDetector::default(),
             )),
             timed_export_rearm_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timed_export_config: Arc::new(Mutex::new(
+            timed_export_config: Arc::new(Mutex::new({
+                let settings = crate::settings::Settings::load();
                 crate::inverter::state_machines::TimedExportConfig {
-                    schedule_enabled: crate::settings::Settings::load()
-                        .timed_export_schedule_enabled,
-                    slots: crate::settings::Settings::load().timed_export_slots,
-                    device_rearm_confirmed: crate::settings::Settings::load()
-                        .timed_export_slots_require_clear,
-                },
+                    schedule_enabled: settings.timed_export_schedule_enabled,
+                    slots: settings.timed_export_slots,
+                    device_rearm_confirmed: settings.timed_export_slots_require_clear,
+                    stop_pending: settings.timed_export_stop_pending,
+                }
+            })),
+            timed_export_stop_pending: Arc::new(std::sync::atomic::AtomicBool::new(
+                crate::settings::Settings::load().timed_export_stop_pending,
             )),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
@@ -592,6 +629,7 @@ impl AppState {
             force_charge_revert: Arc::new(Mutex::new(None)),
             force_discharge_revert: Arc::new(Mutex::new(None)),
             force_action_lock: Arc::new(Mutex::new(())),
+            timed_export_action_lock: Arc::new(Mutex::new(())),
             history: Arc::new(Mutex::new(None)),
             log_ring,
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
@@ -620,21 +658,42 @@ impl AppState {
                     .map(|saved_reserve| DischargeFloorState::HeldFromRestart { saved_reserve })
                     .unwrap_or_default(),
             )),
-            timed_export_state: Arc::new(Mutex::new(
-                crate::inverter::state_machines::TimedExportState::default(),
-            )),
+            timed_export_state: Arc::new(Mutex::new({
+                let settings = crate::settings::Settings::load();
+                if settings.timed_export_stop_pending {
+                    // CODE_REVIEW.md BLOCKER: a Stop/Eco-family route
+                    // disabled the schedule but the process exited before the
+                    // disarm was confirmed by readback. Resume the exit
+                    // (`Exiting`) instead of booting `Off`, where the still-
+                    // populated physical slots would be misread as another
+                    // controller's schedule and the armed registers would
+                    // never be repaired.
+                    tracing::warn!(
+                        "Timed Export: restart with a stop/exit still pending — resuming the disarm"
+                    );
+                    crate::inverter::state_machines::TimedExportState::Exiting {
+                        polls_waiting: 0,
+                        retries: 0,
+                    }
+                } else {
+                    crate::inverter::state_machines::TimedExportState::default()
+                }
+            })),
             timed_export_rearm: Arc::new(Mutex::new(
                 crate::inverter::state_machines::TimedExportRearmDetector::default(),
             )),
             timed_export_rearm_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timed_export_config: Arc::new(Mutex::new(
+            timed_export_config: Arc::new(Mutex::new({
+                let settings = crate::settings::Settings::load();
                 crate::inverter::state_machines::TimedExportConfig {
-                    schedule_enabled: crate::settings::Settings::load()
-                        .timed_export_schedule_enabled,
-                    slots: crate::settings::Settings::load().timed_export_slots,
-                    device_rearm_confirmed: crate::settings::Settings::load()
-                        .timed_export_slots_require_clear,
-                },
+                    schedule_enabled: settings.timed_export_schedule_enabled,
+                    slots: settings.timed_export_slots,
+                    device_rearm_confirmed: settings.timed_export_slots_require_clear,
+                    stop_pending: settings.timed_export_stop_pending,
+                }
+            })),
+            timed_export_stop_pending: Arc::new(std::sync::atomic::AtomicBool::new(
+                crate::settings::Settings::load().timed_export_stop_pending,
             )),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
@@ -1148,6 +1207,51 @@ async fn write_registers_fail_fast_with_gap(
         }
     }
     true
+}
+
+/// CODE_REVIEW.md BLOCKER: clear the durable stop/exit-pending marker once
+/// the reconciler has settled the machine on `Off` AND the snapshot readback
+/// confirms the Eco baseline. Clearing earlier would let a crash before a
+/// completed disarm boot the next process as `Off` with export still armed.
+/// Called only when the poll loop actually stored its decision state — when
+/// an API mutation changed the machine mid-write, that path owns the state
+/// and the marker.
+pub(crate) async fn clear_timed_export_stop_pending_if_settled(
+    state: &Arc<AppState>,
+    te_state: &crate::inverter::state_machines::TimedExportState,
+    snapshot: &crate::inverter::model::InverterSnapshot,
+) {
+    if !matches!(
+        te_state,
+        crate::inverter::state_machines::TimedExportState::Off
+    ) || snapshot.battery_power_mode != 1
+        || snapshot.enable_discharge
+    {
+        return;
+    }
+    if state
+        .timed_export_stop_pending
+        .swap(false, std::sync::atomic::Ordering::AcqRel)
+    {
+        let _ = crate::settings::Settings::update(|s| s.timed_export_stop_pending = false);
+    }
+}
+
+/// Whether the durable stop/exit-pending marker should influence this
+/// poll's reconciler decision.
+///
+/// The marker alone is not enough: while a Timed Export mutation holds the
+/// action lock, that handler is draining its own awaited exit batches, and
+/// a competing poll-loop repair would sit in front of them in the write
+/// budget (1.5 s per register) until the handler's awaited completion
+/// times out and the stop wrongly reports failure. `try_lock` is instant
+/// and the guard (if any) is dropped immediately.
+pub(crate) async fn effective_timed_export_stop_pending(state: &AppState) -> bool {
+    let api_mutation_holds_lock = state.timed_export_action_lock.try_lock().is_err();
+    state
+        .timed_export_stop_pending
+        .load(std::sync::atomic::Ordering::Acquire)
+        && !api_mutation_holds_lock
 }
 
 /// Commit a poll cycle's re-arm-detector progress only when no API/reconnect
@@ -3199,8 +3303,17 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         ) = {
                                             let te_state =
                                                 state.timed_export_state.lock().await.clone();
-                                            let te_config =
+                                            let mut te_config =
                                                 state.timed_export_config.lock().await.clone();
+                                            // The durable stop-pending marker lives in
+                                            // settings + the atomic mirror; overlay it here so
+                                            // every reconciler decision this poll sees the
+                                            // current value even if an API flipped it since
+                                            // the mirror struct was last written. Suppressed
+                                            // while an API mutation holds the action lock —
+                                            // that handler is draining its own exit batches.
+                                            te_config.stop_pending =
+                                                effective_timed_export_stop_pending(&state).await;
                                             let te_rearm = state.timed_export_rearm.lock().await;
                                             let te_rearm_generation = state
                                                 .timed_export_rearm_generation
@@ -3351,6 +3464,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             let mut stored = state.timed_export_state.lock().await;
                                             if *stored == te_state_at_decision {
                                                 *stored = te_state.clone();
+                                                drop(stored);
+                                                clear_timed_export_stop_pending_if_settled(
+                                                    &state,
+                                                    &te_state,
+                                                    &snapshot,
+                                                )
+                                                .await;
                                             }
                                         }
                                         let _ = commit_timed_export_rearm_if_unchanged(
@@ -5217,6 +5337,40 @@ mod tests {
     use crate::settings::{
         Settings, SolarArrayConfig, SolarMeterBaseline, TariffConfig, TariffSlot,
     };
+    use crate::test_util::with_isolated_config_dir_async;
+
+    /// CODE_REVIEW.md BLOCKER: the durable stop-pending marker drives
+    /// poll-loop exit repairs — but never while an API mutation holds the
+    /// action lock, or the repair would starve the handler's awaited exit
+    /// batches past their completion timeout.
+    #[tokio::test]
+    async fn stop_pending_marker_is_suppressed_while_action_lock_is_held() {
+        with_isolated_config_dir_async(|| async {
+            let state = AppState::new();
+            state
+                .timed_export_stop_pending
+                .store(true, std::sync::atomic::Ordering::Release);
+            assert!(
+                effective_timed_export_stop_pending(&state).await,
+                "with the lock free, the marker drives the repair"
+            );
+
+            let _guard = state.timed_export_action_lock.lock().await;
+            assert!(
+                !effective_timed_export_stop_pending(&state).await,
+                "a held action lock (an in-flight stop/enable/slot-save) must suppress the repair"
+            );
+
+            drop(_guard);
+            assert!(effective_timed_export_stop_pending(&state).await);
+
+            state
+                .timed_export_stop_pending
+                .store(false, std::sync::atomic::Ordering::Release);
+            assert!(!effective_timed_export_stop_pending(&state).await);
+        })
+        .await;
+    }
 
     /// Build a `MeterData` with only the fields `compute_solar_arrays`
     /// inspects set; the rest are zeroed. `MeterData` doesn't derive

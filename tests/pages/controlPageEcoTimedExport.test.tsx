@@ -657,6 +657,69 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             vi.useRealTimers();
         });
 
+        it('does not present Agile-owned export as a manual Force Discharge', async () => {
+            vi.useFakeTimers({ shouldAdvanceTime: true });
+            vi.setSystemTime(new Date('2026-06-28T17:00:00'));
+            // Schedule stopped; the export-shaped registers inside the
+            // physical slot window belong to the Agile tariff automation
+            // (agile_active), not to a manual Force Discharge — offering
+            // "Stop Discharge" would call an endpoint with no force revert
+            // to unwind (CODE_REVIEW.md).
+            mockTimedExportSchedule({ schedule_enabled: false, slots: [] });
+            await renderWithSnapshot(
+                makeSnapshot({
+                    battery_power_mode: 0,
+                    enable_discharge: true,
+                    battery_power: 100,
+                    grid_power: 50,
+                    agile_active: true,
+                    discharge_slots: [configuredSlot()],
+                })
+            );
+
+            // The Timed Export control owns leaving export mode.
+            const button = (await screen.findByRole('button', {
+                name: /stop Timed Export/i,
+            })) as HTMLButtonElement;
+            expect(button.dataset.variant).toBe('active');
+            expect(button.dataset.action).toBe('stop');
+            // The export-shaped readback is not misattributed to a manual
+            // force discharge.
+            expect(screen.queryByRole('button', { name: /Stop Discharge/i })).not.toBeInTheDocument();
+            expect(screen.getByRole('button', { name: /Force Discharge/i })).toBeInTheDocument();
+            vi.useRealTimers();
+        });
+
+        it('presents a failed stop (machine Exiting) as Timed Export, not Force Discharge', async () => {
+            vi.useFakeTimers({ shouldAdvanceTime: true });
+            vi.setSystemTime(new Date('2026-06-28T17:00:00'));
+            // A failed stop leaves the registers export-shaped while the
+            // backend machine is still Exiting: the managed schedule owns the
+            // pending repair, so the manual Force Discharge stop must not be
+            // offered in its place (CODE_REVIEW.md).
+            mockTimedExportSchedule({
+                schedule_enabled: false,
+                slots: [],
+                machine_state: 'Exiting',
+            });
+            await renderWithSnapshot(
+                makeSnapshot({
+                    battery_power_mode: 0,
+                    enable_discharge: true,
+                    battery_power: 100,
+                    grid_power: 50,
+                    discharge_slots: [configuredSlot()],
+                })
+            );
+
+            const button = (await screen.findByRole('button', {
+                name: /stop Timed Export/i,
+            })) as HTMLButtonElement;
+            expect(button.dataset.action).toBe('stop');
+            expect(screen.queryByRole('button', { name: /Stop Discharge/i })).not.toBeInTheDocument();
+            vi.useRealTimers();
+        });
+
         it('shows the pending Arming state while the machine is Entering', async () => {
             vi.useFakeTimers({ shouldAdvanceTime: true });
             vi.setSystemTime(new Date('2026-06-28T17:00:00'));

@@ -343,14 +343,35 @@ export function isTimedExportWindowActive(
  * action rather than the managed Timed Export schedule. Physical slots remain
  * part of this check because an armed register pair without a slot is an
  * invalid/stale state, not a running Force Discharge action.
+ *
+ * Ownership is NOT inferred from the register shape alone (CODE_REVIEW.md):
+ * - Agile discharge arms the identical HR27=0/enable registers and reports
+ *   `snapshot.agile_active` — when set, the tariff automation owns the
+ *   readback.
+ * - A failed Timed Export stop leaves the same shape while the backend
+ *   machine is still `Entering`/`Exiting`; those registers belong to the
+ *   managed schedule's pending transition, and offering "Stop Force
+ *   Discharge" here would call an endpoint with no force revert to unwind
+ *   while hiding the schedule's own stop/repair state.
  */
 export function isForceDischargeActive(
     snapshot: InverterSnapshot | null,
     scheduleEnabled: boolean,
     scheduledSlots: ScheduleSlot[] | undefined,
     minuteOfDay: number,
+    options?: {
+        /** Backend machine-state discriminant (see `extractMachineStateName`). */
+        machineStateName?: string;
+    },
 ): boolean {
     if (!snapshot || !isTimedExportActive(snapshot)) return false;
+    if (snapshot.agile_active) return false;
+    if (
+        options?.machineStateName === 'Entering'
+        || options?.machineStateName === 'Exiting'
+    ) {
+        return false;
+    }
     if (!isInSlotWindow(snapshot.discharge_slots, Math.floor(minuteOfDay / 60), minuteOfDay % 60)) {
         return false;
     }
