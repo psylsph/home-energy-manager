@@ -73,7 +73,6 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
             min_soc_pct: 20,
             observed_min_soc_pct: 4,
             after_min_soc_pct: 80,
-            charge_target_soc_pct: 100,
             current_soc_pct: 25,
             rationale: 'Battery is at 25% now and solar leaves it at 30%. Charging 3.2 kWh in the 9.0p window lifts it to 80%.',
             // Real planner payload (planner v2): the trajectory when the

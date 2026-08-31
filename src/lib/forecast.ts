@@ -340,9 +340,6 @@ export type PlanRecommendation =
       observed_min_soc_pct: number;
       /** Lowest SOC across the hours the charge can influence, %. */
       after_min_soc_pct: number;
-      /** SOC the battery reaches by the end of the charge window, % —
-       *  the level the applied charge-slot target is set to. */
-      charge_target_soc_pct: number;
       /** Live snapshot SOC at the time the plan was computed, %. */
       current_soc_pct: number;
       rationale: string;

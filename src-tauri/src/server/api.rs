@@ -6598,7 +6598,6 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             min_soc_pct,
             observed_min_soc_pct,
             after_min_soc_pct,
-            charge_target_soc_pct,
             current_soc_pct,
             rationale,
             with_charge_series,
@@ -6609,15 +6608,15 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             // nightly auto-refresh uses (a 00:00 end would decode as a
             // disabled slot).
             let (start_h, start_m, end_h, end_m) = crate::forecast::refresh::plan_slot_hhmm(window);
-            // The slot's charge target is the SOC the re-simulated plan
-            // says the battery must REACH during the window — NOT the
-            // min-soc floor. A slot targeted at the floor stops charging
-            // as soon as it's touched, and the rest of the day's drain
-            // pulls the battery right back below the floor (the exact
-            // "still drops to 4%" failure the planner exists to prevent).
-            // Clamped to the inverter's 4–100% register range and rounded
-            // up so the applied slot never under-shoots the model.
-            let slot_target_soc = charge_target_soc_pct.clamp(4.0, 100.0).ceil() as u64;
+            // The slot's charge target is always 100 by design in the v2
+            // one-cycle sizing (CODE_REVIEW.md Minor 6): the DURATION is
+            // the control variable, and the rate-limit register (HR 111 /
+            // HR 313 / HR 1110) governs the charge. A slot targeted at the
+            // min-soc floor would stop charging as soon as it's touched,
+            // and the rest of the day's drain would pull the battery right
+            // back below the floor (the exact "still drops to 4%" failure
+            // the planner exists to prevent).
+            let slot_target_soc = 100u64;
             // The "if we follow the plan" trajectory, in the same
             // `[timestamp_unix, soc_pct]` shape as the forecast's
             // `battery.hours` so the Forecast tab's Battery projection
@@ -6635,7 +6634,6 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                 "min_soc_pct": min_soc_pct,
                 "observed_min_soc_pct": observed_min_soc_pct,
                 "after_min_soc_pct": after_min_soc_pct,
-                "charge_target_soc_pct": charge_target_soc_pct,
                 "current_soc_pct": current_soc_pct,
                 "rationale": rationale,
                 "with_charge_series": with_charge_series,
@@ -6656,7 +6654,7 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                         "end_hour": end_h,
                         "end_minute": end_m,
                         "target_soc": slot_target_soc,
-                        "charge_rate_percent": 100,
+                        "charge_rate_percent": crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT,
                     },
                     "timed_charge": { "enabled": true },
                 },

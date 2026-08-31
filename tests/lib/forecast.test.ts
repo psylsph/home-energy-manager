@@ -360,7 +360,6 @@ describe('forecastPlanTitle', () => {
     min_soc_pct: 20,
     observed_min_soc_pct: 4,
     after_min_soc_pct: 80,
-    charge_target_soc_pct: 90,
     current_soc_pct: 50,
     rationale: 'Charge the battery in the cheap window.',
   };
@@ -427,7 +426,6 @@ describe('forecastPlanChargeRationale', () => {
       min_soc_pct: 20,
       observed_min_soc_pct: 4,
       after_min_soc_pct: 46,
-      charge_target_soc_pct: 100,
       current_soc_pct: 4,
       rationale:
         'Battery is at 4% now and tomorrow\'s solar is only expected to leave it at 46% by the end of the day. Charging 5.7 kWh in the 7.0p window (00:30–05:30) lifts it to 100% (about £0.40 of grid import).',

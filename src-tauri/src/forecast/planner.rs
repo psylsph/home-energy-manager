@@ -62,10 +62,6 @@ pub enum PlanRecommendation {
         /// the hours the charge can influence — from the end of the
         /// charge window onwards), %.
         after_min_soc_pct: f64,
-        /// The SOC the battery reaches by the end of the charge window,
-        /// % — the level the inverter's charge-slot target must be set
-        /// to for the plan to hold when applied.
-        charge_target_soc_pct: f64,
         /// Current SOC at the moment of the plan request, %.
         current_soc_pct: f64,
         /// Human-readable rationale shown under the recommendation.
@@ -626,7 +622,6 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         window,
         kwh,
         after_min_soc_pct,
-        charge_target_soc_pct,
         with_charge_series,
         import_tomorrow_with_charge_kwh,
         export_tomorrow_with_charge_kwh,
@@ -720,7 +715,6 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             window,
             kwh,
             outcome.trough_pct,
-            100.0,
             outcome
                 .series
                 .iter()
@@ -743,7 +737,6 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             window,
             kwh,
             (observed_min_soc_pct + lift).min(100.0),
-            100.0,
             // No window to inject into, so no with-charge projection to
             // overlay. The Battery tab falls back to solar-only.
             Vec::new(),
@@ -800,7 +793,6 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         observed_min_soc_pct,
         current_soc_pct: inputs.current_soc_pct,
         after_min_soc_pct,
-        charge_target_soc_pct,
         rationale,
         with_charge_series,
         import_tomorrow_with_charge_kwh,
@@ -1205,7 +1197,6 @@ mod tests {
                 min_soc_pct,
                 observed_min_soc_pct,
                 after_min_soc_pct,
-                charge_target_soc_pct,
                 rationale,
                 current_soc_pct,
                 ..
@@ -1231,9 +1222,10 @@ mod tests {
                 );
                 assert!(after_min_soc_pct < min_soc_pct);
                 assert!(rationale.contains("still below"), "rationale: {rationale}");
-                // The slot target is the level the battery actually
-                // reaches in the window — above the 60% floor ask.
-                assert!(charge_target_soc_pct > 60.0);
+                // The slot target is always 100 by design in the v2
+                // one-cycle sizing (the duration is the control variable;
+                // the rate-limit register governs the charge) — the
+                // dropped `charge_target_soc_pct` field used to carry it.
                 // The planner round-trips the live current SOC so the UI
                 // can show the user which number drove the kWh ask.
                 assert!((current_soc_pct - 30.0).abs() < 1e-9);
@@ -2109,7 +2101,6 @@ mod tests {
             window,
             observed_min_soc_pct,
             after_min_soc_pct,
-            charge_target_soc_pct,
             rationale,
             ..
         } = rec
@@ -2143,15 +2134,11 @@ mod tests {
         (real_after_min - after_min_soc_pct).abs() < 0.5,
         "planner's after_min_soc_pct={after_min_soc_pct} should match independent re-sim trough {real_after_min}"
     );
-        // The charge-slot target the Apply payload writes must be the level
-        // the battery needs to REACH in the window (well above the 20%
-        // minimum) — a slot target of 20% would stop charging at 20% and
-        // let the battery crash back down, which is exactly the reported
-        // failure mode.
-        assert!(
-            charge_target_soc_pct > 50.0,
-            "charge slot target {charge_target_soc_pct} must be well above the 20% minimum"
-        );
+        // The charge-slot target the Apply payload writes is always 100 by
+        // design in the v2 one-cycle sizing — the duration is the control
+        // variable, and the rate-limit register (HR 111 / HR 313 /
+        // HR 1110) governs the charge. The dropped `charge_target_soc_pct`
+        // field used to carry this number.
         // No caveat in the rationale — the plan holds.
         assert!(!rationale.contains("still below"), "rationale: {rationale}");
     }
