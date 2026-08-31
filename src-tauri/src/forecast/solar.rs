@@ -44,6 +44,11 @@ pub struct SolarForecast {
 
 /// How many complete past days of modelled radiation to request so the
 /// performance-ratio calibration has history to learn from.
+///
+/// Deliberately decoupled from [`FORECAST_DAYS`]: the calibration needs a
+/// long, stable history (median over ≥5 usable days) while the forecast
+/// window only needs to cover the 72 h planning horizon. Bumping one does
+/// not imply the other should change (CODE_REVIEW.md suggestion 3).
 pub const PAST_DAYS: u32 = 14;
 /// How many calendar days to request. Open-Meteo's forecast window starts at
 /// midnight, so four days are needed to provide 72 hours from any time today.
