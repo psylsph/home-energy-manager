@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.76.0] - 2026-08-31
+
+### Added
+
+- **Timed Export is now a schedule that runs itself — set it once and forget it.** Pick your export windows (say 16:00–19:00), press Arm, and the app takes over from there: between windows the inverter sits in its normal Eco mode covering the house, at the start of each window it switches itself to full-power export, and when the window ends it switches back to Eco. The single Timed Export button now tells you where you are at a glance — waiting for the window, exporting now, held by a discharge pause, or a problem that needs your attention — and the Control page shows when the next export starts and when Eco resumes. Everything runs on the inverter's own clock, so a headless box kept in UTC won't shift your windows (issue #289).
+
+- **The app now waits for the inverter to confirm before claiming a change worked.** Battery mode changes and schedule edits show an "Applying…" banner (which survives switching to another tab) until the inverter has actually accepted the change, and a request the inverter refuses now comes back with a clear error and what to do next instead of a success message that wasn't true. If a save fails part-way through, the previous schedule is put back, so the inverter is never left with half a schedule on it.
+
+- **A failed or interrupted stop now finishes itself.** If Timed Export couldn't be switched off because the inverter was busy — or the app or the connection dropped mid-stop — it picks the stop back up on its own and settles on Eco, instead of leaving the battery exporting with the schedule showing Off.
+
+### Fixed
+
+- **Stop now really stops on inverters that switch themselves back on.** Some firmware quietly re-arms discharge whenever an export window is programmed into it, which made Timed Export impossible to turn off: you'd press Stop and it would start exporting again on its own. The app now recognises this behaviour and works around it, so Stop leaves you in Eco and keeps you there.
+
+- **A corrupted battery-voltage reading no longer fires a breaker-trip alert.** One particular corrupt reading (-0.0 V) looked just like a genuine 0 V complete-disconnect measurement and could send a false alarm; it's now recognised as garbage.
+
+- **History charts show 24-hour times everywhere.** The time axis used to follow the browser's locale, so an en-US machine got "04:40 PM" mixed into an otherwise 24-hour app; it's HH:MM across the board now.
+
+### Internal
+
+- Full verification review of everything since v0.75.9 (CODE_REVIEW.md pass 2): the reconciler's ownership rules, the durable stop marker, and the transactional write paths checked line by line; no blocking findings.
+- The Playwright suite now resets backend-owned schedule state between tests, not just the simulated inverter, so specs can't leak an armed schedule into each other; a new harness-only reset endpoint answers 404 in normal runs.
+- Modbus retry waits are jittered so a queue of retries no longer hammer the adapter in lockstep; history day-boundary maths takes an explicit timezone (production behaviour unchanged); the forecast night-window test is pinned to a fixed date; the "connection lost" error predicate no longer conflates "never connected" with "the connection dropped".
+
 ## [0.75.9] - 2026-08-29
 
 ### Fixed
