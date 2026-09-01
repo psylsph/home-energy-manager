@@ -6420,18 +6420,29 @@ pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCod
         now: Local::now(),
     });
 
-    let rec = build_plan_payload(
+    let (charge, export_advice) = compute_full_plan(
         &forecast,
         &settings,
         snapshot.as_ref(),
         Local::now().timestamp(),
     );
-    let apply = rec.get("apply").cloned().unwrap_or(serde_json::Value::Null);
+    let rec_value = plan_to_json_value(&charge);
+    let apply = rec_value
+        .get("apply")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let recommendation = {
-        let mut r = rec.as_object().cloned().unwrap_or_default();
+        let mut r = rec_value.as_object().cloned().unwrap_or_default();
         r.remove("apply");
         serde_json::Value::Object(r)
     };
+    // The export advice has no Apply path yet (read-only v1) — when it
+    // stands down with the charge plan it serialises as null so the UI
+    // hides the card entirely.
+    let export = export_advice
+        .as_ref()
+        .map(export_advice_to_json)
+        .unwrap_or(serde_json::Value::Null);
     (
         StatusCode::OK,
         Json(json!({
@@ -6439,26 +6450,69 @@ pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCod
             "data": {
                 "recommendation": recommendation,
                 "apply": apply,
+                "export": export,
             }
         })),
     )
 }
 
-/// Build the serialisable plan response (recommendation + Apply payload).
-///
-/// The forecast already produced the SOC trajectory; the planner only
-/// needs the projected end SOC plus the simulated hour series (for the
-/// `NoChargeNeeded` branch). Everything else comes from the snapshot
-/// and settings.
-fn build_plan_payload(
+/// Compute the typed plan recommendation from a forecast payload, plus
+/// the export advice that rides the same trajectory. Shared by the API
+/// handler (which serialises both) and the poll loop's nightly
+/// auto-refresh (which acts on the charge side), so the applied slot,
+/// the displayed plan, and the export card can never come from
+/// different computations. The export half is `None` exactly when the
+/// charge half is `NoPlan` — the same gates (projection, history,
+/// import tariff) underpin both.
+pub(crate) fn compute_full_plan(
     forecast: &crate::forecast::ForecastPayload,
     settings: &crate::settings::Settings,
     snapshot: Option<&crate::inverter::model::InverterSnapshot>,
     now_ts: i64,
-) -> serde_json::Value {
-    plan_to_json_value(&compute_plan_recommendation(
-        forecast, settings, snapshot, now_ts,
-    ))
+) -> (
+    crate::forecast::planner::PlanRecommendation,
+    Option<crate::forecast::planner::ExportAdvice>,
+) {
+    use crate::forecast::planner::{ExportAdvice, ExportPlanInputs, PlanRecommendation};
+    let (charge, export_ctx) = compute_charge_plan_inner(forecast, settings, snapshot, now_ts);
+    // NoPlan means one of the shared gates failed (projection, history,
+    // import tariff) — the export advice stands down with them.
+    if matches!(charge, PlanRecommendation::NoPlan { .. }) {
+        return (charge, None);
+    }
+    let Some(ExportContext {
+        sim_hours,
+        params,
+        import_tariff,
+        floor_pct: min_soc_pct,
+    }) = export_ctx
+    else {
+        return (charge, None);
+    };
+    // Without an export tariff there is no window to sell into — say so
+    // rather than hiding the card, so the user knows what to configure.
+    let Some(export_tariff) = settings.export_tariff_config.as_ref() else {
+        return (
+            charge,
+            Some(ExportAdvice::NoExport {
+                reason: "no export tariff configured — set your export rates in Settings so the planner can find your best window".to_string(),
+            }),
+        );
+    };
+    let charge_window = match &charge {
+        crate::forecast::planner::PlanRecommendation::Charge { window, .. } => Some(window),
+        _ => None,
+    };
+    let export = crate::forecast::planner::plan_export_window(&ExportPlanInputs {
+        sim_hours: &sim_hours,
+        params: &params,
+        export_tariff,
+        import_tariff,
+        charge_window,
+        floor_pct: min_soc_pct,
+        now_ts,
+    });
+    (charge, Some(export))
 }
 
 /// Compute the typed plan recommendation from a forecast payload. Shared
@@ -6471,16 +6525,45 @@ pub(crate) fn compute_plan_recommendation(
     snapshot: Option<&crate::inverter::model::InverterSnapshot>,
     now_ts: i64,
 ) -> crate::forecast::planner::PlanRecommendation {
+    compute_full_plan(forecast, settings, snapshot, now_ts).0
+}
+
+/// The context the export advice needs to ride the charge plan's
+/// trajectory: the reconstructed hourly inputs, the simulation params,
+/// the import tariff, and the user's SOC floor.
+struct ExportContext<'a> {
+    sim_hours: Vec<crate::forecast::simulate::SimHourInput>,
+    params: crate::forecast::simulate::SimulationParams,
+    import_tariff: &'a crate::settings::TariffConfig,
+    floor_pct: f64,
+}
+
+/// The charge-plan computation proper, returning the context the export
+/// advice needs to ride the same trajectory. `None` when the charge
+/// gates failed (no projection / no import tariff) — the export advice
+/// stands down with them.
+fn compute_charge_plan_inner<'a>(
+    forecast: &crate::forecast::ForecastPayload,
+    settings: &'a crate::settings::Settings,
+    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
+    now_ts: i64,
+) -> (
+    crate::forecast::planner::PlanRecommendation,
+    Option<ExportContext<'a>>,
+) {
     use crate::forecast::simulate::{
         SimHourInput, SimHourResult, SimulationOutput, SimulationParams,
     };
     let import_tariff = settings.import_tariff_config.as_ref();
 
-    // No battery projection -> straight NoPlan.
+    // No battery projection -> straight NoPlan (and no export advice).
     let Some(battery) = &forecast.battery else {
-        return crate::forecast::planner::PlanRecommendation::NoPlan {
+        return (
+            crate::forecast::planner::PlanRecommendation::NoPlan {
             reason: "no battery projection available — connect to the inverter and wait for forecast data".to_string(),
-        };
+        },
+            None,
+        );
     };
 
     // Reserve floor + capacity from the snapshot/battery block; rate caps
@@ -6591,7 +6674,17 @@ pub(crate) fn compute_plan_recommendation(
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
-    crate::forecast::planner::plan_overnight_charge(&inputs)
+    let charge = crate::forecast::planner::plan_overnight_charge(&inputs);
+    // The export advice rides the same trajectory: hand over the hourly
+    // inputs, params, tariff, and floor. `None` when there is no import
+    // tariff — the charge planner has already NoPlan'd on that gate.
+    let ctx = import_tariff.map(|t| ExportContext {
+        sim_hours,
+        params,
+        import_tariff: t,
+        floor_pct: min_soc_pct,
+    });
+    (charge, ctx)
 }
 
 /// Serialise a `PlanRecommendation` into the JSON shape the UI/Apply
@@ -6687,6 +6780,47 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             "kind": "no_plan",
             "reason": reason,
             "apply": null,
+        }),
+    }
+}
+
+/// Serialise the export advice (issue #283 stage 2) into the JSON shape
+/// the UI expects. Deliberately no `apply` payload — export advice is
+/// read-only in v1; scheduling a discharge slot comes later.
+fn export_advice_to_json(advice: &crate::forecast::planner::ExportAdvice) -> serde_json::Value {
+    use crate::forecast::planner::ExportAdvice;
+    match advice {
+        ExportAdvice::Export {
+            window,
+            kwh,
+            min_soc_pct,
+            after_min_soc_pct,
+            earning,
+            rationale,
+            with_export_series,
+        } => {
+            // Same wall-clock clamp as the charge window: a 00:00 end
+            // would decode as a disabled slot on the inverter.
+            let (start_h, start_m, end_h, end_m) = crate::forecast::refresh::plan_slot_hhmm(window);
+            serde_json::json!({
+                "kind": "export",
+                "window": {
+                    "start": format!("{:02}:{:02}", start_h, start_m),
+                    "end": format!("{:02}:{:02}", end_h, end_m),
+                    "rate": window.rate,
+                    "tomorrow": window.tomorrow,
+                },
+                "kwh": kwh,
+                "min_soc_pct": min_soc_pct,
+                "after_min_soc_pct": after_min_soc_pct,
+                "earning": earning,
+                "rationale": rationale,
+                "with_export_series": with_export_series,
+            })
+        }
+        ExportAdvice::NoExport { reason } => serde_json::json!({
+            "kind": "no_export",
+            "reason": reason,
         }),
     }
 }

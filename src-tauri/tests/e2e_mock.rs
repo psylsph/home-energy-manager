@@ -1981,6 +1981,9 @@ async fn forecast_plan_endpoint_degrades_to_no_plan() {
         "reason: {}",
         rec["reason"]
     );
+    // Without a plan there is no export advice either — the field is
+    // null so the UI hides the export card entirely.
+    assert!(body["data"]["export"].is_null());
 }
 
 /// Fully seeded: cloudy forecast + Flux tariff + drained battery → a
@@ -2193,4 +2196,163 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
         apply["timed_charge"],
         serde_json::json!({ "enabled": true })
     );
+}
+
+/// Sunny forecast + Flux import/export tariffs + a battery that is full
+/// long before the evening peak → the plan payload carries export
+/// advice alongside the charge recommendation: sell the peak window
+/// down to the same floor the charge planner holds. Which verdict the
+/// endpoint returns depends on where "now" sits in the daily cycle —
+/// the peak is only sellable while it is still ahead of the next
+/// cheap-rate import window — so the test reads the clock once and
+/// pins the matching branch (02:00–16:00 → export; otherwise the
+/// window is in progress, passed, or beyond the cycle → no_export).
+#[tokio::test]
+async fn forecast_plan_endpoint_includes_export_advice() {
+    use chrono::TimeZone;
+    use chrono::Timelike;
+    use givenergy_local::history::{ForecastValueRow, HistoryDb};
+    use givenergy_local::inverter::model::InverterSnapshot;
+
+    let config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+
+    // Sunny forward forecast: 800 W/m² for the daylight hours — the
+    // 9.5 kWh battery is full by mid-morning, leaving real surplus
+    // above the floor by the 16:00 peak.
+    let db = HistoryDb::open(&config.dir.join("history.db")).unwrap();
+    let now = chrono::Local::now();
+    let now_ts = now.timestamp();
+    let hour_start = now_ts - now_ts.rem_euclid(3600);
+    for h in 0..73i64 {
+        let ts = hour_start + h * 3600;
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: ts,
+            variable: "shortwave_radiation".to_string(),
+            value: if h % 24 >= 6 && h % 24 <= 19 {
+                800.0
+            } else {
+                0.0
+            },
+            source: "open-meteo".to_string(),
+            fetched_at: now_ts,
+        }])
+        .unwrap();
+    }
+    db.set_meta_value("forecast_pr", "0.8").unwrap();
+    db.set_meta_value("forecast_pr_days", "12").unwrap();
+
+    // A week of consumption history (+0.5/h).
+    let mut date = now.date_naive() - chrono::Duration::days(7);
+    while date < now.date_naive() {
+        let mut counter = 0.0_f64;
+        for hour in 0..24u32 {
+            let ts = chrono::Local
+                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp();
+            db.insert_reading(&InverterSnapshot {
+                timestamp: ts,
+                home_energy_today_kwh: counter as f32,
+                ..Default::default()
+            });
+            counter += 0.5;
+        }
+        date = date.succ_opt().unwrap();
+    }
+    *state.history.lock().await = Some(Arc::new(db));
+
+    // A healthy battery: full-ish with the hardware rate limits.
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        soc: 90,
+        battery_capacity_kwh: 9.5,
+        max_battery_power_w: 3000,
+        charge_rate: 50,
+        discharge_rate: 50,
+        battery_reserve: 10,
+        ..Default::default()
+    });
+    {
+        let mut ws = state.weather.lock().await;
+        ws.config.enabled = true;
+        ws.config.latitude = Some(51.5);
+        ws.config.longitude = Some(-0.13);
+    }
+
+    let router = create_router(state.clone());
+
+    // Flux-like import AND export tariffs via the existing settings
+    // endpoint: 9p overnight import, 35p evening export peak.
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({
+            "pv1_rated_kw": 5.0,
+            "import_tariff_config": {
+                "slots": [
+                    { "start": "00:00", "end": "02:00", "rate": 0.26 },
+                    { "start": "02:00", "end": "05:00", "rate": 0.09 },
+                    { "start": "05:00", "end": "16:00", "rate": 0.26 },
+                    { "start": "16:00", "end": "21:00", "rate": 0.35 },
+                    { "start": "21:00", "end": "23:59", "rate": 0.26 }
+                ]
+            },
+            "export_tariff_config": {
+                "slots": [
+                    { "start": "00:00", "end": "16:00", "rate": 0.05 },
+                    { "start": "16:00", "end": "21:00", "rate": 0.35 },
+                    { "start": "21:00", "end": "23:59", "rate": 0.05 }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
+
+    let (status, body) = get_json(&router, "/api/forecast/plan").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // One clock read pins the expected branch; the planner reads the
+    // same clock moments later inside the handler.
+    let local_now = chrono::Local::now();
+    let minute_of_day = local_now.hour() * 60 + local_now.minute();
+    let export_in_cycle = (2 * 60..16 * 60).contains(&minute_of_day);
+    let export = &body["data"]["export"];
+    if export_in_cycle {
+        assert_eq!(export["kind"], Value::String("export".to_string()));
+        assert_eq!(export["window"]["start"], serde_json::json!("16:00"));
+        let end = export["window"]["end"].as_str().expect("window end");
+        let parts: Vec<u32> = end.split(':').map(|p| p.parse().expect("HH:MM")).collect();
+        let end_min = parts[0] * 60 + parts[1];
+        assert!(
+            end_min > 16 * 60 && end_min <= 21 * 60,
+            "export window end {end} must fall inside the 16:00–21:00 peak"
+        );
+        let kwh = export["kwh"].as_f64().expect("kwh");
+        assert!(kwh > 0.0, "kwh = {kwh}");
+        let rate = export["window"]["rate"].as_f64().expect("rate");
+        assert!((rate - 0.35).abs() < 1e-9, "peak export rate, got {rate}");
+        let earning = export["earning"].as_f64().expect("earning");
+        assert!(
+            (earning - kwh * rate).abs() < 1e-9,
+            "earning {earning} must equal kwh × rate"
+        );
+        assert!(
+            export["after_min_soc_pct"].as_f64().expect("after_min") >= 20.0,
+            "the export must hold the 20% floor"
+        );
+        assert!(!export["with_export_series"]
+            .as_array()
+            .expect("series")
+            .is_empty());
+        // Read-only v1: no apply payload on the export advice.
+        assert!(export.get("apply").is_none());
+    } else {
+        assert_eq!(export["kind"], Value::String("no_export".to_string()));
+        assert!(
+            !export["reason"].as_str().expect("reason").is_empty(),
+            "a stood-down verdict still explains itself"
+        );
+    }
 }
