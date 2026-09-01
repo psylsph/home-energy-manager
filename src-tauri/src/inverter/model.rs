@@ -1070,6 +1070,11 @@ pub struct InverterSnapshot {
     /// settings save — harmless for a hint banner.
     #[serde(default)]
     pub forecast_plan_auto_refresh: bool,
+    /// True when the Forecast plan's auto-apply trigger is enabled: the
+    /// backend applies the plan `lead_minutes` before each cheap window
+    /// and notifies the user. Stamped by the poll loop from settings.
+    #[serde(default)]
+    pub forecast_plan_auto_apply_enabled: bool,
     /// Battery calibration stage (0=off, 5=balance). Only meaningful for legacy Gen1/Gen2/Polar devices.
     #[serde(default)]
     pub battery_calibration_stage: u8,

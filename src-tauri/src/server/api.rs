@@ -1163,6 +1163,11 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // Nightly auto-refresh of the Forecast plan's charge slot:
             // re-sizes slot 1 from the live SOC before each cheap period.
             "forecast_plan_auto_refresh": settings.forecast_plan_auto_refresh,
+            // Auto-apply of the Forecast plan: applies the calculated
+            // charging plan the configured number of minutes before the
+            // cheap charging tariff window and notifies the user.
+            "forecast_plan_auto_apply_enabled": settings.forecast_plan_auto_apply_enabled,
+            "forecast_plan_auto_apply_lead_minutes": settings.forecast_plan_auto_apply_lead_minutes,
         }
         })),
     )
@@ -1396,6 +1401,24 @@ pub async fn update_settings(
             .and_then(|v| v.as_bool())
         {
             persist.forecast_plan_auto_refresh = v;
+        }
+        if let Some(v) = body
+            .get("forecast_plan_auto_apply_enabled")
+            .and_then(|v| v.as_bool())
+        {
+            persist.forecast_plan_auto_apply_enabled = v;
+        }
+        if let Some(v) = body
+            .get("forecast_plan_auto_apply_lead_minutes")
+            .and_then(|v| v.as_u64())
+        {
+            if v > crate::forecast::refresh::PLAN_AUTO_APPLY_MAX_LEAD_MINUTES as u64 {
+                return Err(format!(
+                    "Auto-apply lead time must be between 0 and {} minutes",
+                    crate::forecast::refresh::PLAN_AUTO_APPLY_MAX_LEAD_MINUTES
+                ));
+            }
+            persist.forecast_plan_auto_apply_lead_minutes = v as u16;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
             let parsed: Vec<crate::settings::SolarArrayConfig> = arrays

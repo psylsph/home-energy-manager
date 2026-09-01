@@ -7,6 +7,8 @@ import {
   truncateSeriesAtNextChargeStart,
   formatForecastXAxisTick,
   forecastPlanTitle,
+  planAutoApplyTriggerLabel,
+  parseLeadMinutes,
   forecastStatusMessages,
   forwardHourTimestamps,
   insertChargeStartVertices,
@@ -550,5 +552,60 @@ describe('forecastPlanChargeRationale', () => {
     expect(charge.rationale).toMatch(/7\.0p/);
     expect(charge.rationale).toMatch(/00:30/);
     expect(charge.rationale).toMatch(/05:30/);
+  });
+});
+
+describe('planAutoApplyTriggerLabel', () => {
+  it('subtracts the lead from the window start', () => {
+    expect(planAutoApplyTriggerLabel('02:00', 30)).toBe('01:30');
+  });
+
+  it('wraps to the previous evening near midnight', () => {
+    // A 00:15 window with a 30-minute lead must trigger at 23:45 the
+    // evening before, not at a negative or wrapped-past time.
+    expect(planAutoApplyTriggerLabel('00:15', 30)).toBe('23:45');
+  });
+
+  it('fires at the window start with a zero lead', () => {
+    expect(planAutoApplyTriggerLabel('02:00', 0)).toBe('02:00');
+  });
+
+  it('rejects out-of-range or malformed window labels', () => {
+    // Same strictness as the planner-label parser used for chart markers:
+    // the backend only ever emits zero-padded in-range HH:MM, so anything
+    // else must fall back to the generic note rather than render nonsense.
+    expect(planAutoApplyTriggerLabel('10:60', 30)).toBeNull();
+    expect(planAutoApplyTriggerLabel('24:00', 30)).toBeNull();
+    expect(planAutoApplyTriggerLabel('2:00', 30)).toBeNull();
+    expect(planAutoApplyTriggerLabel('abc', 30)).toBeNull();
+    expect(planAutoApplyTriggerLabel('', 30)).toBeNull();
+  });
+
+  it('rejects leads that cannot produce a valid trigger label', () => {
+    // A half-typed input must not render as "NaN:NaN" in the plan note.
+    expect(planAutoApplyTriggerLabel('02:00', Number.NaN)).toBeNull();
+    expect(planAutoApplyTriggerLabel('02:00', -5)).toBeNull();
+    expect(planAutoApplyTriggerLabel('02:00', 12.5)).toBeNull();
+  });
+});
+
+describe('parseLeadMinutes', () => {
+  it('accepts plain whole-minute input, trimming whitespace', () => {
+    expect(parseLeadMinutes('45')).toBe(45);
+    expect(parseLeadMinutes('0')).toBe(0);
+    expect(parseLeadMinutes(' 30 ')).toBe(30);
+  });
+
+  it('rejects emptied or partially typed input as null', () => {
+    // Number('') is 0 — an emptied lead field must read as invalid, not as
+    // a zero lead that would silently move the trigger to the window's own
+    // start. Anything that isn't plain digits (empty, whitespace, signed,
+    // fractional, exponent notation) is rejected.
+    expect(parseLeadMinutes('')).toBeNull();
+    expect(parseLeadMinutes('   ')).toBeNull();
+    expect(parseLeadMinutes('-5')).toBeNull();
+    expect(parseLeadMinutes('12.5')).toBeNull();
+    expect(parseLeadMinutes('1e2')).toBeNull();
+    expect(parseLeadMinutes('abc')).toBeNull();
   });
 });

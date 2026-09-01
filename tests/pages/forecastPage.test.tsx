@@ -224,31 +224,60 @@ describe('ForecastPage', () => {
   it('renders the Tomorrow summary with payload numbers', async () => {
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText(/tomorrow/i)).toBeTruthy();
+      expect(screen.getByText('Tomorrow')).toBeTruthy();
     });
     await waitFor(() => {
       expect(screen.getByTestId('forecast-solar-tomorrow').textContent).toMatch(/18\.4/);
       expect(screen.getByTestId('forecast-consumption-tomorrow').textContent).toMatch(/11\.2/);
       expect(screen.getByTestId('forecast-surplus-tomorrow').textContent).toMatch(/7\.2/);
       expect(screen.getByTestId('forecast-import-tomorrow').textContent).toMatch(/1\.1/);
-      expect(screen.getByTestId('forecast-start-soc').textContent).toMatch(/62/);
     });
     // Calibrated — no degradation banner.
     expect(screen.queryByTestId('forecast-status-banner')).toBeNull();
   });
 
-  it('renders all forecast charts across the 72-hour forward axis', async () => {
+  it('attributes forecast data to Open-Meteo under CC BY 4.0', async () => {
+    // Open-Meteo's CC-BY 4.0 licence requires attribution where the data is
+    // presented — the page's entire content is Open-Meteo-derived.
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-attribution')).toBeTruthy();
+    });
+    expect(screen.getByText('Open-Meteo.com')).toBeTruthy();
+    expect(screen.getByTestId('forecast-attribution').textContent).toMatch(
+      /CC BY 4\.0/,
+    );
+  });
+
+  it('offers the three forecast charts across the 72-hour forward axis', async () => {
     // The consumption chart is tiled onto the forward timestamps (the
     // solar series' axis) instead of a midnight-anchored 24 h "typical
     // day" — the three charts start at the same "now" and cover the full
     // 72-hour forecast horizon.
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Solar forecast (next 72 h)')).toBeTruthy();
-      expect(screen.getByText('Consumption profile (next 72 h)')).toBeTruthy();
-      expect(screen.getByText('Battery projection (next 72 h)')).toBeTruthy();
+      expect(screen.getByText('Expected solar generation · next 72 hours')).toBeTruthy();
+      expect(screen.getByText('Expected home use · next 72 hours')).toBeTruthy();
+      expect(screen.getByText('Battery projection · next 72 hours')).toBeTruthy();
     });
     expect(screen.queryByText('Consumption profile (typical day)')).toBeNull();
+  });
+
+  it('shows one chart at a time and switches charts with tabs', async () => {
+    render(<ForecastPage />);
+    const batteryTab = await screen.findByTestId('forecast-chart-tab-battery');
+    const solarTab = screen.getByTestId('forecast-chart-tab-solar');
+    expect(batteryTab.getAttribute('aria-selected')).toBe('true');
+    expect(solarTab.getAttribute('aria-selected')).toBe('false');
+
+    fireEvent.click(solarTab);
+
+    expect(solarTab.getAttribute('aria-selected')).toBe('true');
+    expect(batteryTab.getAttribute('aria-selected')).toBe('false');
+    expect(
+      screen.getByText('Expected solar generation · next 72 hours').closest('[aria-hidden]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('false');
   });
 
   it('labels consumption bands as low and high estimates', async () => {
@@ -340,7 +369,7 @@ describe('ForecastPage', () => {
     });
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Consumption profile (next 72 h)')).toBeTruthy();
+      expect(screen.getByText('Expected home use · next 72 hours')).toBeTruthy();
     });
     expect(screen.queryByText('Not enough history yet.')).toBeNull();
   });
@@ -441,6 +470,7 @@ describe('ForecastPage plan card', () => {
     await waitFor(() => {
       expect(screen.getByTestId('forecast-plan').textContent).toMatch(/3\.2/);
     });
+    expect(screen.getByText('Today’s recommendation')).toBeTruthy();
     expect(screen.getByTestId('forecast-plan').textContent).toMatch(/02:00/);
     expect(screen.getByTestId('forecast-plan').textContent).toMatch(/03:36/);
     const apply = screen.getByTestId('forecast-plan-apply');
@@ -514,12 +544,12 @@ describe('ForecastPage plan card', () => {
     // child of the h-56 chart div where it would overflow the card and
     // render outside the background.
     const card = screen
-      .getByText('Battery projection (next 72 h)')
+      .getByText('Battery projection · next 72 hours')
       .closest('section');
     expect(card).not.toBeNull();
     const caption = container.textContent?.match(/SOC if overnight charge enacted/);
     expect(caption).toBeTruthy();
-    const chartDiv = screen.getByText('Battery projection (next 72 h)').parentElement
+    const chartDiv = screen.getByText('Battery projection · next 72 hours').parentElement
       ?.querySelector('div.h-56');
     expect(chartDiv).not.toBeNull();
     // Caption paragraph lives after the chart div, still inside section.
@@ -807,5 +837,400 @@ describe('ForecastPage plan cycle note', () => {
       expect(screen.getByText(/floor is held on solar alone/i)).toBeTruthy();
     });
     expect(screen.queryByTestId('forecast-plan-cycle-note')).toBeNull();
+  });
+
+  it('auto-apply note falls back to the generic text while the lead field is invalid', async () => {
+    // With auto-apply on, the note names the trigger time. A half-typed
+    // lead input must never render "NaN:NaN" — the note falls back to the
+    // lead-agnostic text until the value is valid again.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') {
+        return {
+          ok: true,
+          data: {
+            forecast_min_soc_pct: 20,
+            forecast_plan_auto_apply_enabled: true,
+            forecast_plan_auto_apply_lead_minutes: 30,
+          },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const note = await waitFor(() => screen.getByTestId('forecast-auto-apply-note'));
+    // Plan window starts 02:00, lead 30 → triggers 01:30.
+    expect(note.textContent).toMatch(/applies itself at 01:30/);
+    const lead = screen.getByTestId('forecast-auto-apply-lead') as HTMLInputElement;
+    fireEvent.change(lead, { target: { value: '' } });
+    await waitFor(() => {
+      expect(note.textContent).not.toMatch(/NaN/);
+      expect(note.textContent).toMatch(/applies itself before each cheap window/i);
+    });
+  });
+});
+
+describe('ForecastPage auto-apply toggle', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  // Auto-apply on with the default 30-minute lead; the plan targets a
+  // 02:00 window so the trigger note is deterministic.
+  const mockLoad = () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') {
+        return {
+          ok: true,
+          data: {
+            forecast_min_soc_pct: 20,
+            forecast_plan_auto_apply_enabled: true,
+            forecast_plan_auto_apply_lead_minutes: 30,
+          },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+  };
+
+  it('editing the lead time and blurring keeps auto-apply on', async () => {
+    // Regression: the blur handler used to call the toggle's save, which
+    // always posted the flipped enabled state — adjusting the lead time
+    // silently disabled the whole trigger.
+    mockLoad();
+    render(<ForecastPage />);
+    const lead = await screen.findByTestId('forecast-auto-apply-lead');
+    apiPostMocked.mockClear();
+    fireEvent.change(lead, { target: { value: '45' } });
+    fireEvent.blur(lead);
+    await waitFor(() => {
+      const post = apiPostMocked.mock.calls.find((c) => c[0] === '/api/settings');
+      expect(post?.[1]).toEqual({
+        forecast_plan_auto_apply_enabled: true,
+        forecast_plan_auto_apply_lead_minutes: 45,
+        forecast_plan_auto_refresh: false,
+      });
+    });
+    const toggle = screen.getByTestId(
+      'forecast-auto-apply-toggle',
+    ) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+  });
+
+  it('blurring an untouched lead field does not save', async () => {
+    mockLoad();
+    render(<ForecastPage />);
+    const lead = await screen.findByTestId('forecast-auto-apply-lead');
+    apiPostMocked.mockClear();
+    fireEvent.focus(lead);
+    fireEvent.blur(lead);
+    // Let any (wrong) save attempt flush before asserting none happened.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),
+    ).toBe(false);
+  });
+
+  it('the checkbox posts the flipped enabled state', async () => {
+    mockLoad();
+    render(<ForecastPage />);
+    const toggle = (await screen.findByTestId(
+      'forecast-auto-apply-toggle',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    apiPostMocked.mockClear();
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      const post = apiPostMocked.mock.calls.find((c) => c[0] === '/api/settings');
+      expect(post?.[1]).toEqual({
+        forecast_plan_auto_apply_enabled: false,
+        forecast_plan_auto_apply_lead_minutes: 30,
+        forecast_plan_auto_refresh: false,
+      });
+    });
+  });
+
+  it('an invalid lead blocks the save and reports the constraint', async () => {
+    mockLoad();
+    render(<ForecastPage />);
+    const toggle = (await screen.findByTestId(
+      'forecast-auto-apply-toggle',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    const lead = screen.getByTestId('forecast-auto-apply-lead');
+    apiPostMocked.mockClear();
+    fireEvent.change(lead, { target: { value: '999' } });
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-auto-apply-error').textContent).toMatch(
+        /between 0 and 120/,
+      );
+    });
+    expect(
+      apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),
+    ).toBe(false);
+    // The controlled checkbox never flipped.
+    expect(
+      (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+  });
+
+  it('an emptied lead field blocks the save instead of posting a zero lead', async () => {
+    // Number('') is 0: clearing the field and blurring used to save lead 0
+    // — silently moving the trigger to the window's own start. It must
+    // report the constraint and leave the stored lead untouched.
+    mockLoad();
+    render(<ForecastPage />);
+    const lead = await screen.findByTestId('forecast-auto-apply-lead');
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement)
+          .checked,
+      ).toBe(true);
+    });
+    apiPostMocked.mockClear();
+    fireEvent.change(lead, { target: { value: '' } });
+    fireEvent.blur(lead);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-auto-apply-error').textContent).toMatch(
+        /between 0 and 120/,
+      );
+    });
+    expect(
+      apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),
+    ).toBe(false);
+  });
+});
+
+describe('ForecastPage merged automatic-handling control', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  // Auto-apply and auto-refresh do the same job (keep charge slot 1 in
+  // step before the cheap window), so the UI presents ONE control. It
+  // reads on when either backend flag is set, and every save writes both:
+  // off clears both; editing the lead upgrades legacy auto-refresh to
+  // auto-apply. `backend` simulates the settings resource: GET reflects
+  // what POST saved, so the post-save refetch behaves like the real thing.
+  const mockLoad = (opts: {
+    autoRefresh?: boolean;
+    autoApply?: boolean;
+  } = {}) => {
+    const backend = {
+      forecast_plan_auto_refresh: opts.autoRefresh ?? false,
+      forecast_plan_auto_apply_enabled: opts.autoApply ?? false,
+      forecast_plan_auto_apply_lead_minutes: 30,
+    };
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') {
+        return {
+          ok: true,
+          data: { forecast_min_soc_pct: 20, ...backend },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+    apiPostMocked.mockImplementation(async (path: string, body: unknown) => {
+      if (path === '/api/settings') Object.assign(backend, body);
+      return { ok: true };
+    });
+  };
+
+  it('reads on for a legacy auto-refresh-only setting and explains the upgrade', async () => {
+    mockLoad({ autoRefresh: true });
+    render(<ForecastPage />);
+    const toggle = (await screen.findByTestId(
+      'forecast-auto-apply-toggle',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    expect(screen.getByTestId('forecast-auto-apply-note').textContent).toMatch(
+      /Auto-refresh keeps this plan/i,
+    );
+  });
+
+  it('turning the control off clears both planner flags', async () => {
+    mockLoad({ autoRefresh: true });
+    render(<ForecastPage />);
+    const toggle = (await screen.findByTestId(
+      'forecast-auto-apply-toggle',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      const post = apiPostMocked.mock.calls.find((c) => c[0] === '/api/settings');
+      expect(post?.[1]).toEqual({
+        forecast_plan_auto_apply_enabled: false,
+        forecast_plan_auto_apply_lead_minutes: 30,
+        forecast_plan_auto_refresh: false,
+      });
+    });
+    await waitFor(() => expect(toggle.checked).toBe(false));
+  });
+
+  it('editing the lead time upgrades legacy auto-refresh to auto-apply', async () => {
+    mockLoad({ autoRefresh: true });
+    render(<ForecastPage />);
+    const lead = await screen.findByTestId('forecast-auto-apply-lead');
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement)
+          .checked,
+      ).toBe(true);
+    });
+    fireEvent.change(lead, { target: { value: '45' } });
+    fireEvent.blur(lead);
+    await waitFor(() => {
+      const post = apiPostMocked.mock.calls.find((c) => c[0] === '/api/settings');
+      expect(post?.[1]).toEqual({
+        forecast_plan_auto_apply_enabled: true,
+        forecast_plan_auto_apply_lead_minutes: 45,
+        forecast_plan_auto_refresh: false,
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-auto-apply-note').textContent).toMatch(
+        /applies itself at/i,
+      );
+    });
+  });
+
+  it('reverts the switch and reports the failure when the save fails', async () => {
+    mockLoad();
+    apiPostMocked.mockRejectedValueOnce(new Error('backend offline'));
+    render(<ForecastPage />);
+    const toggle = (await screen.findByTestId(
+      'forecast-auto-apply-toggle',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(toggle.checked).toBe(false));
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-auto-apply-error').textContent).toMatch(
+        /backend offline/,
+      );
+    });
+    // The optimistic flip is rolled back so the UI never claims the
+    // planner owns the slot when the backend says otherwise.
+    expect(toggle.checked).toBe(false);
+  });
+});
+
+describe('ForecastPage battery efficiencies', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  // Moved here from the Settings page's Solar section (issue #283); the
+  // inputs hydrate as whole percents and save together on blur as 0–1
+  // ratios. `backend` reflects POSTed settings so the post-save refetch
+  // keeps the edited values, like the real resource.
+  const mockLoad = () => {
+    const backend: Record<string, unknown> = {
+      forecast_min_soc_pct: 20,
+      forecast_charge_efficiency: 0.9,
+      forecast_discharge_efficiency: 0.95,
+    };
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') {
+        return { ok: true, data: { ...backend } };
+      }
+      return { ok: true, data: {} };
+    });
+    apiPostMocked.mockImplementation(async (path: string, body: unknown) => {
+      if (path === '/api/settings') Object.assign(backend, body);
+      return { ok: true };
+    });
+  };
+
+  it('hydrates the efficiency inputs as percentages', async () => {
+    mockLoad();
+    render(<ForecastPage />);
+    const charge = (await screen.findByTestId(
+      'forecast-charge-eff-input',
+    )) as HTMLInputElement;
+    expect(charge.value).toBe('90');
+    expect(
+      (screen.getByTestId('forecast-discharge-eff-input') as HTMLInputElement)
+        .value,
+    ).toBe('95');
+  });
+
+  it('saves both efficiencies as 0–1 ratios on blur', async () => {
+    mockLoad();
+    render(<ForecastPage />);
+    const charge = (await screen.findByTestId(
+      'forecast-charge-eff-input',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(charge.value).toBe('90'));
+    apiPostMocked.mockClear();
+    fireEvent.change(charge, { target: { value: '85' } });
+    fireEvent.blur(charge);
+    await waitFor(() => {
+      const post = apiPostMocked.mock.calls.find((c) => c[0] === '/api/settings');
+      expect(post?.[1]).toEqual({
+        forecast_charge_efficiency: 0.85,
+        forecast_discharge_efficiency: 0.95,
+      });
+    });
+  });
+
+  it('blocks the save for out-of-range efficiencies', async () => {
+    mockLoad();
+    render(<ForecastPage />);
+    const charge = (await screen.findByTestId(
+      'forecast-charge-eff-input',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(charge.value).toBe('90'));
+    apiPostMocked.mockClear();
+    fireEvent.change(charge, { target: { value: '120' } });
+    fireEvent.blur(charge);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-eff-error').textContent).toMatch(
+        /between 50 and 100/,
+      );
+    });
+    expect(
+      apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),
+    ).toBe(false);
+  });
+
+  it('does not re-save when blurred without edits', async () => {
+    mockLoad();
+    render(<ForecastPage />);
+    const charge = (await screen.findByTestId(
+      'forecast-charge-eff-input',
+    )) as HTMLInputElement;
+    await waitFor(() => expect(charge.value).toBe('90'));
+    apiPostMocked.mockClear();
+    fireEvent.focus(charge);
+    fireEvent.blur(charge);
+    // Let any (wrong) save attempt flush before asserting none happened.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),
+    ).toBe(false);
   });
 });

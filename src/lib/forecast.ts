@@ -342,6 +342,17 @@ export type ForecastChargeMarker = {
   timestamp: number;
 };
 
+/** Strict "HH:MM" → minute-of-day parser: two-digit, in-range hours and
+ * minutes only. Shared by everything that reads planner window labels,
+ * which are always zero-padded from the backend. */
+function parseHhmmMinutes(value: string): number | null {
+  const match = /^(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  return hour <= 23 && minute <= 59 ? hour * 60 + minute : null;
+}
+
 /** Return the start/end of the one planned charge occurrence visible on the
  * forecast's forward axis. The next occurrence is intentionally omitted:
  * the planner is recalculated from the next live SOC before it is applied. */
@@ -349,15 +360,8 @@ export function forecastChargeMarkers(
   generatedAt: number,
   window: PlannerChargeWindow,
 ): ForecastChargeMarker[] {
-  const parseMinutes = (value: string): number | null => {
-    const match = /^(\d{2}):(\d{2})$/.exec(value);
-    if (!match) return null;
-    const hour = Number(match[1]);
-    const minute = Number(match[2]);
-    return hour <= 23 && minute <= 59 ? hour * 60 + minute : null;
-  };
-  const startMin = parseMinutes(window.start);
-  const endMin = parseMinutes(window.end);
+  const startMin = parseHhmmMinutes(window.start);
+  const endMin = parseHhmmMinutes(window.end);
   if (startMin == null || endMin == null || endMin === startMin) return [];
 
   const horizonEnd = generatedAt + FORECAST_HORIZON_HOURS * 3600;
@@ -488,6 +492,38 @@ export function forecastPlanTitle(rec: PlanRecommendation): string {
     return `No overnight charge needed — solar covers the day`;
   }
   return `Plan not ready yet — ${rec.reason}`;
+}
+
+/**
+ * Wall-clock trigger time (HH:MM) for the plan's auto-apply: the cheap
+ * window's start minus the user's lead minutes, wrapped at midnight
+ * (a 02:00 window with a 30-minute lead triggers at 01:30; a 00:15
+ * window with a 30-minute lead wraps to 23:45 the previous evening).
+ * Returns null when it cannot produce a valid HH:MM label: a malformed
+ * or out-of-range window label, or a lead that isn't a whole non-negative
+ * number of minutes (e.g. a half-typed input) — callers fall back to a
+ * lead-agnostic note instead of rendering a nonsense time.
+ */
+export function planAutoApplyTriggerLabel(
+  windowStart: string,
+  leadMinutes: number,
+): string | null {
+  const startMin = parseHhmmMinutes(windowStart);
+  if (startMin == null) return null;
+  if (!Number.isInteger(leadMinutes) || leadMinutes < 0) return null;
+  const triggerMin = (((startMin - leadMinutes) % 1440) + 1440) % 1440;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(Math.floor(triggerMin / 60))}:${pad(triggerMin % 60)}`;
+}
+
+/** Parse the auto-apply lead-time input: whole minutes only. `Number('')`
+ * is 0, which would read an emptied field as a zero lead (trigger fired at
+ * the window's own start) — so anything that isn't plain digits (empty,
+ * whitespace, signed, fractional, exponent notation) is rejected as null.
+ * Shared by the save path and the plan-note rendering so the two guards
+ * can't drift apart. */
+export function parseLeadMinutes(value: string): number | null {
+  return /^\d+$/.test(value.trim()) ? Number(value) : null;
 }
 
 /**

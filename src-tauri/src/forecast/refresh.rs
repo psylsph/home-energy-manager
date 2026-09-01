@@ -93,6 +93,109 @@ pub fn plan_refresh_due_with_adaptive(
     !adaptive_owns_rate && plan_refresh_due(now, last_refresh_date, tariff)
 }
 
+/// Hard upper bound for the user-configured auto-apply lead time,
+/// enforced by `POST /api/settings`. Two hours comfortably covers any
+/// sane "warn me before the cheap window" preference without letting a
+/// fat-fingered 9999 fire the trigger all day.
+pub const PLAN_AUTO_APPLY_MAX_LEAD_MINUTES: u16 = 120;
+
+/// Why the auto-apply gate stood down — or that it's due. Returned by
+/// [`plan_auto_apply_due`] so the poll loop can log (and once per day
+/// notify) the reason instead of silently skipping on every poll. This
+/// is the `Due { reason } | NotDue { reason }` shape CODE_REVIEW.md's
+/// open SUGGESTION asks for; `plan_refresh_due` can be retro-fitted to
+/// it later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanApplyDecision {
+    /// Fire the auto-apply this poll.
+    Due { reason: &'static str },
+    /// Stand down; `reason` says why.
+    NotDue { reason: &'static str },
+}
+
+/// The auto-apply trigger gate: due when the tariff's cheapest charging
+/// window starts within `lead_minutes` of now and the trigger has not
+/// fired yet today. Pure tariff arithmetic — the expensive plan
+/// computation runs only on `Due`. The lead time is the user-configured
+/// value (0–120 min); 0 fires at the window's own start, which is safe
+/// because the slot write lands via the shared write pump and the
+/// inverter charges the remainder of the slot either way.
+pub fn plan_auto_apply_due(
+    now: DateTime<Local>,
+    last_apply_date: Option<NaiveDate>,
+    tariff: Option<&TariffConfig>,
+    lead_minutes: u16,
+) -> PlanApplyDecision {
+    if last_apply_date == Some(now.date_naive()) {
+        return PlanApplyDecision::NotDue {
+            reason: "already applied today",
+        };
+    }
+    let Some(tariff) = tariff else {
+        return PlanApplyDecision::NotDue {
+            reason: "no tariff configured",
+        };
+    };
+    let now_min = now.hour() as u16 * 60 + now.minute() as u16;
+    let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30)
+    else {
+        return PlanApplyDecision::NotDue {
+            reason: "no upcoming cheap window",
+        };
+    };
+    // Minutes until the selected occurrence starts, wrapping at midnight.
+    let until_start = (window.start_min + 1440 - now_min) % 1440;
+    if until_start <= lead_minutes {
+        PlanApplyDecision::Due {
+            reason: "inside the lead window",
+        }
+    } else {
+        PlanApplyDecision::NotDue {
+            reason: "outside the lead window",
+        }
+    }
+}
+
+/// The poll loop's full auto-apply gate: the same composition as
+/// [`plan_refresh_due_with_adaptive`] — Adaptive Charge owning the
+/// charge-limit register suppresses the apply (both write the charge
+/// rate), with a distinct reason so the poll loop can warn/notify about
+/// it once per day.
+pub fn plan_auto_apply_decision_with_adaptive(
+    now: DateTime<Local>,
+    last_apply_date: Option<NaiveDate>,
+    tariff: Option<&TariffConfig>,
+    lead_minutes: u16,
+    adaptive_owns_rate: bool,
+) -> PlanApplyDecision {
+    if adaptive_owns_rate {
+        return PlanApplyDecision::NotDue {
+            reason: "Adaptive Charge owns the charge rate",
+        };
+    }
+    plan_auto_apply_due(now, last_apply_date, tariff, lead_minutes)
+}
+
+/// Whether the poll loop should emit the once-per-day "Adaptive Charge
+/// owns the charge rate" warning for the auto-apply: only when the apply
+/// would actually be due — not already applied today, a tariff configured,
+/// and inside the lead window. Pure helper so the poll loop's warning gate
+/// is testable, mirroring how the auto-refresh block gates its equivalent
+/// warning on [`plan_refresh_due`]. Without the would-be-due check the
+/// warning would fire daily even with no cheap window near (or no tariff
+/// at all), training users to ignore the channel.
+pub fn plan_auto_apply_adaptive_warning_due(
+    now: DateTime<Local>,
+    last_apply_date: Option<NaiveDate>,
+    tariff: Option<&TariffConfig>,
+    lead_minutes: u16,
+) -> bool {
+    matches!(
+        plan_auto_apply_due(now, last_apply_date, tariff, lead_minutes),
+        PlanApplyDecision::Due { .. }
+    )
+}
+
 /// Map a freshly computed plan to the refresh action. The window's
 /// wall-clock bounds use the same 23:59 clamp as the Apply payload so the
 /// inverter's slot register stays enabled for end-of-day windows.
@@ -237,6 +340,175 @@ mod tests {
         let afternoon = local_dt(2026, 8, 31, 15, 0);
         assert!(!plan_refresh_due_with_adaptive(afternoon, None, Some(&flux), false));
         assert!(!plan_refresh_due_with_adaptive(afternoon, None, Some(&flux), true));
+    }
+
+    #[test]
+    fn adaptive_warning_only_when_the_apply_would_actually_be_due() {
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 40); // 20 min before 02:00
+        // Inside the lead window and not applied yet: the warning fires...
+        assert!(plan_auto_apply_adaptive_warning_due(day, None, Some(&flux), 30));
+        // ...but not once today's apply has already happened — nothing is
+        // being skipped, so a warning would be noise.
+        assert!(!plan_auto_apply_adaptive_warning_due(
+            day,
+            Some(day.date_naive()),
+            Some(&flux),
+            30
+        ));
+        // Mid-afternoon with no cheap window near: no daily false alarm.
+        let afternoon = local_dt(2026, 8, 31, 15, 0);
+        assert!(!plan_auto_apply_adaptive_warning_due(
+            afternoon,
+            None,
+            Some(&flux),
+            30
+        ));
+        // No tariff configured: nothing to warn about either.
+        assert!(!plan_auto_apply_adaptive_warning_due(day, None, None, 30));
+    }
+
+    #[test]
+    fn adaptive_warning_respects_the_configured_lead_time() {
+        let flux = flux_tariff();
+        // 90 min before the 02:00 window: outside a 30-minute lead, inside
+        // a 120-minute one — the gate must follow the user's setting.
+        let early = local_dt(2026, 8, 31, 0, 30);
+        assert!(!plan_auto_apply_adaptive_warning_due(early, None, Some(&flux), 30));
+        assert!(plan_auto_apply_adaptive_warning_due(early, None, Some(&flux), 120));
+    }
+
+    #[test]
+    fn auto_apply_due_only_inside_the_configured_lead_window() {
+        let flux = flux_tariff();
+        // 20 min before the 02:00 cheap window: due with the default lead.
+        let day = local_dt(2026, 8, 31, 1, 40);
+        assert!(matches!(
+            plan_auto_apply_due(day, None, Some(&flux), 30),
+            PlanApplyDecision::Due { .. }
+        ));
+        // 90 min before: outside a 30-minute lead...
+        let early = local_dt(2026, 8, 31, 0, 30);
+        assert!(matches!(
+            plan_auto_apply_due(early, None, Some(&flux), 30),
+            PlanApplyDecision::NotDue { .. }
+        ));
+        // ...but inside a 120-minute one.
+        assert!(matches!(
+            plan_auto_apply_due(early, None, Some(&flux), 120),
+            PlanApplyDecision::Due { .. }
+        ));
+    }
+
+    #[test]
+    fn auto_apply_boundary_exactly_the_lead_before_fires() {
+        // Exactly the lead interval before the start still fires — same
+        // boundary contract as the nightly refresh.
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 30);
+        assert!(matches!(
+            plan_auto_apply_due(day, None, Some(&flux), 30),
+            PlanApplyDecision::Due { .. }
+        ));
+    }
+
+    #[test]
+    fn auto_apply_zero_lead_fires_at_the_window_start() {
+        let flux = flux_tariff();
+        let start = local_dt(2026, 8, 31, 2, 0);
+        assert!(matches!(
+            plan_auto_apply_due(start, None, Some(&flux), 0),
+            PlanApplyDecision::Due { .. }
+        ));
+        // One minute before with a zero lead: not yet.
+        let just_before = local_dt(2026, 8, 31, 1, 59);
+        assert!(matches!(
+            plan_auto_apply_due(just_before, None, Some(&flux), 0),
+            PlanApplyDecision::NotDue { .. }
+        ));
+    }
+
+    #[test]
+    fn auto_apply_wraps_midnight_to_tomorrows_window() {
+        // Cheap window 00:15–05:00: a 30-minute lead must fire at 23:45
+        // the previous evening, not wrap past the window entirely.
+        let t = tariff(&[
+            ("00:15", "05:00", 0.09),
+            ("05:00", "23:59", 0.30),
+        ]);
+        let evening = local_dt(2026, 8, 31, 23, 45);
+        assert!(matches!(
+            plan_auto_apply_due(evening, None, Some(&t), 30),
+            PlanApplyDecision::Due { .. }
+        ));
+        // 31 minutes before: not yet.
+        let earlier = local_dt(2026, 8, 31, 23, 14);
+        assert!(matches!(
+            plan_auto_apply_due(earlier, None, Some(&t), 30),
+            PlanApplyDecision::NotDue { .. }
+        ));
+    }
+
+    #[test]
+    fn auto_apply_fires_once_per_day() {
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 40);
+        assert!(matches!(
+            plan_auto_apply_due(day, None, Some(&flux), 30),
+            PlanApplyDecision::Due { .. }
+        ));
+        // Same poll cycle shape after the latch: already applied today.
+        assert_eq!(
+            plan_auto_apply_due(day, Some(day.date_naive()), Some(&flux), 30),
+            PlanApplyDecision::NotDue {
+                reason: "already applied today"
+            }
+        );
+    }
+
+    #[test]
+    fn auto_apply_needs_a_tariff() {
+        let day = local_dt(2026, 8, 31, 1, 40);
+        assert_eq!(
+            plan_auto_apply_due(day, None, None, 30),
+            PlanApplyDecision::NotDue {
+                reason: "no tariff configured"
+            }
+        );
+    }
+
+    #[test]
+    fn auto_apply_decision_suppressed_when_adaptive_owns_the_rate() {
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 40); // would be due
+        assert_eq!(
+            plan_auto_apply_decision_with_adaptive(day, None, Some(&flux), 30, true),
+            PlanApplyDecision::NotDue {
+                reason: "Adaptive Charge owns the charge rate"
+            }
+        );
+        // Without Adaptive, the same moment is due.
+        assert!(matches!(
+            plan_auto_apply_decision_with_adaptive(day, None, Some(&flux), 30, false),
+            PlanApplyDecision::Due { .. }
+        ));
+        // Adaptive suppression short-circuits before the due arithmetic, so
+        // the poll loop must consult `plan_auto_apply_adaptive_warning_due`
+        // before warning — an out-of-lead-window moment reports the adaptive
+        // reason while the warning gate correctly says not to warn.
+        let afternoon = local_dt(2026, 8, 31, 15, 0);
+        assert_eq!(
+            plan_auto_apply_decision_with_adaptive(afternoon, None, Some(&flux), 30, true),
+            PlanApplyDecision::NotDue {
+                reason: "Adaptive Charge owns the charge rate"
+            }
+        );
+        assert!(!plan_auto_apply_adaptive_warning_due(
+            afternoon,
+            None,
+            Some(&flux),
+            30
+        ));
     }
 
     #[test]

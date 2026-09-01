@@ -326,13 +326,6 @@ export default function SettingsPage() {
   // array's kWp. Empty CT-array list = no AC-coupled labelling configured.
   const [pv1RatedKw, setPv1RatedKw] = useState<string>('');
   const [pv2RatedKw, setPv2RatedKw] = useState<string>('');
-  // Issue #283: forecast battery efficiencies, edited as whole percents
-  // (90 / 95) and converted to 0–1 ratios on save.
-  const [forecastChargeEffPct, setForecastChargeEffPct] = useState<string>('90');
-  const [forecastDischargeEffPct, setForecastDischargeEffPct] = useState<string>('95');
-  // Forecast plan auto-refresh (issue #283): the backend re-sizes charge
-  // slot 1 from the live SOC before each cheap period. Opt-in.
-  const [forecastPlanAutoRefresh, setForecastPlanAutoRefresh] = useState<boolean>(false);
   const [solarCtArrays, setSolarCtArrays] = useState<
     { meter_address: number; name: string; rated_kw: string }[]
   >([]);
@@ -439,20 +432,6 @@ export default function SettingsPage() {
         setPv1RatedKw(
           s.pv1_rated_kw != null && s.pv1_rated_kw > 0 ? String(s.pv1_rated_kw) : '',
         );
-        // Issue #283: hydrate forecast efficiencies as whole percents.
-        // Missing fields (pre-#283 settings) fall back to the defaults the
-        // backend will report once saved.
-        setForecastChargeEffPct(
-          s.forecast_charge_efficiency != null
-            ? String(Math.round(s.forecast_charge_efficiency * 100))
-            : '90',
-        );
-        setForecastDischargeEffPct(
-          s.forecast_discharge_efficiency != null
-            ? String(Math.round(s.forecast_discharge_efficiency * 100))
-            : '95',
-        );
-        setForecastPlanAutoRefresh(s.forecast_plan_auto_refresh ?? false);
         setPv2RatedKw(
           s.pv2_rated_kw != null && s.pv2_rated_kw > 0 ? String(s.pv2_rated_kw) : '',
         );
@@ -739,27 +718,10 @@ export default function SettingsPage() {
       );
     setSolarSaving(true);
     try {
-      // Issue #283: forecast efficiencies save with the solar section.
-      // Parsed as percents → 0–1 ratios; anything outside 50–100 is
-      // rejected client-side (mirrors the backend's 0.5–1.0 validation)
-      // so the save never round-trips a nonsense ratio.
-      const chargePctNum = Number(forecastChargeEffPct);
-      const dischargePctNum = Number(forecastDischargeEffPct);
-      const pctOrInvalid = (n: number): number | null =>
-        Number.isFinite(n) && n >= 50 && n <= 100 ? n : null;
-      const chargePct = pctOrInvalid(chargePctNum);
-      const dischargePct = pctOrInvalid(dischargePctNum);
-      if (chargePct === null || dischargePct === null) {
-        flash('Battery efficiencies must be between 50 and 100 percent', false);
-        setSolarSaving(false);
-        return;
-      }
       await apiPost('/api/settings', {
         pv1_rated_kw: numOrZero(pv1RatedKw),
         pv2_rated_kw: numOrZero(pv2RatedKw),
         solar_arrays: cleanedArrays,
-        forecast_charge_efficiency: chargePct / 100,
-        forecast_discharge_efficiency: dischargePct / 100,
       });
       // Keep local CT-array state in sync with what was persisted (the
       // server may have normalised a row's address / dropped invalid
@@ -1019,30 +981,6 @@ export default function SettingsPage() {
       setCheckForUpdates(previous);
       const msg = e instanceof Error ? e.message : String(e);
       flash(`Failed to update update-checking: ${msg}`, false);
-    }
-  };
-
-  // Forecast plan auto-refresh. Persist-only — the poll loop reads the
-  // flag each cycle and re-sizes charge slot 1 before each cheap period
-  // (or clears it when the fresh plan needs no charge). Saved immediately
-  // rather than with the Solar section's Save button so handing charge
-  // slot 1 over to the planner (or taking it back) is explicit and
-  // instant.
-  const handleForecastPlanAutoRefreshToggle = async (next: boolean) => {
-    const previous = forecastPlanAutoRefresh;
-    setForecastPlanAutoRefresh(next);
-    try {
-      await apiPost('/api/settings', { forecast_plan_auto_refresh: next });
-      flash(
-        next
-          ? 'Plan auto-refresh on — the planner now keeps charge slot 1 in step with the battery'
-          : 'Plan auto-refresh off',
-        true,
-      );
-    } catch (e) {
-      setForecastPlanAutoRefresh(previous);
-      const msg = e instanceof Error ? e.message : String(e);
-      flash(`Failed to update plan auto-refresh: ${msg}`, false);
     }
   };
 
@@ -1645,74 +1583,6 @@ export default function SettingsPage() {
               Leave blank to hide PV2 from the % display.
             </span>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="forecast-charge-eff" className="text-text-primary text-sm font-sans font-medium">
-              Battery charge efficiency
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                id="forecast-charge-eff"
-                type="number"
-                min={50}
-                max={100}
-                step={1}
-                value={forecastChargeEffPct}
-                onChange={(e) => setForecastChargeEffPct(e.target.value)}
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
-                data-testid="forecast-charge-eff-input"
-              />
-              <span className="text-text-secondary text-xs font-sans">%</span>
-            </div>
-            <span className="text-text-secondary text-xs font-sans">
-              Used by the Forecast page’s battery projection. Default 90.
-            </span>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="forecast-discharge-eff" className="text-text-primary text-sm font-sans font-medium">
-              Battery discharge efficiency
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                id="forecast-discharge-eff"
-                type="number"
-                min={50}
-                max={100}
-                step={1}
-                value={forecastDischargeEffPct}
-                onChange={(e) => setForecastDischargeEffPct(e.target.value)}
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
-                data-testid="forecast-discharge-eff-input"
-              />
-              <span className="text-text-secondary text-xs font-sans">%</span>
-            </div>
-            <span className="text-text-secondary text-xs font-sans">
-              Default 95. Round-trip with charge efficiency ≈ 85.5%.
-            </span>
-          </div>
-          <div className="flex items-start justify-between gap-3 pt-1">
-            <div className="flex flex-col gap-1">
-              <span className="text-text-primary text-sm font-sans font-medium">
-                Auto-refresh charge plan
-              </span>
-              <span className="text-text-secondary text-xs font-sans">
-                Re-sizes charge slot 1 from the live battery shortly before each
-                cheap period, and clears it when no charge is needed. The
-                inverter otherwise repeats the last applied slot every night.
-                Takes ownership of charge slot 1.
-              </span>
-            </div>
-            <Toggle
-              checked={forecastPlanAutoRefresh}
-              onChange={(v) => void handleForecastPlanAutoRefreshToggle(v)}
-              ariaLabel="Auto-refresh charge plan"
-            />
-          </div>
-          <span
-            data-testid="forecast-plan-auto-refresh-state"
-            className="text-text-secondary text-xs font-sans"
-          >
-            {forecastPlanAutoRefresh ? 'On — charge slot 1 is managed by the planner' : 'Off'}
-          </span>
         </div>
 
         {/* External CT meter arrays (AC-coupled / separate inverters). */}

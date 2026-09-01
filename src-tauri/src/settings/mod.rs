@@ -644,6 +644,10 @@ pub(crate) fn default_forecast_min_soc_pct() -> f64 {
     20.0
 }
 
+pub(crate) fn default_forecast_plan_auto_apply_lead_minutes() -> u16 {
+    30
+}
+
 /// A snapshot of a single discharge schedule slot, persisted to settings
 /// so the user's pre-Eco schedule can be restored when they switch back
 /// to Timed mode.
@@ -1237,6 +1241,19 @@ pub struct Settings {
     /// planner. Defaults to off.
     #[serde(default)]
     pub forecast_plan_auto_refresh: bool,
+    /// When true, the poll loop applies the calculated charging plan
+    /// automatically every day, `forecast_plan_auto_apply_lead_minutes`
+    /// before the cheap charging tariff window begins, and sends a
+    /// notification through the configured alert channels. While this is
+    /// on, the fixed nightly auto-refresh stands down so charge slot 1
+    /// gets exactly one machine write per day. Defaults to off.
+    #[serde(default)]
+    pub forecast_plan_auto_apply_enabled: bool,
+    /// Minutes before the cheap charging tariff window's start at which
+    /// the auto-apply trigger fires (0 = at the window's start). Clamped
+    /// to 0–120 by `POST /api/settings`. Defaults to 30.
+    #[serde(default = "default_forecast_plan_auto_apply_lead_minutes")]
+    pub forecast_plan_auto_apply_lead_minutes: u16,
 
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
@@ -1690,6 +1707,8 @@ impl Default for Settings {
             forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
             forecast_plan_auto_refresh: false,
+            forecast_plan_auto_apply_enabled: false,
+            forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
@@ -2039,6 +2058,8 @@ mod tests {
             check_for_updates: default_check_for_updates(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
             forecast_plan_auto_refresh: false,
+            forecast_plan_auto_apply_enabled: false,
+            forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -2388,6 +2409,49 @@ mod tests {
         );
     }
 
+    /// `settings.json` written before the Forecast auto-apply trigger
+    /// shipped (no `forecast_plan_auto_apply_*` keys) must still load with
+    /// safe defaults: trigger off, documented 30-minute lead.
+    #[test]
+    fn legacy_settings_without_auto_apply_fields_loads() {
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(
+            !decoded.forecast_plan_auto_apply_enabled,
+            "missing field must default to false"
+        );
+        assert_eq!(
+            decoded.forecast_plan_auto_apply_lead_minutes, 30,
+            "missing lead must default to 30"
+        );
+    }
+
+    /// The auto-apply fields survive a full JSON round-trip.
+    #[test]
+    fn auto_apply_settings_roundtrip() {
+        let original = Settings {
+            forecast_plan_auto_apply_enabled: true,
+            forecast_plan_auto_apply_lead_minutes: 90,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+
+        assert!(decoded.forecast_plan_auto_apply_enabled);
+        assert_eq!(decoded.forecast_plan_auto_apply_lead_minutes, 90);
+    }
+
     /// Timed Export settings survive a full JSON round-trip.
     #[test]
     fn timed_export_settings_roundtrip() {
@@ -2591,6 +2655,8 @@ mod tests {
             check_for_updates: default_check_for_updates(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
             forecast_plan_auto_refresh: false,
+            forecast_plan_auto_apply_enabled: false,
+            forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),

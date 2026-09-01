@@ -415,6 +415,42 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     ).toBeDefined();
   });
 
+  it('shows the planner-ownership banner when auto-apply is on', async () => {
+    // The auto-apply trigger hands slot 1 to the planner just like the
+    // nightly auto-refresh — either flag alone must raise the banner.
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ forecast_plan_auto_apply_enabled: true }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    expect(
+      within(section).getByTestId('charge-slot-1-planner-owned-banner'),
+    ).toBeDefined();
+    expect(
+      within(section).getByText(/managed by the Forecast plan/i),
+    ).toBeDefined();
+  });
+
+  it('hides the planner-ownership banner when both planner flags are off', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        forecast_plan_auto_refresh: false,
+        forecast_plan_auto_apply_enabled: false,
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    expect(
+      within(section).queryByTestId('charge-slot-1-planner-owned-banner'),
+    ).toBeNull();
+  });
+
   it('hides the planner-ownership banner when auto-refresh is off', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ forecast_plan_auto_refresh: false }),

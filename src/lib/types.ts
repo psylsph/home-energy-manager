@@ -113,6 +113,10 @@ export interface InverterSnapshot {
    * period. Stamped by the poll loop from settings.
    */
   forecast_plan_auto_refresh?: boolean;
+  /** True when the Forecast plan's auto-apply trigger is enabled: the
+   * backend applies the plan the configured minutes before each cheap
+   * tariff window and notifies the user. Stamped by the poll loop. */
+  forecast_plan_auto_apply_enabled?: boolean;
   max_charge_slots: number;
   max_discharge_slots: number;
   charge_slots: ScheduleSlot[];
@@ -315,6 +319,14 @@ export interface PollSettings {
    * shortly before each cheap period (the Forecast plan's nightly
    * refresh). Opt-in; defaults to false. */
   forecast_plan_auto_refresh?: boolean;
+  /** When true, the backend applies the calculated charging plan
+   * automatically the configured minutes before the cheap charging
+   * tariff window and notifies the user. Supersedes the nightly
+   * auto-refresh while on. Opt-in; defaults to false. */
+  forecast_plan_auto_apply_enabled?: boolean;
+  /** Minutes before the cheap charging tariff window's start at which
+   * the auto-apply trigger fires (0–120). Defaults to 30. */
+  forecast_plan_auto_apply_lead_minutes?: number;
   /** Rated peak capacity (kWp) of the PV2 DC string. 0 = unset. */
   pv2_rated_kw?: number;
   /** External solar arrays measured by CT clamps (AC-coupled). */

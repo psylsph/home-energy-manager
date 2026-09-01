@@ -478,6 +478,14 @@ pub struct AppState {
     /// warning fires at most once per day instead of on every poll inside
     /// the lead window (CODE_REVIEW.md Major 3).
     pub forecast_plan_refresh_warned: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// Last date the Forecast plan's auto-apply trigger fired. In-memory
+    /// only: a restart inside the lead window re-runs the apply, which is
+    /// an idempotent rewrite of the same slot.
+    pub forecast_plan_apply_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// Last date the poll loop warned/notified that the auto-apply was
+    /// skipped because Adaptive Charge owns the charge rate. In-memory
+    /// only, so the warning fires at most once per day.
+    pub forecast_plan_apply_warned: Arc<Mutex<Option<chrono::NaiveDate>>>,
     /// Weather subsystem state — current config, last fetch result, backfill
     /// progress. Always present (not `Option<…>` like `history`) so the API
     /// layer doesn't have to special-case "weather not yet initialised".
@@ -602,6 +610,8 @@ impl AppState {
             last_report_date: Arc::new(Mutex::new(None)),
             forecast_plan_refresh_date: Arc::new(Mutex::new(None)),
             forecast_plan_refresh_warned: Arc::new(Mutex::new(None)),
+            forecast_plan_apply_date: Arc::new(Mutex::new(None)),
+            forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
             evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
@@ -715,6 +725,8 @@ impl AppState {
             last_report_date: Arc::new(Mutex::new(None)),
             forecast_plan_refresh_date: Arc::new(Mutex::new(None)),
             forecast_plan_refresh_warned: Arc::new(Mutex::new(None)),
+            forecast_plan_apply_date: Arc::new(Mutex::new(None)),
+            forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
             evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
@@ -2885,6 +2897,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // charge slot 1.
                                     snapshot.forecast_plan_auto_refresh =
                                         poll_settings.forecast_plan_auto_refresh;
+                                    // Same for the user-configured auto-apply
+                                    // trigger — the Control page's "slot 1 is
+                                    // planner-owned" banner treats either as
+                                    // planner ownership.
+                                    snapshot.forecast_plan_auto_apply_enabled =
+                                        poll_settings.forecast_plan_auto_apply_enabled;
                                     // `agile_enabled` is the legacy boolean mirror of
                                     // `agile_scope != Off`. The slot-based Agile block
                                     // later in this poll updates both `agile_enabled`
@@ -3016,7 +3034,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // or an Octopus/Cosy automation that lowers the
                                 // limit after the refresh still wins until the
                                 // next refresh re-asserts it.
-                                if poll_settings.forecast_plan_auto_refresh {
+                                // While the auto-apply trigger is enabled it
+                                // supersedes the fixed auto-refresh: exactly one
+                                // machine write of charge slot 1 per day, at the
+                                // user's lead time, with a notification.
+                                if poll_settings.forecast_plan_auto_refresh
+                                    && !poll_settings.forecast_plan_auto_apply_enabled
+                                {
                                     let now = chrono::Local::now();
                                     let adaptive_owns_rate = poll_settings.adaptive_charge_enabled
                                         || poll_settings.adaptive_charge_saved_limit.is_some();
@@ -3176,6 +3200,242 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             tracing::warn!(
                                                 "Forecast plan auto-refresh is enabled but Adaptive Charge owns the charge rate — skipping tonight's slot rewrite"
                                             );
+                                        }
+                                    }
+                                }
+
+                                // ---- Forecast plan auto-apply (user-configured trigger) ----
+                                // Every day, the configured number of minutes before the
+                                // cheap charging tariff window begins, re-compute the plan
+                                // from the live SOC and forecast, apply it to charge slot 1
+                                // exactly as the Forecast page's Apply button would, and
+                                // notify the user through the alert channels. While this is
+                                // enabled it supersedes the fixed nightly auto-refresh
+                                // above, so charge slot 1 gets exactly one machine write
+                                // per day — at the user's lead time, with a notification.
+                                if poll_settings.forecast_plan_auto_apply_enabled {
+                                    let now = chrono::Local::now();
+                                    let adaptive_owns_rate = poll_settings.adaptive_charge_enabled
+                                        || poll_settings.adaptive_charge_saved_limit.is_some();
+                                    let last = *state.forecast_plan_apply_date.lock().await;
+                                    let decision = crate::forecast::refresh::
+                                        plan_auto_apply_decision_with_adaptive(
+                                            now,
+                                            last,
+                                            poll_settings.import_tariff_config.as_ref(),
+                                            poll_settings.forecast_plan_auto_apply_lead_minutes,
+                                            adaptive_owns_rate,
+                                        );
+                                    match decision {
+                                        crate::forecast::refresh::PlanApplyDecision::NotDue {
+                                            reason,
+                                        } => {
+                                            // Would-be-due but Adaptive Charge owns the
+                                            // charge-limit register — warn + notify once
+                                            // per day instead of on every poll. Gated on
+                                            // the apply actually being due (same shape as
+                                            // the auto-refresh block's warning above):
+                                            // without that gate an Adaptive user with no
+                                            // cheap window near would get a false alarm
+                                            // every single day.
+                                            if adaptive_owns_rate
+                                                && crate::forecast::refresh::
+                                                    plan_auto_apply_adaptive_warning_due(
+                                                        now,
+                                                        last,
+                                                        poll_settings.import_tariff_config.as_ref(),
+                                                        poll_settings.forecast_plan_auto_apply_lead_minutes,
+                                                    )
+                                            {
+                                                let mut warned =
+                                                    state.forecast_plan_apply_warned.lock().await;
+                                                if *warned != Some(now.date_naive()) {
+                                                    *warned = Some(now.date_naive());
+                                                    tracing::warn!(
+                                                        "Forecast plan auto-apply is enabled but Adaptive Charge owns the charge rate — skipping tonight's apply"
+                                                    );
+                                                    crate::alerts::send_plan_notification(
+                                                        &state,
+                                                        &crate::alerts::build_plan_unavailable_message(
+                                                            "Adaptive Charge owns the charge rate, so tonight's charging is left to it",
+                                                        ),
+                                                    )
+                                                    .await;
+                                                }
+                                            } else {
+                                                tracing::debug!(
+                                                    reason,
+                                                    "Forecast plan auto-apply standing down"
+                                                );
+                                            }
+                                        }
+                                        crate::forecast::refresh::PlanApplyDecision::Due { .. } => {
+                                            let (weather_enabled, coords) = {
+                                                let ws = state.weather.lock().await;
+                                                (
+                                                    ws.config.enabled,
+                                                    ws.config.latitude.zip(ws.config.longitude),
+                                                )
+                                            };
+                                            let history = state.history.lock().await.clone();
+                                            let live_snapshot = snapshot.clone();
+                                            // Shallow clone, same rationale as the
+                                            // auto-refresh above: the planner reads only
+                                            // a read-only subset of settings.
+                                            let apply_settings = poll_settings.clone();
+                                            let planned = tokio::task::spawn_blocking(
+                                                move || {
+                                                    let forecast = crate::forecast::build_forecast_payload(
+                                                        &crate::forecast::ForecastInputs {
+                                                            db: history.as_deref(),
+                                                            settings: &apply_settings,
+                                                            snapshot: Some(&live_snapshot),
+                                                            weather_enabled,
+                                                            weather_coords: coords,
+                                                            now,
+                                                        },
+                                                    );
+                                                    crate::server::api::compute_plan_recommendation(
+                                                        &forecast,
+                                                        &apply_settings,
+                                                        Some(&live_snapshot),
+                                                        now.timestamp(),
+                                                    )
+                                                },
+                                            )
+                                            .await;
+                                            // Mark today done regardless of the outcome
+                                            // shape so a persistent failure can't turn
+                                            // into a per-poll write/notification storm.
+                                            *state.forecast_plan_apply_date.lock().await =
+                                                Some(now.date_naive());
+                                            match planned {
+                                                Ok(rec) => {
+                                                    let tomorrow = matches!(
+                                                        &rec,
+                                                        crate::forecast::planner::PlanRecommendation::Charge { window, .. } if window.tomorrow
+                                                    );
+                                                    let action = crate::forecast::refresh::plan_refresh_action(&rec);
+                                                    match action {
+                                                        crate::forecast::refresh::PlanRefreshAction::WriteSlot {
+                                                            start_hhmm,
+                                                            end_hhmm,
+                                                        } => {
+                                                            match crate::server::api::build_charge_slot_writes(
+                                                                snapshot.device_type,
+                                                                1,
+                                                                true,
+                                                                start_hhmm,
+                                                                end_hhmm,
+                                                                crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
+                                                                Some(crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT),
+                                                            ) {
+                                                                Ok(writes) => {
+                                                                    tracing::info!(
+                                                                        start = start_hhmm,
+                                                                        end = end_hhmm,
+                                                                        kwh = format!("{:.2}", rec_kwh(&rec)),
+                                                                        "Forecast plan auto-apply: writing charge slot 1 for the cheap tariff window"
+                                                                    );
+                                                                    crate::server::api::queue_writes(
+                                                                        &state, writes,
+                                                                    )
+                                                                    .await;
+                                                                    crate::alerts::send_plan_notification(
+                                                                        &state,
+                                                                        &crate::alerts::build_plan_applied_message(
+                                                                            start_hhmm,
+                                                                            end_hhmm,
+                                                                            rec_kwh(&rec),
+                                                                            tomorrow,
+                                                                        ),
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                                Err(e) => {
+                                                                    tracing::warn!(
+                                                                        "Forecast plan auto-apply: could not encode slot writes: {e}"
+                                                                    );
+                                                                    crate::alerts::send_plan_notification(
+                                                                        &state,
+                                                                        &crate::alerts::build_plan_unavailable_message(
+                                                                            "the charge slot could not be encoded for this inverter",
+                                                                        ),
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                            }
+                                                        }
+                                                        crate::forecast::refresh::PlanRefreshAction::ClearSlot => {
+                                                            match crate::server::api::build_charge_slot_writes(
+                                                                snapshot.device_type,
+                                                                1,
+                                                                false,
+                                                                0,
+                                                                0,
+                                                                crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
+                                                                None,
+                                                            ) {
+                                                                Ok(writes) => {
+                                                                    tracing::info!(
+                                                                        "Forecast plan auto-apply: fresh plan needs no charge — clearing charge slot 1"
+                                                                    );
+                                                                    crate::server::api::queue_writes(
+                                                                        &state, writes,
+                                                                    )
+                                                                    .await;
+                                                                    crate::alerts::send_plan_notification(
+                                                                        &state,
+                                                                        &crate::alerts::build_plan_cleared_message(),
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                                Err(e) => {
+                                                                    tracing::warn!(
+                                                                        "Forecast plan auto-apply: could not encode slot clear: {e}"
+                                                                    );
+                                                                    crate::alerts::send_plan_notification(
+                                                                        &state,
+                                                                        &crate::alerts::build_plan_unavailable_message(
+                                                                            "the charge slot could not be cleared for this inverter",
+                                                                        ),
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                            }
+                                                        }
+                                                        crate::forecast::refresh::PlanRefreshAction::None => {
+                                                            let reason = match &rec {
+                                                                crate::forecast::planner::PlanRecommendation::NoPlan { reason } => {
+                                                                    reason.clone()
+                                                                }
+                                                                _ => "no plan available".to_string(),
+                                                            };
+                                                            tracing::debug!(
+                                                                reason,
+                                                                "Forecast plan auto-apply: no plan available this cycle"
+                                                            );
+                                                            crate::alerts::send_plan_notification(
+                                                                &state,
+                                                                &crate::alerts::build_plan_unavailable_message(&reason),
+                                                            )
+                                                            .await;
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "Forecast plan auto-apply failed: {e}"
+                                                    );
+                                                    crate::alerts::send_plan_notification(
+                                                        &state,
+                                                        &crate::alerts::build_plan_unavailable_message(
+                                                            "the plan computation failed",
+                                                        ),
+                                                    )
+                                                    .await;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -8031,6 +8291,161 @@ mod tests {
             assert_eq!(snapshot.grid_frequency, 50.0);
             assert_eq!(snapshot.battery_temperature, 25.0);
             assert_eq!(snapshot.device_type_code, "0000");
+        })
+        .await;
+    }
+
+    // ------------------------------------------------------------------
+    // Forecast plan auto-apply vs auto-refresh: exactly one machine
+    // writer of charge slot 1 per day. These drive the real poll loop
+    // against the mock dongle so the supersession gate (refresh stands
+    // down while auto-apply is enabled) is pinned end-to-end, not just at
+    // the pure-gate level.
+    // ------------------------------------------------------------------
+
+    /// A tariff whose cheapest window opens ~2 minutes from now — inside
+    /// the refresh's fixed 30-minute lead and any auto-apply lead up to
+    /// 120 — so the gates are due on the first post-connect cycle
+    /// regardless of the wall clock. Head + tail rows with equal rates
+    /// trigger `cheapest_import_window`'s midnight-merge, giving one
+    /// ~35-minute window that wraps the day boundary cleanly.
+    fn tariff_with_window_starting_soon() -> TariffConfig {
+        let now = chrono::Local::now();
+        let start_t = now + chrono::Duration::minutes(2);
+        let end_t = start_t + chrono::Duration::minutes(35);
+        let hm = |t: chrono::DateTime<chrono::Local>| {
+            format!("{:02}:{:02}", t.hour(), t.minute())
+        };
+        TariffConfig {
+            slots: vec![
+                TariffSlot {
+                    start: "00:00".to_string(),
+                    end: hm(end_t),
+                    rate: 0.09,
+                },
+                TariffSlot {
+                    start: hm(start_t),
+                    end: "23:59".to_string(),
+                    rate: 0.09,
+                },
+            ],
+        }
+    }
+
+    /// Start the poll loop against a mock dongle with the given disk
+    /// settings (the feature flags — tariff, plan triggers — are re-read
+    /// from disk every cycle; the connection uses the in-memory copy).
+    async fn spawn_plan_trigger_harness(
+        mut settings: Settings,
+    ) -> (
+        Arc<AppState>,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(run_keyed_register_mock(listener));
+
+        settings.host = "127.0.0.1".to_string();
+        settings.port = port;
+        settings.serial = "TEST123456".to_string();
+        settings.poll_interval = 1;
+        settings.save().expect("save settings for poll loop");
+
+        let state = Arc::new(AppState::new());
+        {
+            let mut mem = state.settings.lock().await;
+            mem.host = settings.host.clone();
+            mem.port = port;
+            mem.serial = "TEST123456".to_string();
+            mem.interval_secs = 1;
+        }
+
+        let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+        (state, poll_task, server)
+    }
+
+    /// Wait (bounded) for a plan-trigger latch to be stamped with today's
+    /// date — the latch is set on the first Due cycle, whatever the plan
+    /// outcome.
+    async fn wait_for_latch(
+        latch: &tokio::sync::Mutex<Option<chrono::NaiveDate>>,
+    ) -> chrono::NaiveDate {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(date) = *latch.lock().await {
+                    break date;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("plan trigger never fired against the mock dongle")
+    }
+
+    #[tokio::test]
+    async fn auto_apply_supersedes_auto_refresh_when_both_enabled() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let settings = Settings {
+                import_tariff_config: Some(tariff_with_window_starting_soon()),
+                forecast_plan_auto_refresh: true,
+                forecast_plan_auto_apply_enabled: true,
+                forecast_plan_auto_apply_lead_minutes: 120,
+                weather_config: crate::settings::WeatherConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (state, poll_task, server) = spawn_plan_trigger_harness(settings).await;
+
+            let today = chrono::Local::now().date_naive();
+            let applied = wait_for_latch(&state.forecast_plan_apply_date).await;
+            poll_task.abort();
+            server.abort();
+
+            assert_eq!(
+                applied, today,
+                "auto-apply must fire inside the lead window"
+            );
+            // Supersession: while auto-apply owns the trigger, the nightly
+            // refresh must stand down even though its own gate is due —
+            // charge slot 1 gets exactly one machine write per day.
+            assert_eq!(
+                *state.forecast_plan_refresh_date.lock().await,
+                None,
+                "auto-refresh must not run while auto-apply is enabled"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn auto_refresh_alone_still_fires_when_due() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let settings = Settings {
+                import_tariff_config: Some(tariff_with_window_starting_soon()),
+                forecast_plan_auto_refresh: true,
+                forecast_plan_auto_apply_enabled: false,
+                weather_config: crate::settings::WeatherConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (state, poll_task, server) = spawn_plan_trigger_harness(settings).await;
+
+            let today = chrono::Local::now().date_naive();
+            let refreshed = wait_for_latch(&state.forecast_plan_refresh_date).await;
+            poll_task.abort();
+            server.abort();
+
+            assert_eq!(refreshed, today);
+            assert_eq!(
+                *state.forecast_plan_apply_date.lock().await,
+                None,
+                "auto-apply is off and must never stamp its latch"
+            );
         })
         .await;
     }

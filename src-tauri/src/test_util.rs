@@ -188,6 +188,11 @@ mod tests {
 
     #[test]
     fn fallback_is_unique_per_test_thread_without_mutating_the_environment() {
+        // Reads of the process-global override must be serialised against
+        // the writers in the restore_config_dir_* tests: without the lock
+        // this snapshot can straddle another test's set/restore window and
+        // observe a foreign temp dir (seen as a full-suite parallel flake).
+        let _lock = config_dir_mutex().lock();
         let before = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR");
         let first = std::thread::spawn(ensure_fallback_config_dir)
             .join()

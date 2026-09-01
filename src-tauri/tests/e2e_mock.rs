@@ -386,6 +386,87 @@ async fn settings_round_trips_forecast_plan_auto_refresh() {
 }
 
 // ====================================================================
+// Forecast plan auto-apply setting
+// ====================================================================
+
+#[tokio::test]
+async fn settings_round_trips_forecast_plan_auto_apply() {
+    let router = fresh_router();
+    let (status, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    // Opt-in: a fresh install must not rewrite charge slot 1 on its own.
+    assert_eq!(
+        body["data"]["forecast_plan_auto_apply_enabled"],
+        Value::Bool(false),
+        "auto-apply must default to off"
+    );
+    assert_eq!(
+        body["data"]["forecast_plan_auto_apply_lead_minutes"], 30,
+        "lead must default to 30 minutes"
+    );
+
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({
+            "forecast_plan_auto_apply_enabled": true,
+            "forecast_plan_auto_apply_lead_minutes": 90,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["data"]["forecast_plan_auto_apply_enabled"],
+        Value::Bool(true),
+        "the toggle must persist"
+    );
+    assert_eq!(
+        body["data"]["forecast_plan_auto_apply_lead_minutes"], 90,
+        "the lead must persist"
+    );
+}
+
+#[tokio::test]
+async fn auto_apply_lead_minutes_above_120_is_rejected() {
+    let router = fresh_router();
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "forecast_plan_auto_apply_lead_minutes": 121 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["ok"], Value::Bool(false));
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("120")),
+        "the error must name the bound"
+    );
+    // The rejected save must not have persisted anything.
+    let (status, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["data"]["forecast_plan_auto_apply_lead_minutes"], 30,
+        "the default lead must survive a rejected save"
+    );
+
+    // The boundary itself is accepted (0–120, inclusive).
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "forecast_plan_auto_apply_lead_minutes": 120 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["forecast_plan_auto_apply_lead_minutes"], 120);
+}
+
+// ====================================================================
 // GET /api/logs and PUT /api/log-level
 // ====================================================================
 

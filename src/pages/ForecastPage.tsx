@@ -15,6 +15,7 @@ import {
   YAxis,
 } from 'recharts';
 import { apiGet, apiPost } from '../lib/api';
+import { openExternal } from '../lib/openExternal';
 import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
@@ -30,6 +31,8 @@ import {
   forecastXAxisTicks,
   forecastYAxisScale,
   forwardHourTimestamps,
+  parseLeadMinutes,
+  planAutoApplyTriggerLabel,
   insertChargeStartVertices,
   relabelToStateInstants,
   shouldRefetchForecast,
@@ -226,6 +229,32 @@ export default function ForecastPage() {
   const [minSocError, setMinSocError] = useState<string | null>(null);
   const [minSocPct, setMinSocPct] = useState<number>(20);
   const [planAutoRefresh, setPlanAutoRefresh] = useState<boolean>(false);
+  const [planAutoApply, setPlanAutoApply] = useState<boolean>(false);
+  const [planAutoApplyLeadInput, setPlanAutoApplyLeadInput] = useState<string>('30');
+  // True while the lead field holds edits that haven't been saved yet —
+  // the blur handler only saves then, so merely focusing the field can't
+  // fire a spurious request.
+  const [planAutoApplyLeadDirty, setPlanAutoApplyLeadDirty] = useState(false);
+  const [planAutoApplySaving, setPlanAutoApplySaving] = useState(false);
+  const [planAutoApplyError, setPlanAutoApplyError] = useState<string | null>(null);
+  // One merged control owns both planner flags: auto-apply is the
+  // configurable, notifying successor of the older fixed-lead auto-refresh
+  // — they do the same job (keep charge slot 1 in step before the cheap
+  // window), so showing two toggles read as duplicated features. The
+  // control reads on when either flag is set (legacy settings may have
+  // only auto-refresh), and every save writes both: toggling off clears
+  // both, editing the lead upgrades legacy auto-refresh to auto-apply.
+  const planAutoHandling = planAutoApply || planAutoRefresh;
+  // Forecast battery efficiencies (issue #283), edited as whole percents
+  // and persisted as 0–1 ratios. They save together on blur — the planner
+  // needs both to be sane, so one invalid field blocks the pair.
+  const [chargeEffInput, setChargeEffInput] = useState<string>('90');
+  const [dischargeEffInput, setDischargeEffInput] = useState<string>('95');
+  const [chargeEffPct, setChargeEffPct] = useState<number>(90);
+  const [dischargeEffPct, setDischargeEffPct] = useState<number>(95);
+  const [effSaving, setEffSaving] = useState(false);
+  const [effError, setEffError] = useState<string | null>(null);
+  const [activeChart, setActiveChart] = useState<'battery' | 'solar' | 'consumption'>('battery');
   const snapshot = useInverterStore((s) => s.snapshot);
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const lastRefetchRef = useRef<number>(0);
@@ -241,7 +270,14 @@ export default function ForecastPage() {
         apiGet<{ ok: boolean; data: PlanResponse }>('/api/forecast/plan'),
         apiGet<{
           ok: boolean;
-          data: { forecast_min_soc_pct?: number; forecast_plan_auto_refresh?: boolean } & Record<string, unknown>;
+          data: {
+            forecast_min_soc_pct?: number;
+            forecast_plan_auto_refresh?: boolean;
+            forecast_plan_auto_apply_enabled?: boolean;
+            forecast_plan_auto_apply_lead_minutes?: number;
+            forecast_charge_efficiency?: number;
+            forecast_discharge_efficiency?: number;
+          } & Record<string, unknown>;
         }>('/api/settings'),
       ]);
       setData(forecastRes.data);
@@ -252,6 +288,20 @@ export default function ForecastPage() {
         setMinSocPct(v);
       }
       setPlanAutoRefresh(settingsRes.data.forecast_plan_auto_refresh ?? false);
+      setChargeEffInput(
+        settingsRes.data.forecast_charge_efficiency != null
+          ? String(Math.round(settingsRes.data.forecast_charge_efficiency * 100))
+          : '90',
+      );
+      setDischargeEffInput(
+        settingsRes.data.forecast_discharge_efficiency != null
+          ? String(Math.round(settingsRes.data.forecast_discharge_efficiency * 100))
+          : '95',
+      );
+      setPlanAutoApply(settingsRes.data.forecast_plan_auto_apply_enabled ?? false);
+      setPlanAutoApplyLeadInput(
+        String(settingsRes.data.forecast_plan_auto_apply_lead_minutes ?? 30),
+      );
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load forecast');
@@ -319,6 +369,74 @@ export default function ForecastPage() {
       setMinSocError(e instanceof Error ? e.message : 'Save failed');
     } finally {
       setMinSocSaving(false);
+    }
+  };
+
+  // Persist the merged automatic-handling control. The next enabled state
+  // is explicit — the checkbox toggle and the lead field's blur handler
+  // want different values, so neither may infer it (inferring the flip
+  // here is what used to silently disable auto-apply whenever the lead
+  // field blurred). Both planner flags are written together: auto-apply
+  // supersedes auto-refresh, so it is always turned off here — never left
+  // on behind the UI's back — and turning the control off clears the
+  // legacy flag too.
+  const savePlanAutoApply = async (nextEnabled: boolean) => {
+    // An emptied (or half-typed) field must not save as 0 — Number('') is
+    // 0, which would silently move the trigger to the window's own start.
+    // parseLeadMinutes rejects anything that isn't plain digits; only the
+    // upper bound still needs checking here.
+    const lead = parseLeadMinutes(planAutoApplyLeadInput);
+    if (lead == null || lead > 120) {
+      setPlanAutoApplyError('Lead time must be a whole number between 0 and 120');
+      return;
+    }
+    setPlanAutoApplyError(null);
+    setPlanAutoApplySaving(true);
+    try {
+      await apiPost('/api/settings', {
+        forecast_plan_auto_apply_enabled: nextEnabled,
+        forecast_plan_auto_apply_lead_minutes: lead,
+        forecast_plan_auto_refresh: false,
+      });
+      setPlanAutoApply(nextEnabled);
+      setPlanAutoRefresh(false);
+      setPlanAutoApplyLeadDirty(false);
+      // Refetch so the plan note and trigger time reflect the new state.
+      await load();
+    } catch (e) {
+      setPlanAutoApplyError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setPlanAutoApplySaving(false);
+    }
+  };
+
+  // Persist both battery efficiencies together (the planner needs the
+  // pair consistent), parsed as percents → 0–1 ratios. Out-of-range values
+  // are rejected client-side (mirrors the backend's 0.5–1.0 validation) so
+  // the save never round-trips a nonsense ratio.
+  const saveEfficiencies = async () => {
+    const charge = Number(chargeEffInput);
+    const discharge = Number(dischargeEffInput);
+    const valid = (n: number) => Number.isInteger(n) && n >= 50 && n <= 100;
+    if (!valid(charge) || !valid(discharge)) {
+      setEffError('Battery efficiencies must be whole numbers between 50 and 100');
+      return;
+    }
+    setEffError(null);
+    setEffSaving(true);
+    try {
+      await apiPost('/api/settings', {
+        forecast_charge_efficiency: charge / 100,
+        forecast_discharge_efficiency: discharge / 100,
+      });
+      setChargeEffPct(charge);
+      setDischargeEffPct(discharge);
+      // Refetch — the planner sees the new efficiencies on the next call.
+      await load();
+    } catch (e) {
+      setEffError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setEffSaving(false);
     }
   };
 
@@ -468,9 +586,20 @@ export default function ForecastPage() {
     <div className="flex flex-col gap-3 sm:gap-4 max-w-5xl">
       <div>
         <h1 className="text-lg font-bold text-text-primary">Forecast</h1>
-        <p className="text-xs text-text-secondary">
-          Predictions from Open-Meteo radiation calibrated against your own
-          generation history.
+        <p
+          className="text-xs text-text-secondary"
+          data-testid="forecast-attribution"
+        >
+          Predictions from{' '}
+          <button
+            type="button"
+            onClick={() => void openExternal('https://open-meteo.com/')}
+            className="text-accent underline hover:opacity-80 inline"
+          >
+            Open-Meteo.com
+          </button>{' '}
+          radiation calibrated against your own generation history — licensed
+          under CC BY 4.0.
         </p>
       </div>
 
@@ -487,52 +616,8 @@ export default function ForecastPage() {
         </div>
       )}
 
-      {/* Planner floor — a setting, not a statistic, so it lives outside
-          the "Tomorrow" tiles. The planner sizes the overnight charge so
-          the battery never dips below this percentage across the forward
-          window, not just at the end. Editing saves immediately and
-          triggers a plan refetch. */}
-      <section className="bg-bg-surface rounded-lg p-3 sm:p-4 flex flex-col gap-1">
-        <div className="flex items-center gap-3">
-          <label
-            htmlFor="forecast-min-soc-input"
-            title="The planner never lets the battery drop below this percentage over the next 72 h"
-            className="text-text-primary text-sm font-sans font-medium"
-          >
-            Minimum battery level
-          </label>
-          <input
-            id="forecast-min-soc-input"
-            type="number"
-            min={0}
-            max={100}
-            step={1}
-            value={minSocPctInput}
-            onChange={(e) => setMinSocPctInput(e.target.value)}
-            onBlur={() => void saveMinSoc()}
-            disabled={!data || minSocSaving}
-            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-24 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
-            data-testid="forecast-min-soc-input"
-          />
-          <span className="text-text-secondary text-xs font-sans">%</span>
-          {minSocError && (
-            <span
-              data-testid="forecast-min-soc-error"
-              className="text-xs text-red-400"
-            >
-              {minSocError}
-            </span>
-          )}
-        </div>
-        <p className="text-xs text-text-secondary font-sans">
-          The planner sizes the next overnight charge so the battery stays
-          above this percentage until the following cheap period. Lower means less grid
-          import; higher keeps more backup in reserve.
-        </p>
-      </section>
-
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 sm:gap-3">
-        <div className="col-span-2 md:col-span-5 text-xs font-semibold uppercase tracking-wide text-text-secondary">
+      <div className="order-2 grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3">
+        <div className="col-span-2 md:col-span-4 text-xs font-semibold uppercase tracking-wide text-text-secondary">
           Tomorrow
         </div>
 
@@ -576,55 +661,55 @@ export default function ForecastPage() {
               : undefined
           }
         />
-        {summary.startSocPct != null && (
-          <SummaryTile
-            label="Battery now"
-            value={`${Math.round(summary.startSocPct)}%`}
-            testId="forecast-start-soc"
-          />
-        )}
       </div>
 
       {plan && plan.recommendation && (
         <section
           data-testid="forecast-plan"
-          className="bg-bg-surface rounded-lg p-3 sm:p-4 flex flex-col gap-2"
+          className="order-1 bg-bg-surface rounded-xl border border-accent/20 p-4 sm:p-5 flex flex-col gap-3 shadow-sm"
           aria-live="polite"
         >
-          <div className="flex items-baseline justify-between gap-2">
-            <h2 className="text-sm font-semibold text-text-primary">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-accent">Today’s recommendation</p>
+              <h2 className="mt-1 text-base sm:text-lg font-semibold text-text-primary">
               {forecastPlanTitle(plan.recommendation)}
-            </h2>
-            {plan.recommendation.kind !== 'no_plan' && (
+              </h2>
+            </div>
+            {summary.startSocPct != null && (
               <span
                 data-testid="forecast-plan-current-soc"
-                className="text-[11px] text-text-secondary"
-                title="Live snapshot SOC at the time the plan was computed"
+                className="shrink-0 rounded-full bg-bg-elevated px-3 py-1.5 text-xs text-text-secondary"
+                title="Current battery state of charge"
               >
-                Current SOC {Math.round(plan.recommendation.current_soc_pct)}%
+                Battery now{' '}
+                {Math.round(
+                  plan.recommendation.kind === 'no_plan'
+                    ? summary.startSocPct
+                    : plan.recommendation.current_soc_pct,
+                )}%
               </span>
             )}
           </div>
           {plan.recommendation.kind === 'charge' && (
-            <p className="text-xs text-text-secondary">
-              <span data-testid="forecast-plan-kwh">
-                Charge {plan.recommendation.kwh.toFixed(1)} kWh in the off-peak
-                window ({plan.recommendation.window.start}–
-                {plan.recommendation.window.end},{' '}
-                {(plan.recommendation.window.rate * 100).toFixed(1)}p)
-              </span>{' '}
-              to clear{' '}
-              <span data-testid="forecast-plan-trough">
-                {Math.round(plan.recommendation.observed_min_soc_pct)}%
-              </span>{' '}
-              trough →{' '}
-              <span data-testid="forecast-plan-after-min">
-                {plan.recommendation.after_min_soc_pct.toFixed(0)}%
-              </span>{' '}
-              (charge rate 100%) — about £
-              {(plan.recommendation.kwh * plan.recommendation.window.rate).toFixed(2)} of
-              grid import.
-            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="rounded-lg bg-bg-elevated p-3">
+                <div className="text-[11px] text-text-secondary">Charge</div>
+                <div data-testid="forecast-plan-kwh" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.recommendation.kwh.toFixed(1)} kWh</div>
+              </div>
+              <div className="rounded-lg bg-bg-elevated p-3">
+                <div className="text-[11px] text-text-secondary">Time</div>
+                <div className="mt-0.5 text-sm font-semibold text-text-primary">{plan.recommendation.window.start}–{plan.recommendation.window.end}</div>
+              </div>
+              <div className="rounded-lg bg-bg-elevated p-3">
+                <div className="text-[11px] text-text-secondary">Lowest battery</div>
+                <div className="mt-0.5 text-sm font-semibold text-text-primary"><span data-testid="forecast-plan-trough">{Math.round(plan.recommendation.observed_min_soc_pct)}%</span> → <span data-testid="forecast-plan-after-min">{plan.recommendation.after_min_soc_pct.toFixed(0)}%</span></div>
+              </div>
+              <div className="rounded-lg bg-bg-elevated p-3">
+                <div className="text-[11px] text-text-secondary">Estimated cost</div>
+                <div className="mt-0.5 text-sm font-semibold text-text-primary">£{(plan.recommendation.kwh * plan.recommendation.window.rate).toFixed(2)}</div>
+              </div>
+            </div>
           )}
           {plan.recommendation.kind === 'no_charge_needed' && (
             <p className="text-xs text-text-secondary">
@@ -661,13 +746,247 @@ export default function ForecastPage() {
               )}
             </div>
           )}
+          <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-3">
+            <div>
+              <div className="text-xs font-medium text-text-primary">Automatic planning</div>
+              <div className="mt-0.5 text-[11px] text-text-secondary">
+                {planAutoHandling
+                  ? planAutoApply && plan.recommendation.kind === 'charge'
+                    ? `On · applies at ${planAutoApplyTriggerLabel(plan.recommendation.window.start, Number(planAutoApplyLeadInput)) ?? 'the configured time'}`
+                    : 'On · keeps the next charge slot up to date'
+                  : 'Off · use the Apply button for each new plan'}
+              </div>
+            </div>
+            <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${planAutoHandling ? 'bg-emerald-500/15 text-emerald-300' : 'bg-bg-elevated text-text-secondary'}`}>
+              {planAutoHandling ? 'On' : 'Off'}
+            </span>
+          </div>
+          <details className="group rounded-lg bg-bg-elevated/50">
+            <summary className="cursor-pointer list-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs font-medium text-text-primary">
+              <span>Plan settings</span>
+              <span aria-hidden className="text-text-secondary transition-transform group-open:rotate-180">⌄</span>
+            </summary>
+            <div className="border-t border-white/10 px-3 pb-3">
+          {/* Planner floor — the planner sizes the overnight charge so the
+              battery never dips below this percentage across the forward
+              window. Editing saves immediately and triggers a plan refetch. */}
+          <div className="pt-3 flex flex-col gap-1">
+            <div className="flex items-center gap-3 flex-wrap">
+              <label
+                htmlFor="forecast-min-soc-input"
+                title="The planner never lets the battery drop below this percentage over the next 72 h"
+                className="text-text-primary text-xs font-sans font-medium"
+              >
+                Minimum battery level
+              </label>
+              <input
+                id="forecast-min-soc-input"
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={minSocPctInput}
+                onChange={(e) => setMinSocPctInput(e.target.value)}
+                onBlur={() => void saveMinSoc()}
+                disabled={!data || minSocSaving}
+                className="bg-bg-surface text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
+                data-testid="forecast-min-soc-input"
+              />
+              <span className="text-text-secondary text-xs font-sans">%</span>
+              {minSocError && (
+                <span data-testid="forecast-min-soc-error" className="text-xs text-red-400">
+                  {minSocError}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-text-secondary font-sans">
+              The planner sizes the next overnight charge so the battery stays above this
+              level until the following cheap period. Lower means less grid import; higher
+              keeps more backup in reserve.
+            </p>
+          </div>
+          {/* Automatic plan handling — one control for keeping charge slot 1
+              in step with the plan: the backend applies the calculated plan
+              (or clears the slot when no charge is needed) the configured
+              minutes before the cheap tariff window and notifies via the
+              alert channels. The older fixed-lead auto-refresh flag is
+              folded in here rather than shown as a second toggle: turning
+              the control on or editing the lead upgrades it to auto-apply,
+              turning the control off clears both. */}
+          <div className="border-t border-white/10 pt-2 mt-1 flex flex-col gap-1">
+            <div className="flex items-center gap-3 flex-wrap">
+              <label
+                htmlFor="forecast-auto-apply-toggle"
+                title="Applies the calculated charging plan automatically before the cheap tariff window and notifies you"
+                className="text-text-primary text-xs font-sans font-medium"
+              >
+                Apply charging plan automatically
+              </label>
+              <input
+                id="forecast-auto-apply-toggle"
+                type="checkbox"
+                checked={planAutoHandling}
+                onChange={() => void savePlanAutoApply(!planAutoHandling)}
+                disabled={planAutoApplySaving}
+                className="h-5 w-5 accent-accent"
+                data-testid="forecast-auto-apply-toggle"
+              />
+              <span className="text-text-secondary text-xs font-sans">every day</span>
+              <input
+                id="forecast-auto-apply-lead"
+                type="number"
+                min={0}
+                max={120}
+                step={1}
+                value={planAutoApplyLeadInput}
+                onChange={(e) => {
+                  setPlanAutoApplyLeadInput(e.target.value);
+                  setPlanAutoApplyLeadDirty(true);
+                }}
+                onBlur={() => {
+                  // Save an edited lead time without touching the enabled
+                  // state — this must never toggle the trigger off. For a
+                  // legacy auto-refresh-only setting this also upgrades it
+                  // to auto-apply.
+                  if (planAutoHandling && planAutoApplyLeadDirty) {
+                    void savePlanAutoApply(true);
+                  }
+                }}
+                disabled={planAutoApplySaving}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
+                data-testid="forecast-auto-apply-lead"
+              />
+              <span className="text-text-secondary text-xs font-sans">
+                min before the cheap window
+              </span>
+              {planAutoApplyError && (
+                <span
+                  data-testid="forecast-auto-apply-error"
+                  role="alert"
+                  className="text-xs text-red-400"
+                >
+                  {planAutoApplyError}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-text-secondary font-sans">
+              {planAutoHandling ? (
+                <span data-testid="forecast-auto-apply-note">
+                  {planAutoApply ? (
+                    (() => {
+                      const rec = plan.recommendation;
+                      const windowStart =
+                        rec.kind === 'charge' ? rec.window.start : null;
+                      // Invalid input (empty or half-typed) → NaN → a null
+                      // trigger label → the lead-agnostic fallback note
+                      // (see parseLeadMinutes).
+                      const lead =
+                        parseLeadMinutes(planAutoApplyLeadInput) ?? Number.NaN;
+                      const trigger =
+                        windowStart != null
+                          ? planAutoApplyTriggerLabel(windowStart, lead)
+                          : null;
+                      return trigger && windowStart
+                        ? `On — today's plan applies itself at ${trigger}, ${planAutoApplyLeadInput} min before the ${windowStart} window. You'll get a notification when it runs.`
+                        : 'On — the plan applies itself before each cheap window and you\'ll get a notification when it runs.';
+                    })()
+                  ) : (
+                    'Auto-refresh keeps this plan’s charge slot in step from the live battery before each cheap window — no daily re-apply needed. Editing the lead time upgrades this to auto-apply.'
+                  )}
+                </span>
+              ) : (
+                <span data-testid="forecast-auto-apply-note">
+                  Off — apply the plan yourself with the button above. Switch
+                  on to have the app apply it automatically before each cheap
+                  window and send you a notification.
+                </span>
+              )}
+            </p>
+          </div>
+          {/* Battery efficiencies — planner inputs (issue #283). Moved here
+              from the Settings page so all Forecast settings live on the
+              Forecast page. They save together on blur. */}
+          <div className="border-t border-white/10 pt-2 mt-1 flex flex-col gap-1">
+            <div className="flex items-center gap-3 flex-wrap">
+              <label
+                htmlFor="forecast-charge-eff"
+                className="text-text-primary text-xs font-sans font-medium"
+              >
+                Battery charge efficiency
+              </label>
+              <input
+                id="forecast-charge-eff"
+                type="number"
+                min={50}
+                max={100}
+                step={1}
+                value={chargeEffInput}
+                onChange={(e) => setChargeEffInput(e.target.value)}
+                onBlur={() => {
+                  if (
+                    Number(chargeEffInput) !== chargeEffPct ||
+                    Number(dischargeEffInput) !== dischargeEffPct
+                  ) {
+                    void saveEfficiencies();
+                  }
+                }}
+                disabled={effSaving}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
+                data-testid="forecast-charge-eff-input"
+              />
+              <label
+                htmlFor="forecast-discharge-eff"
+                className="text-text-primary text-xs font-sans font-medium"
+              >
+                Battery discharge efficiency
+              </label>
+              <input
+                id="forecast-discharge-eff"
+                type="number"
+                min={50}
+                max={100}
+                step={1}
+                value={dischargeEffInput}
+                onChange={(e) => setDischargeEffInput(e.target.value)}
+                onBlur={() => {
+                  if (
+                    Number(chargeEffInput) !== chargeEffPct ||
+                    Number(dischargeEffInput) !== dischargeEffPct
+                  ) {
+                    void saveEfficiencies();
+                  }
+                }}
+                disabled={effSaving}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
+                data-testid="forecast-discharge-eff-input"
+              />
+              <span className="text-text-secondary text-xs font-sans">%</span>
+              {effError && (
+                <span
+                  data-testid="forecast-eff-error"
+                  role="alert"
+                  className="text-xs text-red-400"
+                >
+                  {effError}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-text-secondary font-sans">
+              Used by the battery projection and the plan’s duration maths.
+              Default 90 / 95 — round-trip ≈ 85.5%.
+            </p>
+          </div>
+            </div>
+          </details>
           {plan.recommendation.kind === 'charge' && (
             <p
               data-testid="forecast-plan-cycle-note"
               className="text-[11px] text-text-secondary"
             >
               This plan covers the next charge cycle only.{' '}
-              {planAutoRefresh
+              {planAutoApply
+                ? 'Auto-apply applies this plan automatically before each cheap window and notifies you — no daily re-apply needed.'
+                : planAutoRefresh
                 ? 'Auto-refresh re-sizes charge slot 1 from the live battery shortly before each cheap period — no daily re-apply needed.'
                 : 'The inverter repeats the applied slot every night, so re-apply tomorrow to keep it in step with the battery.'}
             </p>
@@ -676,7 +995,33 @@ export default function ForecastPage() {
         </section>
       )}
 
-      <ChartCard title="Solar forecast (next 72 h)">
+      <div className="order-3 flex flex-col gap-3 sm:gap-4">
+        <div
+          role="tablist"
+          aria-label="Forecast chart"
+          className="grid grid-cols-3 rounded-lg bg-bg-surface p-1"
+        >
+          {([
+            ['battery', 'Battery'],
+            ['solar', 'Solar'],
+            ['consumption', 'Home use'],
+          ] as const).map(([chart, label]) => (
+            <button
+              key={chart}
+              type="button"
+              role="tab"
+              aria-selected={activeChart === chart}
+              data-testid={`forecast-chart-tab-${chart}`}
+              onClick={() => setActiveChart(chart)}
+              className={`rounded-md px-3 py-2 text-xs sm:text-sm font-medium transition-colors ${activeChart === chart ? 'bg-bg-elevated text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+      <div className={activeChart === 'solar' ? '' : 'hidden'} aria-hidden={activeChart !== 'solar'}>
+      <ChartCard title="Expected solar generation · next 72 hours">
         {solarChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             No forecast data yet.
@@ -751,8 +1096,10 @@ export default function ForecastPage() {
           </ResponsiveContainer>
         )}
       </ChartCard>
+      </div>
 
-      <ChartCard title="Consumption profile (next 72 h)">
+      <div className={activeChart === 'consumption' ? '' : 'hidden'} aria-hidden={activeChart !== 'consumption'}>
+      <ChartCard title="Expected home use · next 72 hours">
         {consumptionEmpty || consumptionChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             Not enough history yet.
@@ -855,9 +1202,11 @@ export default function ForecastPage() {
           </ResponsiveContainer>
         )}
       </ChartCard>
+      </div>
 
+      <div className={activeChart === 'battery' ? '' : 'hidden'} aria-hidden={activeChart !== 'battery'}>
       <ChartCard
-        title="Battery projection (next 72 h)"
+        title="Battery projection · next 72 hours"
         footer={
           hasWithCharge && plan?.recommendation?.kind === 'charge' ? (
             <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
@@ -962,13 +1311,9 @@ export default function ForecastPage() {
           </ResponsiveContainer>
         )}
       </ChartCard>
+      </div>
+      </div>
 
-      <p className="text-[11px] text-text-secondary">
-        Forecast data by Open-Meteo.com (CC-BY 4.0). Solar predictions are
-        Open-Meteo radiation scaled by a performance ratio fitted from your
-        own generation history (the last 2 weeks). Solar band is a ±20%
-        model estimate until measured accuracy statistics accumulate.
-      </p>
     </div>
   );
 }

@@ -822,6 +822,60 @@ async fn dispatch_alert_text(
 }
 
 // ---------------------------------------------------------------------------
+// Forecast plan auto-apply notifications
+// ---------------------------------------------------------------------------
+
+/// Notification text for the auto-applied charging plan: charge slot 1
+/// was (re)written with the plan's window at the user's lead time before
+/// the cheap tariff window.
+pub fn build_plan_applied_message(
+    start_hhmm: u16,
+    end_hhmm: u16,
+    kwh: f64,
+    tomorrow: bool,
+) -> String {
+    let when = if tomorrow { "tomorrow" } else { "tonight" };
+    format!(
+        "📋 Charging plan applied — {:.1} kWh {} {:02}:{:02}–{:02}:{:02} (charge rate 100%).",
+        kwh,
+        when,
+        start_hhmm / 100,
+        start_hhmm % 100,
+        end_hhmm / 100,
+        end_hhmm % 100
+    )
+}
+
+/// Notification text for a no-charge-needed plan: the trigger ran but
+/// cleared charge slot 1 (back to Eco) instead of writing a schedule.
+pub fn build_plan_cleared_message() -> String {
+    "📋 Charging plan applied — no charge needed, charge slot 1 cleared for tonight.".to_string()
+}
+
+/// Notification text for an auto-apply trigger that ran but could not
+/// produce or apply a plan (planner has no recommendation, or the
+/// computation failed).
+pub fn build_plan_unavailable_message(reason: &str) -> String {
+    format!("⚠️ Charging plan not applied — {reason}")
+}
+
+/// Send a Forecast-plan notification to all configured channels. Honours
+/// only the master alerts toggle (`AlertsConfig::enabled`) — there is no
+/// per-type switch, so enabling auto-apply with alerts configured just
+/// works. Delivery failures are logged and never retried; they never
+/// block or re-run the apply itself.
+pub async fn send_plan_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    text: &str,
+) {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled {
+        return;
+    }
+    dispatch_alert_text(&config, text, "forecast-plan").await;
+}
+
+// ---------------------------------------------------------------------------
 // Telegram sender
 // ---------------------------------------------------------------------------
 
@@ -1738,6 +1792,40 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
 mod tests {
     use super::*;
     use crate::inverter::model::InverterSnapshot;
+
+    #[test]
+    fn plan_applied_message_formats_hhmm_and_kwh() {
+        assert_eq!(
+            build_plan_applied_message(230, 336, 3.24, false),
+            "📋 Charging plan applied — 3.2 kWh tonight 02:30–03:36 (charge rate 100%)."
+        );
+    }
+
+    #[test]
+    fn plan_applied_message_zero_pads_and_says_tomorrow_for_forward_windows() {
+        // 00:15–05:00 window occurring tomorrow: hours/minutes must be
+        // zero-padded and the message must not say "tonight".
+        assert_eq!(
+            build_plan_applied_message(15, 500, 2.0, true),
+            "📋 Charging plan applied — 2.0 kWh tomorrow 00:15–05:00 (charge rate 100%)."
+        );
+    }
+
+    #[test]
+    fn plan_cleared_message_explains_the_eco_fallback() {
+        assert_eq!(
+            build_plan_cleared_message(),
+            "📋 Charging plan applied — no charge needed, charge slot 1 cleared for tonight."
+        );
+    }
+
+    #[test]
+    fn plan_unavailable_message_includes_the_reason() {
+        assert_eq!(
+            build_plan_unavailable_message("the plan computation failed"),
+            "⚠️ Charging plan not applied — the plan computation failed"
+        );
+    }
 
     fn make_snapshot() -> InverterSnapshot {
         InverterSnapshot {
