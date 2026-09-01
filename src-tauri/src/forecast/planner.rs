@@ -129,14 +129,15 @@ pub struct PlanInputs<'a> {
     pub now_ts: i64,
 }
 
-/// Parse the tariff's cheapest contiguous window that starts at or
-/// after `now_min` and is at least `min_duration_min` long. Ties break
-/// to the earlier window. Pure helper exposed for tests.
-pub fn cheapest_import_window(
+/// Every tariff slot occurrence in the forward 24 h cycle that is at
+/// least `min_duration_min` long, including the wrapping window formed
+/// by matching boundary rows. Shared by the cheapest-import and
+/// best-export pickers; the sort order is the caller's business.
+fn tariff_window_candidates(
     tariff: &TariffConfig,
     now_min: u16,
     min_duration_min: u16,
-) -> Option<ChargeWindow> {
+) -> Vec<ChargeWindow> {
     let parsed = tariff.parsed_slots();
     // Occurrences of each slot in the forward 24 h cycle. A 02:00–05:00
     // off-peak recurs each night, so `now_min` only determines WHICH 24 h
@@ -191,10 +192,42 @@ pub fn cheapest_import_window(
             }
         }
     }
+    candidates
+}
+
+/// Parse the tariff's cheapest contiguous window that starts at or
+/// after `now_min` and is at least `min_duration_min` long. Ties break
+/// to the earlier window. Pure helper exposed for tests.
+pub fn cheapest_import_window(
+    tariff: &TariffConfig,
+    now_min: u16,
+    min_duration_min: u16,
+) -> Option<ChargeWindow> {
+    let mut candidates = tariff_window_candidates(tariff, now_min, min_duration_min);
     // Cheapest first; ties to the earlier window.
     candidates.sort_by(|a, b| {
         a.rate
             .partial_cmp(&b.rate)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then((a.tomorrow as u8).cmp(&(b.tomorrow as u8)))
+            .then(window_duration_minutes(b).cmp(&window_duration_minutes(a)))
+    });
+    candidates.into_iter().next()
+}
+
+/// The tariff's best contiguous window to SELL into — the highest-rate
+/// slot occurrence at or after `now_min`, at least `min_duration_min`
+/// long. Same tie-breaks as [`cheapest_import_window`], mirrored.
+pub fn best_export_window(
+    tariff: &TariffConfig,
+    now_min: u16,
+    min_duration_min: u16,
+) -> Option<ChargeWindow> {
+    let mut candidates = tariff_window_candidates(tariff, now_min, min_duration_min);
+    // Highest rate first; ties to the earlier window.
+    candidates.sort_by(|a, b| {
+        b.rate
+            .partial_cmp(&a.rate)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then((a.tomorrow as u8).cmp(&(b.tomorrow as u8)))
             .then(window_duration_minutes(b).cmp(&window_duration_minutes(a)))
@@ -218,8 +251,9 @@ fn charge_duration_minutes(kwh: f64, max_charge_kw: f64) -> u16 {
 }
 
 /// Shorten a tariff window from its start while never extending beyond the
-/// cheap-rate period. The returned window is the actual slot to write to the
-/// inverter, not merely the tariff window used to find the opportunity.
+/// tariff period it came from. The returned window is the actual slot to
+/// write to the inverter (charge) or reason about (export), not merely the
+/// tariff window used to find the opportunity.
 fn charge_window_for_duration(base: &ChargeWindow, duration_min: u16) -> ChargeWindow {
     let available = window_duration_minutes(base);
     let duration = duration_min.min(available);
@@ -452,28 +486,24 @@ fn simulate_with_charge(
     }
 }
 
-/// Re-run the simulation with the charge rate fixed at the inverter maximum
-/// and the charge window providing the variable. Only the first window
-/// occurrence is charged; after that the simulation returns to Eco until
-/// the next cheap period, when a fresh recommendation is expected.
-fn simulate_with_max_rate(
-    sim_hours: &[SimHourInput],
+/// Apply the charge injection for the FIRST occurrence of `window` that
+/// starts at or after `now_ts` to `hours` in place, and return that
+/// occurrence's hour indices plus the index where the NEXT occurrence
+/// begins (the one-cycle horizon boundary). The grid charge is injected
+/// by lifting each window hour's supply to the max rate above whatever
+/// the home's load was already consuming: `solar += charge_ac +
+/// max(0, consumption - solar) × overlap`. The load offset matters — the
+/// eco-mode simulator only charges from *surplus*, so without it a
+/// charge scheduled during an overnight-deficit hour would never reach
+/// the battery at all.
+fn inject_charge_first_occurrence(
+    hours: &mut [SimHourInput],
     params: &SimulationParams,
     window: &ChargeWindow,
     now_ts: i64,
-) -> ChargeOutcome {
-    let (selected, next_occurrence_start) = first_reachable_occurrence(sim_hours, window, now_ts);
-    let Some(first_run) = selected.map(|occ| occ.run) else {
-        return ChargeOutcome {
-            trough_pct: f64::NAN,
-            charge_level_pct: f64::NAN,
-            next_occurrence_start: None,
-            series: Vec::new(),
-        };
-    };
-    let post_end = next_occurrence_start.unwrap_or(sim_hours.len());
-
-    let mut hours: Vec<SimHourInput> = sim_hours.to_vec();
+) -> Option<(Vec<usize>, Option<usize>)> {
+    let (selected, next_occurrence_start) = first_reachable_occurrence(hours, window, now_ts);
+    let first_run = selected.map(|occ| occ.run)?;
     for (i, hour) in hours.iter_mut().enumerate() {
         if !first_run.contains(&i) {
             continue;
@@ -489,6 +519,31 @@ fn simulate_with_max_rate(
         // hourly bucket is left to Eco, so it can discharge the battery.
         hour.solar_kwh += charge_ac + unmet_load * overlap_hours;
     }
+    Some((first_run, next_occurrence_start))
+}
+
+/// Re-run the simulation with the charge rate fixed at the inverter maximum
+/// and the charge window providing the variable. Only the first window
+/// occurrence is charged; after that the simulation returns to Eco until
+/// the next cheap period, when a fresh recommendation is expected.
+fn simulate_with_max_rate(
+    sim_hours: &[SimHourInput],
+    params: &SimulationParams,
+    window: &ChargeWindow,
+    now_ts: i64,
+) -> ChargeOutcome {
+    let mut hours: Vec<SimHourInput> = sim_hours.to_vec();
+    let Some((first_run, next_occurrence_start)) =
+        inject_charge_first_occurrence(&mut hours, params, window, now_ts)
+    else {
+        return ChargeOutcome {
+            trough_pct: f64::NAN,
+            charge_level_pct: f64::NAN,
+            next_occurrence_start: None,
+            series: Vec::new(),
+        };
+    };
+    let post_end = next_occurrence_start.unwrap_or(sim_hours.len());
 
     let sim = crate::forecast::simulate::simulate_battery(&hours, params);
     let last_of_first = *first_run.last().expect("non-empty run");
@@ -849,9 +904,10 @@ pub struct ExportPlanInputs<'a> {
     pub params: &'a SimulationParams,
     /// The export tariff whose best window to sell into.
     pub export_tariff: &'a TariffConfig,
-    /// The £/kWh rate the sold energy would be replaced at in the next
-    /// cheap import window — the arbitrage break-even denominator.
-    pub import_replacement_rate: f64,
+    /// The import tariff: picks the charge-cycle horizon (the next
+    /// cheap import window) and the replacement rate the arbitrage
+    /// break-even is measured against.
+    pub import_tariff: &'a TariffConfig,
     /// The charge plan's sized window when a charge applies; `None`
     /// when the charge planner said no charge is needed.
     pub charge_window: Option<&'a ChargeWindow>,
@@ -864,9 +920,276 @@ pub struct ExportPlanInputs<'a> {
 
 /// Compute the export advice. See [`ExportAdvice`] for the cases.
 pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
-    let _ = inputs;
-    ExportAdvice::NoExport {
-        reason: "export advice not implemented yet".to_string(),
+    if inputs.sim_hours.is_empty() {
+        return ExportAdvice::NoExport {
+            reason: "no battery projection available — connect to the \
+                     inverter and wait for forecast data"
+                .to_string(),
+        };
+    }
+    let now_min = chrono::DateTime::from_timestamp(inputs.now_ts, 0)
+        .map(|dt| {
+            let local = dt.with_timezone(&chrono::Local);
+            local.hour() as u16 * 60 + local.minute() as u16
+        })
+        .unwrap_or(0);
+    // The best window to sell into, mirroring the charge planner's
+    // cheapest-window pick (30-minute floor for the same reason).
+    let Some(base_window) = best_export_window(inputs.export_tariff, now_min, 30) else {
+        return ExportAdvice::NoExport {
+            reason: "no export window of at least 30 minutes remains in \
+                     your export tariff's daily cycle"
+                .to_string(),
+        };
+    };
+    // Unlike the charge planner there is no fallback to an occurrence
+    // already underway: selling into the tail of a started window is
+    // not a plan, it is a reaction. No upcoming occurrence → stand down.
+    let occurrences = window_occurrences(inputs.sim_hours, &base_window);
+    let Some(selected) = occurrences
+        .iter()
+        .position(|occ| occ.start_ts >= inputs.now_ts)
+        .and_then(|pos| occurrences.get(pos).cloned())
+    else {
+        return ExportAdvice::NoExport {
+            reason: "the next export window starts beyond the forecast \
+                     horizon — no window remains to schedule"
+                .to_string(),
+        };
+    };
+    // The charge cycle's horizon: where the next cheap import window
+    // begins (a fresh plan takes over there), or the end of the series.
+    // Both the sizing horizon and the series slice stop at that boundary.
+    let import_window = cheapest_import_window(inputs.import_tariff, now_min, 30);
+    let horizon_idx = match &import_window {
+        Some(w) => {
+            let occurrences = window_occurrences(inputs.sim_hours, w);
+            occurrences
+                .iter()
+                .position(|occ| occ.start_ts >= inputs.now_ts)
+                .and_then(|pos| occurrences.get(pos).map(WindowOccurrence::first_index))
+                .unwrap_or(inputs.sim_hours.len())
+        }
+        None => inputs.sim_hours.len(),
+    };
+    // A window that starts at/after the horizon belongs to the NEXT
+    // charge cycle — advising it now would pretend this cycle's battery
+    // level governs it.
+    let horizon_ts = inputs
+        .sim_hours
+        .get(horizon_idx)
+        .map(|h| h.timestamp)
+        .unwrap_or(i64::MAX);
+    if selected.start_ts >= horizon_ts {
+        return ExportAdvice::NoExport {
+            reason: "the next export window sits beyond this charge cycle \
+                     — replan after the next cheap-rate top-up"
+                .to_string(),
+        };
+    }
+    // Selling while the planned charge is filling the battery would
+    // have the grid pay for energy the plan is simultaneously buying.
+    if let Some(charge_window) = inputs.charge_window {
+        let overlaps = selected.run.iter().any(|&i| {
+            inputs
+                .sim_hours
+                .get(i)
+                .is_some_and(|h| window_overlap_hours(h.timestamp, charge_window) > 0.0)
+        });
+        if overlaps {
+            return ExportAdvice::NoExport {
+                reason: "the export window overlaps the planned charge \
+                         window — selling while the plan is charging \
+                         would buy and sell at the same time"
+                    .to_string(),
+            };
+        }
+    }
+    // Arbitrage gate: the energy sold now must be replaceable in the
+    // next cheap import window for less than it earns. One kWh AC sold
+    // drains 1/eta_d stored, restored by 1/(eta_c·eta_d) AC — so the
+    // round trip only pays when the export rate beats the replacement
+    // rate inflated by both efficiencies.
+    let replacement_rate = import_window.map(|w| w.rate).unwrap_or_else(|| {
+        inputs
+            .import_tariff
+            .parsed_slots()
+            .iter()
+            .map(|(_, _, r)| *r)
+            .fold(f64::INFINITY, f64::min)
+    });
+    let eta_round_trip = inputs.params.charge_efficiency.clamp(0.01, 1.0)
+        * inputs.params.discharge_efficiency.clamp(0.01, 1.0);
+    let replacement_cost = replacement_rate / eta_round_trip;
+    if base_window.rate <= replacement_cost {
+        return ExportAdvice::NoExport {
+            reason: format!(
+                "the {} export window pays {:.1}p but replacing that \
+                 energy in the {:.1}p import window costs about {:.1}p \
+                 after the battery round trip — selling loses money",
+                hhmm(base_window.start_min),
+                base_window.rate * 100.0,
+                replacement_rate * 100.0,
+                replacement_cost * 100.0,
+            ),
+        };
+    }
+    // Largest whole-minute duration whose post-window trough still
+    // holds the floor. Durations are monotone (a longer export can only
+    // leave every later SOC lower-or-equal), so a binary search is
+    // exact. Duration 0 is known-good: with no export injected the
+    // composed trajectory IS the charge plan's, which holds the floor
+    // through the horizon by construction.
+    let max_duration_min = window_duration_minutes(&base_window);
+    let max_export_kw = inputs.params.max_discharge_kw;
+    // Trough after the window through to the cycle horizon — the range
+    // the export must hold the floor across. The horizon hour itself is
+    // excluded: that is when the next cycle's charge takes over.
+    let run_last = selected
+        .run
+        .last()
+        .copied()
+        .expect("occurrence runs are never empty");
+    let post_end = horizon_idx.min(inputs.sim_hours.len());
+    let trough_after = |series: &[crate::forecast::simulate::SimHourResult]| {
+        let post = &series[(run_last + 1).min(post_end)..post_end];
+        if post.is_empty() {
+            series
+                .get(run_last)
+                .map(|h| h.soc_pct)
+                .unwrap_or(f64::INFINITY)
+        } else {
+            post.iter().map(|h| h.soc_pct).fold(f64::INFINITY, f64::min)
+        }
+    };
+    let duration_min = {
+        let mut lo = 0u16; // known-good
+        let mut hi = max_duration_min; // good or bad, the loop handles both
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            let probe_window = charge_window_for_duration(&base_window, mid);
+            let mut probe_hours: Vec<SimHourInput> = inputs.sim_hours.to_vec();
+            if let Some(charge_window) = inputs.charge_window {
+                inject_charge_first_occurrence(
+                    &mut probe_hours,
+                    inputs.params,
+                    charge_window,
+                    inputs.now_ts,
+                );
+            }
+            let probe_run = window_runs_for_window(&probe_window, inputs.sim_hours, &selected);
+            inject_export_discharge(&mut probe_hours, &probe_run, &probe_window, max_export_kw);
+            let probe = crate::forecast::simulate::simulate_battery(&probe_hours, inputs.params);
+            if trough_after(&probe.hours) >= inputs.floor_pct {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+    let window = charge_window_for_duration(&base_window, duration_min);
+    // Re-simulate at the chosen duration for the reported trajectory.
+    let mut final_hours: Vec<SimHourInput> = inputs.sim_hours.to_vec();
+    if let Some(charge_window) = inputs.charge_window {
+        inject_charge_first_occurrence(
+            &mut final_hours,
+            inputs.params,
+            charge_window,
+            inputs.now_ts,
+        );
+    }
+    inject_export_discharge(&mut final_hours, &selected.run, &window, max_export_kw);
+    let final_sim = crate::forecast::simulate::simulate_battery(&final_hours, inputs.params);
+    let after_min_soc_pct = trough_after(&final_sim.hours);
+    let kwh = max_export_kw * window_duration_minutes(&window) as f64 / 60.0;
+    if kwh < EXPORT_MIN_KWH || after_min_soc_pct < inputs.floor_pct {
+        return ExportAdvice::NoExport {
+            reason: format!(
+                "only about {:.1} kWh spare above your {:.0}% floor during \
+                 the {} window — under the {:.1} kWh threshold worth \
+                 scheduling",
+                kwh.max(0.0),
+                inputs.floor_pct,
+                hhmm(base_window.start_min),
+                EXPORT_MIN_KWH,
+            ),
+        };
+    }
+    let earning = kwh * window.rate;
+    let replace_cost = kwh * replacement_rate;
+    let rationale = format!(
+        "Selling about {:.1} kWh in the {:.1}p export window ({}–{}) earns \
+         about £{:.2}. The battery bottoms out at {:.0}% — at or above your \
+         {:.0}% floor — and replacing the energy in the {:.1}p import window \
+         costs about £{:.2}.",
+        kwh,
+        window.rate * 100.0,
+        hhmm(window.start_min),
+        hhmm(window.end_min),
+        earning,
+        after_min_soc_pct,
+        inputs.floor_pct,
+        replacement_rate * 100.0,
+        replace_cost,
+    );
+    ExportAdvice::Export {
+        window,
+        kwh,
+        min_soc_pct: inputs.floor_pct,
+        after_min_soc_pct,
+        earning,
+        rationale,
+        with_export_series: final_sim
+            .hours
+            .iter()
+            .take(horizon_idx + 1)
+            .map(|h| (h.timestamp, h.soc_pct))
+            .collect(),
+    }
+}
+
+/// The hour indices of the SELECTED occurrence that overlap `window`
+/// at the given (possibly shortened) duration. The occurrence's run is
+/// fixed; only how much of each hour the window covers changes.
+fn window_runs_for_window(
+    window: &ChargeWindow,
+    sim_hours: &[SimHourInput],
+    selected: &WindowOccurrence,
+) -> Vec<usize> {
+    selected
+        .run
+        .iter()
+        .copied()
+        .filter(|&i| {
+            sim_hours
+                .get(i)
+                .is_some_and(|h| window_overlap_hours(h.timestamp, window) > 0.0)
+        })
+        .collect()
+}
+
+/// Inject a max-rate export discharge on the given hour indices, sized
+/// by each hour's overlap with `window`. Modelled as a virtual load
+/// (supply subtracted from solar): the eco simulator covers it from
+/// the battery up to the discharge rate cap, which is exactly the
+/// physics of max-power export — home load is served first, the rest
+/// leaves for the grid, and the reserve floor stops the drain.
+fn inject_export_discharge(
+    hours: &mut [SimHourInput],
+    run: &[usize],
+    window: &ChargeWindow,
+    max_export_kw: f64,
+) {
+    for &i in run {
+        let Some(hour) = hours.get_mut(i) else {
+            continue;
+        };
+        let overlap_hours = window_overlap_hours(hour.timestamp, window);
+        if overlap_hours <= 0.0 {
+            continue;
+        }
+        hour.solar_kwh -= max_export_kw * overlap_hours;
     }
 }
 
@@ -2369,10 +2692,12 @@ mod tests {
     // Export advice (issue #283 stage 2)
     // ----------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn export_inputs<'a>(
         sim_hours: &'a [SimHourInput],
         p: &'a SimulationParams,
         export_tariff: &'a TariffConfig,
+        import_tariff: &'a TariffConfig,
         charge_window: Option<&'a ChargeWindow>,
         now_ts: i64,
     ) -> ExportPlanInputs<'a> {
@@ -2380,12 +2705,12 @@ mod tests {
             sim_hours,
             params: p,
             export_tariff,
-            // Flux off-peak rate — the arbitrage break-even the advice
-            // must beat (see the flat-economics test below).
-            import_replacement_rate: 0.09,
+            // The horizon and the arbitrage replacement rate (Flux's
+            // 9p off-peak) come from the import tariff.
+            import_tariff,
             charge_window,
             floor_pct: 20.0,
-            now_ts: now_ts,
+            now_ts,
         }
     }
 
@@ -2412,7 +2737,14 @@ mod tests {
         };
         let hours = idle_day_hours(0);
         let now = pinned_now_ts(&hours, 0, 12 * 60);
-        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &flux_tariff(),
+            &flux_tariff(),
+            None,
+            now,
+        ));
         let ExportAdvice::Export {
             window,
             kwh,
@@ -2427,7 +2759,11 @@ mod tests {
         };
         assert_eq!(window.start_min, 16 * 60);
         assert_eq!(window.end_min, 16 * 60 + 136);
-        assert!((window.rate - 0.35).abs() < 1e-9, "peak rate, got {}", window.rate);
+        assert!(
+            (window.rate - 0.35).abs() < 1e-9,
+            "peak rate, got {}",
+            window.rate
+        );
         assert!((kwh - 2.5 * 136.0 / 60.0).abs() < 1e-9, "kwh = {kwh}");
         assert!((earning - kwh * 0.35).abs() < 1e-9);
         assert_eq!(min_soc_pct, 20.0);
@@ -2447,7 +2783,14 @@ mod tests {
         };
         let hours = idle_day_hours(0);
         let now = pinned_now_ts(&hours, 0, 12 * 60);
-        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &flux_tariff(),
+            &flux_tariff(),
+            None,
+            now,
+        ));
         let ExportAdvice::Export { window, kwh, .. } = advice else {
             panic!("expected an export recommendation, got {advice:?}");
         };
@@ -2472,7 +2815,14 @@ mod tests {
         ]);
         let hours = idle_day_hours(0);
         let now = pinned_now_ts(&hours, 0, 12 * 60);
-        let advice = plan_export_window(&export_inputs(&hours, &p, &weak_export, None, now));
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &weak_export,
+            &flux_tariff(),
+            None,
+            now,
+        ));
         let ExportAdvice::NoExport { reason } = advice else {
             panic!("expected a no-export verdict, got {advice:?}");
         };
@@ -2493,7 +2843,14 @@ mod tests {
         };
         let hours = idle_day_hours(0);
         let now = pinned_now_ts(&hours, 0, 12 * 60);
-        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &flux_tariff(),
+            &flux_tariff(),
+            None,
+            now,
+        ));
         let ExportAdvice::NoExport { reason } = advice else {
             panic!("expected a no-export verdict, got {advice:?}");
         };
@@ -2514,7 +2871,14 @@ mod tests {
         };
         let hours = idle_day_hours(0);
         let now = pinned_now_ts(&hours, 0, 22 * 60);
-        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &flux_tariff(),
+            &flux_tariff(),
+            None,
+            now,
+        ));
         let ExportAdvice::NoExport { reason } = advice else {
             panic!("expected a no-export verdict, got {advice:?}");
         };
@@ -2548,6 +2912,7 @@ mod tests {
             &hours,
             &p,
             &flux_tariff(),
+            &flux_tariff(),
             Some(&charge_window),
             now,
         ));
@@ -2561,39 +2926,30 @@ mod tests {
         };
         // 30% → 20% floor: 1 kWh stored → 0.95 kWh AC → 22 whole minutes.
         assert!((kwh - 2.5 * 22.0 / 60.0).abs() < 1e-9, "kwh = {kwh}");
-        // The composed trajectory must still show the planned overnight
-        // charge landing after the export window.
-        let before_charge = with_export_series
-            .iter()
-            .find(|(ts, _)| {
-                chrono::DateTime::from_timestamp(*ts, 0)
-                    .map(|dt| {
+        // The composed series stops at the cycle horizon (the next
+        // charge occurrence) but includes its first hour — so the
+        // planned charge must lift the series across that boundary.
+        let soc_at = |day: i64, hour: u32| {
+            with_export_series
+                .iter()
+                .find(|(ts, _)| {
+                    chrono::DateTime::from_timestamp(*ts, 0).is_some_and(|dt| {
                         let local = dt.with_timezone(&chrono::Local);
-                        local.hour() == 1 && chrono::DateTime::from_timestamp(now, 0)
-                            .map(|n| local.date_naive() == n.with_timezone(&chrono::Local).date_naive() + chrono::Duration::days(1))
-                            .unwrap_or(false)
+                        let now_local = chrono::DateTime::from_timestamp(now, 0)
+                            .expect("now")
+                            .with_timezone(&chrono::Local);
+                        local.date_naive() == now_local.date_naive() + chrono::Duration::days(day)
+                            && local.hour() == hour
                     })
-                    .unwrap_or(false)
-            })
-            .map(|(_, soc)| *soc)
-            .expect("series should cover the hour before the planned charge");
-        let after_charge = with_export_series
-            .iter()
-            .find(|(ts, _)| {
-                chrono::DateTime::from_timestamp(*ts, 0)
-                    .map(|dt| {
-                        let local = dt.with_timezone(&chrono::Local);
-                        local.hour() == 5 && chrono::DateTime::from_timestamp(now, 0)
-                            .map(|n| local.date_naive() == n.with_timezone(&chrono::Local).date_naive() + chrono::Duration::days(1))
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-            })
-            .map(|(_, soc)| *soc)
-            .expect("series should cover the end of the planned charge");
+                })
+                .map(|(_, soc)| *soc)
+        };
+        let before_charge = soc_at(1, 1).expect("series covers the hour before the planned charge");
+        let after_charge_start =
+            soc_at(1, 2).expect("series covers the first hour of the planned charge");
         assert!(
-            after_charge > before_charge,
-            "planned charge must lift the composed series: {before_charge} → {after_charge}"
+            after_charge_start > before_charge,
+            "planned charge must lift the composed series: {before_charge} → {after_charge_start}"
         );
     }
 }
