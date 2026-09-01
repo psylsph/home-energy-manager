@@ -800,6 +800,76 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     }
 }
 
+/// Smallest export worth scheduling, AC kWh. Below this the card is
+/// noise — the battery has nothing meaningful to sell (issue #283).
+pub const EXPORT_MIN_KWH: f64 = 0.5;
+
+/// The export-side recommendation (issue #283 stage 2): whether the
+/// battery can sell surplus energy into the export tariff's best
+/// window without breaking the same minimum-SOC floor the charge
+/// planner holds. Pure and synchronous — the API layer serialises it;
+/// there is deliberately no Apply path yet.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportAdvice {
+    /// Sell `kwh` AC in the window at `rate`; the post-export trough
+    /// still holds `min_soc_pct`.
+    Export {
+        window: ChargeWindow,
+        /// AC kWh exported during the window.
+        kwh: f64,
+        /// The user's configured minimum-allowable SOC, %.
+        min_soc_pct: f64,
+        /// The lowest SOC after the export window across the rest of
+        /// the charge cycle, %.
+        after_min_soc_pct: f64,
+        /// Estimated earnings, £ (`kwh × window.rate`).
+        earning: f64,
+        /// Human-readable rationale shown under the recommendation.
+        rationale: String,
+        /// Per-hour SOC trajectory when the export is applied to the
+        /// charge-plan trajectory, same `[timestamp_unix, soc_pct]`
+        /// shape as the charge plan's `with_charge_series`.
+        with_export_series: Vec<(i64, f64)>,
+    },
+    /// No export opportunity worth taking — the reason says which gate
+    /// stood down (no window left, floor binds, arbitrage loses,
+    /// nothing spare). The UI shows the reason or hides the card.
+    NoExport { reason: String },
+}
+
+/// Inputs the export planner needs. All slices are the forecast's
+/// forward-only hourly series; `charge_window` is the charge plan's
+/// sized window when a charge applies, so the export advice can ride
+/// the charged trajectory instead of contradicting it.
+#[derive(Debug, Clone)]
+pub struct ExportPlanInputs<'a> {
+    /// Phase 1 hourly inputs (solar + consumption per hour).
+    pub sim_hours: &'a [SimHourInput],
+    /// Simulation params (capacity, efficiencies, rate caps).
+    pub params: &'a SimulationParams,
+    /// The export tariff whose best window to sell into.
+    pub export_tariff: &'a TariffConfig,
+    /// The £/kWh rate the sold energy would be replaced at in the next
+    /// cheap import window — the arbitrage break-even denominator.
+    pub import_replacement_rate: f64,
+    /// The charge plan's sized window when a charge applies; `None`
+    /// when the charge planner said no charge is needed.
+    pub charge_window: Option<&'a ChargeWindow>,
+    /// The user's configured minimum-allowable SOC, % — the export
+    /// must never pull the battery below this across the charge cycle.
+    pub floor_pct: f64,
+    /// The planning moment (unix seconds, local interpretation).
+    pub now_ts: i64,
+}
+
+/// Compute the export advice. See [`ExportAdvice`] for the cases.
+pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
+    let _ = inputs;
+    ExportAdvice::NoExport {
+        reason: "export advice not implemented yet".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2292,6 +2362,238 @@ mod tests {
             (outcome.charge_level_pct - 23.5).abs() < 1e-9,
             "10% + (0.5+1.0)×0.9/10 = 23.5%, got {}",
             outcome.charge_level_pct
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Export advice (issue #283 stage 2)
+    // ----------------------------------------------------------------
+
+    fn export_inputs<'a>(
+        sim_hours: &'a [SimHourInput],
+        p: &'a SimulationParams,
+        export_tariff: &'a TariffConfig,
+        charge_window: Option<&'a ChargeWindow>,
+        now_ts: i64,
+    ) -> ExportPlanInputs<'a> {
+        ExportPlanInputs {
+            sim_hours,
+            params: p,
+            export_tariff,
+            // Flux off-peak rate — the arbitrage break-even the advice
+            // must beat (see the flat-economics test below).
+            import_replacement_rate: 0.09,
+            charge_window,
+            floor_pct: 20.0,
+            now_ts: now_ts,
+        }
+    }
+
+    /// Idle day (no solar, no load) so hand-computed SOC arithmetic
+    /// pins the sizing exactly.
+    fn idle_day_hours(day_offset: i64) -> Vec<SimHourInput> {
+        (0..24)
+            .map(|h| SimHourInput {
+                timestamp: hour_ts(h as u32, day_offset),
+                solar_kwh: 0.0,
+                consumption_kwh: 0.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn export_advice_sells_the_peak_window_on_a_flux_tariff() {
+        // 10 kWh battery at 80%, floor 20%: sellable stored = 6 kWh →
+        // 5.7 kWh AC at 95% discharge efficiency → 2.5 kW caps it at
+        // 136 whole minutes (137 would dip to 19.9%).
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        let hours = idle_day_hours(0);
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let ExportAdvice::Export {
+            window,
+            kwh,
+            after_min_soc_pct,
+            earning,
+            min_soc_pct,
+            with_export_series,
+            ..
+        } = advice
+        else {
+            panic!("expected an export recommendation, got {advice:?}");
+        };
+        assert_eq!(window.start_min, 16 * 60);
+        assert_eq!(window.end_min, 16 * 60 + 136);
+        assert!((window.rate - 0.35).abs() < 1e-9, "peak rate, got {}", window.rate);
+        assert!((kwh - 2.5 * 136.0 / 60.0).abs() < 1e-9, "kwh = {kwh}");
+        assert!((earning - kwh * 0.35).abs() < 1e-9);
+        assert_eq!(min_soc_pct, 20.0);
+        assert!(
+            after_min_soc_pct >= 20.0,
+            "floor must hold, got {after_min_soc_pct}"
+        );
+        assert!(!with_export_series.is_empty());
+    }
+
+    #[test]
+    fn export_advice_shortens_the_window_to_hold_the_floor() {
+        // 40% start: sellable stored = 2 kWh → 1.9 kWh AC → 45 minutes.
+        let p = SimulationParams {
+            start_soc_pct: 40.0,
+            ..params()
+        };
+        let hours = idle_day_hours(0);
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let ExportAdvice::Export { window, kwh, .. } = advice else {
+            panic!("expected an export recommendation, got {advice:?}");
+        };
+        assert_eq!(window.start_min, 16 * 60);
+        assert_eq!(window.end_min, 16 * 60 + 45);
+        assert!((kwh - 2.5 * 45.0 / 60.0).abs() < 1e-9, "kwh = {kwh}");
+    }
+
+    #[test]
+    fn export_advice_rejects_when_the_arbitrage_loses() {
+        // Best export rate 10p against a 9p replacement rate: the
+        // round trip (0.9 × 0.95) makes replacing the energy cost more
+        // than selling earns, so no export is advised.
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        let weak_export = tariff(&[
+            ("00:00", "15:00", 0.05),
+            ("15:00", "21:00", 0.10),
+            ("21:00", "23:59", 0.05),
+        ]);
+        let hours = idle_day_hours(0);
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&export_inputs(&hours, &p, &weak_export, None, now));
+        let ExportAdvice::NoExport { reason } = advice else {
+            panic!("expected a no-export verdict, got {advice:?}");
+        };
+        let reason = reason.to_lowercase();
+        assert!(
+            reason.contains("replace") || reason.contains("round trip") || reason.contains("worth"),
+            "reason should explain the economics: {reason}"
+        );
+    }
+
+    #[test]
+    fn export_advice_rejects_when_nothing_is_spare() {
+        // 25% start against a 20% floor: 0.5 kWh stored → 0.475 kWh AC
+        // — under the scheduling threshold even at best.
+        let p = SimulationParams {
+            start_soc_pct: 25.0,
+            ..params()
+        };
+        let hours = idle_day_hours(0);
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let ExportAdvice::NoExport { reason } = advice else {
+            panic!("expected a no-export verdict, got {advice:?}");
+        };
+        let reason = reason.to_lowercase();
+        assert!(
+            reason.contains("spare") || reason.contains("floor"),
+            "reason should explain the battery has nothing to sell: {reason}"
+        );
+    }
+
+    #[test]
+    fn export_advice_stands_down_once_the_window_has_passed() {
+        // At 22:00 the 16:00–21:00 peak is gone; tomorrow's occurrence
+        // is a fresh cycle's business, so no export is advised.
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        let hours = idle_day_hours(0);
+        let now = pinned_now_ts(&hours, 0, 22 * 60);
+        let advice = plan_export_window(&export_inputs(&hours, &p, &flux_tariff(), None, now));
+        let ExportAdvice::NoExport { reason } = advice else {
+            panic!("expected a no-export verdict, got {advice:?}");
+        };
+        let reason = reason.to_lowercase();
+        assert!(
+            reason.contains("window") || reason.contains("horizon"),
+            "reason should explain no window remains: {reason}"
+        );
+    }
+
+    #[test]
+    fn export_advice_composes_with_the_charge_plan() {
+        // A 30% battery with an overnight top-up planned for tomorrow:
+        // the export rides the charged trajectory — sell today's
+        // surplus above the floor now, then the planned charge lands
+        // after the export window without contradiction.
+        let p = SimulationParams {
+            start_soc_pct: 30.0,
+            ..params()
+        };
+        let mut hours = idle_day_hours(0);
+        hours.extend(idle_day_hours(1));
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let charge_window = ChargeWindow {
+            start_min: 2 * 60,
+            end_min: 5 * 60,
+            tomorrow: true,
+            rate: 0.09,
+        };
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &flux_tariff(),
+            Some(&charge_window),
+            now,
+        ));
+        let ExportAdvice::Export {
+            kwh,
+            with_export_series,
+            ..
+        } = advice
+        else {
+            panic!("expected an export recommendation, got {advice:?}");
+        };
+        // 30% → 20% floor: 1 kWh stored → 0.95 kWh AC → 22 whole minutes.
+        assert!((kwh - 2.5 * 22.0 / 60.0).abs() < 1e-9, "kwh = {kwh}");
+        // The composed trajectory must still show the planned overnight
+        // charge landing after the export window.
+        let before_charge = with_export_series
+            .iter()
+            .find(|(ts, _)| {
+                chrono::DateTime::from_timestamp(*ts, 0)
+                    .map(|dt| {
+                        let local = dt.with_timezone(&chrono::Local);
+                        local.hour() == 1 && chrono::DateTime::from_timestamp(now, 0)
+                            .map(|n| local.date_naive() == n.with_timezone(&chrono::Local).date_naive() + chrono::Duration::days(1))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|(_, soc)| *soc)
+            .expect("series should cover the hour before the planned charge");
+        let after_charge = with_export_series
+            .iter()
+            .find(|(ts, _)| {
+                chrono::DateTime::from_timestamp(*ts, 0)
+                    .map(|dt| {
+                        let local = dt.with_timezone(&chrono::Local);
+                        local.hour() == 5 && chrono::DateTime::from_timestamp(now, 0)
+                            .map(|n| local.date_naive() == n.with_timezone(&chrono::Local).date_naive() + chrono::Duration::days(1))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|(_, soc)| *soc)
+            .expect("series should cover the end of the planned charge");
+        assert!(
+            after_charge > before_charge,
+            "planned charge must lift the composed series: {before_charge} → {after_charge}"
         );
     }
 }
