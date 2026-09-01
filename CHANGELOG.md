@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.78.0] - 2026-09-01
+
+### Added
+
+- **The charge plan can now apply itself — and tell you when it does.** Switch on "Apply charging plan automatically" on the Forecast page and the app rewrites charge slot 1 from the latest plan a few minutes before each cheap window (you choose how many), then sends a notification saying what happened: the charge it applied, when no charge was needed, or why it stood down. While it's on, the older nightly auto-refresh stands down with it, so charge slot 1 gets exactly one automatic write a day — and nights when Adaptive Charge is driving the charge rate are left to it.
+
+- **All the plan's settings now live on the Forecast page.** Battery charge/discharge efficiencies, the minimum battery level and the automatic-plan toggle sit in a "Plan settings" section on the plan card, replacing the controls that used to be in Settings. The old auto-refresh toggle is folded into the new one — turning automatic planning on, or editing the lead time, upgrades you to auto-apply — and if you had auto-refresh on, it simply keeps working until you touch the new control.
+
+- **The Forecast page now leads with today's recommendation.** The plan card is the first thing on the page, with the charge, window, lowest battery and cost laid out as tiles, and the battery, solar and home-use charts hide behind tabs instead of stacking the whole page.
+
 ## [0.77.0] - 2026-09-01
 
 ### Added
