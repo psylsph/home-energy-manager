@@ -477,9 +477,32 @@ export type PlanApply = {
   timed_charge: { enabled: true };
 } | null;
 
+/** Export-slot advice (issue #283 stage 2): whether the battery can
+ *  sell surplus energy into the export tariff's best window without
+ *  breaking the plan's minimum-SOC floor. Read-only — there is no
+ *  Apply path yet. Absent (or null) when the charge plan stood down. */
+export type ExportAdvice =
+  | {
+      kind: 'export';
+      window: { start: string; end: string; rate: number; tomorrow: boolean };
+      /** AC kWh to sell during the window. */
+      kwh: number;
+      /** The user's configured minimum-allowable SOC, %. */
+      min_soc_pct: number;
+      /** Lowest SOC after the export across the charge cycle, %. */
+      after_min_soc_pct: number;
+      /** Estimated earnings, £ (kwh × window.rate). */
+      earning: number;
+      rationale: string;
+      /** Per-hour SOC trajectory when the export is applied. */
+      with_export_series: [number, number][];
+    }
+  | { kind: 'no_export'; reason: string };
+
 export type PlanResponse = {
   recommendation: PlanRecommendation;
   apply: PlanApply;
+  export?: ExportAdvice | null;
 };
 
 /** Short headline for the Plan card. Degrades gracefully per kind. */
@@ -492,6 +515,15 @@ export function forecastPlanTitle(rec: PlanRecommendation): string {
     return `No overnight charge needed — solar covers the day`;
   }
   return `Plan not ready yet — ${rec.reason}`;
+}
+
+/** Short headline for the export-advice card (issue #283 stage 2).
+ *  Only the positive verdict gets a card; this mirrors the charge
+ *  title's shape so the two cards read as a pair. */
+export function forecastExportTitle(advice: ExportAdvice): string {
+  if (advice.kind !== 'export') return '';
+  const when = advice.window.tomorrow ? 'Tomorrow' : 'Today';
+  return `Sell ${advice.kwh.toFixed(1)} kWh — ${when} ${advice.window.start}\u2013${advice.window.end}`;
 }
 
 /**

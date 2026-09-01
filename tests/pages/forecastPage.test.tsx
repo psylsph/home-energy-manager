@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { useInverterStore } from '../../src/store/useInverterStore';
 
 // ---------------------------------------------------------------------------
@@ -61,11 +61,11 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
   });
   const planPayload = (
     kind: 'charge' | 'no_charge_needed' | 'no_plan',
+    exportAdvice?: Record<string, unknown> | null,
   ): { ok: true; data: unknown } => {
+    const base: Record<string, unknown> = (() => {
     if (kind === 'charge') {
       return {
-        ok: true,
-        data: {
           recommendation: {
             kind: 'charge',
             window: { start: '02:00', end: '03:36', rate: 0.09, tomorrow: true },
@@ -102,13 +102,10 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
             },
             timed_charge: { enabled: true },
           },
-        },
-      };
+        };
     }
     if (kind === 'no_charge_needed') {
       return {
-        ok: true,
-        data: {
           recommendation: {
             kind: 'no_charge_needed',
             min_soc_pct: 20,
@@ -117,18 +114,25 @@ const { fullPayload, planPayload } = vi.hoisted(() => {
             rationale: 'Sunny day — the battery fills from solar.',
           },
           apply: null,
-        },
       };
+    }
+    if (kind === 'no_plan') {
+      return {
+          recommendation: {
+            kind: 'no_plan',
+            reason: 'no battery projection available — connect to the inverter',
+          },
+          apply: null,
+      };
+    }
+    return {};
+    })();
+    if (exportAdvice !== undefined) {
+      base.export = exportAdvice;
     }
     return {
       ok: true,
-      data: {
-        recommendation: {
-          kind: 'no_plan',
-          reason: 'no battery projection available — connect to the inverter',
-        },
-        apply: null,
-      },
+      data: base,
     };
   };
   return { fullPayload, planPayload };
@@ -666,6 +670,76 @@ describe('ForecastPage plan card', () => {
   });
 });
 
+
+describe('ForecastPage export advice', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ gridLineWeight: 'standard' });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  const exportAdvice = {
+    kind: 'export',
+    window: { start: '16:00', end: '18:16', rate: 0.35, tomorrow: false },
+    kwh: 5.7,
+    min_soc_pct: 20,
+    after_min_soc_pct: 20.4,
+    earning: 2.0,
+    rationale:
+      'Selling about 5.7 kWh in the 35.0p export window (16:00–18:16) earns about £2.00.',
+    with_export_series: [
+      [1_700_003_600, 62],
+      [1_700_007_200, 40],
+    ],
+  };
+
+  it('renders the read-only export opportunity card when the plan carries export advice', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge', exportAdvice);
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const card = await screen.findByTestId('forecast-export-card');
+    expect(card.textContent).toMatch(/Export opportunity/);
+    expect(screen.getByTestId('forecast-export-kwh').textContent).toMatch(/5\.7/);
+    expect(screen.getByTestId('forecast-export-window').textContent).toMatch(/16:00/);
+    expect(screen.getByTestId('forecast-export-window').textContent).toMatch(/18:16/);
+    expect(screen.getByTestId('forecast-export-earning').textContent).toMatch(/£2\.00/);
+    expect(screen.getByTestId('forecast-export-rationale').textContent).toMatch(
+      /35\.0p export window/,
+    );
+    // Read-only v1: the export advice must not offer any Apply control.
+    expect(within(card).queryByRole('button')).toBeNull();
+  });
+
+  it('hides the export card when the advice stood down', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') {
+        return planPayload('charge', { kind: 'no_export', reason: 'nothing spare' });
+      }
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan');
+    expect(screen.queryByTestId('forecast-export-card')).toBeNull();
+  });
+
+  it('hides the export card when the payload carries no export advice', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan');
+    expect(screen.queryByTestId('forecast-export-card')).toBeNull();
+  });
+});
 
 describe('ForecastPage refresh triggers', () => {
   beforeEach(() => {

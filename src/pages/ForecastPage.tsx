@@ -26,6 +26,7 @@ import {
   forecastChargeMarkers,
   truncateSeriesAtNextChargeStart,
   formatForecastXAxisTick,
+  forecastExportTitle,
   forecastPlanTitle,
   forecastStatusMessages,
   forecastXAxisTicks,
@@ -1013,6 +1014,40 @@ export default function ForecastPage() {
             </p>
           )}
           {applyState === 'sending' && <ForecastApplyProgress />}
+        </section>
+      )}
+
+      {plan?.export?.kind === 'export' && (
+        <section
+          data-testid="forecast-export-card"
+          className="order-2 bg-bg-surface rounded-xl border border-accent/20 p-4 sm:p-5 flex flex-col gap-3 shadow-sm"
+          aria-label="Export opportunity"
+        >
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-accent">Export opportunity</p>
+            <h3 className="mt-1 text-base sm:text-lg font-semibold text-text-primary">
+              {forecastExportTitle(plan.export)}
+            </h3>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-[11px] text-text-secondary">Sell</div>
+              <div data-testid="forecast-export-kwh" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.export.kwh.toFixed(1)} kWh</div>
+            </div>
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-[11px] text-text-secondary">Time</div>
+              <div data-testid="forecast-export-window" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.export.window.start}–{plan.export.window.end}</div>
+            </div>
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-[11px] text-text-secondary">Est. earnings</div>
+              <div data-testid="forecast-export-earning" className="mt-0.5 text-sm font-semibold text-text-primary">£{plan.export.earning.toFixed(2)}</div>
+            </div>
+            <div className="rounded-lg bg-bg-elevated p-3">
+              <div className="text-[11px] text-text-secondary">Battery floor held</div>
+              <div data-testid="forecast-export-floor" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.export.after_min_soc_pct.toFixed(0)}%</div>
+            </div>
+          </div>
+          <p data-testid="forecast-export-rationale" className="text-xs text-text-secondary">{plan.export.rationale}</p>
         </section>
       )}
 
