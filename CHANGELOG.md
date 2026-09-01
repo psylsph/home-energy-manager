@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.78.1] - 2026-09-01
+
+### Fixed
+
+- **A corrupt meter read can no longer hijack the day's solar total.** On setups where the panels are measured by a CT clamp, a single bad read of the meter's energy counter could blow the day's solar figure up to nonsense (one reporter saw 1,128 kWh) and pin it there until midnight. Implausible jumps are now discarded and the counter re-seeds itself — the same corruption defence the rest of the energy figures already had. (fixes #294)
+
 ## [0.78.0] - 2026-09-01
 
 ### Added
