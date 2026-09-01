@@ -137,8 +137,7 @@ pub fn plan_auto_apply_due(
         };
     };
     let now_min = now.hour() as u16 * 60 + now.minute() as u16;
-    let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30)
-    else {
+    let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30) else {
         return PlanApplyDecision::NotDue {
             reason: "no upcoming cheap window",
         };
@@ -332,22 +331,47 @@ mod tests {
     fn adaptive_owns_rate_suppresses_the_refresh() {
         let flux = flux_tariff();
         let day = local_dt(2026, 8, 31, 1, 40); // 20 min before 02:00
-        // Due without Adaptive: fires.
-        assert!(plan_refresh_due_with_adaptive(day, None, Some(&flux), false));
+                                                // Due without Adaptive: fires.
+        assert!(plan_refresh_due_with_adaptive(
+            day,
+            None,
+            Some(&flux),
+            false
+        ));
         // Same moment with Adaptive owning the rate: suppressed.
-        assert!(!plan_refresh_due_with_adaptive(day, None, Some(&flux), true));
+        assert!(!plan_refresh_due_with_adaptive(
+            day,
+            None,
+            Some(&flux),
+            true
+        ));
         // Adaptive alone never makes an otherwise-undue refresh fire.
         let afternoon = local_dt(2026, 8, 31, 15, 0);
-        assert!(!plan_refresh_due_with_adaptive(afternoon, None, Some(&flux), false));
-        assert!(!plan_refresh_due_with_adaptive(afternoon, None, Some(&flux), true));
+        assert!(!plan_refresh_due_with_adaptive(
+            afternoon,
+            None,
+            Some(&flux),
+            false
+        ));
+        assert!(!plan_refresh_due_with_adaptive(
+            afternoon,
+            None,
+            Some(&flux),
+            true
+        ));
     }
 
     #[test]
     fn adaptive_warning_only_when_the_apply_would_actually_be_due() {
         let flux = flux_tariff();
         let day = local_dt(2026, 8, 31, 1, 40); // 20 min before 02:00
-        // Inside the lead window and not applied yet: the warning fires...
-        assert!(plan_auto_apply_adaptive_warning_due(day, None, Some(&flux), 30));
+                                                // Inside the lead window and not applied yet: the warning fires...
+        assert!(plan_auto_apply_adaptive_warning_due(
+            day,
+            None,
+            Some(&flux),
+            30
+        ));
         // ...but not once today's apply has already happened — nothing is
         // being skipped, so a warning would be noise.
         assert!(!plan_auto_apply_adaptive_warning_due(
@@ -374,8 +398,18 @@ mod tests {
         // 90 min before the 02:00 window: outside a 30-minute lead, inside
         // a 120-minute one — the gate must follow the user's setting.
         let early = local_dt(2026, 8, 31, 0, 30);
-        assert!(!plan_auto_apply_adaptive_warning_due(early, None, Some(&flux), 30));
-        assert!(plan_auto_apply_adaptive_warning_due(early, None, Some(&flux), 120));
+        assert!(!plan_auto_apply_adaptive_warning_due(
+            early,
+            None,
+            Some(&flux),
+            30
+        ));
+        assert!(plan_auto_apply_adaptive_warning_due(
+            early,
+            None,
+            Some(&flux),
+            120
+        ));
     }
 
     #[test]
@@ -432,10 +466,7 @@ mod tests {
     fn auto_apply_wraps_midnight_to_tomorrows_window() {
         // Cheap window 00:15–05:00: a 30-minute lead must fire at 23:45
         // the previous evening, not wrap past the window entirely.
-        let t = tariff(&[
-            ("00:15", "05:00", 0.09),
-            ("05:00", "23:59", 0.30),
-        ]);
+        let t = tariff(&[("00:15", "05:00", 0.09), ("05:00", "23:59", 0.30)]);
         let evening = local_dt(2026, 8, 31, 23, 45);
         assert!(matches!(
             plan_auto_apply_due(evening, None, Some(&t), 30),
@@ -529,7 +560,12 @@ mod tests {
         let flux = flux_tariff();
         let day = local_dt(2026, 8, 31, 1, 40);
         assert!(plan_refresh_due(day, None, Some(&flux)));
-        assert!(plan_refresh_due_with_adaptive(day, None, Some(&flux), false));
+        assert!(plan_refresh_due_with_adaptive(
+            day,
+            None,
+            Some(&flux),
+            false
+        ));
     }
 
     #[test]

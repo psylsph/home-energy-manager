@@ -7915,7 +7915,10 @@ mod tests {
                 .iter()
                 .find(|w| w.address == HR_3PH_BATTERY_CHARGE_LIMIT)
                 .expect("three-phase must set the three-phase charge limit (HR 1110)");
-            assert_eq!(rate.value, 100, "three-phase HR1110 is a direct 1-100 scale");
+            assert_eq!(
+                rate.value, 100,
+                "three-phase HR1110 is a direct 1-100 scale"
+            );
         })
         .await;
     }

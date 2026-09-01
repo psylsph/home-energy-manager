@@ -440,9 +440,7 @@ async fn auto_apply_lead_minutes_above_120_is_rejected() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["ok"], Value::Bool(false));
     assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("120")),
+        body["error"].as_str().is_some_and(|e| e.contains("120")),
         "the error must name the bound"
     );
     // The rejected save must not have persisted anything.
