@@ -52,6 +52,7 @@ Full verification order: `cargo clippy` → `npm run lint` → `npm run lint:md`
 ## Linting rules
 
 - **Clippy**: all warnings must be fixed (`cd src-tauri && cargo clippy`).
+- **rustfmt**: all Rust files must be fmt-clean (`cd src-tauri && cargo fmt --check`); run `cargo fmt` before committing — fix pre-existing drift in touched files rather than working around it.
 - **ESLint** (`npm run lint`): `verbatimModuleSyntax` — use `import type` for type-only imports; `erasableSyntaxOnly` — no `enum`, `namespace`, or constructor parameter properties; `noUnusedLocals`/`noUnusedParameters`; `react-hooks/set-state-in-effect` — don't call setState directly inside `useEffect`, use key-based remounting or derived values.
 - **Markdown**: `npm run lint:md` after significant .md edits.
 
