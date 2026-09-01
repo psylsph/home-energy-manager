@@ -30,6 +30,8 @@ import {
   forecastXAxisTicks,
   forecastYAxisScale,
   forwardHourTimestamps,
+  insertChargeStartVertices,
+  relabelToStateInstants,
   shouldRefetchForecast,
   toBatteryChartData,
   toConsumptionChartData,
@@ -353,36 +355,51 @@ export default function ForecastPage() {
   const statusMessages = forecastStatusMessages(data.status);
   const summary = tomorrowSummary(data);
   const solarChart = toSolarChartData(data.solar);
-  const batteryChart = data.battery
-    ? toBatteryChartData({
-        ...data.battery,
-        // Anchor the projection at "now": the stored forward hours are
-        // full future hours, so without the anchor the chart's left
-        // edge is the END of the first hour — a full hour's drain below
-        // the live SOC (graph starting at 48% while the battery sat at
-        // 59%). The anchor uses the payload's generation time and the
-        // SOC the simulation actually started from, so it always lines
-        // up with the series regardless of fetch latency.
-        hours: anchorSeriesAtNow(
-          data.battery.hours,
-          data.generated_at,
-          data.battery.start_soc_pct,
-        ),
-      })
+  // Charge window markers come first: the start marker's instant is also
+  // where the "if charge enacted" line must part from the projection
+  // (see insertChargeStartVertices below).
+  const chargeMarkers =
+    plan?.recommendation?.kind === 'charge'
+      ? forecastChargeMarkers(data.generated_at, plan.recommendation.window)
+      : [];
+  const chargeStartTs =
+    chargeMarkers.find((m) => m.kind === 'start')?.timestamp ?? null;
+
+  // Anchor the projection at "now": the stored forward hours are full
+  // future hours, so without the anchor the chart's left edge is the END
+  // of the first hour — a full hour's drain below the live SOC (graph
+  // starting at 48% while the battery sat at 59%). The anchor uses the
+  // payload's generation time and the SOC the simulation actually started
+  // from, so it always lines up with the series regardless of fetch
+  // latency. Both lines are also re-labelled to state instants first: the
+  // simulation records each hourly bucket's END state under the
+  // bucket-start timestamp, which draws every change an hour early — a
+  // 23:30–23:59 window landed entirely in the 23:00 bucket's point, so the
+  // dashed "if charge enacted" line visibly climbed before the
+  // charge-start marker.
+  const anchoredProjection = data.battery
+    ? anchorSeriesAtNow(
+        relabelToStateInstants(data.battery.hours),
+        data.generated_at,
+        data.battery.start_soc_pct,
+      )
     : [];
   // Merge the planner's "if we follow the recommendation" trajectory onto
   // the battery projection so the Forecast tab's Battery projection chart
   // can draw it as a second line — same x-axis (unix seconds). The
   // hypothetical series ends at the next cheap-period start; anything
-  // after that must be based on a fresh recommendation.
-  const withChargeSeries =
+  // after that must be based on a fresh recommendation. The vertex
+  // insertion pins the dashed line to the projection until the window's
+  // start instant, so its rise begins exactly at the green marker instead
+  // of across the whole preceding hour.
+  const withChargePrepared =
     plan?.recommendation?.kind === 'charge'
       ? // The what-if trajectory starts from the same live SOC at the
         // same generation time — anchor it too so both lines meet at
         // "now" and the divergence reads as the charge's effect.
         anchorSeriesAtNow(
           truncateSeriesAtNextChargeStart(
-            plan.recommendation.with_charge_series,
+            relabelToStateInstants(plan.recommendation.with_charge_series),
             data.generated_at,
             plan.recommendation.window,
           ),
@@ -390,15 +407,19 @@ export default function ForecastPage() {
           data.battery?.start_soc_pct ?? plan.recommendation.current_soc_pct,
         )
       : [];
+  const { projection: projectionHours, withCharge: withChargeSeries } =
+    chargeStartTs != null && withChargePrepared.length > 0
+      ? insertChargeStartVertices(anchoredProjection, withChargePrepared, chargeStartTs)
+      : { projection: anchoredProjection, withCharge: withChargePrepared };
+
+  const batteryChart = data.battery
+    ? toBatteryChartData({ ...data.battery, hours: projectionHours })
+    : [];
   const batteryChartWithPlan = batteryChart.map((p) => {
     const match = withChargeSeries.find(([ts]) => ts === p.timestamp);
     return match ? { ...p, withCharge: match[1] } : { ...p, withCharge: undefined };
   });
   const hasWithCharge = withChargeSeries.length > 0;
-  const chargeMarkers =
-    plan?.recommendation?.kind === 'charge'
-      ? forecastChargeMarkers(data.generated_at, plan.recommendation.window)
-      : [];
   // The consumption profile is a typical-day hour-of-day series; tile it
   // onto the forward timestamps so all three charts share one x-axis —
   // same start (now), same horizon — instead of a midnight-anchored 24 h

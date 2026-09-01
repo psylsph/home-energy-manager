@@ -113,6 +113,92 @@ export function anchorSeriesAtNow(
   return [[generatedAt, startValue], ...series];
 }
 
+/** Re-label end-of-bucket series points with the instant each value
+ *  actually holds. The simulation records the state AFTER each hourly
+ *  bucket under the bucket-START timestamp, so a point labelled 23:00 is
+ *  really the state at midnight. Drawn as-is, every hour's change lands
+ *  one hour early on the chart — most visibly when a short charge window
+ *  sits in the tail of a bucket and the "if charge enacted" line starts
+ *  climbing well before the charge-start marker. Shifting each point
+ *  +1 h puts every segment on the axis hour it actually depicts. */
+export function relabelToStateInstants(
+  series: [number, number][],
+): [number, number][] {
+  return series.map(([timestamp, value]) => [timestamp + 3600, value]);
+}
+
+/** Give the projection and the "if charge enacted" lines a shared vertex
+ *  at the charge window's start instant, holding the uncharged SOC
+ *  (linearly interpolated from the projection — before the window the
+ *  what-if line IS the projection). Without it, the dashed line's single
+ *  hour-bucket point makes it rise across the whole bucket, visibly ahead
+ *  of the charge-start marker. A no-op when the window start is
+ *  hour-aligned (the bucket boundary already holds the pre-charge state)
+ *  or falls outside either series. */
+export function insertChargeStartVertices(
+  projection: [number, number][],
+  withCharge: [number, number][],
+  chargeStartTs: number,
+): { projection: [number, number][]; withCharge: [number, number][] } {
+  if (projection.length === 0 || withCharge.length === 0) {
+    return { projection, withCharge };
+  }
+  const hasPointAt = (series: [number, number][]) =>
+    series.some(([ts]) => ts === chargeStartTs);
+  if (hasPointAt(projection) || hasPointAt(withCharge)) {
+    return { projection, withCharge };
+  }
+  const within = (series: [number, number][]) =>
+    chargeStartTs > series[0][0] && chargeStartTs < series[series.length - 1][0];
+  if (!within(projection) || !within(withCharge)) {
+    return { projection, withCharge };
+  }
+  const preChargeSoc = interpolateSeriesAt(projection, chargeStartTs);
+  if (preChargeSoc == null) {
+    return { projection, withCharge };
+  }
+  return {
+    projection: insertVertexAt(projection, chargeStartTs, preChargeSoc),
+    withCharge: insertVertexAt(withCharge, chargeStartTs, preChargeSoc),
+  };
+}
+
+/** Linearly interpolate a `[timestamp, value][]` series at an instant
+ *  bracketed by two of its points; null when not bracketed. */
+function interpolateSeriesAt(
+  series: [number, number][],
+  ts: number,
+): number | null {
+  for (let i = 1; i < series.length; i++) {
+    const [t0, v0] = series[i - 1];
+    const [t1, v1] = series[i];
+    if (ts >= t0 && ts <= t1 && t1 > t0) {
+      return v0 + ((v1 - v0) * (ts - t0)) / (t1 - t0);
+    }
+  }
+  return null;
+}
+
+/** Insert a `[ts, value]` point into a time-sorted series (a point at `ts`
+ *  is assumed absent — callers check). */
+function insertVertexAt(
+  series: [number, number][],
+  ts: number,
+  value: number,
+): [number, number][] {
+  const out: [number, number][] = [];
+  let inserted = false;
+  for (const point of series) {
+    if (!inserted && ts < point[0]) {
+      out.push([ts, value]);
+      inserted = true;
+    }
+    out.push(point);
+  }
+  if (!inserted) out.push([ts, value]);
+  return out;
+}
+
 /** Chart-ready SOC projection points. */
 export function toBatteryChartData(battery: ForecastBattery): BatteryChartPoint[] {
   return battery.hours.map(([timestamp, soc]) => ({ timestamp, soc }));

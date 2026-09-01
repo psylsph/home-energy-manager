@@ -9,6 +9,8 @@ import {
   forecastPlanTitle,
   forecastStatusMessages,
   forwardHourTimestamps,
+  insertChargeStartVertices,
+  relabelToStateInstants,
   shouldRefetchForecast,
   toConsumptionChartData,
   toSolarChartData,
@@ -276,6 +278,116 @@ describe('anchorSeriesAtNow', () => {
 
   it('returns an empty series unchanged', () => {
     expect(anchorSeriesAtNow([], 100, 50)).toEqual([]);
+  });
+});
+
+describe('relabelToStateInstants', () => {
+  it('moves each end-of-bucket point to the instant its value holds (+1 h)', () => {
+    // The simulation records the state AFTER each hourly bucket under the
+    // bucket-START timestamp — the point labelled 23:00 is really the
+    // state at midnight. Drawn as-is, every hour's change lands one hour
+    // early on the chart (user report: the dashed "if charge enacted"
+    // line climbing before the charge-start marker).
+    expect(relabelToStateInstants([[1000, 10], [4600, 20]])).toEqual([
+      [4600, 10],
+      [8200, 20],
+    ]);
+  });
+
+  it('preserves values and order', () => {
+    const series: [number, number][] = [
+      [0, 5],
+      [3600, 4.5],
+      [7200, 3],
+    ];
+    expect(relabelToStateInstants(series).map(([, v]) => v)).toEqual([5, 4.5, 3]);
+  });
+
+  it('returns an empty series unchanged', () => {
+    expect(relabelToStateInstants([])).toEqual([]);
+  });
+});
+
+describe('insertChargeStartVertices', () => {
+  // Tonight-style shape (user report): a 23:30–23:59 charge window sits in
+  // the tail of the 23:00 hour bucket, so the raw series records the whole
+  // charge under the 23:00 label. Left uncorrected the chart draws the
+  // dashed "if charge enacted" line climbing from 22:00 — well before the
+  // charge-start marker at 23:30. Times below are offsets from 22:00.
+  const projection: [number, number][] = [
+    [0, 76.3], // state at 23:00
+    [3600, 73.4], // state at 24:00 (charge NOT applied in the projection)
+    [7200, 70.6],
+  ];
+  const withCharge: [number, number][] = [
+    [0, 76.3],
+    [3600, 92.2], // the 23:30–23:59 charge lands inside the 23:00 bucket
+    [7200, 89.3],
+  ];
+  const chargeStart = 3600 + 1800; // 23:30 as a true instant
+
+  const lerpAt = (series: [number, number][], ts: number): number | null => {
+    for (let i = 1; i < series.length; i++) {
+      const [t0, v0] = series[i - 1];
+      const [t1, v1] = series[i];
+      if (ts >= t0 && ts <= t1 && t1 > t0) {
+        return v0 + ((v1 - v0) * (ts - t0)) / (t1 - t0);
+      }
+    }
+    return null;
+  };
+
+  it('keeps the if-charge line exactly on the projection until the window starts', () => {
+    const { projection: proj, withCharge: dashed } = insertChargeStartVertices(
+      relabelToStateInstants(projection),
+      relabelToStateInstants(withCharge),
+      chargeStart,
+    );
+    // Before the window start the dashed line must sit on the projection —
+    // without the vertex it interpolates straight toward the post-charge
+    // value and visibly rises ahead of the charge-start marker.
+    for (const ts of [3600, 4050, 4500, 4950, chargeStart]) {
+      expect(lerpAt(dashed, ts)).toBeCloseTo(lerpAt(proj, ts) ?? Number.NaN, 6);
+    }
+    // The lift appears only after the window start.
+    expect(lerpAt(dashed, 7200)!).toBeGreaterThan(lerpAt(proj, 7200)!);
+  });
+
+  it('gives both lines a vertex at the window start holding the uncharged SOC', () => {
+    const { projection: proj, withCharge: dashed } = insertChargeStartVertices(
+      relabelToStateInstants(projection),
+      relabelToStateInstants(withCharge),
+      chargeStart,
+    );
+    // The projection interpolated at 23:30: 76.3 → 73.4, halfway.
+    expect(lerpAt(dashed, chargeStart)).toBeCloseTo(74.85, 3);
+    expect(proj.some(([ts]) => ts === chargeStart)).toBe(true);
+    expect(dashed.some(([ts]) => ts === chargeStart)).toBe(true);
+  });
+
+  it('is a no-op when the window start is hour-aligned (a point already exists)', () => {
+    const p = relabelToStateInstants(projection);
+    const d = relabelToStateInstants(withCharge);
+    const hourAlignedStart = 3600; // 23:00 — both lines already have it
+    const { projection: proj, withCharge: dashed } = insertChargeStartVertices(
+      p,
+      d,
+      hourAlignedStart,
+    );
+    expect(proj).toBe(p);
+    expect(dashed).toBe(d);
+  });
+
+  it('leaves the series alone when the instant falls outside the projection', () => {
+    const p = relabelToStateInstants(projection);
+    const d = relabelToStateInstants(withCharge);
+    const { projection: proj, withCharge: dashed } = insertChargeStartVertices(
+      p,
+      d,
+      20000,
+    );
+    expect(proj).toBe(p);
+    expect(dashed).toBe(d);
   });
 });
 
