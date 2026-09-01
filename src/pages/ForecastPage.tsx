@@ -126,6 +126,14 @@ function ForecastApplyProgress() {
 type ForecastChargeSlot = NonNullable<PlanResponse['apply']>['charge_slot'];
 const FORECAST_CHARGE_CONFIRM_TIMEOUT_MS = 15_000;
 
+/** The Forecast page's three chart tabs, in tab-strip (and keyboard) order. */
+const CHART_TABS = [
+  ['battery', 'Battery'],
+  ['solar', 'Solar'],
+  ['consumption', 'Home use'],
+] as const;
+type ForecastChart = (typeof CHART_TABS)[number][0];
+
 function forecastChargeSlotMatchesReadback(
   snapshot: InverterSnapshot | null,
   desired: ForecastChargeSlot,
@@ -254,7 +262,14 @@ export default function ForecastPage() {
   const [dischargeEffPct, setDischargeEffPct] = useState<number>(95);
   const [effSaving, setEffSaving] = useState(false);
   const [effError, setEffError] = useState<string | null>(null);
-  const [activeChart, setActiveChart] = useState<'battery' | 'solar' | 'consumption'>('battery');
+  const [activeChart, setActiveChart] = useState<ForecastChart>('battery');
+  // Roving-tabindex refs for the chart tab strip: after an arrow-key
+  // selection the newly active tab must receive focus (WAI-ARIA tabs).
+  const chartTabRefs = useRef<Record<ForecastChart, HTMLButtonElement | null>>({
+    battery: null,
+    solar: null,
+    consumption: null,
+  });
   const snapshot = useInverterStore((s) => s.snapshot);
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const lastRefetchRef = useRef<number>(0);
@@ -749,10 +764,16 @@ export default function ForecastPage() {
           <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-3">
             <div>
               <div className="text-xs font-medium text-text-primary">Automatic planning</div>
-              <div className="mt-0.5 text-[11px] text-text-secondary">
+              <div className="mt-0.5 text-[11px] text-text-secondary" data-testid="forecast-auto-apply-summary">
                 {planAutoHandling
                   ? planAutoApply && plan.recommendation.kind === 'charge'
-                    ? `On · applies at ${planAutoApplyTriggerLabel(plan.recommendation.window.start, Number(planAutoApplyLeadInput)) ?? 'the configured time'}`
+                    ? `On · applies at ${planAutoApplyTriggerLabel(
+                        plan.recommendation.window.start,
+                        // Same strict parser as the note below — Number('')
+                        // is 0, which would read an emptied field as a
+                        // zero lead and name the window's own start.
+                        parseLeadMinutes(planAutoApplyLeadInput) ?? Number.NaN,
+                      ) ?? 'the configured time'}`
                     : 'On · keeps the next charge slot up to date'
                   : 'Off · use the Apply button for each new plan'}
               </div>
@@ -1000,19 +1021,38 @@ export default function ForecastPage() {
           role="tablist"
           aria-label="Forecast chart"
           className="grid grid-cols-3 rounded-lg bg-bg-surface p-1"
+          onKeyDown={(e) => {
+            // WAI-ARIA tabs keyboard pattern: Arrow keys select and focus
+            // the neighbouring tab (wrapping), Home/End jump to the ends.
+            // The keys are consumed so the page never scrolls underneath.
+            const order = CHART_TABS.map(([chart]) => chart);
+            const idx = order.indexOf(activeChart);
+            let next: number | null = null;
+            if (e.key === 'ArrowRight') next = (idx + 1) % order.length;
+            else if (e.key === 'ArrowLeft')
+              next = (idx - 1 + order.length) % order.length;
+            else if (e.key === 'Home') next = 0;
+            else if (e.key === 'End') next = order.length - 1;
+            if (next == null) return;
+            e.preventDefault();
+            setActiveChart(order[next]);
+            chartTabRefs.current[order[next]]?.focus();
+          }}
         >
-          {([
-            ['battery', 'Battery'],
-            ['solar', 'Solar'],
-            ['consumption', 'Home use'],
-          ] as const).map(([chart, label]) => (
+          {CHART_TABS.map(([chart, label]) => (
             <button
               key={chart}
               type="button"
               role="tab"
+              id={`forecast-chart-tab-${chart}`}
+              aria-controls={`forecast-chart-panel-${chart}`}
               aria-selected={activeChart === chart}
+              tabIndex={activeChart === chart ? 0 : -1}
               data-testid={`forecast-chart-tab-${chart}`}
               onClick={() => setActiveChart(chart)}
+              ref={(el) => {
+                chartTabRefs.current[chart] = el;
+              }}
               className={`rounded-md px-3 py-2 text-xs sm:text-sm font-medium transition-colors ${activeChart === chart ? 'bg-bg-elevated text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}
             >
               {label}
@@ -1020,7 +1060,13 @@ export default function ForecastPage() {
           ))}
         </div>
 
-      <div className={activeChart === 'solar' ? '' : 'hidden'} aria-hidden={activeChart !== 'solar'}>
+      <div
+        role="tabpanel"
+        id="forecast-chart-panel-solar"
+        aria-labelledby="forecast-chart-tab-solar"
+        className={activeChart === 'solar' ? '' : 'hidden'}
+        aria-hidden={activeChart !== 'solar'}
+      >
       <ChartCard title="Expected solar generation · next 72 hours">
         {solarChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
@@ -1098,7 +1144,13 @@ export default function ForecastPage() {
       </ChartCard>
       </div>
 
-      <div className={activeChart === 'consumption' ? '' : 'hidden'} aria-hidden={activeChart !== 'consumption'}>
+      <div
+        role="tabpanel"
+        id="forecast-chart-panel-consumption"
+        aria-labelledby="forecast-chart-tab-consumption"
+        className={activeChart === 'consumption' ? '' : 'hidden'}
+        aria-hidden={activeChart !== 'consumption'}
+      >
       <ChartCard title="Expected home use · next 72 hours">
         {consumptionEmpty || consumptionChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
@@ -1204,7 +1256,13 @@ export default function ForecastPage() {
       </ChartCard>
       </div>
 
-      <div className={activeChart === 'battery' ? '' : 'hidden'} aria-hidden={activeChart !== 'battery'}>
+      <div
+        role="tabpanel"
+        id="forecast-chart-panel-battery"
+        aria-labelledby="forecast-chart-tab-battery"
+        className={activeChart === 'battery' ? '' : 'hidden'}
+        aria-hidden={activeChart !== 'battery'}
+      >
       <ChartCard
         title="Battery projection · next 72 hours"
         footer={
