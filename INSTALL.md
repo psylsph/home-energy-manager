@@ -821,6 +821,7 @@ Everything the app needs is in one directory:
 | `settings.json` | **Yes** | Inverter connection, tariff rates, Cosy charge slots, discharge slots, Agile config, load limiter, auto-winter, alerts, Octopus integration, and all other app settings |
 | `settings.json.bak` | Optional | Automatic backup of the previous `settings.json` — handy as a safety net |
 | `history.db` | Optional | Stored graph history (energy totals, power readings over time). Copy it if you want charts to pick up where they left off; skip it to start fresh on the new machine |
+| `history.db-wal`, `history.db-shm` | See note | SQLite write-ahead log and shared-memory index that pair with `history.db` when HEM is running. Only copy these **together with** `history.db`, and only when HEM is stopped on both PCs — otherwise leave them alone and delete them on the destination before copying `history.db` over. See step 2. |
 
 You do **not** need `logs/` or `backup/` — those are runtime log files and internal backups.
 
@@ -828,6 +829,8 @@ You do **not** need `logs/` or `backup/` — those are runtime log files and int
 
 1. Install the app on the second PC and run it once so it creates the config folder, then close it.
 2. Copy `settings.json` (and optionally `history.db`) from the first PC's config folder into the second PC's config folder, overwriting the defaults.
+
+   **If you are copying `history.db` to bring your chart history across:** `history.db`, `history.db-wal`, and `history.db-shm` form a set — SQLite trusts the `-wal` file over the main `history.db` if both are present. If the destination PC has run HEM at least once, its `history.db-wal` and `history.db-shm` point at its own (empty) database and will hide your copied data. The simplest workaround is to delete `history.db-wal` and `history.db-shm` on the destination before copying `history.db` over (the next HEM launch recreates them for the new session). Alternatively, copy all three files while HEM is stopped on both PCs. On Windows, `history.db-wal` and `history.db-shm` are hidden in Explorer by default — turn on "Show hidden files" in File Explorer Options if you need to see them.
 3. Launch the app on the second PC — your charge schedules, tariff rates, and all other settings will be there.
 
 ### If both PCs will run at the same time
