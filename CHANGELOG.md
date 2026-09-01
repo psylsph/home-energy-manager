@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.78.2] - 2026-09-01
+
+### Fixed
+
+- **A single bad meter read no longer knocks the day's solar figure down to zero.** Yesterday's corruption guard stopped a corrupt CT-meter read from inflating the day's solar, but recovering from it dropped the figure to nothing until midnight. Recovery is now staged: a one-off corrupt read is ignored and the true figure returns on its own a minute later, while a counter that has genuinely jumped keeps the solar already generated that day and carries on from the new reading — and a corrupt clamp still never takes healthy ones down with it.
+
+- **The Forecast page's chart tabs now work properly with keyboard and screen readers.** The tabs could be clicked but not reached or switched with arrow keys, and screen readers couldn't locate the chart each tab controls. Also fixed a small glitch where emptying the "minutes before the cheap window" field made the plan summary name the wrong trigger time.
+
 ## [0.78.1] - 2026-09-01
 
 ### Fixed
