@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.77.0] - 2026-09-01
+
+### Added
+
+- **The charge plan can now look after itself.** A new "Auto-refresh charge plan" setting re-sizes charge slot 1 from your live battery shortly before each cheap period, and clears it when no charge is needed — so the inverter stops repeating yesterday's charge night after night. While it's on, the planner owns charge slot 1 (the Control page says so right on the slot), and nights when Adaptive Charge is driving the charge rate are left alone.
+
+### Fixed
+
+- **Charge plans now hold the minimum they promise.** The plan used to work out one slot duration and repeat it every night; if the forecast trough fell after the charge window, the battery could still sink below your minimum even though the plan claimed otherwise. Plans are now worked out one charge at a time from the live battery — the shortest full-power charge that keeps you above the floor until the next cheap period (issue #283).
+
+- **The Forecast chart's "SOC if charge enacted" line no longer rises before the charge window actually starts.** Short windows were drawn across the whole hour they sat in, so a 23:30–23:59 plan showed the battery climbing from about 22:00. The line now hugs the projection until the window opens and rises exactly between the start and end markers.
+
+- **Tomorrow's expected import under a charge plan is right again for plans made late at night.** A plan made between 23:00 and midnight counted the charge against the wrong day, so the Tomorrow import figure could miss the charge window's electricity entirely.
+
+- **The app no longer pauses live updates while it rewrites the nightly charge plan.** On some inverter models the re-plan could hold up the live read-out for around ten seconds; it now uses the same background queue as every other control action, so graphs and gauges keep updating.
+
+### Internal
+
+- Full code review of the auto-refresh feature (CODE_REVIEW.md): every blocking and minor finding addressed — the Adaptive Charge interaction is pinned by tests, charge-limit coverage added for AC-coupled and three-phase models, and the plan payload dropped a field that was always 100 by design.
+
 ## [0.76.0] - 2026-08-31
 
 ### Added
