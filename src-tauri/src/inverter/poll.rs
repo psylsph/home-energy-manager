@@ -1558,6 +1558,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
     // Connect-failure counter for the auto-discovery subsystem (separate
     // from ReconnectController, which owns the dead-session/flap gates).
     let mut consecutive_connect_failures: u32 = 0;
+    // In-memory CT-solar recovery tracking (issue #294): per-meter last
+    // accepted same-day delta and consecutive-rejection count for the
+    // staged counter-corruption recovery. Loop-scoped (not persisted) so
+    // it survives across polls without rewriting settings.json each cycle.
+    let mut solar_ct_recovery: std::collections::BTreeMap<String, CtMeterRecovery> =
+        std::collections::BTreeMap::new();
     // Reconnect / back-off state machine: sustained-timeout disconnect,
     // dead-session escalation, flap gate, and the connect-failure back-off.
     // Extracted into ReconnectController so the multi-session transitions
@@ -3465,6 +3471,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         &mut snapshot,
                                         &poll_settings,
                                         &mut solar_baselines,
+                                        &mut solar_ct_recovery,
                                         chrono::Local::now().naive_local(),
                                     );
                                     if reseeded || solar_baselines
@@ -5611,6 +5618,23 @@ pub(crate) const SOLAR_METER_BASELINE_RESEED_DELTA_KWH: f64 = 1.0;
 /// where MAX bucketing preserved the plateau for the rest of the day.
 pub(crate) const SOLAR_METER_MAX_PLAUSIBLE_KW: f64 = 30.0;
 
+/// In-memory per-meter recovery tracking for [`apply_ct_solar_authority`]
+/// (issue #294). Deliberately not persisted: it only shapes within-day
+/// recovery, and updating it every poll would rewrite settings.json on
+/// every cycle.
+///
+/// `#[allow(dead_code)]` until the staged-recovery logic lands (RED
+/// tests pin the contract first).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct CtMeterRecovery {
+    /// Last accepted same-day delta (kWh) — the value the meter holds at
+    /// while its counter reads implausibly.
+    pub(crate) accepted_today_kwh: f64,
+    /// Consecutive polls whose delta was rejected as implausible.
+    pub(crate) consecutive_rejections: u32,
+}
+
 /// Apply CT-meter solar authority (issue #277).
 ///
 /// On AC-coupled systems the inverter's own PV registers mirror the AC
@@ -5658,6 +5682,7 @@ pub(crate) fn apply_ct_solar_authority(
     snapshot: &mut InverterSnapshot,
     settings: &crate::settings::Settings,
     baselines: &mut std::collections::BTreeMap<String, crate::settings::SolarMeterBaseline>,
+    _recovery: &mut std::collections::BTreeMap<String, CtMeterRecovery>,
     now_local: chrono::NaiveDateTime,
 ) -> bool {
     // Configured solar CT meters (addresses 1–8) that the user has
@@ -6185,7 +6210,8 @@ mod tests {
         let (mut snap, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3800, 100.0, 500.0)], 1800, 28.1);
         let mut baselines = std::collections::BTreeMap::new();
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        let mut recovery = std::collections::BTreeMap::new();
+        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         assert_eq!(snap.solar_power, 3800, "CT replaces inverter PV registers");
         // Baseline seeded on first sight of the meter.
         assert_eq!(baselines.len(), 1);
@@ -6197,9 +6223,10 @@ mod tests {
     fn ct_authority_accumulates_today_energy_since_midnight() {
         // First poll of the day: baseline seeded, today = 0.
         let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
         let (mut snap, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         assert_eq!(snap.today_solar_kwh, 0.0);
         // First read of the day: today starts at 0 (baseline seeded at the
         // current counters), and the meter card shows 0 rather than hiding
@@ -6214,7 +6241,8 @@ mod tests {
         // Later same day: export counter advanced 12.4 kWh → today = 12.4.
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
-        let reseeded = apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, day(0));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, &mut recovery, day(0));
         assert!(!reseeded, "same-day accumulation must not reseed");
         assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
         // Per-array card gets its own today figure.
@@ -6233,16 +6261,18 @@ mod tests {
         // Day 0 accumulates 12.4 kWh; first poll of day 1 reseeds and
         // today restarts at 0.
         let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
         let (mut snap, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, day(0));
+        apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, &mut recovery, day(0));
 
         let (mut snap3, settings) =
             ct_snapshot(vec![meter_with_energy(1, 1000, 100.0, 513.0)], 0, 0.0);
-        let reseeded = apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, day(1));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, &mut recovery, day(1));
         assert!(reseeded, "new day must reseed the baseline");
         assert_eq!(snap3.today_solar_kwh, 0.0, "today restarts at midnight");
         assert_eq!(baselines["1"].e_export_kwh, 513.0);
@@ -6254,17 +6284,19 @@ mod tests {
         // factory reset): reseed instead of freezing today at the stale
         // value.
         let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
         let (mut snap, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 1000.0, 500.0)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 1005.0, 512.4)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, day(0));
+        apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, &mut recovery, day(0));
         assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
 
         // Counter reset: import 1005 → 2, export 512.4 → 1.
         let (mut snap3, settings) = ct_snapshot(vec![meter_with_energy(1, 500, 2.0, 1.0)], 0, 0.0);
-        let reseeded = apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, day(0));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, &mut recovery, day(0));
         assert!(reseeded);
         assert_eq!(snap3.today_solar_kwh, 0.0);
         assert_eq!(baselines["1"].e_import_kwh, 2.0);
@@ -6285,7 +6317,9 @@ mod tests {
         let before_power = snap.solar_power;
         let before_today = snap.today_solar_kwh;
         let mut baselines = std::collections::BTreeMap::new();
-        let reseeded = apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        let mut recovery = std::collections::BTreeMap::new();
+        let reseeded =
+            apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         assert!(!reseeded);
         assert_eq!(snap.solar_power, before_power, "hybrid untouched");
         assert_eq!(snap.today_solar_kwh, before_today, "hybrid today untouched");
@@ -6318,7 +6352,8 @@ mod tests {
         };
         snap.solar_arrays = compute_solar_arrays(&snap, &settings);
         let mut baselines = std::collections::BTreeMap::new();
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        let mut recovery = std::collections::BTreeMap::new();
+        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         // Power = CT only (3200), not CT + DC (5200): the registers
         // mirror the same generation.
         assert_eq!(snap.solar_power, 3200);
@@ -6372,7 +6407,9 @@ mod tests {
         };
         snap.solar_arrays = compute_solar_arrays(&snap, &settings);
         let mut baselines = std::collections::BTreeMap::new();
-        let reseeded = apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        let mut recovery = std::collections::BTreeMap::new();
+        let reseeded =
+            apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         assert!(reseeded, "first sight of both meters seeds baselines");
         assert_eq!(snap.solar_power, 3500, "both CTs readable → CT authority");
 
@@ -6387,7 +6424,8 @@ mod tests {
             ..Default::default()
         };
         snap2.solar_arrays = compute_solar_arrays(&snap2, &settings);
-        let reseeded = apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, day(0));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, &mut recovery, day(0));
         assert!(!reseeded, "absent meter must not touch baselines");
         assert_eq!(
             snap2.solar_power, 2100,
@@ -6408,47 +6446,244 @@ mod tests {
             ct_snapshot(vec![meter_with_energy(1, 5, 100.0, 500.0)], 1800, 28.1);
         // 5 W is below the noise threshold → power_w clamps to 0.
         let mut baselines = std::collections::BTreeMap::new();
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, day(0));
+        let mut recovery = std::collections::BTreeMap::new();
+        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         assert_eq!(snap.solar_power, 0, "present meter reading ~0 → solar is 0");
     }
 
     #[test]
-    fn ct_authority_rejects_implausible_counter_jump() {
-        // Issue #294: a corrupt read of the meter's cumulative counter
-        // made the day's delta jump to ~1128 kWh and stick there — the
-        // CT path had no plausibility bound, so the value rode straight
-        // into the Status tile and history (where MAX bucketing kept the
-        // plateau all day). The same-day delta bound is
-        // 30 kW × hours-since-midnight + 1 kWh; at 10:30 that is 316 kWh,
-        // so a 1133.3 kWh jump must be rejected: the meter contributes 0
-        // this cycle and its baseline reseeds to the current counters.
+    fn ct_authority_transient_jump_self_heals_next_cycle() {
+        // Issue #294's one-cycle corrupt read must not damage the day at
+        // all: the implausible delta is rejected (never becomes today's
+        // solar), the tile holds the last accepted value, and because the
+        // baseline is NOT poisoned, the very next healthy counter read
+        // recovers the true figure by itself.
         let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
         let (mut snap, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, at(0, 0, 30));
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 0, 30),
+        );
 
-        // 10:30 same day: export counter jumped 1133.3 kWh in one step.
+        // 10:25: 5 kWh of real morning generation.
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 505.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 25),
+        );
+        assert!((snap.today_solar_kwh - 5.0).abs() < 0.01);
+
+        // 10:30: the reporter's corrupt read — export counter jumped
+        // 1133.3 kWh in one step (ceiling at 10:30 is 316 kWh).
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1633.3)], 0, 0.0);
-        let reseeded =
-            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 10, 30));
-        assert!(reseeded, "a corrupt jump must reseed the poisoned baseline");
-        assert_eq!(
-            snap2.today_solar_kwh, 0.0,
-            "corrupt delta must not become today's solar"
+        let reseeded = apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 30),
         );
-        // f32 meter counters widen to f64 with rounding — compare with
-        // tolerance.
         assert!(
-            (baselines["1"].e_export_kwh - 1633.3).abs() < 0.01,
-            "baseline reseeds to the current (corrupt) counter"
+            !reseeded,
+            "a first corrupt cycle must not poison the baseline"
         );
-        let meter_arr = snap2
-            .solar_arrays
-            .iter()
-            .find(|a| a.source == SolarArraySource::Meter)
-            .unwrap();
-        assert_eq!(meter_arr.today_kwh, Some(0.0));
+        assert!(
+            (snap2.today_solar_kwh - 5.0).abs() < 0.01,
+            "corrupt delta must not become today's solar — hold the last accepted value"
+        );
+        assert_eq!(
+            recovery["1"].consecutive_rejections, 1,
+            "the rejection is tracked for the staged recovery"
+        );
+
+        // 10:35: the counter reads normally again — the true figure
+        // recovers by itself, no reseed involved.
+        let (mut snap3, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 507.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut snap3,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 35),
+        );
+        assert!(!reseeded);
+        assert!(
+            (snap3.today_solar_kwh - 7.0).abs() < 0.01,
+            "a transient glitch self-heals on the next healthy read"
+        );
+        assert_eq!(recovery["1"].consecutive_rejections, 0);
+
+        // 10:40: a second glitch later starts a fresh streak — the
+        // healthy read in between reset the rejection counter.
+        let (mut snap4, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1633.3)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap4,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 40),
+        );
+        assert!((snap4.today_solar_kwh - 7.0).abs() < 0.01);
+        assert_eq!(recovery["1"].consecutive_rejections, 1);
+    }
+
+    #[test]
+    fn ct_authority_persistent_jump_carries_forward_after_three_rejections() {
+        // A jump that holds for three consecutive polls is a persistent
+        // counter shift, not a transient glitch: the baseline reseeds to
+        // (current − last accepted) so the day's real energy survives —
+        // the tile holds 24.4 kWh through the burst and accumulates from
+        // the new resting point afterwards, instead of dropping to 0.
+        let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 0, 30),
+        );
+        // 10:25: the reporter's healthy 24.4 kWh.
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 524.4)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 25),
+        );
+        assert!((snap.today_solar_kwh - 24.4).abs() < 0.01);
+
+        // Three consecutive implausible cycles (delta 1150 vs a ~321
+        // kWh ceiling): the first two hold, the third carries forward.
+        for (hour, min) in [(10, 30), (10, 35)] {
+            let (mut s, settings) =
+                ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1650.0)], 0, 0.0);
+            let reseeded = apply_ct_solar_authority(
+                &mut s,
+                &settings,
+                &mut baselines,
+                &mut recovery,
+                at(0, hour, min),
+            );
+            assert!(!reseeded, "rejection {min} must not reseed yet");
+            assert!(
+                (s.today_solar_kwh - 24.4).abs() < 0.01,
+                "stage 1 holds the last accepted value"
+            );
+            assert!((baselines["1"].e_export_kwh - 500.0).abs() < 0.01);
+        }
+
+        // Third rejection: stage 2 — carry-forward reseed.
+        let (mut s, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1650.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut s,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 40),
+        );
+        assert!(
+            reseeded,
+            "the third consecutive rejection triggers the reseed"
+        );
+        assert!(
+            (s.today_solar_kwh - 24.4).abs() < 0.01,
+            "the carry-forward keeps the day's accepted energy on the reseed cycle"
+        );
+        assert!(
+            (baselines["1"].e_export_kwh - 1625.6).abs() < 0.01,
+            "baseline carries the accepted energy forward (1650 − 24.4)"
+        );
+
+        // 10:45: the counter advances normally from its new resting
+        // point — accumulation resumes on top of the carried value.
+        let (mut s, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1650.8)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut s,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 45),
+        );
+        assert!(!reseeded, "post-reseed accumulation is not another spike");
+        assert!((s.today_solar_kwh - 25.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn ct_authority_rejection_streak_resets_across_midnight() {
+        // The rejection counter is day-scoped: yesterday's two rejections
+        // must not combine with today's first corrupt read into an early
+        // stage-2 reseed at 00:10 (where even 6 kWh in 10 minutes is
+        // implausible).
+        let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 0, 30),
+        );
+        // Two spikes late on day 0.
+        for min in [23_55, 23_58] {
+            let (mut s, settings) =
+                ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1633.3)], 0, 0.0);
+            apply_ct_solar_authority(
+                &mut s,
+                &settings,
+                &mut baselines,
+                &mut recovery,
+                at(0, min / 60, min % 60),
+            );
+        }
+        assert_eq!(recovery["1"].consecutive_rejections, 2);
+
+        // 00:05 on day 1: new day — the seed path resets the tracker.
+        let (mut s, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 510.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut s,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(1, 0, 5),
+        );
+        assert_eq!(recovery["1"].consecutive_rejections, 0);
+
+        // 00:10 on day 1: a fresh spike counts from one again — hold,
+        // not a stage-2 carry-forward reseed.
+        let (mut s, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1600.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut s,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(1, 0, 10),
+        );
+        assert!(!reseeded, "a new day must not inherit yesterday's streak");
+        assert_eq!(s.today_solar_kwh, 0.0);
+        assert_eq!(recovery["1"].consecutive_rejections, 1);
+        assert!((baselines["1"].e_export_kwh - 510.0).abs() < 0.01);
     }
 
     #[test]
@@ -6456,41 +6691,28 @@ mod tests {
         // 24.4 kWh by 14:00 (the reporter's healthy PV1 figure) is well
         // inside 30 kW × 14 h + 1 — must accumulate normally, untouched.
         let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
         let (mut snap, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, at(0, 0, 30));
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 0, 30),
+        );
 
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 524.4)], 0, 0.0);
-        let reseeded =
-            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 14, 0));
+        let reseeded = apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 14, 0),
+        );
         assert!(!reseeded, "plausible generation must not reseed");
         assert!((snap2.today_solar_kwh - 24.4).abs() < 0.01);
-    }
-
-    #[test]
-    fn ct_authority_recovers_after_spike_reseed() {
-        // After a rejected jump the next poll resumes accumulating from
-        // the reseeded baseline instead of repeating the spike (issue
-        // #294's all-day plateau) or staying stuck at 0.
-        let mut baselines = std::collections::BTreeMap::new();
-        let (mut snap, settings) =
-            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, at(0, 0, 30));
-        let (mut snap2, settings) =
-            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1633.3)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 10, 30));
-
-        // 10:35: counter advances normally from its (corrupt) resting
-        // point — 0.8 kWh in five minutes is impossible in reality but
-        // the guard is per-cycle from the baseline, and 0.8 is inside
-        // the bound, so accumulation resumes.
-        let (mut snap3, settings) =
-            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1634.1)], 0, 0.0);
-        let reseeded =
-            apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, at(0, 10, 35));
-        assert!(!reseeded, "post-reseed accumulation is not another spike");
-        assert!((snap3.today_solar_kwh - 0.8).abs() < 0.01);
     }
 
     #[test]
@@ -6522,7 +6744,14 @@ mod tests {
         };
         snap.solar_arrays = compute_solar_arrays(&snap, &settings);
         let mut baselines = std::collections::BTreeMap::new();
-        apply_ct_solar_authority(&mut snap, &settings, &mut baselines, at(0, 0, 30));
+        let mut recovery = std::collections::BTreeMap::new();
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 0, 30),
+        );
 
         // 10:30: meter 1 advances 5.0 kWh; meter 2's counter jumps by
         // the reporter's 1128.3.
@@ -6534,21 +6763,28 @@ mod tests {
             ..Default::default()
         };
         snap2.solar_arrays = compute_solar_arrays(&snap2, &settings);
-        let reseeded =
-            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 10, 30));
-        assert!(reseeded, "meter 2's jump reseeds its baseline");
+        let reseeded = apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 10, 30),
+        );
+        assert!(!reseeded, "a first corrupt cycle must not reseed anything");
         assert!(
             (snap2.today_solar_kwh - 5.0).abs() < 0.01,
-            "healthy meter keeps contributing, corrupt one contributes 0"
+            "healthy meter keeps contributing, corrupt one holds its last accepted 0"
         );
         assert_eq!(
             baselines["1"].e_export_kwh, 500.0,
             "healthy baseline untouched"
         );
         assert!(
-            (baselines["2"].e_export_kwh - 1178.3).abs() < 0.01,
-            "corrupt baseline reseeded"
+            (baselines["2"].e_export_kwh - 50.0).abs() < 0.01,
+            "corrupt meter's baseline is not poisoned by one bad cycle"
         );
+        assert_eq!(recovery["1"].consecutive_rejections, 0);
+        assert_eq!(recovery["2"].consecutive_rejections, 1);
     }
 
     #[test]
