@@ -280,6 +280,73 @@ describe('ForecastPage', () => {
     ).toBe('false');
   });
 
+  it('links each chart tab to an addressable tabpanel', async () => {
+    // role=tab without an addressable role=tabpanel breaks the ARIA tabs
+    // contract: screen readers announce a selected tab whose panel can
+    // never be located. Every tab must point at a real panel via
+    // aria-controls, the panel must point back via aria-labelledby, and
+    // only the active tab may sit in the tab order (roving tabindex).
+    render(<ForecastPage />);
+    const batteryTab = await screen.findByTestId('forecast-chart-tab-battery');
+    expect(batteryTab.getAttribute('aria-selected')).toBe('true');
+
+    const charts = ['battery', 'solar', 'consumption'] as const;
+    for (const chart of charts) {
+      const tab = screen.getByTestId(`forecast-chart-tab-${chart}`);
+      const panelId = tab.getAttribute('aria-controls');
+      expect(panelId, `${chart} tab must reference a panel`).toMatch(
+        /^forecast-chart-panel-/,
+      );
+      const panel = document.getElementById(panelId ?? '');
+      expect(panel, `${chart} panel must exist`).not.toBeNull();
+      expect(panel?.getAttribute('role')).toBe('tabpanel');
+      expect(panel?.getAttribute('aria-labelledby')).toBe(tab.id);
+    }
+
+    for (const chart of charts) {
+      const tab = screen.getByTestId(`forecast-chart-tab-${chart}`) as HTMLButtonElement;
+      expect(tab.tabIndex, `only the active tab is tabbable`).toBe(
+        chart === 'battery' ? 0 : -1,
+      );
+    }
+  });
+
+  it('arrow keys move through the chart tabs and wrap at the ends', async () => {
+    // The tabs pattern expects a keyboard path: Arrow keys select and
+    // focus the neighbouring tab (wrapping), Home/End jump to the ends.
+    render(<ForecastPage />);
+    const battery = (await screen.findByTestId(
+      'forecast-chart-tab-battery',
+    )) as HTMLButtonElement;
+    battery.focus();
+    expect(document.activeElement).toBe(battery);
+
+    const solar = screen.getByTestId('forecast-chart-tab-solar') as HTMLButtonElement;
+    fireEvent.keyDown(battery, { key: 'ArrowRight' });
+    expect(solar.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(solar);
+
+    fireEvent.keyDown(solar, { key: 'ArrowLeft' });
+    expect(battery.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(battery);
+
+    // Left from the first tab wraps to the last.
+    const consumption = screen.getByTestId(
+      'forecast-chart-tab-consumption',
+    ) as HTMLButtonElement;
+    fireEvent.keyDown(battery, { key: 'ArrowLeft' });
+    expect(consumption.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(consumption);
+
+    // Home/End jump to the first/last tab.
+    fireEvent.keyDown(consumption, { key: 'Home' });
+    expect(battery.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(battery);
+    fireEvent.keyDown(battery, { key: 'End' });
+    expect(consumption.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(consumption);
+  });
+
   it('labels consumption bands as low and high estimates', async () => {
     render(<ForecastPage />);
     await waitFor(() => {
@@ -1008,6 +1075,26 @@ describe('ForecastPage auto-apply toggle', () => {
     expect(
       apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),
     ).toBe(false);
+  });
+
+  it('the Automatic planning summary falls back while the lead field is invalid', async () => {
+    // The summary line used Number(leadInput), so an emptied field read
+    // as a zero lead and rendered "applies at 02:00" — the window's own
+    // start — while the note below it correctly fell back to the generic
+    // text. Both displays must share the strict parser so they can never
+    // disagree.
+    mockLoad();
+    render(<ForecastPage />);
+    const summary = await screen.findByTestId('forecast-auto-apply-summary');
+    // 30-minute lead before the 02:00 window.
+    expect(summary.textContent).toMatch(/applies at 01:30/);
+
+    fireEvent.change(screen.getByTestId('forecast-auto-apply-lead'), {
+      target: { value: '' },
+    });
+
+    expect(summary.textContent).not.toMatch(/applies at 02:00/);
+    expect(summary.textContent).toMatch(/the configured time/);
   });
 });
 
