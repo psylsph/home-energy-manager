@@ -5602,6 +5602,15 @@ pub(crate) fn compute_solar_arrays(
 /// negative "today" energy.
 pub(crate) const SOLAR_METER_BASELINE_RESEED_DELTA_KWH: f64 = 1.0;
 
+/// Per-clamp plausibility ceiling for the CT "today" delta (issue #294).
+/// Mirrors the history-side 30 kW counter-delta bound: no residential
+/// clamp sees more than ~30 kW sustained, so a day's delta can never
+/// grow faster than 30 kW × hours-since-midnight (+1 kWh margin). The
+/// CT path runs after the sanitizer, so without this bound a single
+/// corrupt counter read rode straight into the Status tile and history,
+/// where MAX bucketing preserved the plateau for the rest of the day.
+pub(crate) const SOLAR_METER_MAX_PLAUSIBLE_KW: f64 = 30.0;
+
 /// Apply CT-meter solar authority (issue #277).
 ///
 /// On AC-coupled systems the inverter's own PV registers mirror the AC
@@ -5627,7 +5636,12 @@ pub(crate) const SOLAR_METER_BASELINE_RESEED_DELTA_KWH: f64 = 1.0;
 ///   generation on an AC-coupled box). The baseline map (in
 ///   `baselines`) is reseeded at local midnight and on counter resets;
 ///   reseeded entries drive the `bool` return so the caller can persist
-///   them.
+///   them. Each same-day delta is also bounded at
+///   `SOLAR_METER_MAX_PLAUSIBLE_KW` × hours-since-midnight + 1 kWh
+///   (issue #294): a corrupt counter read that blows through the bound
+///   reseeds that meter's baseline and contributes 0 for the cycle —
+///   the same recovery the counter-reset path uses — instead of
+///   poisoning the aggregate.
 /// - Per-array `today_kwh` is stamped onto the meter entries in
 ///   `snapshot.solar_arrays` (they ship `None` today, issue #110).
 ///
@@ -5747,7 +5761,31 @@ pub(crate) fn apply_ct_solar_authority(
                     force_reseed = true;
                     0.0
                 } else {
-                    d_import.max(d_export)
+                    let delta = d_import.max(d_export);
+                    // Issue #294: bound the delta the same way the sanitizer
+                    // bounds the inverter registers (the CT path runs after
+                    // sanitization, so this is that check's last line of
+                    // defence). A jump faster than 30 kW × hours-since-midnight
+                    // cannot be real generation — the counter read (or the
+                    // baseline beneath it) is corrupt, so reseed to the current
+                    // counters and contribute 0 this cycle rather than writing
+                    // the spike into the snapshot and history.
+                    let elapsed_hours = (now_local.time().num_seconds_from_midnight() as f64
+                        / 3600.0)
+                        .max(1.0 / 60.0);
+                    let ceiling = SOLAR_METER_MAX_PLAUSIBLE_KW * elapsed_hours + 1.0;
+                    if delta > ceiling {
+                        tracing::warn!(
+                            meter = addr,
+                            delta_kwh = delta,
+                            ceiling_kwh = ceiling,
+                            "Solar CT counter jumped implausibly — reseeding baseline, contributing 0 this cycle"
+                        );
+                        force_reseed = true;
+                        0.0
+                    } else {
+                        delta
+                    }
                 }
             }
             Some(_) | None => {
@@ -6392,14 +6430,17 @@ mod tests {
         // 10:30 same day: export counter jumped 1133.3 kWh in one step.
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1633.3)], 0, 0.0);
-        let reseeded = apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 10, 30));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 10, 30));
         assert!(reseeded, "a corrupt jump must reseed the poisoned baseline");
         assert_eq!(
             snap2.today_solar_kwh, 0.0,
             "corrupt delta must not become today's solar"
         );
-        assert_eq!(
-            baselines["1"].e_export_kwh, 1633.3,
+        // f32 meter counters widen to f64 with rounding — compare with
+        // tolerance.
+        assert!(
+            (baselines["1"].e_export_kwh - 1633.3).abs() < 0.01,
             "baseline reseeds to the current (corrupt) counter"
         );
         let meter_arr = snap2
@@ -6421,7 +6462,8 @@ mod tests {
 
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 524.4)], 0, 0.0);
-        let reseeded = apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 14, 0));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 14, 0));
         assert!(!reseeded, "plausible generation must not reseed");
         assert!((snap2.today_solar_kwh - 24.4).abs() < 0.01);
     }
@@ -6445,7 +6487,8 @@ mod tests {
         // the bound, so accumulation resumes.
         let (mut snap3, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 1634.1)], 0, 0.0);
-        let reseeded = apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, at(0, 10, 35));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, at(0, 10, 35));
         assert!(!reseeded, "post-reseed accumulation is not another spike");
         assert!((snap3.today_solar_kwh - 0.8).abs() < 0.01);
     }
@@ -6491,14 +6534,21 @@ mod tests {
             ..Default::default()
         };
         snap2.solar_arrays = compute_solar_arrays(&snap2, &settings);
-        let reseeded = apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 10, 30));
+        let reseeded =
+            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, at(0, 10, 30));
         assert!(reseeded, "meter 2's jump reseeds its baseline");
         assert!(
             (snap2.today_solar_kwh - 5.0).abs() < 0.01,
             "healthy meter keeps contributing, corrupt one contributes 0"
         );
-        assert_eq!(baselines["1"].e_export_kwh, 500.0, "healthy baseline untouched");
-        assert_eq!(baselines["2"].e_export_kwh, 1178.3, "corrupt baseline reseeded");
+        assert_eq!(
+            baselines["1"].e_export_kwh, 500.0,
+            "healthy baseline untouched"
+        );
+        assert!(
+            (baselines["2"].e_export_kwh - 1178.3).abs() < 0.01,
+            "corrupt baseline reseeded"
+        );
     }
 
     #[test]
@@ -8450,9 +8500,7 @@ mod tests {
         let now = chrono::Local::now();
         let start_t = now + chrono::Duration::minutes(2);
         let end_t = start_t + chrono::Duration::minutes(35);
-        let hm = |t: chrono::DateTime<chrono::Local>| {
-            format!("{:02}:{:02}", t.hour(), t.minute())
-        };
+        let hm = |t: chrono::DateTime<chrono::Local>| format!("{:02}:{:02}", t.hour(), t.minute());
         TariffConfig {
             slots: vec![
                 TariffSlot {
