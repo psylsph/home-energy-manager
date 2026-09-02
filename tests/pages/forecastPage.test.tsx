@@ -641,6 +641,14 @@ describe('ForecastPage plan card', () => {
     });
     expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge start/);
     expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge end/);
+    // Marker keys live in the card FOOTER — small and away from the
+    // graph — not in the under-chart line legend.
+    expect(
+      screen.getByTestId('forecast-charge-legend').closest('div')?.className,
+    ).toMatch(/mt-2/);
+    expect(screen.getByTestId('forecast-line-legend').textContent).not.toMatch(
+      'Charge start',
+    );
   });
 
   it('draws the current-schedule line on the Battery projection chart when slots are enabled', async () => {
@@ -666,10 +674,15 @@ describe('ForecastPage plan card', () => {
       if (path === '/api/forecast/plan') return planPayload('no_plan');
       return { ok: true, data: {} };
     });
-    render(<ForecastPage />);
+    const { container } = render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('With current schedule')).toBeTruthy();
+      // The legend gains the toggleable description…
+      expect(
+        screen.getByRole('button', { name: 'With current schedule' }),
+      ).toBeTruthy();
     });
+    // …and the pink line itself renders on the chart.
+    expect(container.querySelector('[data-stroke="#f472b6"]')).not.toBeNull();
     // A caption inside the card explains what the line represents.
     const card = screen
       .getByText('Battery projection · next 72 hours')
@@ -678,15 +691,99 @@ describe('ForecastPage plan card', () => {
   });
 
   it('hides the current-schedule line when no slot is enabled', async () => {
-    // Without enabled slots the projection would duplicate the Eco line.
+    // Without enabled slots the projection would duplicate the Eco line:
+    // neither the pink line nor its legend entry may render.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
+    const { container } = render(<ForecastPage />);
+    await screen.findByText('Tomorrow');
+    expect(
+      screen.queryByRole('button', { name: 'With current schedule' }),
+    ).toBeNull();
+    expect(container.querySelector('[data-stroke="#f472b6"]')).toBeNull();
+  });
+
+  it('gives every projection line a toggleable legend entry under the chart', async () => {
+    // Issue #297 feedback: the line descriptions (including the
+    // no-grid-charging SOC baseline) belong in a legend close under the
+    // graph; the Charge start/end marker keys must not be in it.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: {
+            ...fullPayload(),
+            battery: {
+              ...fullPayload().battery,
+              with_current_schedule: [[1_700_003_600, 65]],
+            },
+          },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const legend = await screen.findByTestId('forecast-line-legend');
+    expect(legend.textContent).toMatch('SOC');
+    expect(legend.textContent).toMatch('If charge enacted');
+    expect(legend.textContent).toMatch('With current schedule');
+    expect(legend.textContent).not.toMatch('Charge start');
+    expect(legend.textContent).not.toMatch('Charge end');
+  });
+
+  it('keeps the no-grid-charging SOC line in the legend even with no plan or schedule', async () => {
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/forecast') return { ok: true, data: fullPayload() };
       if (path === '/api/forecast/plan') return planPayload('no_plan');
       return { ok: true, data: {} };
     });
     render(<ForecastPage />);
-    await screen.findByText('Tomorrow');
-    expect(screen.queryByText('With current schedule')).toBeNull();
+    const legend = await screen.findByTestId('forecast-line-legend');
+    expect(legend.textContent).toBe('SOC');
+  });
+
+  it('toggles a projection line off and on from the legend', async () => {
+    const { container } = render(<ForecastPage />);
+    const soc = await screen.findByRole('button', { name: 'SOC' });
+    const socLine = () => container.querySelector('[data-stroke="#34d399"]');
+    expect(soc.getAttribute('aria-pressed')).toBe('true');
+    expect(socLine()).not.toBeNull();
+
+    fireEvent.click(soc);
+    expect(soc.getAttribute('aria-pressed')).toBe('false');
+    expect(socLine()).toBeNull();
+
+    fireEvent.click(soc);
+    expect(soc.getAttribute('aria-pressed')).toBe('true');
+    expect(socLine()).not.toBeNull();
+  });
+
+  it('hiding the plan line also hides the charge markers and its caption', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    const { container } = render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-charge-legend')).toBeTruthy();
+    expect(screen.getAllByTestId('forecast-charge-marker')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'If charge enacted' }));
+    expect(container.querySelector('[data-stroke="#60a5fa"]')).toBeNull();
+    expect(
+      container.querySelectorAll('[data-testid="forecast-charge-marker"]'),
+    ).toHaveLength(0);
+    expect(screen.queryByTestId('forecast-charge-legend')).toBeNull();
+    expect(screen.queryByText(/SOC if overnight charge enacted/)).toBeNull();
+
+    // Toggling back restores everything.
+    fireEvent.click(screen.getByRole('button', { name: 'If charge enacted' }));
+    expect(screen.getAllByTestId('forecast-charge-marker')).toHaveLength(2);
+    expect(screen.getByTestId('forecast-charge-legend')).toBeTruthy();
   });
 
   it('hides Apply when no charge is needed', async () => {

@@ -59,10 +59,14 @@ import { useInverterStore } from '../store/useInverterStore';
 
 function ChartCard({
   title,
+  legend,
   footer,
   children,
 }: {
   title: string;
+  /** Toggleable line legend rendered directly under the chart area —
+   *  closer to the graph than the footer captions. */
+  legend?: React.ReactNode;
   /** Optional caption rendered INSIDE the card background, below the
    *  fixed-height chart area. Anything placed among `children` would
    *  land inside the `h-56` div alongside the 100%-height chart and
@@ -74,8 +78,57 @@ function ChartCard({
     <section className="bg-bg-surface rounded-lg p-3 sm:p-4">
       <h2 className="text-sm font-semibold text-text-primary mb-3">{title}</h2>
       <div className="h-56 sm:h-64">{children}</div>
+      {legend ? <div className="mt-1.5">{legend}</div> : null}
       {footer ? <div className="mt-2">{footer}</div> : null}
     </section>
+  );
+}
+
+/** Toggleable line legend for the Battery projection chart: activating a
+ *  description hides/shows that line. Plain buttons rather than
+ *  recharts' Legend so every entry is a real, keyboard-reachable control
+ *  with an aria-pressed state. */
+function LineToggleLegend({
+  lines,
+  hidden,
+  onToggle,
+}: {
+  lines: { key: string; label: string; colour: string; style?: 'solid' | 'dashed' | 'dotted' }[];
+  hidden: ReadonlySet<string>;
+  onToggle: (key: string) => void;
+}) {
+  return (
+    <div
+      data-testid="forecast-line-legend"
+      role="group"
+      aria-label="Projection lines — activate to show or hide a line"
+      className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1"
+    >
+      {lines.map((line) => {
+        const visible = !hidden.has(line.key);
+        return (
+          <button
+            key={line.key}
+            type="button"
+            onClick={() => onToggle(line.key)}
+            aria-pressed={visible}
+            className={`inline-flex cursor-pointer items-center gap-1.5 text-xs font-sans ${
+              visible ? 'text-text-primary' : 'text-text-secondary/50 line-through'
+            }`}
+          >
+            <span
+              aria-hidden
+              className="inline-block w-4 align-middle"
+              style={{
+                borderTop: `2px ${line.style ?? 'solid'} ${line.colour}`,
+                opacity: visible ? 1 : 0.35,
+              }}
+            />
+            {line.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -246,6 +299,20 @@ export default function ForecastPage() {
   const [planAutoApplyLeadDirty, setPlanAutoApplyLeadDirty] = useState(false);
   const [planAutoApplySaving, setPlanAutoApplySaving] = useState(false);
   const [planAutoApplyError, setPlanAutoApplyError] = useState<string | null>(null);
+  // Battery projection lines the user has hidden via the legend (issue
+  // #297): keys are 'soc' | 'withCharge' | 'withCurrent'. Session-scoped
+  // on purpose — a fresh page starts with every line visible.
+  const [hiddenLines, setHiddenLines] = useState<ReadonlySet<string>>(new Set());
+  const toggleLine = (key: string) =>
+    setHiddenLines((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
   // One merged control owns both planner flags: auto-apply is the
   // configurable, notifying successor of the older fixed-lead auto-refresh
   // — they do the same job (keep charge slot 1 in step before the cheap
@@ -574,6 +641,32 @@ export default function ForecastPage() {
       : undefined;
     return match ? { ...p, withCurrent: match[1] } : { ...p, withCurrent: undefined };
   });
+  const lineVisible = (key: string) => !hiddenLines.has(key);
+  // Legend descriptions: SOC always (the no-grid-charging baseline); the
+  // what-if lines only when data exists for them.
+  const batteryLegendLines = [
+    { key: 'soc', label: 'SOC', colour: '#34d399', style: 'solid' as const },
+    ...(hasWithCharge
+      ? [
+          {
+            key: 'withCharge',
+            label: 'If charge enacted',
+            colour: '#60a5fa',
+            style: 'dashed' as const,
+          },
+        ]
+      : []),
+    ...(hasWithSchedule
+      ? [
+          {
+            key: 'withCurrent',
+            label: 'With current schedule',
+            colour: '#f472b6',
+            style: 'dotted' as const,
+          },
+        ]
+      : []),
+  ];
   // The consumption profile is a typical-day hour-of-day series; tile it
   // onto the forward timestamps so all three charts share one x-axis —
   // same start (now), same horizon — instead of a midnight-anchored 24 h
@@ -1320,11 +1413,22 @@ export default function ForecastPage() {
       >
       <ChartCard
         title="Battery projection · next 72 hours"
+        legend={
+          batteryChart.length > 0 ? (
+            <LineToggleLegend
+              lines={batteryLegendLines}
+              hidden={hiddenLines}
+              onToggle={toggleLine}
+            />
+          ) : undefined
+        }
         footer={
-          hasWithCharge || hasWithSchedule ? (
+          (hasWithCharge && lineVisible('withCharge')) ||
+          (hasWithSchedule && lineVisible('withCurrent')) ||
+          (chargeMarkers.length > 0 && lineVisible('withCharge')) ? (
             <>
-              {hasWithCharge && plan?.recommendation?.kind === 'charge' ? (
-                <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
+              {hasWithCharge && lineVisible('withCharge') && plan?.recommendation?.kind === 'charge' ? (
+                <p className="text-[11px] text-text-secondary/70 font-sans leading-snug">
                   <span
                     aria-hidden
                     className="inline-block w-3 h-px align-middle mr-1"
@@ -1335,8 +1439,8 @@ export default function ForecastPage() {
                   {' '}{plan.recommendation.kwh.toFixed(1)} kWh.
                 </p>
               ) : null}
-              {hasWithSchedule ? (
-                <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
+              {hasWithSchedule && lineVisible('withCurrent') ? (
+                <p className="text-[11px] text-text-secondary/70 font-sans leading-snug">
                   <span
                     aria-hidden
                     className="inline-block w-3 h-px align-middle mr-1"
@@ -1344,6 +1448,27 @@ export default function ForecastPage() {
                   />
                   SOC with your current inverter schedule — enabled charge/discharge
                   slots as configured.
+                </p>
+              ) : null}
+              {chargeMarkers.length > 0 && lineVisible('withCharge') ? (
+                // Marker keys live in the footer, small and away from the
+                // graph — the legend under the chart is for the lines.
+                <p
+                  data-testid="forecast-charge-legend"
+                  className="text-[10px] text-text-secondary/70 font-sans leading-snug"
+                >
+                  <span
+                    aria-hidden
+                    className="inline-block w-3 h-px align-middle mr-1"
+                    style={{ borderTop: '2px dashed #34d399' }}
+                  />
+                  Charge start
+                  <span
+                    aria-hidden
+                    className="inline-block w-3 h-px align-middle mr-1 ml-3"
+                    style={{ borderTop: '2px dashed #fbbf24' }}
+                  />
+                  Charge end
                 </p>
               ) : null}
             </>
@@ -1358,17 +1483,18 @@ export default function ForecastPage() {
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={batteryChartData}>
               <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
-              {chargeMarkers.map((marker) => {
-                const colour = marker.kind === 'start' ? '#34d399' : '#fbbf24';
-                return (
-                  <ReferenceLine
-                    key={`${marker.kind}-${marker.timestamp}`}
-                    x={marker.timestamp}
-                    stroke={colour}
-                    strokeDasharray="4 3"
-                  />
-                );
-              })}
+              {lineVisible('withCharge') &&
+                chargeMarkers.map((marker) => {
+                  const colour = marker.kind === 'start' ? '#34d399' : '#fbbf24';
+                  return (
+                    <ReferenceLine
+                      key={`${marker.kind}-${marker.timestamp}`}
+                      x={marker.timestamp}
+                      stroke={colour}
+                      strokeDasharray="4 3"
+                    />
+                  );
+                })}
               <XAxis
                 dataKey="timestamp"
                 stroke="#94a3b8"
@@ -1407,15 +1533,17 @@ export default function ForecastPage() {
                   />
                 </>
               )}
-              <Line
-                type="monotone"
-                dataKey="soc"
-                stroke="#34d399"
-                strokeWidth={2}
-                dot={false}
-                name="SOC"
-              />
-              {hasWithCharge && (
+              {lineVisible('soc') && (
+                <Line
+                  type="monotone"
+                  dataKey="soc"
+                  stroke="#34d399"
+                  strokeWidth={2}
+                  dot={false}
+                  name="SOC"
+                />
+              )}
+              {hasWithCharge && lineVisible('withCharge') && (
                 <Line
                   type="monotone"
                   dataKey="withCharge"
@@ -1427,7 +1555,7 @@ export default function ForecastPage() {
                   connectNulls
                 />
               )}
-              {hasWithSchedule && (
+              {hasWithSchedule && lineVisible('withCurrent') && (
                 <Line
                   type="monotone"
                   dataKey="withCurrent"
@@ -1437,14 +1565,6 @@ export default function ForecastPage() {
                   dot={false}
                   name="With current schedule"
                   connectNulls
-                />
-              )}
-              {chargeMarkers.length > 0 && (
-                <Legend
-                  payload={[
-                    { value: 'Charge start', type: 'line', color: '#34d399' },
-                    { value: 'Charge end', type: 'line', color: '#fbbf24' },
-                  ]}
                 />
               )}
             </LineChart>
