@@ -375,11 +375,15 @@ function Layout() {
   // Each re-poll returns the backend's current cache (nudging the backend
   // to re-fetch GitHub when its own cache is stale), so the version text,
   // the link, and the per-version dismissal latch all track the real latest
-  // release within about an hour of it shipping.
+  // release within about an hour of it shipping. An in-flight guard keeps a
+  // slow response from stacking duplicate fetches when a tick lands mid-request.
   useEffect(() => {
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    let inFlight = false;
     const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const res = await apiGet<LatestVersionInfo>('/api/latest-version');
         if (cancelled) return;
@@ -390,6 +394,8 @@ function Layout() {
         }
       } catch {
         /* keep store default (null) — banner simply won't show */
+      } finally {
+        inFlight = false;
       }
     };
     void load();

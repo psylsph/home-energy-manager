@@ -376,6 +376,7 @@ describe('<App/> read-only mode (issue #114)', () => {
 describe('<App/> latest-version periodic refresh (issue #296)', () => {
   beforeEach(() => {
     silenceConsoleError();
+    vi.clearAllMocks();
     useInverterStore.setState({ latestVersionInfo: null, dismissedUpdateVersion: null });
   });
 
