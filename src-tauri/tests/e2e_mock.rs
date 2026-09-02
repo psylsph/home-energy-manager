@@ -1966,24 +1966,31 @@ async fn forecast_endpoint_serves_seeded_forecast() {
 /// overnight while Eco bleeds to the reserve (issue #297).
 #[tokio::test]
 async fn forecast_endpoint_includes_current_schedule_when_slots_enabled() {
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
+    use givenergy_local::forecast::{META_FORECAST_PR, META_FORECAST_PR_DAYS};
     use givenergy_local::history::{ForecastValueRow, HistoryDb};
     use givenergy_local::inverter::model::{InverterSnapshot, ScheduleSlot};
 
     let config = IsolatedConfig::enter();
     let state = Arc::new(AppState::new());
 
-    // Cloudy forward forecast: daylight only (06:00–19:00 at 100 W/m²),
-    // so the nights are genuinely dark and the charge slot matters.
+    // Cloudy forward forecast: daylight only (06:00–19:00 local at
+    // 100 W/m²), so the nights are genuinely dark and the charge slot
+    // matters. The strongest solar hour (0.4 kWh after PR) is weaker
+    // than the 0.5 kWh/h household load below, so every assertion holds
+    // no matter when the test runs.
     let db = HistoryDb::open(&config.dir.join("history.db")).unwrap();
     let now = chrono::Local::now();
     let now_ts = now.timestamp();
     let hour_start = now_ts - now_ts.rem_euclid(3600);
     for h in 0..72i64 {
+        let local_hour = chrono::DateTime::from_timestamp(hour_start + h * 3600, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local).hour())
+            .unwrap_or(0);
         db.insert_forecast_values(&[ForecastValueRow {
             timestamp: hour_start + h * 3600,
             variable: "shortwave_radiation".to_string(),
-            value: if h % 24 >= 6 && h % 24 <= 19 {
+            value: if (6..=19).contains(&local_hour) {
                 100.0
             } else {
                 0.0
@@ -1993,8 +2000,8 @@ async fn forecast_endpoint_includes_current_schedule_when_slots_enabled() {
         }])
         .unwrap();
     }
-    db.set_meta_value("forecast_pr", "0.8").unwrap();
-    db.set_meta_value("forecast_pr_days", "12").unwrap();
+    db.set_meta_value(META_FORECAST_PR, "0.8").unwrap();
+    db.set_meta_value(META_FORECAST_PR_DAYS, "12").unwrap();
 
     // A week of consumption history (+0.5 kWh/h).
     let mut date = now.date_naive() - chrono::Duration::days(7);
