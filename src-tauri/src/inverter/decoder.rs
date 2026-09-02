@@ -412,7 +412,7 @@ pub(crate) fn decode_snapshot_with_solar_position(
     // Device type is only known after the holding block has been decoded, so
     // model-aware solar corrections must run after the block loop but before
     // the home/consumption energy balances are derived.
-    apply_solar_position_corrections(&mut snap, solar_position);
+    apply_model_and_solar_corrections(&mut snap, solar_position);
 
     // Compute home power.
     // Internal sign conventions (match givenergy-modbus / GivTCP references):
@@ -595,7 +595,7 @@ fn suppress_dark_string_noise(power: i32, voltage: f32) -> i32 {
 
 /// Apply corrections that need the final decoded device type and, when
 /// configured, the site's solar position.
-fn apply_solar_position_corrections(
+fn apply_model_and_solar_corrections(
     snap: &mut InverterSnapshot,
     solar_position: Option<SolarPosition>,
 ) {
