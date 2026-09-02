@@ -666,7 +666,7 @@ describe('ForecastPage plan card', () => {
       if (path === '/api/forecast/plan') return planPayload('no_plan');
       return { ok: true, data: {} };
     });
-    const { container } = render(<ForecastPage />);
+    render(<ForecastPage />);
     await waitFor(() => {
       expect(screen.getByText('With current schedule')).toBeTruthy();
     });
@@ -679,6 +679,11 @@ describe('ForecastPage plan card', () => {
 
   it('hides the current-schedule line when no slot is enabled', async () => {
     // Without enabled slots the projection would duplicate the Eco line.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
     render(<ForecastPage />);
     await screen.findByText('Tomorrow');
     expect(screen.queryByText('With current schedule')).toBeNull();

@@ -25,6 +25,10 @@ export type ForecastBattery = {
   reserve_soc_pct: number;
   hours: [number, number][];
   end_soc_pct: number;
+  /** SOC projection with the inverter's CURRENTLY enabled schedule
+   *  applied (issue #297); null when no slot would run — the line
+   *  would then merely duplicate the Eco projection in `hours`. */
+  with_current_schedule: [number, number][] | null;
 };
 
 /** Number of forward hours displayed by the Forecast page. */

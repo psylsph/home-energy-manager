@@ -554,6 +554,26 @@ export default function ForecastPage() {
     return match ? { ...p, withCharge: match[1] } : { ...p, withCharge: undefined };
   });
   const hasWithCharge = withChargeSeries.length > 0;
+  // Third line (issue #297): the projection with the inverter's CURRENT
+  // schedule applied — enabled charge/discharge slots as configured — so
+  // "leave everything as it is" has a line of its own between the Eco
+  // projection and the plan's hypothetical charge. Same anchor treatment
+  // as the other two series so all three meet at "now".
+  const withScheduleSeries =
+    data.battery?.with_current_schedule && data.battery.with_current_schedule.length > 0
+      ? anchorSeriesAtNow(
+          relabelToStateInstants(data.battery.with_current_schedule),
+          data.generated_at,
+          data.battery.start_soc_pct,
+        )
+      : [];
+  const hasWithSchedule = withScheduleSeries.length > 0;
+  const batteryChartData = batteryChartWithPlan.map((p) => {
+    const match = hasWithSchedule
+      ? withScheduleSeries.find(([ts]) => ts === p.timestamp)
+      : undefined;
+    return match ? { ...p, withCurrent: match[1] } : { ...p, withCurrent: undefined };
+  });
   // The consumption profile is a typical-day hour-of-day series; tile it
   // onto the forward timestamps so all three charts share one x-axis —
   // same start (now), same horizon — instead of a midnight-anchored 24 h
@@ -1301,17 +1321,32 @@ export default function ForecastPage() {
       <ChartCard
         title="Battery projection · next 72 hours"
         footer={
-          hasWithCharge && plan?.recommendation?.kind === 'charge' ? (
-            <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
-              <span
-                aria-hidden
-                className="inline-block w-3 h-px align-middle mr-1"
-                style={{ borderTop: '2px dashed #60a5fa' }}
-              />
-              SOC if overnight charge enacted —
-              Tomorrow {plan.recommendation.window.start}–{plan.recommendation.window.end},
-              {' '}{plan.recommendation.kwh.toFixed(1)} kWh.
-            </p>
+          hasWithCharge || hasWithSchedule ? (
+            <>
+              {hasWithCharge && plan?.recommendation?.kind === 'charge' ? (
+                <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
+                  <span
+                    aria-hidden
+                    className="inline-block w-3 h-px align-middle mr-1"
+                    style={{ borderTop: '2px dashed #60a5fa' }}
+                  />
+                  SOC if overnight charge enacted —
+                  Tomorrow {plan.recommendation.window.start}–{plan.recommendation.window.end},
+                  {' '}{plan.recommendation.kwh.toFixed(1)} kWh.
+                </p>
+              ) : null}
+              {hasWithSchedule ? (
+                <p className="text-[10px] text-text-secondary/70 font-sans leading-snug">
+                  <span
+                    aria-hidden
+                    className="inline-block w-3 h-px align-middle mr-1"
+                    style={{ borderTop: '2px dotted #f472b6' }}
+                  />
+                  SOC with your current inverter schedule — enabled charge/discharge
+                  slots as configured.
+                </p>
+              ) : null}
+            </>
           ) : undefined
         }
       >
@@ -1321,7 +1356,7 @@ export default function ForecastPage() {
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={batteryChartWithPlan}>
+            <LineChart data={batteryChartData}>
               <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
               {chargeMarkers.map((marker) => {
                 const colour = marker.kind === 'start' ? '#34d399' : '#fbbf24';
@@ -1389,6 +1424,18 @@ export default function ForecastPage() {
                   strokeDasharray="6 4"
                   dot={false}
                   name="If charge enacted"
+                  connectNulls
+                />
+              )}
+              {hasWithSchedule && (
+                <Line
+                  type="monotone"
+                  dataKey="withCurrent"
+                  stroke="#f472b6"
+                  strokeWidth={2}
+                  strokeDasharray="2 4"
+                  dot={false}
+                  name="With current schedule"
                   connectNulls
                 />
               )}
