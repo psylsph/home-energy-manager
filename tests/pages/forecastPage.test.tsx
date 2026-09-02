@@ -643,6 +643,47 @@ describe('ForecastPage plan card', () => {
     expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge end/);
   });
 
+  it('draws the current-schedule line on the Battery projection chart when slots are enabled', async () => {
+    // Issue #297: a third line projecting the battery under the
+    // inverter's CURRENT schedule — neither the Eco projection (no
+    // timed windows) nor the plan's hypothetical charge.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: {
+            ...fullPayload(),
+            battery: {
+              ...fullPayload().battery,
+              with_current_schedule: [
+                [1_700_003_600, 65],
+                [1_700_007_200, 65],
+              ],
+            },
+          },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
+    const { container } = render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByText('With current schedule')).toBeTruthy();
+    });
+    // A caption inside the card explains what the line represents.
+    const card = screen
+      .getByText('Battery projection · next 72 hours')
+      .closest('section');
+    expect(card?.textContent).toMatch(/current inverter schedule/i);
+  });
+
+  it('hides the current-schedule line when no slot is enabled', async () => {
+    // Without enabled slots the projection would duplicate the Eco line.
+    render(<ForecastPage />);
+    await screen.findByText('Tomorrow');
+    expect(screen.queryByText('With current schedule')).toBeNull();
+  });
+
   it('hides Apply when no charge is needed', async () => {
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/forecast') return { ok: true, data: fullPayload() };
