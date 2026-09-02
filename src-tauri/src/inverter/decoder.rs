@@ -75,6 +75,7 @@ use crate::modbus::registers::{decode_hhmm, RegisterType};
 use super::model::{
     BatteryMode, BatteryModule, BatteryState, DeviceType, InverterSnapshot, MeterData, ScheduleSlot,
 };
+use super::solar_position::SolarPosition;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -306,6 +307,17 @@ fn hybrid_hv_gen3_should_prefer_single_phase(blocks: &[BlockRead]) -> bool {
 
 /// Decode raw register blocks into an InverterSnapshot.
 pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
+    decode_snapshot_with_solar_position(blocks, None)
+}
+
+/// Decode with an optional site/time-derived solar position.
+///
+/// Keeping this input explicit makes the PV-dark behaviour deterministic in
+/// tests and leaves callers without configured Meteo coordinates unchanged.
+pub(crate) fn decode_snapshot_with_solar_position(
+    blocks: &[BlockRead],
+    _solar_position: Option<SolarPosition>,
+) -> InverterSnapshot {
     let mut snap = InverterSnapshot {
         timestamp: chrono::Utc::now().timestamp(),
         grid_online: true,
@@ -4344,7 +4356,7 @@ mod tests {
         input_data[44] = 37; // PV generation today 3.7 kWh (used as fallback)
 
         let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x3001; // AC Coupled
+        holding_data[0] = 0x2001; // Gen2 Hybrid
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
@@ -4353,8 +4365,8 @@ mod tests {
         ];
         let snap = decode_snapshot(&blocks);
 
-        assert_eq!(snap.device_type, DeviceType::ACCoupled);
-        // Fallback path: IR(17)=IR(19)=0 → use IR(44) = 3.7 kWh.
+        assert_eq!(snap.device_type, DeviceType::Gen2Hybrid);
+        // Hybrid fallback path: IR(17)=IR(19)=0 → use IR(44) = 3.7 kWh.
         assert!((snap.today_solar_kwh - 3.7).abs() < 0.01);
         // Consumption formula at the home level: solar + import + discharge - export - charge.
         // No charge/discharge registers set → both are 0, so the term collapses
@@ -4362,6 +4374,35 @@ mod tests {
         assert!((snap.today_consumption_kwh - 4.7).abs() < 0.01);
         assert!((snap.home_energy_today_kwh - 4.7).abs() < 0.01);
         assert!((snap.today_ac_charge_kwh - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn ac_coupled_ir44_inverter_output_is_never_solar_fallback() {
+        // DTC 3001 field capture, 2 Sep 2026: while PV1/PV2 daily counters
+        // remained zero, IR(44) rose with grid-fed immersion/EV load and then
+        // almost exactly with battery discharge after the charge lock ended.
+        // On AC-coupled firmware IR(44) is inverter-output-today, not solar.
+        let mut input_data = vec![0u16; 60];
+        input_data[17] = 0; // IR(17): no PV1 energy yet
+        input_data[19] = 0; // IR(19): no PV2 energy yet
+        input_data[44] = 9; // IR(44): 0.9 kWh inverter output, not PV
+
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x3001; // AC Coupled
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+        ];
+
+        let snap = decode_snapshot(&blocks);
+
+        assert_eq!(snap.device_type, DeviceType::ACCoupled);
+        assert_eq!(snap.today_pv1_kwh, 0.0);
+        assert_eq!(snap.today_pv2_kwh, 0.0);
+        assert_eq!(
+            snap.today_solar_kwh, 0.0,
+            "AC-coupled IR(44) inverter output must not appear as solar"
+        );
     }
 
     #[test]
@@ -4793,6 +4834,92 @@ mod tests {
         decode_input_0_59(&data, &mut snap);
         assert_eq!(snap.pv2_power, 30, "genuine low-light watts must survive");
         assert_eq!(snap.solar_power, 30);
+    }
+
+    #[test]
+    fn pv_dark_filter_zeroes_reporters_high_voltage_phantom() {
+        // Issue #261 capture, 2 Sep 2026: the dark PV2 string held its full
+        // 238.3 V while EV-charger interference produced a self-consistent
+        // 0.1 A / 23 W reading. Voltage/current alone cannot distinguish it
+        // from genuine low-light generation; solar position can.
+        let mut input_data = vec![0u16; 60];
+        input_data[2] = 2383;
+        input_data[9] = 1;
+        input_data[20] = 23;
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001;
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+        ];
+
+        let snap = decode_snapshot_with_solar_position(
+            &blocks,
+            Some(SolarPosition {
+                elevation_deg: -30.0,
+                hour_angle_deg: -160.0,
+            }),
+        );
+
+        assert_eq!(snap.pv2_power, 0);
+        assert_eq!(snap.solar_power, 0);
+        assert!((snap.pv2_voltage - 238.3).abs() < 0.01);
+        assert!((snap.pv2_current - 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn pv_dark_filter_preserves_same_low_power_reading_in_daylight() {
+        let mut input_data = vec![0u16; 60];
+        input_data[2] = 2383;
+        input_data[9] = 1;
+        input_data[20] = 23;
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001;
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+        ];
+
+        let snap = decode_snapshot_with_solar_position(
+            &blocks,
+            Some(SolarPosition {
+                elevation_deg: 10.0,
+                hour_angle_deg: -60.0,
+            }),
+        );
+
+        assert_eq!(snap.pv2_power, 23);
+        assert_eq!(snap.solar_power, 23);
+    }
+
+    #[test]
+    fn hybrid_ir44_fallback_is_suppressed_pre_dawn_but_preserved_after_sunset() {
+        let mut input_data = vec![0u16; 60];
+        input_data[44] = 4; // phantom/stale aggregate while both strings are zero
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x2001;
+        let blocks = vec![
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+        ];
+
+        let pre_dawn = decode_snapshot_with_solar_position(
+            &blocks,
+            Some(SolarPosition {
+                elevation_deg: -30.0,
+                hour_angle_deg: -160.0,
+            }),
+        );
+        assert_eq!(pre_dawn.today_solar_kwh, 0.0);
+
+        let after_sunset = decode_snapshot_with_solar_position(
+            &blocks,
+            Some(SolarPosition {
+                elevation_deg: -30.0,
+                hour_angle_deg: 160.0,
+            }),
+        );
+        assert!((after_sunset.today_solar_kwh - 0.4).abs() < 0.01);
     }
 
     #[test]

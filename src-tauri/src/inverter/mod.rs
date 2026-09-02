@@ -10,4 +10,5 @@ pub mod model;
 pub mod poll;
 pub mod reconnect;
 pub mod sanitizer;
+pub(crate) mod solar_position;
 pub mod state_machines;
