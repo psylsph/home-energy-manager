@@ -62,6 +62,7 @@ import { apiGet } from '../src/lib/api';
 import { socColor } from '../src/lib/energyFlow';
 import { UPDATE_REFRESH_INTERVAL_MS } from '../src/lib/updateCheck';
 import { useInverterStore } from '../src/store/useInverterStore';
+import type { LatestVersionInfo } from '../src/lib/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -424,5 +425,40 @@ describe('<App/> latest-version periodic refresh (issue #296)', () => {
       await vi.advanceTimersByTimeAsync(UPDATE_REFRESH_INTERVAL_MS);
     });
     expect(countVersionCalls()).toBe(initial + 2);
+  });
+
+  it('skips a scheduled refresh while the previous latest-version fetch is still in flight', async () => {
+    vi.useFakeTimers();
+    let release: (v: LatestVersionInfo) => void = () => {};
+    const pending = new Promise<LatestVersionInfo>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(apiGet).mockImplementation(async (path: string) =>
+      path === '/api/latest-version' ? pending : { ok: true, data: {} });
+
+    render(<App />);
+
+    // The mount fetch is still pending when the first hourly tick fires: the
+    // tick must be skipped, not stacked behind the in-flight request.
+    const countVersionCalls = () =>
+      vi.mocked(apiGet).mock.calls.filter(([path]) => path === '/api/latest-version').length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UPDATE_REFRESH_INTERVAL_MS);
+    });
+    expect(countVersionCalls()).toBe(1);
+
+    // Once it completes, the next tick goes through as normal.
+    release({
+      current_version: '0.70.2',
+      latest_version: '0.70.3',
+      release_url: 'https://github.com/psylsph/home-energy-manager/releases/tag/v0.70.3',
+      update_available: true,
+    });
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UPDATE_REFRESH_INTERVAL_MS);
+    });
+    expect(countVersionCalls()).toBe(2);
+    expect(useInverterStore.getState().latestVersionInfo?.latest_version).toBe('0.70.3');
   });
 });
