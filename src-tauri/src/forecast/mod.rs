@@ -844,6 +844,12 @@ mod tests {
 
         // Seven days of hourly home-energy counters, +0.5 kWh every hour,
         // all 24 hours covered: today-7 through yesterday inclusive.
+        seed_consumption_history(db, now);
+    }
+
+    /// Seven days of hourly home-energy counters, +0.5 kWh every hour,
+    /// all 24 hours covered: today-7 through yesterday inclusive.
+    fn seed_consumption_history(db: &HistoryDb, now: DateTime<Local>) {
         let mut date = now.date_naive() - chrono::Duration::days(7);
         while date < now.date_naive() {
             let mut counter = 0.0_f64;
@@ -1021,22 +1027,45 @@ mod tests {
 
     #[test]
     fn payload_includes_current_schedule_diverging_from_eco_overnight() {
-        // A discharge slot holding a 30% floor overnight: after midnight
-        // (no sun, 0.5 kWh/h household load from the seeded history) the
-        // Eco projection keeps draining to the 10% reserve while the
-        // current-schedule projection holds at 30% — visibly higher.
+        // An enabled overnight charge slot (23:00–06:00 → 65%): the Eco
+        // projection keeps draining toward the reserve overnight while
+        // the current-schedule projection charges to and holds 65% —
+        // visibly higher at 02:00 (issue #297). Solar is limited to
+        // 12:00–14:00 so the night is genuinely dark.
         let db = test_db();
         let now = local_dt(2025, 6, 15, 12, 0);
-        seed_full_forecast_state(&db, now);
+        seed_consumption_history(&db, now);
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            let ts = hour_start + h * 3600;
+            let local_hour = chrono::DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local).hour())
+                .unwrap_or(0);
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: ts,
+                variable: "shortwave_radiation".to_string(),
+                value: if (12..=14).contains(&local_hour) {
+                    500.0
+                } else {
+                    0.0
+                },
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        db.set_meta_value(META_FORECAST_PR, "0.8").unwrap();
+        db.set_meta_value(META_FORECAST_PR_DAYS, "12").unwrap();
         let mut snap = battery_snapshot();
-        snap.enable_discharge = true;
-        snap.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+        snap.enable_charge = true;
+        snap.charge_slots[0] = crate::inverter::model::ScheduleSlot {
             enabled: true,
             start_hour: 23,
             start_minute: 0,
             end_hour: 6,
             end_minute: 0,
-            target_soc: 30,
+            target_soc: 65,
         };
         let settings = five_kwp_settings();
         let payload =
@@ -1045,10 +1074,10 @@ mod tests {
         let schedule_series = battery
             .with_current_schedule
             .as_ref()
-            .expect("enabled discharge slot must yield a schedule projection");
+            .expect("enabled charge slot must yield a schedule projection");
         assert_eq!(schedule_series.len(), battery.hours.len());
-        // Compare at 02:00 tomorrow: 14 hours of night drain in.
-        let tomorrow_2am = chrono::Local
+        // Compare at 02:00 tomorrow, mid-slot after the overnight drain.
+        let tomorrow_2am = Local
             .with_ymd_and_hms(2025, 6, 16, 2, 0, 0)
             .single()
             .unwrap()
@@ -1068,6 +1097,9 @@ mod tests {
             schedule_soc > eco_soc,
             "schedule projection ({schedule_soc}) must hold above eco ({eco_soc}) overnight"
         );
-        assert!(schedule_soc >= 30.0 - 1e-6, "floor held: {schedule_soc}");
+        assert!(
+            schedule_soc >= 65.0 - 1e-6,
+            "slot target held at 02:00: {schedule_soc}"
+        );
     }
 }

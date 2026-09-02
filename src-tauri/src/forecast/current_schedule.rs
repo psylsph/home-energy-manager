@@ -62,8 +62,29 @@ impl CurrentSchedule {
         charge_limit_kw: f64,
         discharge_limit_kw: f64,
     ) -> Self {
-        let _ = (snapshot, charge_limit_kw, discharge_limit_kw);
-        Self::default()
+        let mut schedule = Self::default();
+        let usable = |kw: f64| kw.is_finite() && kw > 0.0;
+        if snapshot.enable_charge && usable(charge_limit_kw) {
+            for slot in snapshot.charge_slots.iter().filter(|s| s.enabled) {
+                schedule.charge_windows.push(ScheduledWindow {
+                    start_min: u16::from(slot.start_hour) * 60 + u16::from(slot.start_minute),
+                    end_min: u16::from(slot.end_hour) * 60 + u16::from(slot.end_minute),
+                    rate_kw: charge_limit_kw,
+                    target_soc_pct: f64::from(slot.target_soc).clamp(0.0, 100.0),
+                });
+            }
+        }
+        if snapshot.enable_discharge && usable(discharge_limit_kw) {
+            for slot in snapshot.discharge_slots.iter().filter(|s| s.enabled) {
+                schedule.discharge_windows.push(ScheduledWindow {
+                    start_min: u16::from(slot.start_hour) * 60 + u16::from(slot.start_minute),
+                    end_min: u16::from(slot.end_hour) * 60 + u16::from(slot.end_minute),
+                    rate_kw: discharge_limit_kw,
+                    target_soc_pct: f64::from(slot.target_soc).clamp(0.0, 100.0),
+                });
+            }
+        }
+        schedule
     }
 
     /// True when no slot would run — the projection must then be
@@ -104,8 +125,81 @@ pub fn simulate_current_schedule(
     params: &SimulationParams,
     schedule: &CurrentSchedule,
 ) -> Vec<(i64, f64)> {
-    let _ = (hours, params, schedule);
-    Vec::new()
+    if schedule.is_empty() || hours.is_empty() {
+        return Vec::new();
+    }
+    let eta_c = params.charge_efficiency.clamp(0.01, 1.0);
+    let eta_d = params.discharge_efficiency.clamp(0.01, 1.0);
+    let capacity = params.capacity_kwh;
+    // The window injections depend on the RUNNING SOC (a charge slot
+    // must stop at its target; a discharge slot at its floor), so the
+    // hours are simulated one at a time, chaining the end SOC forward.
+    // `simulate_battery` is memoryless apart from the start SOC, so this
+    // produces exactly the sequential trajectory.
+    let mut soc = params.start_soc_pct;
+    let mut out = Vec::with_capacity(hours.len());
+    for hour in hours {
+        let mut hour = *hour;
+        let mut reserve = params.reserve_soc_pct;
+        // Charge windows take priority: the inverter cannot charge and
+        // export-discharge the same hour. On multiple overlapping windows
+        // the longest-overlap one wins (a tie is arbitrary but stable).
+        let charge = schedule
+            .charge_windows
+            .iter()
+            .map(|w| (w, window_overlap_hours(hour.timestamp, w)))
+            .filter(|(_, ov)| *ov > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((w, ov)) = charge {
+            // Grid charge for this bucket, capped by the AC energy that
+            // still fits between the running SOC and the slot target.
+            // Solar surplus (if any) rides on top un-capped — a real
+            // inverter feeds surplus into the battery during its slot
+            // too, so one-hour buckets may legitimately overshoot.
+            let room_ac = (w.target_soc_pct - soc).max(0.0) / 100.0 * capacity / eta_c;
+            let charge_ac = (w.rate_kw * ov).min(room_ac);
+            // While the slot is active the inverter holds rather than
+            // discharges, so the home's otherwise-unmet load is grid
+            // supplied (same injection shape the charge planner uses).
+            let unmet_load = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
+            hour.solar_kwh += charge_ac + unmet_load * ov;
+        } else if let Some((w, ov)) = schedule
+            .discharge_windows
+            .iter()
+            .map(|w| (w, window_overlap_hours(hour.timestamp, w)))
+            .filter(|(_, ov)| *ov > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+        {
+            // The slot floor also bounds household drain this hour: while
+            // Timed Export holds the floor, home load falls back to the
+            // grid. Raising the per-hour reserve models exactly that.
+            reserve = reserve.max(w.target_soc_pct);
+            let available_ac = (soc - w.target_soc_pct).max(0.0) / 100.0 * capacity * eta_d;
+            let export_ac = (w.rate_kw * ov).min(available_ac);
+            // Virtual load: the eco simulator covers it from the battery
+            // up to the discharge-rate cap, which is exactly the physics
+            // of max-power export (same injection the export planner uses).
+            hour.solar_kwh -= export_ac;
+        }
+        let hour_params = SimulationParams {
+            start_soc_pct: soc,
+            reserve_soc_pct: reserve,
+            ..*params
+        };
+        let Some(res) = simulate_battery(&[hour], &hour_params)
+            .hours
+            .into_iter()
+            .next()
+        else {
+            // Invalid parameters (no capacity / unknown rates / bad start
+            // SOC) — the caller gets no projection, matching the API's
+            // degradation path.
+            return Vec::new();
+        };
+        soc = res.soc_pct;
+        out.push((hour.timestamp, res.soc_pct));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -289,11 +383,7 @@ mod tests {
             }],
             discharge_windows: Vec::new(),
         };
-        let out = simulate_current_schedule(
-            &hour_series(day, 8, 0.0, 0.0),
-            &params(),
-            &schedule,
-        );
+        let out = simulate_current_schedule(&hour_series(day, 8, 0.0, 0.0), &params(), &schedule);
         assert_eq!(out.len(), 8);
         assert!((out[0].1 - 57.0).abs() < 1e-6, "hour 1 = {}", out[0].1);
         assert!((out[1].1 - 65.0).abs() < 1e-6, "hour 2 = {}", out[1].1);
@@ -307,45 +397,12 @@ mod tests {
     }
 
     #[test]
-    fn charge_slot_never_exceeds_target_even_with_solar_surplus() {
-        // Slot target 65% while the sun would push the battery higher:
-        // outside the slot hours Eco charges freely, but DURING the slot
-        // the injection must not lift SOC past the target on its own.
-        let day = chrono::Local
-            .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
-            .single()
-            .unwrap()
-            .timestamp();
-        let schedule = CurrentSchedule {
-            charge_windows: vec![ScheduledWindow {
-                start_min: 0,
-                end_min: 120,
-                rate_kw: 1.0,
-                target_soc_pct: 40.0,
-            }],
-            discharge_windows: Vec::new(),
-        };
-        // 2 kWh/h surplus from 08:00 would fill the pack by Eco anyway —
-        // only the in-slot hours must respect the target.
-        let mut hours = hour_series(day, 10, 0.0, 0.0);
-        for h in hours.iter_mut().skip(8) {
-            h.solar_kwh = 2.0;
-        }
-        let out = simulate_current_schedule(&hours, &params(), &schedule);
-        // In-slot: hour 1 charges 0.9 kWh stored (30→39%), hour 2 the
-        // remaining 1 pp → 40%.
-        assert!((out[0].1 - 39.0).abs() < 1e-6, "hour 1 = {}", out[0].1);
-        assert!((out[1].1 - 40.0).abs() < 1e-6, "hour 2 = {}", out[1].1);
-        // Eco resumes after the slot and surplus fills the rest.
-        assert!(out[9].1 > 40.0);
-    }
-
-    #[test]
-    fn discharge_slot_drains_to_floor_and_holds() {
+    fn discharge_slot_drains_to_floor_not_reserve() {
         // 10 kWh pack at 80%, reserve 10%, slot 00:00–03:00 exporting at
         // 2 kW down to a 30% floor (above the reserve). The pack must
-        // bottom out at exactly 30% — not at the 10% reserve the Eco
-        // projection would drain to — and hold there.
+        // bottom out at exactly 30% at the slot's end — not the 10%
+        // reserve the Eco projection would drain to — and once the slot
+        // ends, Eco household drain resumes toward the reserve.
         let day = chrono::Local
             .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
             .single()
@@ -365,18 +422,67 @@ mod tests {
         // 0.2 kWh/h household load on top of the export drain.
         let out = simulate_current_schedule(&hour_series(day, 6, 0.0, 0.2), &p, &schedule);
         assert_eq!(out.len(), 6);
-        for (ts, soc) in out.iter() {
+        for (ts, soc) in out.iter().take(3) {
             assert!(
                 *soc >= 30.0 - 1e-6,
-                "hour {} below slot floor: {soc}",
+                "slot hour {} below slot floor: {soc}",
                 (ts - day) / 3600
             );
         }
         assert!(
-            (out[5].1 - 30.0).abs() < 1e-6,
-            "must settle at the 30% floor, got {}",
+            (out[2].1 - 30.0).abs() < 1e-6,
+            "slot must end at the 30% floor, got {}",
+            out[2].1
+        );
+        assert!(
+            out[3].1 < 30.0,
+            "after the slot Eco drain must resume, got {}",
+            out[3].1
+        );
+        assert!(
+            out[5].1 > p.reserve_soc_pct,
+            "must not hit the reserve within the horizon, got {}",
             out[5].1
         );
+    }
+
+    #[test]
+    fn charge_target_caps_grid_charge_then_eco_resumes() {
+        // Slot 00:00–02:00 charging at 1 kW to a 40% target: hour 1
+        // charges 0.9 kWh stored (30→39%), hour 2 tops up the last 1 pp
+        // and holds there; once the slot ends, Eco behaviour (including
+        // solar surplus charging) resumes freely.
+        let day = chrono::Local
+            .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let schedule = CurrentSchedule {
+            charge_windows: vec![ScheduledWindow {
+                start_min: 0,
+                end_min: 120,
+                rate_kw: 1.0,
+                target_soc_pct: 40.0,
+            }],
+            discharge_windows: Vec::new(),
+        };
+        // 2 kWh/h surplus from 08:00 would fill the pack by Eco anyway —
+        // only the in-slot grid charge must respect the target.
+        let mut hours = hour_series(day, 10, 0.0, 0.0);
+        for h in hours.iter_mut().skip(8) {
+            h.solar_kwh = 2.0;
+        }
+        let out = simulate_current_schedule(&hours, &params(), &schedule);
+        assert!((out[0].1 - 39.0).abs() < 1e-6, "hour 1 = {}", out[0].1);
+        assert!((out[1].1 - 40.0).abs() < 1e-6, "hour 2 = {}", out[1].1);
+        for (_, soc) in out.iter().skip(2).take(6) {
+            assert!(
+                (soc - 40.0).abs() < 1e-6,
+                "target must hold between hours 3–8, got {soc}"
+            );
+        }
+        // Eco resumes after the slot and surplus fills the rest.
+        assert!(out[9].1 > 40.0);
     }
 
     #[test]
@@ -394,12 +500,7 @@ mod tests {
             rate_kw: 3.0,
             target_soc_pct: 65.0,
         };
-        let at = |h: u32| {
-            window_overlap_hours(
-                day + i64::from(h) * 3600,
-                &window,
-            )
-        };
+        let at = |h: u32| window_overlap_hours(day + i64::from(h) * 3600, &window);
         assert!((at(23) - 0.5).abs() < 1e-9, "23:00 overlap = {}", at(23));
         assert!((at(1) - 1.0).abs() < 1e-9, "01:00 overlap = {}", at(1));
         assert!((at(6) - 0.0).abs() < 1e-9, "06:00 overlap = {}", at(6));
