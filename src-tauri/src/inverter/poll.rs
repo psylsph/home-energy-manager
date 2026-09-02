@@ -5625,6 +5625,15 @@ pub(crate) const SOLAR_METER_MAX_PLAUSIBLE_KW: f64 = 30.0;
 /// sanitizer's consecutive-read confirmation conventions.
 pub(crate) const CT_METER_RESEED_AFTER_REJECTIONS: u32 = 3;
 
+/// The counter read a meter's per-poll jump bound is anchored at: the
+/// cumulative counters as of the last accepted read, and when it happened.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CtMeterLastRead {
+    pub(crate) import_kwh: f64,
+    pub(crate) export_kwh: f64,
+    pub(crate) at: chrono::NaiveDateTime,
+}
+
 /// In-memory per-meter recovery tracking for [`apply_ct_solar_authority`]
 /// (issue #294). Deliberately not persisted: it only shapes within-day
 /// recovery, and updating it every poll would rewrite settings.json on
@@ -5636,6 +5645,10 @@ pub(crate) struct CtMeterRecovery {
     pub(crate) accepted_today_kwh: f64,
     /// Consecutive polls whose delta was rejected as implausible.
     pub(crate) consecutive_rejections: u32,
+    /// Anchor for the per-poll jump bound: the counters as of the last
+    /// accepted read. `None` until the meter's first read of the run, in
+    /// which case only the day-shaped baseline ceiling guards the read.
+    pub(crate) last_read: Option<CtMeterLastRead>,
 }
 
 /// Apply CT-meter solar authority (issue #277).
@@ -5663,9 +5676,16 @@ pub(crate) struct CtMeterRecovery {
 ///   generation on an AC-coupled box). The baseline map (in
 ///   `baselines`) is reseeded at local midnight and on counter resets;
 ///   reseeded entries drive the `bool` return so the caller can persist
-///   them. Each same-day delta is also bounded at
+///   them. Each same-day delta is bounded twice (issue #294): the
+///   primary per-poll bound rejects any single-poll counter rise over
+///   `SOLAR_METER_MAX_PLAUSIBLE_KW` × elapsed-since-last-accepted-read
+///   plus 1 kWh (no poll interval can generate more, so even a jump the
+///   growing day-shaped ceiling would let through is caught on
+///   arrival), and the day-shaped
 ///   `SOLAR_METER_MAX_PLAUSIBLE_KW` × hours-since-midnight + 1 kWh
-///   (issue #294), with a two-stage recovery tracked in `recovery`:
+///   ceiling backstops a run's first read where no per-poll anchor
+///   exists yet. Both feed one two-stage recovery tracked in
+///   `recovery`:
 ///   an implausible delta holds the meter's last accepted value
 ///   without touching its baseline (a transient corrupt read self-heals
 ///   on the next poll); after `CT_METER_RESEED_AFTER_REJECTIONS`
@@ -5795,36 +5815,71 @@ pub(crate) fn apply_ct_solar_authority(
                 if current_import < b.e_import_kwh - SOLAR_METER_BASELINE_RESEED_DELTA_KWH
                     && current_export < b.e_export_kwh - SOLAR_METER_BASELINE_RESEED_DELTA_KWH
                 {
-                    recovery.insert(key.clone(), CtMeterRecovery::default());
+                    let rec = recovery.entry(key.clone()).or_default();
+                    *rec = CtMeterRecovery {
+                        last_read: Some(CtMeterLastRead {
+                            import_kwh: current_import,
+                            export_kwh: current_export,
+                            at: now_local,
+                        }),
+                        ..Default::default()
+                    };
                     force_reseed = true;
                     0.0
                 } else {
                     let delta = d_import.max(d_export);
+                    let rec = recovery.entry(key.clone()).or_default();
                     // Issue #294: bound the delta the same way the sanitizer
                     // bounds the inverter registers (the CT path runs after
                     // sanitization, so this is that check's last line of
-                    // defence). A jump faster than 30 kW × hours-since-midnight
-                    // cannot be real generation. Recovery is staged:
-                    // stage 1 holds the last accepted value and leaves the
-                    // baseline alone (a transient corrupt read self-heals on
-                    // the next poll); after CT_METER_RESEED_AFTER_REJECTIONS
-                    // consecutive rejections the jump is persistent, so the
-                    // baseline carries the accepted energy forward and
-                    // accumulation resumes from the new resting point.
-                    // baseline beneath it) is corrupt, so reseed to the current
-                    // counters and contribute 0 this cycle rather than writing
-                    // the spike into the snapshot and history.
+                    // defence). Two bounds sharing one recovery tracker:
+                    //
+                    // - Per-poll (primary): between two accepted reads the
+                    //   counter can only rise by SOLAR_METER_MAX_PLAUSIBLE_KW
+                    //   × elapsed + 1 kWh. The day-shaped ceiling below grows
+                    //   all day, so a mid-size stuck jump (+200 kWh
+                    //   mid-morning) would slip under it and inflate the day
+                    //   until midnight — no single poll interval can
+                    //   generate that much, so the per-poll bound catches
+                    //   the jump on arrival.
+                    // - Day-shaped (backstop): the first read of a run has
+                    //   no per-poll anchor yet (app start / restart), so it
+                    //   is guarded by SOLAR_METER_MAX_PLAUSIBLE_KW ×
+                    //   hours-since-midnight + 1 kWh vs the persisted
+                    //   baseline.
+                    //
+                    // Recovery is staged: an implausible delta holds the
+                    // meter's last accepted value without touching its
+                    // baseline or its per-poll anchor (a transient corrupt
+                    // read self-heals on the next poll); after
+                    // CT_METER_RESEED_AFTER_REJECTIONS consecutive
+                    // rejections the jump is persistent, so the baseline
+                    // reseeds to (current − accepted) — the day's real
+                    // energy survives and accumulation resumes from the new
+                    // resting point — instead of poisoning the aggregate.
+                    let poll_violation = rec.last_read.as_ref().and_then(|last| {
+                        let elapsed_hours = ((now_local - last.at).num_seconds().max(0) as f64
+                            / 3600.0)
+                            .max(1.0 / 60.0);
+                        let poll_ceiling = SOLAR_METER_MAX_PLAUSIBLE_KW * elapsed_hours + 1.0;
+                        let poll_jump = (current_import - last.import_kwh)
+                            .max(0.0)
+                            .max((current_export - last.export_kwh).max(0.0));
+                        (poll_jump > poll_ceiling).then_some((poll_jump, poll_ceiling))
+                    });
                     let elapsed_hours = (now_local.time().num_seconds_from_midnight() as f64
                         / 3600.0)
                         .max(1.0 / 60.0);
                     let ceiling = SOLAR_METER_MAX_PLAUSIBLE_KW * elapsed_hours + 1.0;
-                    if delta > ceiling {
-                        let rec = recovery.entry(key.clone()).or_default();
+                    let violation =
+                        poll_violation.or_else(|| (delta > ceiling).then_some((delta, ceiling)));
+                    if let Some((jump, bound)) = violation {
                         rec.consecutive_rejections += 1;
                         tracing::warn!(
                             meter = addr,
                             delta_kwh = delta,
-                            ceiling_kwh = ceiling,
+                            jump_kwh = jump,
+                            ceiling_kwh = bound,
                             rejections = rec.consecutive_rejections,
                             "Solar CT counter jumped implausibly — rejecting the delta"
                         );
@@ -5845,19 +5900,33 @@ pub(crate) fn apply_ct_solar_authority(
                             } else {
                                 seed_import = (current_import - accepted).max(0.0);
                             }
+                            // Re-anchor the per-poll bound at the new
+                            // resting point — a stale pre-jump anchor would
+                            // re-violate on every later poll and reseed
+                            // again.
+                            rec.last_read = Some(CtMeterLastRead {
+                                import_kwh: current_import,
+                                export_kwh: current_export,
+                                at: now_local,
+                            });
                             rec.consecutive_rejections = 0;
                             force_reseed = true;
                             accepted
                         } else {
                             // Stage 1 — possibly transient: hold the last
-                            // accepted value; the untouched baseline lets a
-                            // healthy next read recover the true figure.
+                            // accepted value; the untouched baseline and
+                            // anchor let a healthy next read recover the
+                            // true figure.
                             rec.accepted_today_kwh
                         }
                     } else {
-                        let rec = recovery.entry(key.clone()).or_default();
                         rec.consecutive_rejections = 0;
                         rec.accepted_today_kwh = delta;
+                        rec.last_read = Some(CtMeterLastRead {
+                            import_kwh: current_import,
+                            export_kwh: current_export,
+                            at: now_local,
+                        });
                         delta
                     }
                 }
@@ -5865,8 +5934,17 @@ pub(crate) fn apply_ct_solar_authority(
             Some(_) | None => {
                 // New day / first run / meter swap: seed baseline from the
                 // current counters. Today starts at 0 and accumulates from
-                // here. The recovery tracker restarts with the day.
-                recovery.insert(key.clone(), CtMeterRecovery::default());
+                // here. The recovery tracker restarts with the day, anchored
+                // at this read so every later poll gets per-poll coverage.
+                let rec = recovery.entry(key.clone()).or_default();
+                *rec = CtMeterRecovery {
+                    last_read: Some(CtMeterLastRead {
+                        import_kwh: current_import,
+                        export_kwh: current_export,
+                        at: now_local,
+                    }),
+                    ..Default::default()
+                };
                 0.0
             }
         };
@@ -6289,10 +6367,17 @@ mod tests {
         assert_eq!(meter_arr.today_kwh, Some(0.0));
 
         // Later same day: export counter advanced 12.4 kWh → today = 12.4.
+        // (Two hours after the seed — a 12.4 kWh step inside a single poll
+        // interval would now trip the per-poll jump bound, rightly.)
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
-        let reseeded =
-            apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, &mut recovery, day(0));
+        let reseeded = apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 14, 0),
+        );
         assert!(!reseeded, "same-day accumulation must not reseed");
         assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
         // Per-array card gets its own today figure.
@@ -6317,7 +6402,13 @@ mod tests {
         apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 512.4)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, &mut recovery, day(0));
+        apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 14, 0),
+        );
 
         let (mut snap3, settings) =
             ct_snapshot(vec![meter_with_energy(1, 1000, 100.0, 513.0)], 0, 0.0);
@@ -6340,13 +6431,24 @@ mod tests {
         apply_ct_solar_authority(&mut snap, &settings, &mut baselines, &mut recovery, day(0));
         let (mut snap2, settings) =
             ct_snapshot(vec![meter_with_energy(1, 3000, 1005.0, 512.4)], 0, 0.0);
-        apply_ct_solar_authority(&mut snap2, &settings, &mut baselines, &mut recovery, day(0));
+        apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 14, 0),
+        );
         assert!((snap2.today_solar_kwh - 12.4).abs() < 0.01);
 
         // Counter reset: import 1005 → 2, export 512.4 → 1.
         let (mut snap3, settings) = ct_snapshot(vec![meter_with_energy(1, 500, 2.0, 1.0)], 0, 0.0);
-        let reseeded =
-            apply_ct_solar_authority(&mut snap3, &settings, &mut baselines, &mut recovery, day(0));
+        let reseeded = apply_ct_solar_authority(
+            &mut snap3,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 16, 0),
+        );
         assert!(reseeded);
         assert_eq!(snap3.today_solar_kwh, 0.0);
         assert_eq!(baselines["1"].e_import_kwh, 2.0);
@@ -6734,8 +6836,7 @@ mod tests {
         assert_eq!(recovery["1"].consecutive_rejections, 1);
 
         // The jump sticks: stage 1 holds through the second cycle.
-        let (mut s, settings) =
-            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.0)], 0, 0.0);
+        let (mut s, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.0)], 0, 0.0);
         let reseeded = apply_ct_solar_authority(
             &mut s,
             &settings,
@@ -6747,8 +6848,7 @@ mod tests {
         assert!((s.today_solar_kwh - 9.0).abs() < 0.01);
 
         // Third rejection: stage 2 — carry-forward reseed.
-        let (mut s, settings) =
-            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.0)], 0, 0.0);
+        let (mut s, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.0)], 0, 0.0);
         let reseeded = apply_ct_solar_authority(
             &mut s,
             &settings,
@@ -6770,8 +6870,7 @@ mod tests {
         // 09:20: accumulation resumes from the new resting point — this
         // also pins the per-poll anchor being re-based at the reseed (a
         // stale pre-jump anchor would re-violate on this +0.5 kWh read).
-        let (mut s, settings) =
-            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.5)], 0, 0.0);
+        let (mut s, settings) = ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.5)], 0, 0.0);
         let reseeded = apply_ct_solar_authority(
             &mut s,
             &settings,
