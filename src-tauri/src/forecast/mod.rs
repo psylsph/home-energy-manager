@@ -12,6 +12,7 @@
 
 pub mod calibration;
 pub mod consumption;
+pub mod current_schedule;
 pub mod planner;
 pub mod refresh;
 pub mod simulate;
@@ -21,6 +22,7 @@ use chrono::{DateTime, Datelike, Local, Timelike};
 
 use crate::forecast::calibration::calibrate_performance_ratio_detailed;
 use crate::forecast::consumption::build_consumption_profile;
+use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
 use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
 use crate::history::{ForecastValueRow, HistoryDb};
@@ -99,6 +101,12 @@ pub struct ForecastBattery {
     /// SOC at the end of each forward hour.
     pub hours: Vec<(i64, f64)>,
     pub end_soc_pct: f64,
+    /// SOC projection with the inverter's CURRENTLY enabled schedule
+    /// applied (issue #297) — charge slots driving towards their target
+    /// at the configured rate, discharge slots draining to their floor.
+    /// `None` when no slot would run (the line would merely duplicate
+    /// the Eco projection above).
+    pub with_current_schedule: Option<Vec<(i64, f64)>>,
 }
 
 /// The complete `GET /api/forecast` data block. `status` carries
@@ -287,12 +295,19 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                     .last()
                     .map(|h| h.soc_pct)
                     .unwrap_or(snap.soc as f64);
+                let schedule = CurrentSchedule::from_snapshot(snap, charge_kw, discharge_kw);
+                let with_current_schedule = if schedule.is_empty() {
+                    None
+                } else {
+                    Some(simulate_current_schedule(&sim_hours, &params, &schedule))
+                };
                 battery = Some(ForecastBattery {
                     capacity_kwh: params.capacity_kwh,
                     start_soc_pct: params.start_soc_pct,
                     reserve_soc_pct: params.reserve_soc_pct,
                     hours: sim.hours.iter().map(|h| (h.timestamp, h.soc_pct)).collect(),
                     end_soc_pct,
+                    with_current_schedule,
                 });
             }
         }
@@ -986,5 +1001,73 @@ mod tests {
         assert!(payload.battery.is_none());
         // Solar and consumption still served.
         assert!((payload.solar_tomorrow_kwh - 48.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn payload_omits_current_schedule_when_no_slot_enabled() {
+        // Without enabled slots the schedule projection would duplicate
+        // the Eco line — the payload must leave the field empty so the
+        // UI hides it (issue #297).
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_full_forecast_state(&db, now);
+        let snap = battery_snapshot();
+        let settings = five_kwp_settings();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        let battery = payload.battery.as_ref().expect("battery projection");
+        assert!(battery.with_current_schedule.is_none());
+    }
+
+    #[test]
+    fn payload_includes_current_schedule_diverging_from_eco_overnight() {
+        // A discharge slot holding a 30% floor overnight: after midnight
+        // (no sun, 0.5 kWh/h household load from the seeded history) the
+        // Eco projection keeps draining to the 10% reserve while the
+        // current-schedule projection holds at 30% — visibly higher.
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_full_forecast_state(&db, now);
+        let mut snap = battery_snapshot();
+        snap.enable_discharge = true;
+        snap.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 23,
+            start_minute: 0,
+            end_hour: 6,
+            end_minute: 0,
+            target_soc: 30,
+        };
+        let settings = five_kwp_settings();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        let battery = payload.battery.as_ref().expect("battery projection");
+        let schedule_series = battery
+            .with_current_schedule
+            .as_ref()
+            .expect("enabled discharge slot must yield a schedule projection");
+        assert_eq!(schedule_series.len(), battery.hours.len());
+        // Compare at 02:00 tomorrow: 14 hours of night drain in.
+        let tomorrow_2am = chrono::Local
+            .with_ymd_and_hms(2025, 6, 16, 2, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let schedule_soc = schedule_series
+            .iter()
+            .find(|(ts, _)| *ts == tomorrow_2am)
+            .map(|(_, soc)| *soc)
+            .expect("02:00 must be in the forward horizon");
+        let eco_soc = battery
+            .hours
+            .iter()
+            .find(|(ts, _)| *ts == tomorrow_2am)
+            .map(|(_, soc)| *soc)
+            .expect("02:00 must be in the forward horizon");
+        assert!(
+            schedule_soc > eco_soc,
+            "schedule projection ({schedule_soc}) must hold above eco ({eco_soc}) overnight"
+        );
+        assert!(schedule_soc >= 30.0 - 1e-6, "floor held: {schedule_soc}");
     }
 }
