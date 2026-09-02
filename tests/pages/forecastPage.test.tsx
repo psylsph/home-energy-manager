@@ -147,12 +147,17 @@ vi.mock('recharts', () => ({
     <div data-testid="forecast-composed-chart">{children}</div>
   ),
   Area: ({ name }: { name?: string }) => <div>{name}</div>,
-  Line: ({ name, stroke, strokeWidth }: {
+  Line: ({ name, stroke, strokeWidth, isAnimationActive }: {
     name?: string;
     stroke?: string;
     strokeWidth?: number;
+    isAnimationActive?: boolean;
   }) => (
-    <div data-stroke={stroke} data-stroke-width={strokeWidth}>{name}</div>
+    <div
+      data-stroke={stroke}
+      data-stroke-width={strokeWidth}
+      data-animate={isAnimationActive === false ? 'off' : 'on'}
+    >{name}</div>
   ),
   LineChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Customized: ({
@@ -794,6 +799,71 @@ describe('ForecastPage plan card', () => {
     fireEvent.click(screen.getByRole('button', { name: 'If charge enacted' }));
     expect(screen.getAllByTestId('forecast-charge-marker')).toHaveLength(2);
     expect(screen.getByTestId('forecast-charge-legend')).toBeTruthy();
+  });
+
+  it('toggles the current-schedule line and its caption off and on', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: {
+            ...fullPayload(),
+            battery: {
+              ...fullPayload().battery,
+              with_current_schedule: [[1_700_003_600, 65]],
+            },
+          },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
+    const { container } = render(<ForecastPage />);
+    const button = await screen.findByRole('button', {
+      name: 'With current schedule',
+    });
+    expect(container.querySelector('[data-stroke="#f472b6"]')).not.toBeNull();
+    expect(screen.getByTestId('forecast-caption-schedule')).toBeTruthy();
+
+    fireEvent.click(button);
+    expect(container.querySelector('[data-stroke="#f472b6"]')).toBeNull();
+    expect(screen.queryByTestId('forecast-caption-schedule')).toBeNull();
+
+    fireEvent.click(button);
+    expect(container.querySelector('[data-stroke="#f472b6"]')).not.toBeNull();
+    expect(screen.getByTestId('forecast-caption-schedule')).toBeTruthy();
+  });
+
+  it('renders every battery line without the draw-in animation', async () => {
+    // Toggling a line via the legend replays recharts' draw-in animation
+    // on the survivors unless it is disabled — the app-wide convention.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: {
+            ...fullPayload(),
+            battery: {
+              ...fullPayload().battery,
+              with_current_schedule: [[1_700_003_600, 65]],
+            },
+          },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    const { container } = render(<ForecastPage />);
+    await waitFor(() => {
+      expect(container.querySelector('[data-stroke="#f472b6"]')).not.toBeNull();
+    });
+    for (const stroke of ['#34d399', '#60a5fa', '#f472b6']) {
+      expect(
+        container
+          .querySelector(`[data-stroke="${stroke}"]`)
+          ?.getAttribute('data-animate'),
+      ).toBe('off');
+    }
   });
 
   it('hides Apply when no charge is needed', async () => {

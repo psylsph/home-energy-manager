@@ -335,6 +335,38 @@ mod tests {
         assert!(CurrentSchedule::from_snapshot(&snap, 3.0, 3.0).is_empty());
     }
 
+    #[test]
+    fn unknown_rate_registers_yield_no_windows() {
+        // A 0 rate limit means "unknown/unset" (optional AC-config block
+        // reads zero) — the same convention battery_rate_limits_kw uses.
+        // There is no honest rate to simulate, so no windows either.
+        let mut charge = all_disabled();
+        charge[0] = slot(2, 0, 5, 0, 65);
+        let mut discharge = all_disabled();
+        discharge[0] = slot(16, 0, 18, 0, 20);
+        let snap = schedule_snapshot(true, true, charge, discharge);
+        assert!(CurrentSchedule::from_snapshot(&snap, 0.0, 0.0).is_empty());
+        assert!(CurrentSchedule::from_snapshot(&snap, f64::NAN, 3.0)
+            .charge_windows
+            .is_empty());
+    }
+
+    #[test]
+    fn multiple_enabled_slots_all_become_windows() {
+        let mut charge = all_disabled();
+        charge[0] = slot(2, 0, 5, 0, 65);
+        charge[3] = slot(23, 30, 6, 0, 100);
+        let mut discharge = all_disabled();
+        discharge[1] = slot(16, 30, 18, 0, 20);
+        discharge[2] = slot(21, 0, 22, 0, 40);
+        let snap = schedule_snapshot(true, true, charge, discharge);
+        let schedule = CurrentSchedule::from_snapshot(&snap, 3.0, 2.5);
+        assert_eq!(schedule.charge_windows.len(), 2);
+        assert_eq!(schedule.discharge_windows.len(), 2);
+        assert_eq!(schedule.charge_windows[1].start_min, 23 * 60 + 30);
+        assert_eq!(schedule.discharge_windows[1].end_min, 22 * 60);
+    }
+
     // --- simulation ------------------------------------------------------
 
     #[test]
@@ -483,6 +515,101 @@ mod tests {
         }
         // Eco resumes after the slot and surplus fills the rest.
         assert!(out[9].1 > 40.0);
+    }
+
+    #[test]
+    fn charge_slot_holds_when_soc_already_above_target() {
+        // Battery at 80% but the slot targets 65%: the inverter neither
+        // charges nor discharges during its slot — it holds, grid serves
+        // the house — and only Eco household drain resumes after the
+        // slot ends.
+        let day = chrono::Local
+            .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let mut p = params();
+        p.start_soc_pct = 80.0;
+        let schedule = CurrentSchedule {
+            charge_windows: vec![ScheduledWindow {
+                start_min: 0,
+                end_min: 120,
+                rate_kw: 3.0,
+                target_soc_pct: 65.0,
+            }],
+            discharge_windows: Vec::new(),
+        };
+        let out = simulate_current_schedule(&hour_series(day, 5, 0.0, 0.3), &p, &schedule);
+        for (_, soc) in out.iter().take(2) {
+            assert!(
+                (soc - 80.0).abs() < 1e-6,
+                "slot hours must hold 80%, got {soc}"
+            );
+        }
+        assert!(
+            out[2].1 < 80.0,
+            "after the slot Eco drain resumes, got {}",
+            out[2].1
+        );
+    }
+
+    #[test]
+    fn partial_hour_overlap_charges_fraction_of_the_hour() {
+        // Slot 00:30–02:30 covers half of the 00:00 bucket, all of the
+        // 01:00 bucket, half of the 02:00 bucket: the grid charge must
+        // scale with the overlap (3 kW × 0.5 h = 1.5 kWh AC → +1.35 kWh
+        // stored per partial hour; the fully-covered hour tops up to the
+        // target and stays there).
+        let day = chrono::Local
+            .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let schedule = CurrentSchedule {
+            charge_windows: vec![ScheduledWindow {
+                start_min: 30,
+                end_min: 150,
+                rate_kw: 3.0,
+                target_soc_pct: 65.0,
+            }],
+            discharge_windows: Vec::new(),
+        };
+        let out = simulate_current_schedule(&hour_series(day, 3, 0.0, 0.0), &params(), &schedule);
+        assert!((out[0].1 - 43.5).abs() < 1e-6, "hour 1 = {}", out[0].1);
+        assert!((out[1].1 - 65.0).abs() < 1e-6, "hour 2 = {}", out[1].1);
+        assert!((out[2].1 - 65.0).abs() < 1e-6, "hour 3 = {}", out[2].1);
+    }
+
+    #[test]
+    fn discharge_floor_below_reserve_clamps_to_reserve() {
+        // A discharge slot targeting below the battery reserve is
+        // nonsensical (the inverter never discharges past the reserve
+        // anyway) — the effective floor must clamp to the reserve.
+        let day = chrono::Local
+            .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let mut p = params();
+        p.start_soc_pct = 60.0;
+        let schedule = CurrentSchedule {
+            charge_windows: Vec::new(),
+            discharge_windows: vec![ScheduledWindow {
+                start_min: 0,
+                end_min: 1440,
+                rate_kw: 3.0,
+                target_soc_pct: 5.0,
+            }],
+        };
+        let out = simulate_current_schedule(&hour_series(day, 8, 0.0, 0.5), &p, &schedule);
+        let min_soc = out
+            .iter()
+            .map(|(_, soc)| *soc)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (min_soc - p.reserve_soc_pct).abs() < 1e-6,
+            "must bottom out at the 10% reserve, got {min_soc}"
+        );
     }
 
     #[test]

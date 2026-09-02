@@ -1955,6 +1955,126 @@ async fn forecast_endpoint_serves_seeded_forecast() {
     assert_eq!(battery["start_soc_pct"], serde_json::json!(50.0));
     let end_soc = battery["end_soc_pct"].as_f64().unwrap();
     assert!((end_soc - 100.0).abs() < 1e-6, "end_soc = {end_soc}");
+    // No slots configured → the current-schedule projection is omitted:
+    // it would merely duplicate the Eco line (issue #297).
+    assert!(battery["with_current_schedule"].is_null());
+}
+
+/// An enabled overnight charge slot must surface the current-schedule
+/// projection through the API: same hour count as the Eco projection,
+/// but actually shaped by the slot — charged up to the slot target
+/// overnight while Eco bleeds to the reserve (issue #297).
+#[tokio::test]
+async fn forecast_endpoint_includes_current_schedule_when_slots_enabled() {
+    use chrono::TimeZone;
+    use givenergy_local::history::{ForecastValueRow, HistoryDb};
+    use givenergy_local::inverter::model::{InverterSnapshot, ScheduleSlot};
+
+    let config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+
+    // Cloudy forward forecast: daylight only (06:00–19:00 at 100 W/m²),
+    // so the nights are genuinely dark and the charge slot matters.
+    let db = HistoryDb::open(&config.dir.join("history.db")).unwrap();
+    let now = chrono::Local::now();
+    let now_ts = now.timestamp();
+    let hour_start = now_ts - now_ts.rem_euclid(3600);
+    for h in 0..72i64 {
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: hour_start + h * 3600,
+            variable: "shortwave_radiation".to_string(),
+            value: if h % 24 >= 6 && h % 24 <= 19 {
+                100.0
+            } else {
+                0.0
+            },
+            source: "open-meteo".to_string(),
+            fetched_at: now_ts,
+        }])
+        .unwrap();
+    }
+    db.set_meta_value("forecast_pr", "0.8").unwrap();
+    db.set_meta_value("forecast_pr_days", "12").unwrap();
+
+    // A week of consumption history (+0.5 kWh/h).
+    let mut date = now.date_naive() - chrono::Duration::days(7);
+    while date < now.date_naive() {
+        let mut counter = 0.0_f64;
+        for hour in 0..24u32 {
+            let ts = chrono::Local
+                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp();
+            db.insert_reading(&InverterSnapshot {
+                timestamp: ts,
+                home_energy_today_kwh: counter as f32,
+                ..Default::default()
+            });
+            counter += 0.5;
+        }
+        date = date.succ_opt().unwrap();
+    }
+    *state.history.lock().await = Some(Arc::new(db));
+
+    // Low battery with an armed overnight charge slot to 65%.
+    let mut snap = InverterSnapshot {
+        soc: 20,
+        battery_capacity_kwh: 9.5,
+        max_battery_power_w: 3000,
+        charge_rate: 50,
+        discharge_rate: 50,
+        battery_reserve: 10,
+        ..Default::default()
+    };
+    snap.enable_charge = true;
+    snap.charge_slots[0] = ScheduleSlot {
+        enabled: true,
+        start_hour: 23,
+        start_minute: 0,
+        end_hour: 6,
+        end_minute: 0,
+        target_soc: 65,
+    };
+    *state.latest_snapshot.lock().await = Some(snap);
+    {
+        let mut ws = state.weather.lock().await;
+        ws.config.enabled = true;
+        ws.config.latitude = Some(51.5);
+        ws.config.longitude = Some(-0.13);
+    }
+
+    let router = create_router(state.clone());
+    let (status, body) = post_json(&router, "/api/settings", &json!({ "pv1_rated_kw": 5.0 })).await;
+    assert_eq!(status, StatusCode::OK, "settings save failed: {body}");
+
+    let (status, body) = get_json(&router, "/api/forecast").await;
+    assert_eq!(status, StatusCode::OK);
+    let battery = body["data"]["battery"].as_object().expect("battery");
+    let hours = battery["hours"].as_array().expect("eco hours");
+    let schedule = battery["with_current_schedule"]
+        .as_array()
+        .expect("enabled charge slot must yield with_current_schedule");
+    assert_eq!(schedule.len(), hours.len());
+
+    let eco_max = hours
+        .iter()
+        .filter_map(|p| p[1].as_f64())
+        .fold(f64::MIN, f64::max);
+    let schedule_max = schedule
+        .iter()
+        .filter_map(|p| p[1].as_f64())
+        .fold(f64::MIN, f64::max);
+    // Eco never recovers from the 20% start (daylight is too weak to
+    // outpace the household load), while the slot charges to 65%.
+    assert!(
+        eco_max < 30.0,
+        "eco projection must stay drained overnight, max = {eco_max}"
+    );
+    assert!(
+        schedule_max >= 64.0,
+        "schedule projection must reach the 65% slot target, max = {schedule_max}"
+    );
 }
 
 // ====================================================================
