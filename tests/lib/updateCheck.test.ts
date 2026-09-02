@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { parseVersion, isUpdateAvailable, normaliseVersionKey } from '../../src/lib/updateCheck';
+import {
+  parseVersion,
+  isUpdateAvailable,
+  normaliseVersionKey,
+  UPDATE_REFRESH_INTERVAL_MS,
+} from '../../src/lib/updateCheck';
 
 /**
  * Tests for the pure version-comparison helpers that drive the dismissible
@@ -75,5 +80,16 @@ describe('normaliseVersionKey', () => {
     // Defensive: even a garbage value should produce a consistent key so a
     // dismissal still records *something* comparable.
     expect(normaliseVersionKey('Weird-Tag')).toBe('weird-tag');
+  });
+});
+
+describe('UPDATE_REFRESH_INTERVAL_MS', () => {
+  it('is one hour', () => {
+    // Exactly one hour: short enough that an unattended instance (issue #296)
+    // picks up a new release within the hour it ships, long enough that the
+    // re-polls are noise against the backend's rate-limit budget (each poke
+    // can trigger at most one GitHub fetch per ON_DEMAND_MIN_INTERVAL, and
+    // GitHub's unauthenticated ceiling is 60/hour/IP).
+    expect(UPDATE_REFRESH_INTERVAL_MS).toBe(60 * 60 * 1000);
   });
 });

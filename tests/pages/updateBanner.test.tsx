@@ -89,6 +89,19 @@ describe('UpdateBanner', () => {
     expect(openExternal).toHaveBeenCalledWith(baseInfo.release_url);
   });
 
+  it('falls back to the releases/latest page when the payload has no release_url', () => {
+    // release_url and latest_version are always populated together by the
+    // backend, so this fallback only fires on a malformed payload — but when
+    // it does, /releases/latest (a GitHub redirect to the newest published
+    // release) is the right landing page, not the bare releases list.
+    useInverterStore.setState({ latestVersionInfo: { ...baseInfo, release_url: null } });
+    render(<UpdateBanner />);
+    fireEvent.click(screen.getByRole('button', { name: /view release/i }));
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://github.com/psylsph/home-energy-manager/releases/latest',
+    );
+  });
+
   it('records a per-version dismissal when the ✕ is clicked', () => {
     useInverterStore.setState({ latestVersionInfo: { ...baseInfo } });
     render(<UpdateBanner />);

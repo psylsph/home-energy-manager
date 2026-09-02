@@ -60,6 +60,7 @@ vi.mock('../src/lib/api', () => ({
 import App from '../src/App';
 import { apiGet } from '../src/lib/api';
 import { socColor } from '../src/lib/energyFlow';
+import { UPDATE_REFRESH_INTERVAL_MS } from '../src/lib/updateCheck';
 import { useInverterStore } from '../src/store/useInverterStore';
 
 // ---------------------------------------------------------------------------
@@ -357,5 +358,71 @@ describe('<App/> read-only mode (issue #114)', () => {
     expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
     expect(sessionStorage.getItem('readOnly')).toBe('true');
     expect(localStorage.getItem('readOnly')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Latest-version banner periodic refresh (issue #296)
+// ---------------------------------------------------------------------------
+//
+// Instances run unattended for days. The banner used to fetch
+// /api/latest-version once on mount and then freeze, so an instance left
+// running kept pointing "View release" at whatever release was current when
+// the page loaded — potentially several releases behind. The app must
+// re-fetch on an interval so the banner text, its link, and the per-version
+// dismissal latch all track the real latest release without a reload.
+
+describe('<App/> latest-version periodic refresh (issue #296)', () => {
+  beforeEach(() => {
+    silenceConsoleError();
+    useInverterStore.setState({ latestVersionInfo: null, dismissedUpdateVersion: null });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    cleanup();
+    useInverterStore.setState({ latestVersionInfo: null, dismissedUpdateVersion: null });
+  });
+
+  it('re-fetches /api/latest-version on an interval and the store tracks the newest payload', async () => {
+    vi.useFakeTimers();
+    let payload = {
+      ok: true,
+      current_version: '0.70.2',
+      latest_version: '0.70.3',
+      release_url: 'https://github.com/psylsph/home-energy-manager/releases/tag/v0.70.3',
+      update_available: true,
+    };
+    vi.mocked(apiGet).mockImplementation(async (path: string) =>
+      path === '/api/latest-version' ? payload : { ok: true, data: {} });
+
+    render(<App />);
+    await act(async () => {}); // flush the mount fetch
+    expect(useInverterStore.getState().latestVersionInfo?.latest_version).toBe('0.70.3');
+    const countVersionCalls = () =>
+      vi.mocked(apiGet).mock.calls.filter(([path]) => path === '/api/latest-version').length;
+    const initial = countVersionCalls();
+    expect(initial).toBeGreaterThanOrEqual(1);
+
+    // A new release ships while the instance keeps running: the endpoint now
+    // reports v0.70.4. After one interval the app must have re-fetched and
+    // the store must reflect it — no page reload needed.
+    payload = {
+      ...payload,
+      latest_version: '0.70.4',
+      release_url: 'https://github.com/psylsph/home-energy-manager/releases/tag/v0.70.4',
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UPDATE_REFRESH_INTERVAL_MS);
+    });
+    expect(countVersionCalls()).toBe(initial + 1);
+    expect(useInverterStore.getState().latestVersionInfo?.latest_version).toBe('0.70.4');
+
+    // And it keeps polling — one more interval, one more fetch.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UPDATE_REFRESH_INTERVAL_MS);
+    });
+    expect(countVersionCalls()).toBe(initial + 2);
   });
 });
