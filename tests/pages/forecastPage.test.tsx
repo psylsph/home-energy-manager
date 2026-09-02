@@ -624,7 +624,7 @@ describe('ForecastPage plan card', () => {
       ?.querySelector('div.h-56');
     expect(chartDiv).not.toBeNull();
     // Caption paragraph lives after the chart div, still inside section.
-    const footer = card?.querySelector('div.mt-2 > p');
+    const footer = card?.querySelector('[data-testid="forecast-caption-plan"]');
     expect(footer?.textContent).toMatch(/SOC if overnight charge enacted/);
     expect(footer?.textContent).toMatch(/3\.2 kWh/);
   });
@@ -744,6 +744,12 @@ describe('ForecastPage plan card', () => {
     render(<ForecastPage />);
     const legend = await screen.findByTestId('forecast-line-legend');
     expect(legend.textContent).toBe('SOC');
+    // The baseline has a footer description like the other lines —
+    // "do nothing" must be spelled out, not just named (issue #297
+    // feedback).
+    expect(screen.getByTestId('forecast-caption-baseline').textContent).toMatch(
+      /SOC if no slots are configured/,
+    );
   });
 
   it('toggles a projection line off and on from the legend', async () => {
@@ -752,14 +758,18 @@ describe('ForecastPage plan card', () => {
     const socLine = () => container.querySelector('[data-stroke="#34d399"]');
     expect(soc.getAttribute('aria-pressed')).toBe('true');
     expect(socLine()).not.toBeNull();
+    expect(screen.getByTestId('forecast-caption-baseline')).toBeTruthy();
 
     fireEvent.click(soc);
     expect(soc.getAttribute('aria-pressed')).toBe('false');
     expect(socLine()).toBeNull();
+    // Its description hides with it.
+    expect(screen.queryByTestId('forecast-caption-baseline')).toBeNull();
 
     fireEvent.click(soc);
     expect(soc.getAttribute('aria-pressed')).toBe('true');
     expect(socLine()).not.toBeNull();
+    expect(screen.getByTestId('forecast-caption-baseline')).toBeTruthy();
   });
 
   it('hiding the plan line also hides the charge markers and its caption', async () => {

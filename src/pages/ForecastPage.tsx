@@ -1423,12 +1423,31 @@ export default function ForecastPage() {
           ) : undefined
         }
         footer={
+          (data.battery != null && lineVisible('soc')) ||
           (hasWithCharge && lineVisible('withCharge')) ||
           (hasWithSchedule && lineVisible('withCurrent')) ||
           (chargeMarkers.length > 0 && lineVisible('withCharge')) ? (
             <>
-              {hasWithCharge && lineVisible('withCharge') && plan?.recommendation?.kind === 'charge' ? (
-                <p className="text-[11px] text-text-secondary/70 font-sans leading-snug">
+              {data.battery != null && lineVisible('soc') ? (
+                <p
+                  data-testid="forecast-caption-baseline"
+                  className="text-[11px] text-text-secondary/70 font-sans leading-snug"
+                >
+                  <span
+                    aria-hidden
+                    className="inline-block w-3 h-px align-middle mr-1"
+                    style={{ borderTop: '2px solid #34d399' }}
+                  />
+                  SOC if no slots are configured — solar surplus only.
+                </p>
+              ) : null}
+              {hasWithCharge &&
+              lineVisible('withCharge') &&
+              plan?.recommendation?.kind === 'charge' ? (
+                <p
+                  data-testid="forecast-caption-plan"
+                  className="text-[11px] text-text-secondary/70 font-sans leading-snug"
+                >
                   <span
                     aria-hidden
                     className="inline-block w-3 h-px align-middle mr-1"
@@ -1440,7 +1459,10 @@ export default function ForecastPage() {
                 </p>
               ) : null}
               {hasWithSchedule && lineVisible('withCurrent') ? (
-                <p className="text-[11px] text-text-secondary/70 font-sans leading-snug">
+                <p
+                  data-testid="forecast-caption-schedule"
+                  className="text-[11px] text-text-secondary/70 font-sans leading-snug"
+                >
                   <span
                     aria-hidden
                     className="inline-block w-3 h-px align-middle mr-1"
