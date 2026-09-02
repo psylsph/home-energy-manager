@@ -9,6 +9,19 @@
  */
 
 /**
+ * How often the mounted app re-fetches `/api/latest-version` to refresh the
+ * banner (issue #296). An instance left running unattended for days used to
+ * freeze its banner at whatever release was current at page load, pointing
+ * "View release" at a stale release page. One hour keeps an unattended
+ * instance within ~an hour of the real latest release while staying far
+ * under the backend's GitHub rate-limit budget: each poke triggers at most
+ * one on-demand fetch (`ON_DEMAND_MIN_INTERVAL` = 60s) against GitHub's
+ * unauthenticated ceiling of 60 requests/hour/IP, on top of the backend's
+ * own 6-hour loop.
+ */
+export const UPDATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
  * Parse the leading `major.minor.patch` triple out of a version string.
  *
  * Accepts an optional leading `v`/`V` and ignores anything after the third

@@ -8,6 +8,7 @@ import { useReconnect } from './hooks/useReconnect';
 import type { PollSettings } from './lib/types';
 import type { LatestVersionInfo } from './lib/types';
 import { apiGet } from './lib/api';
+import { UPDATE_REFRESH_INTERVAL_MS } from './lib/updateCheck';
 import { formatPercent, formatTimestamp } from './lib/format';
 import { buildSystemAlerts } from './lib/gridFault';
 import { FLOW_COLORS, socColor } from './lib/energyFlow';
@@ -366,8 +367,15 @@ function Layout() {
   // loop that only fires ~30s after startup, so on a cold start the first
   // fetch usually comes back empty (latest_version: null). We schedule a
   // single follow-up fetch a minute later so the banner still appears
-  // without making the user reload — no perpetual polling for what is a
-  // rarely-changing value.
+  // without making the user reload.
+  //
+  // The fetch then re-runs every UPDATE_REFRESH_INTERVAL_MS (issue #296):
+  // instances run unattended for days, and a banner frozen at whatever was
+  // current at page load would point "View release" at a stale release.
+  // Each re-poll returns the backend's current cache (nudging the backend
+  // to re-fetch GitHub when its own cache is stale), so the version text,
+  // the link, and the per-version dismissal latch all track the real latest
+  // release within about an hour of it shipping.
   useEffect(() => {
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -385,9 +393,11 @@ function Layout() {
       }
     };
     void load();
+    const refresh = setInterval(load, UPDATE_REFRESH_INTERVAL_MS);
     return () => {
       cancelled = true;
       if (retry) clearTimeout(retry);
+      clearInterval(refresh);
     };
   }, [setLatestVersionInfo]);
 

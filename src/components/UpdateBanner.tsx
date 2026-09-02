@@ -17,7 +17,10 @@ import { isUpdateAvailable, normaliseVersionKey } from '../lib/updateCheck';
  *
  * Nothing happens automatically — the link opens the GitHub release page in
  * the system browser (via `openExternal`, which uses the Tauri opener plugin
- * in the desktop shell) where the user can download the new build.
+ * in the desktop shell) where the user can download the new build. If the
+ * payload carries no URL, the fallback is the `releases/latest` redirect —
+ * always the newest published release, matching what the backend's version
+ * check fetches.
  */
 export default function UpdateBanner() {
   const info = useInverterStore((s) => s.latestVersionInfo);
@@ -45,7 +48,7 @@ export default function UpdateBanner() {
         </span>
         <button
           type="button"
-          onClick={() => void openExternal(info.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases')}
+          onClick={() => void openExternal(info.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases/latest')}
           className="ml-auto shrink-0 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-3 py-1 text-xs font-semibold transition-colors"
         >
           View release

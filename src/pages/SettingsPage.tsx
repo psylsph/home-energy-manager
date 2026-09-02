@@ -2594,7 +2594,7 @@ export default function SettingsPage() {
                 {latestVersionInfo.update_available && (
                   <button
                     type="button"
-                    onClick={() => void openExternal(latestVersionInfo.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases')}
+                    onClick={() => void openExternal(latestVersionInfo.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases/latest')}
                     className="ml-2 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-2.5 py-0.5 text-xs font-semibold text-amber-100 transition-colors"
                   >
                     View release
