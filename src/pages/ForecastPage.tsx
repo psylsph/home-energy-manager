@@ -1541,6 +1541,7 @@ export default function ForecastPage() {
                   strokeWidth={2}
                   dot={false}
                   name="SOC"
+                  isAnimationActive={false}
                 />
               )}
               {hasWithCharge && lineVisible('withCharge') && (
@@ -1553,6 +1554,7 @@ export default function ForecastPage() {
                   dot={false}
                   name="If charge enacted"
                   connectNulls
+                  isAnimationActive={false}
                 />
               )}
               {hasWithSchedule && lineVisible('withCurrent') && (
@@ -1565,6 +1567,7 @@ export default function ForecastPage() {
                   dot={false}
                   name="With current schedule"
                   connectNulls
+                  isAnimationActive={false}
                 />
               )}
             </LineChart>
