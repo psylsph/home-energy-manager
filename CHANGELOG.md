@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.79.0] - 2026-09-02
+
+### Added
+
+- **The Battery projection now shows what happens if you change nothing.** A third line plots the next three days with the schedule already in your inverter — charge slots filling to their target overnight, discharge slots draining to their floor — so you can put it beside the "if solar only" and "if charge enacted" lines and see exactly what tonight looks like if you leave everything as it is. Each line can be switched on and off from a legend under the chart. (fixes #297)
+
 ## [0.78.3] - 2026-09-02
 
 ### Fixed
