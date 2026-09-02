@@ -6678,6 +6678,112 @@ mod tests {
     }
 
     #[test]
+    fn ct_authority_sub_ceiling_jump_is_rejected_per_poll() {
+        // Issue #294 follow-up: the day-shaped midnight ceiling grows all
+        // day, so a stuck counter jump small enough to stay under it (+200
+        // kWh at 09:05 vs a ~273 kWh ceiling) passes every check and
+        // inflates today's solar until midnight absorbs it at the reseed.
+        // Between two accepted reads the counter can only rise by
+        // max-plausible-power × elapsed, so the per-poll bound must catch
+        // the jump on arrival, hold the accepted figure, and stage-2 reseed
+        // with the day carried forward.
+        let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 500.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 0, 30),
+        );
+
+        // 09:00: a healthy 9 kWh of morning generation.
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 509.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 9, 0),
+        );
+        assert!((snap.today_solar_kwh - 9.0).abs() < 0.01);
+
+        // 09:05: the export counter steps to 709 — a +200 kWh jump that no
+        // poll interval of generation can produce, yet it sits under the
+        // day-shaped ceiling (30 kW × 9.08 h + 1 ≈ 273 kWh).
+        let (mut snap2, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 9, 5),
+        );
+        assert!(
+            !reseeded,
+            "a first corrupt cycle must not poison the baseline"
+        );
+        assert!(
+            (snap2.today_solar_kwh - 9.0).abs() < 0.01,
+            "a jump no poll interval can generate must be rejected even when the day-shaped ceiling would let it through"
+        );
+        assert_eq!(recovery["1"].consecutive_rejections, 1);
+
+        // The jump sticks: stage 1 holds through the second cycle.
+        let (mut s, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut s,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 9, 10),
+        );
+        assert!(!reseeded, "rejection 2 must not reseed yet");
+        assert!((s.today_solar_kwh - 9.0).abs() < 0.01);
+
+        // Third rejection: stage 2 — carry-forward reseed.
+        let (mut s, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut s,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 9, 15),
+        );
+        assert!(
+            reseeded,
+            "the third consecutive rejection triggers the reseed"
+        );
+        assert!((s.today_solar_kwh - 9.0).abs() < 0.01);
+        assert_eq!(recovery["1"].consecutive_rejections, 0);
+        assert!(
+            (baselines["1"].e_export_kwh - 700.0).abs() < 0.01,
+            "baseline carries the accepted energy forward (709 − 9)"
+        );
+
+        // 09:20: accumulation resumes from the new resting point — this
+        // also pins the per-poll anchor being re-based at the reseed (a
+        // stale pre-jump anchor would re-violate on this +0.5 kWh read).
+        let (mut s, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 100.0, 709.5)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut s,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 9, 20),
+        );
+        assert!(!reseeded, "post-reseed accumulation is not another spike");
+        assert!((s.today_solar_kwh - 9.5).abs() < 0.01);
+    }
+
+    #[test]
     fn ct_authority_rejection_streak_resets_across_midnight() {
         // The rejection counter is day-scoped: yesterday's two rejections
         // must not combine with today's first corrupt read into an early
