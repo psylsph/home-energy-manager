@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.78.3] - 2026-09-02
+
+### Fixed
+
+- **Overnight "sunshine" is finally gone.** When the sun is properly down — worked out from the location you've saved for the weather feature — the few watts of noise a dark string picks up while the EV charger runs now read as zero, and the stale daily-solar total some firmware still reports before dawn no longer shows as today's solar. On AC-coupled systems "solar today" now comes from the per-string registers or a solar CT clamp instead of the inverter output register, which isn't solar at all. (fixes #261)
+
+- **Mid-sized solar spikes from a CT clamp are caught too.** The guard from 0.78.1 stopped day-sized counter jumps, but a stuck counter could slip a smaller jump under the limit and quietly inflate the day's solar until midnight. Every new read is now checked against the previous one, so nothing the clamp couldn't physically produce gets through — and a counter that has genuinely jumped still keeps the solar generated so far. (fixes #294)
+
+- **The update banner keeps itself current.** An instance left running for days used to freeze its "new version available" banner at whatever was newest when the page loaded, pointing "View release" somewhere stale. The banner now re-checks every hour on its own — no reload needed. (fixes #296)
+
 ## [0.78.2] - 2026-09-01
 
 ### Fixed
