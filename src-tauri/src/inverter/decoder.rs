@@ -316,7 +316,7 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
 /// tests and leaves callers without configured Meteo coordinates unchanged.
 pub(crate) fn decode_snapshot_with_solar_position(
     blocks: &[BlockRead],
-    _solar_position: Option<SolarPosition>,
+    solar_position: Option<SolarPosition>,
 ) -> InverterSnapshot {
     let mut snap = InverterSnapshot {
         timestamp: chrono::Utc::now().timestamp(),
@@ -408,6 +408,11 @@ pub(crate) fn decode_snapshot_with_solar_position(
             }
         }
     }
+
+    // Device type is only known after the holding block has been decoded, so
+    // model-aware solar corrections must run after the block loop but before
+    // the home/consumption energy balances are derived.
+    apply_solar_position_corrections(&mut snap, solar_position);
 
     // Compute home power.
     // Internal sign conventions (match givenergy-modbus / GivTCP references):
@@ -585,6 +590,57 @@ fn suppress_dark_string_noise(power: i32, voltage: f32) -> i32 {
         0
     } else {
         power
+    }
+}
+
+/// Apply corrections that need the final decoded device type and, when
+/// configured, the site's solar position.
+fn apply_solar_position_corrections(
+    snap: &mut InverterSnapshot,
+    solar_position: Option<SolarPosition>,
+) {
+    let per_string_today = snap.today_pv1_kwh + snap.today_pv2_kwh;
+
+    // DTC 3001 field data shows IR(44) rising almost exactly with battery
+    // discharge after the charge lock ends; under heavy grid-fed EV/immersion
+    // load it can also creep while both PV counters remain zero. On AC-coupled
+    // firmware it is inverter-output-today, not PV-generation-today. The
+    // mirrored per-string counters (or CT authority applied later in poll.rs)
+    // are the valid solar source.
+    if matches!(
+        snap.device_type,
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+    ) {
+        snap.today_solar_kwh = per_string_today;
+    }
+
+    let Some(position) = solar_position else {
+        return;
+    };
+
+    if position.is_pv_dark() {
+        // A dark string can retain its full open-circuit voltage and electrical
+        // interference can produce a self-consistent one-LSB current/power
+        // pair (issue #261: 238.3 V, 0.1 A, 23 W). At this solar elevation the
+        // low reading cannot be real generation, regardless of string voltage.
+        let old_pv1 = snap.pv1_power;
+        let old_pv2 = snap.pv2_power;
+        if snap.pv1_power > 0 && snap.pv1_power <= PV_STRING_NOISE_THRESHOLD_W {
+            snap.pv1_power = 0;
+        }
+        if snap.pv2_power > 0 && snap.pv2_power <= PV_STRING_NOISE_THRESHOLD_W {
+            snap.pv2_power = 0;
+        }
+        let suppressed_w = old_pv1 - snap.pv1_power + old_pv2 - snap.pv2_power;
+        snap.solar_power = snap.solar_power.saturating_sub(suppressed_w);
+    }
+
+    // Hybrid firmware may expose phantom/stale IR(44) energy before sunrise
+    // while both authoritative per-string daily counters are still zero. Only
+    // suppress the fallback pre-dawn: after sunset IR(44) may be the sole valid
+    // full-day total on early firmware and must remain visible until midnight.
+    if position.is_pre_dawn_dark() && per_string_today == 0.0 {
+        snap.today_solar_kwh = 0.0;
     }
 }
 
@@ -4356,7 +4412,7 @@ mod tests {
         input_data[44] = 37; // PV generation today 3.7 kWh (used as fallback)
 
         let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x2001; // Gen2 Hybrid
+        holding_data[0] = 0x2001; // Gen1 Hybrid until ARM firmware refines it
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
@@ -4365,7 +4421,7 @@ mod tests {
         ];
         let snap = decode_snapshot(&blocks);
 
-        assert_eq!(snap.device_type, DeviceType::Gen2Hybrid);
+        assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
         // Hybrid fallback path: IR(17)=IR(19)=0 → use IR(44) = 3.7 kWh.
         assert!((snap.today_solar_kwh - 3.7).abs() < 0.01);
         // Consumption formula at the home level: solar + import + discharge - export - charge.
@@ -4387,22 +4443,27 @@ mod tests {
         input_data[19] = 0; // IR(19): no PV2 energy yet
         input_data[44] = 9; // IR(44): 0.9 kWh inverter output, not PV
 
-        let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x3001; // AC Coupled
-        let blocks = vec![
-            make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
-            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
-        ];
+        for (dtc, expected) in [
+            (0x3001, DeviceType::ACCoupled),
+            (0x3002, DeviceType::ACCoupledMk2),
+        ] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            let blocks = vec![
+                make_block(RegisterType::Input, 0, 60, "input_0_59", input_data.clone()),
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            ];
 
-        let snap = decode_snapshot(&blocks);
+            let snap = decode_snapshot(&blocks);
 
-        assert_eq!(snap.device_type, DeviceType::ACCoupled);
-        assert_eq!(snap.today_pv1_kwh, 0.0);
-        assert_eq!(snap.today_pv2_kwh, 0.0);
-        assert_eq!(
-            snap.today_solar_kwh, 0.0,
-            "AC-coupled IR(44) inverter output must not appear as solar"
-        );
+            assert_eq!(snap.device_type, expected);
+            assert_eq!(snap.today_pv1_kwh, 0.0);
+            assert_eq!(snap.today_pv2_kwh, 0.0);
+            assert_eq!(
+                snap.today_solar_kwh, 0.0,
+                "AC-coupled IR(44) inverter output must not appear as solar"
+            );
+        }
     }
 
     #[test]
@@ -4442,7 +4503,7 @@ mod tests {
         input_data[26] = 0;
         input_data[44] = 30; // IR(44): 3.0 kWh (valid fallback)
         let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x3001;
+        holding_data[0] = 0x2101; // Polar Hybrid keeps the hybrid fallback
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
@@ -4890,6 +4951,32 @@ mod tests {
 
         assert_eq!(snap.pv2_power, 23);
         assert_eq!(snap.solar_power, 23);
+    }
+
+    #[test]
+    fn pv_dark_filter_requires_location_and_never_suppresses_above_floor() {
+        let decode = |power, position| {
+            let mut input_data = vec![0u16; 60];
+            input_data[2] = 2383;
+            input_data[9] = 2;
+            input_data[20] = power;
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = 0x2001;
+            decode_snapshot_with_solar_position(
+                &[
+                    make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
+                    make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                ],
+                position,
+            )
+        };
+        let dark = Some(SolarPosition {
+            elevation_deg: -30.0,
+            hour_angle_deg: -160.0,
+        });
+
+        assert_eq!(decode(23, None).pv2_power, 23);
+        assert_eq!(decode(51, dark).pv2_power, 51);
     }
 
     #[test]

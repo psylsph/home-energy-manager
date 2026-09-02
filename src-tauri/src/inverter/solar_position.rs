@@ -1,7 +1,9 @@
 //! Offline solar-position calculation used to identify periods where genuine
 //! PV generation is physically implausible.
 
-use chrono::{DateTime, Utc};
+use std::f64::consts::PI;
+
+use chrono::{DateTime, Datelike, Timelike, Utc};
 
 /// Below this solar elevation, low inverter-PV readings are treated as noise.
 ///
@@ -37,7 +39,7 @@ impl SolarPosition {
 /// intentionally offline: persisted Meteo coordinates are sufficient and no
 /// weather request is required during polling.
 pub(crate) fn calculate_solar_position(
-    _at: DateTime<Utc>,
+    at: DateTime<Utc>,
     latitude_deg: f64,
     longitude_deg: f64,
 ) -> Option<SolarPosition> {
@@ -49,10 +51,40 @@ pub(crate) fn calculate_solar_position(
         return None;
     }
 
-    // RED seam: the NOAA calculation is supplied by the GREEN commit.
+    // NOAA's fractional-year approximation. Its sub-degree accuracy is far
+    // tighter than the margin between the -8 degree PV-dark boundary and any
+    // useful domestic-array output, and it needs neither a network request nor
+    // a timezone database because both the timestamp and longitude are UTC.
+    let fractional_hour = at.hour() as f64
+        + at.minute() as f64 / 60.0
+        + at.second() as f64 / 3600.0
+        + at.nanosecond() as f64 / 3_600_000_000_000.0;
+    let gamma = 2.0 * PI / 365.0 * (at.ordinal() as f64 - 1.0 + (fractional_hour - 12.0) / 24.0);
+
+    let equation_of_time_minutes = 229.18
+        * (0.000_075 + 0.001_868 * gamma.cos()
+            - 0.032_077 * gamma.sin()
+            - 0.014_615 * (2.0 * gamma).cos()
+            - 0.040_849 * (2.0 * gamma).sin());
+    let declination_rad = 0.006_918 - 0.399_912 * gamma.cos() + 0.070_257 * gamma.sin()
+        - 0.006_758 * (2.0 * gamma).cos()
+        + 0.000_907 * (2.0 * gamma).sin()
+        - 0.002_697 * (3.0 * gamma).cos()
+        + 0.001_48 * (3.0 * gamma).sin();
+
+    let utc_minutes = fractional_hour * 60.0;
+    let true_solar_minutes =
+        (utc_minutes + equation_of_time_minutes + 4.0 * longitude_deg).rem_euclid(1440.0);
+    let hour_angle_deg = true_solar_minutes / 4.0 - 180.0;
+    let latitude_rad = latitude_deg.to_radians();
+    let hour_angle_rad = hour_angle_deg.to_radians();
+    let sin_elevation = latitude_rad.sin() * declination_rad.sin()
+        + latitude_rad.cos() * declination_rad.cos() * hour_angle_rad.cos();
+    let elevation_deg = sin_elevation.clamp(-1.0, 1.0).asin().to_degrees();
+
     Some(SolarPosition {
-        elevation_deg: 0.0,
-        hour_angle_deg: 0.0,
+        elevation_deg,
+        hour_angle_deg,
     })
 }
 

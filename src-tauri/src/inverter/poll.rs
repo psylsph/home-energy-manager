@@ -59,7 +59,7 @@ use tokio::sync::{broadcast, oneshot, Mutex, Notify};
 
 use crate::alerts::AlertType;
 use crate::history::HistoryDb;
-use crate::inverter::decoder::decode_snapshot;
+use crate::inverter::decoder::decode_snapshot_with_solar_position;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
 use crate::inverter::model::{
     BatteryMode, DeviceType, InverterSnapshot, ScheduleSlot, SolarArraySource, SolarArraySummary,
@@ -71,6 +71,7 @@ use crate::inverter::sanitizer::{
     derive_battery_fields_from_bms, is_block_suspicious, sanitize_snapshot, validate_battery_bms,
     ConsecutiveSuspectCounts, DeltaCorrectionCounts, GraceCumulativeSamples, RateReleaseCounts,
 };
+use crate::inverter::solar_position::calculate_solar_position;
 use crate::inverter::state_machines::{
     build_force_discharge_auto_revert_writes, build_timed_export_disable_writes,
     check_adaptive_charge, check_auto_winter, check_discharge_floor,
@@ -1949,7 +1950,37 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                             .await
                         {
                             Ok(blocks) => {
-                                let mut snapshot = decode_snapshot(&blocks);
+                                // Load settings from disk on a blocking thread
+                                // so synchronous file I/O doesn't stall the poll
+                                // loop on slow/networked filesystems. Loading here
+                                // makes the persisted Meteo coordinates available
+                                // before decode while retaining the existing one
+                                // settings read per successful poll.
+                                let poll_settings = tokio::task::spawn_blocking(
+                                    crate::settings::Settings::load,
+                                )
+                                .await
+                                .unwrap_or_default();
+
+                                // Meteo coordinates are enough to identify
+                                // physically dark periods; no weather request
+                                // is made here and filtering stays disabled
+                                // when the user has not configured a location.
+                                let solar_position = poll_settings
+                                    .weather_config
+                                    .latitude
+                                    .zip(poll_settings.weather_config.longitude)
+                                    .and_then(|(latitude, longitude)| {
+                                        calculate_solar_position(
+                                            chrono::Utc::now(),
+                                            latitude,
+                                            longitude,
+                                        )
+                                    });
+                                let mut snapshot = decode_snapshot_with_solar_position(
+                                    &blocks,
+                                    solar_position,
+                                );
 
                                 // Gen3 Hybrid targeted pause-register probe. The
                                 // full HR 300-359 AC-config block times out on
@@ -2869,15 +2900,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         "First poll read after connect - data is flowing"
                                     );
                                 }
-                                // Load settings from disk on a blocking thread
-                                // so synchronous file I/O doesn't stall the poll
-                                // loop on slow/networked filesystems.
-                                let poll_settings = tokio::task::spawn_blocking(
-                                    crate::settings::Settings::load,
-                                )
-                                .await
-                                .unwrap_or_default();
-
                                 // ---- Auto winter mode ----
                                 {
                                     let config = state.auto_winter_config.lock().await;
