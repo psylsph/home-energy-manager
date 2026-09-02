@@ -728,7 +728,7 @@ describe('ForecastPage plan card', () => {
     });
     render(<ForecastPage />);
     const legend = await screen.findByTestId('forecast-line-legend');
-    expect(legend.textContent).toMatch('SOC');
+    expect(legend.textContent).toMatch('If solar only');
     expect(legend.textContent).toMatch('If charge enacted');
     expect(legend.textContent).toMatch('With current schedule');
     expect(legend.textContent).not.toMatch('Charge start');
@@ -743,7 +743,7 @@ describe('ForecastPage plan card', () => {
     });
     render(<ForecastPage />);
     const legend = await screen.findByTestId('forecast-line-legend');
-    expect(legend.textContent).toBe('SOC');
+    expect(legend.textContent).toBe('If solar only');
     // The baseline has a footer description like the other lines —
     // "do nothing" must be spelled out, not just named (issue #297
     // feedback).
@@ -754,7 +754,7 @@ describe('ForecastPage plan card', () => {
 
   it('toggles a projection line off and on from the legend', async () => {
     const { container } = render(<ForecastPage />);
-    const soc = await screen.findByRole('button', { name: 'SOC' });
+    const soc = await screen.findByRole('button', { name: 'If solar only' });
     const socLine = () => container.querySelector('[data-stroke="#34d399"]');
     expect(soc.getAttribute('aria-pressed')).toBe('true');
     expect(socLine()).not.toBeNull();

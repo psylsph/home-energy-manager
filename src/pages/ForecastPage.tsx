@@ -645,7 +645,7 @@ export default function ForecastPage() {
   // Legend descriptions: SOC always (the no-grid-charging baseline); the
   // what-if lines only when data exists for them.
   const batteryLegendLines = [
-    { key: 'soc', label: 'SOC', colour: '#34d399', style: 'solid' as const },
+    { key: 'soc', label: 'If solar only', colour: '#34d399', style: 'solid' as const },
     ...(hasWithCharge
       ? [
           {
@@ -1562,7 +1562,7 @@ export default function ForecastPage() {
                   stroke="#34d399"
                   strokeWidth={2}
                   dot={false}
-                  name="SOC"
+                  name="If solar only"
                   isAnimationActive={false}
                 />
               )}
