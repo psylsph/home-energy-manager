@@ -136,17 +136,22 @@ pub fn crc16_modbus(data: &[u8]) -> u16 {
 
 /// Encode the serial number string into exactly 10 bytes (Latin-1, space-padded).
 ///
-/// Panics if the serial string is longer than 10 bytes.
-pub(crate) fn encode_serial(serial: &str) -> [u8; SERIAL_LEN] {
-    assert!(
-        serial.len() <= SERIAL_LEN,
-        "serial number must be at most {SERIAL_LEN} bytes, got {}",
-        serial.len()
-    );
+/// Returns an error if the serial string is longer than 10 bytes. Review H8:
+/// this used to `assert!`, and the serial is stored verbatim from
+/// POST /api/settings — a 12-character serial panicked the spawned poll task
+/// on its first request, silently stopping monitoring, writes and alerts
+/// until app restart. The settings boundary now rejects over-long serials,
+/// and this Result keeps the framer side panic-free as well.
+pub(crate) fn encode_serial(serial: &str) -> Result<[u8; SERIAL_LEN], String> {
+    if serial.len() > SERIAL_LEN {
+        return Err(format!(
+            "serial number must be at most {SERIAL_LEN} bytes, got {}",
+            serial.len()
+        ));
+    }
     let mut buf = [b' '; SERIAL_LEN];
-    let bytes = serial.as_bytes();
-    buf[..bytes.len()].copy_from_slice(bytes);
-    buf
+    buf[..serial.len()].copy_from_slice(serial.as_bytes());
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +194,16 @@ pub fn build_heartbeat_response(request: &[u8]) -> Vec<u8> {
 /// # Returns
 /// The fully assembled frame as a `Vec<u8>`.
 pub fn encode_frame(serial: &str, slave: u8, function: u8, payload: &[u8]) -> Vec<u8> {
-    let serial_bytes = encode_serial(serial);
+    // Defensive fallback: the settings boundary rejects over-long serials,
+    // so this only fires for a hand-edited settings.json. Truncate (with a
+    // warn) rather than panic the caller — a wrong serial then fails at the
+    // protocol level instead of killing the poll task.
+    let serial_bytes = encode_serial(serial).unwrap_or_else(|e| {
+        tracing::warn!("{e}; truncating for the outgoing frame");
+        let mut buf = [b' '; SERIAL_LEN];
+        buf.copy_from_slice(&serial.as_bytes()[..SERIAL_LEN]);
+        buf
+    });
 
     // Build inner PDU first: slave + function + payload
     let mut inner = Vec::with_capacity(2 + payload.len());
@@ -384,21 +398,23 @@ mod tests {
 
     #[test]
     fn serial_encoding_short_serial() {
-        let encoded = encode_serial("SA1234");
+        let encoded = encode_serial("SA1234").expect("short serial encodes");
         assert_eq!(&encoded[..6], b"SA1234");
         assert_eq!(&encoded[6..], b"    "); // space-padded
     }
 
     #[test]
     fn serial_encoding_exact_length() {
-        let encoded = encode_serial("SA12345678");
+        let encoded = encode_serial("SA12345678").expect("10-char serial encodes");
         assert_eq!(&encoded, b"SA12345678");
     }
 
     #[test]
-    #[should_panic(expected = "serial number must be at most 10 bytes")]
-    fn serial_encoding_too_long_panics() {
-        let _ = encode_serial("SERIAL_TOO_LONG");
+    fn serial_encoding_too_long_returns_error() {
+        // Review H8: this used to pin an `assert!` panic — the exact panic
+        // that killed the poll task on an over-long serial. It must now be
+        // an Err (see encode_serial_rejects_over_long_serial).
+        assert!(encode_serial("SERIAL_TOO_LONG").is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -735,5 +751,44 @@ mod tests {
     fn normal_frame_is_not_heartbeat() {
         let frame = encode_frame("SA1234", 0x01, 0x03, &[0x00, 0x01]);
         assert!(!is_heartbeat_request(&frame));
+    }
+
+    // -----------------------------------------------------------------------
+    // Serial encoding (review H8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encode_serial_space_pads_short_serials() {
+        let encoded = encode_serial("AB12").expect("short serial encodes");
+        assert_eq!(&encoded[..4], b"AB12");
+        assert_eq!(&encoded[4..], b"      ", "remainder must be space-padded");
+    }
+
+    #[test]
+    fn encode_serial_rejects_over_long_serial() {
+        // Review H8: an 11+ character serial used to `assert!` — and since
+        // settings stored the serial verbatim from POST /api/settings, a
+        // 12-character serial panicked the spawned poll task on its first
+        // request, silently stopping monitoring, writes and alerts until
+        // restart.
+        let err = encode_serial("0123456789A").expect_err("11 chars must be rejected");
+        assert!(
+            err.contains("at most 10"),
+            "error should name the limit: {err}"
+        );
+        assert!(encode_serial("0123456789").is_ok(), "exactly 10 is fine");
+    }
+
+    #[test]
+    fn encode_frame_with_over_long_serial_truncates_instead_of_panicking() {
+        // Defensive: the settings boundary rejects over-long serials, so a
+        // frame built with one can only come from hand-edited settings.json.
+        // It must truncate (protocol-level failure) rather than panic.
+        let oversized = encode_frame("0123456789ABCDEF", 0x11, 0x03, &[0x00, 0x01]);
+        let ten_char = encode_frame("0123456789", 0x11, 0x03, &[0x00, 0x01]);
+        assert_eq!(
+            oversized, ten_char,
+            "an over-long serial must encode as its first 10 bytes"
+        );
     }
 }

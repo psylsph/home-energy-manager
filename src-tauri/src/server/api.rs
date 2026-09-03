@@ -1666,11 +1666,33 @@ fn settings_log_fields(
     out
 }
 
+/// Validate a dongle serial at the settings boundary (review H8).
+///
+/// The wire format is exactly 10 Latin-1 bytes, space-padded. The serial is
+/// stored verbatim from POST /api/settings and reaches `encode_serial`
+/// inside the spawned poll task — an over-long serial used to panic that
+/// task on its first request, silently stopping monitoring, writes and
+/// alerts until app restart. Reject over-long and non-printable serials
+/// here, where the caller gets an honest 400.
+fn validate_dongle_serial(serial: &str) -> Result<(), String> {
+    if serial.len() > 10 {
+        return Err(format!(
+            "Invalid serial: must be at most 10 characters, got {}",
+            serial.len()
+        ));
+    }
+    if !serial.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        return Err("Invalid serial: only printable ASCII characters are allowed".to_string());
+    }
+    Ok(())
+}
+
 fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
     let host = body["host"].as_str().unwrap_or("").to_string();
     let port_raw = body.get("port").and_then(|v| v.as_u64());
     let port = port_raw.unwrap_or(0) as u16;
     let serial = body["serial"].as_str().unwrap_or("").to_string();
+    validate_dongle_serial(&serial)?;
     // Only overwrite interval if explicitly provided; otherwise keep current value.
     // The Connect button sends {host,port,serial} without interval_secs,
     // so we must not clobber it with a default.
@@ -18684,5 +18706,52 @@ mod tests {
             assert_eq!(ws.config.postcode, "X1 1XX");
         })
         .await;
+    }
+
+    // -------------------------------------------------------------------
+    // Serial validation at the settings boundary (review H8): the wire
+    // format is exactly 10 Latin-1 bytes. An over-long serial used to be
+    // stored verbatim and panicked `encode_serial` inside the spawned poll
+    // task on its first request — silently stopping monitoring, writes and
+    // alerts until restart.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_settings_rejects_serial_longer_than_ten_chars() {
+        let err = parse_settings(&serde_json::json!({
+            "host": "192.168.1.10",
+            "port": 8899,
+            "serial": "0123456789AB"
+        }))
+        .expect_err("a 12-char serial must be rejected");
+        assert!(err.contains("10"), "error should name the limit: {err}");
+    }
+
+    #[test]
+    fn parse_settings_rejects_non_printable_serial() {
+        let err = parse_settings(&serde_json::json!({
+            "host": "192.168.1.10",
+            "port": 8899,
+            "serial": "AB\tCD"
+        }))
+        .expect_err("a serial with a control character must be rejected");
+        assert!(err.contains("printable"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_settings_accepts_ten_char_serial_and_empty() {
+        assert!(
+            parse_settings(&serde_json::json!({
+                "host": "192.168.1.10",
+                "port": 8899,
+                "serial": "TEST123456"
+            }))
+            .is_ok(),
+            "exactly 10 characters must be accepted"
+        );
+        assert!(
+            parse_settings(&serde_json::json!({ "host": "192.168.1.10" })).is_ok(),
+            "an omitted serial must still be accepted"
+        );
     }
 }
