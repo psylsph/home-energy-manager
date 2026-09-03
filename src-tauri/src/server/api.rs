@@ -4021,7 +4021,14 @@ pub async fn set_export_limit(
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     let watts: u16 = match body["watts"].as_u64() {
-        Some(w) => w as u16,
+        Some(w) if w <= u16::MAX as u64 => w as u16,
+        // Review H10 companion: an unvalidated cast here let e.g. 70 000
+        // wrap to 4 464 W and silently take effect. The 22 000 W guard is
+        // the widest per-command ceiling (EMS); each command re-validates
+        // its own range (three-phase is 6 500 W).
+        Some(_) => {
+            return error_response("'watts' out of range (0-22000)");
+        }
         None => return error_response("Missing 'watts' field"),
     };
 

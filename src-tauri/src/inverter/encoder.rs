@@ -717,9 +717,16 @@ impl ControlCommand {
             }
             ControlCommand::SetThreePhaseExportLimit { watts } => {
                 // HR 1063 — three-phase plant-level export power limit (deci-W).
-                // Same [0..22000] W ceiling as SetEmsExportLimit. Convert W to
-                // deci-W (raw register value = W × 10).
-                validate_range(*watts, 0, 22_000, "three-phase export limit")?;
+                // Ceiling is 6 500 W per the reference library
+                // (inverter_three-phase.py: `p_export_limit … HR(1063) …
+                // max=6500`) — NOT the 22 kW used for the EMS register,
+                // and not merely the u16 deci-W ceiling (65 535 =
+                // 6 553.5 W). Review H10: values above 6 553 W used to be
+                // "accepted" by the 22 kW validation and then saturated to
+                // 0xFFFF via `saturating_mul(10)` — the uninitialised-
+                // register fingerprint, so the limit read back as
+                // unconfigured while the API reported success.
+                validate_range(*watts, 0, 6_500, "three-phase export limit")?;
                 vec![rw(HR_3PH_EXPORT_LIMIT, (*watts).saturating_mul(10))]
             }
             ControlCommand::SyncClock => {
@@ -2008,14 +2015,29 @@ mod tests {
 
     #[test]
     fn set_three_phase_export_limit_validates_range() {
-        // 0 disables the limit; max is 22 kW per GivTCP entity_lut.py:89.
+        // 0 disables the limit. Max is 6 500 W per the reference library
+        // (inverter_threephase.py: `p_export_limit … HR(1063) … max=6500`)
+        // — and that is also what the u16 deci-W encoding supports (65 535
+        // = 6 553.5 W). Review H10: the old 22 kW ceiling let values above
+        // 6 553 W saturate to 0xFFFF, which reads back as the
+        // "uninitialised register" fingerprint (limit shows unconfigured).
         assert!(ControlCommand::SetThreePhaseExportLimit { watts: 0 }
             .encode()
             .is_ok());
-        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_000 }
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 6_500 }
             .encode()
             .is_ok());
-        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_001 }
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 6_501 }
+            .encode()
+            .is_err());
+        // Just past the raw u16 deci-W ceiling: previously delivered
+        // 0xFFFF instead of erroring.
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 6_553 }
+            .encode()
+            .is_err());
+        // The old test pinned the saturation: 22 000 W used to "encode"
+        // as 0xFFFF.
+        assert!(ControlCommand::SetThreePhaseExportLimit { watts: 22_000 }
             .encode()
             .is_err());
     }
