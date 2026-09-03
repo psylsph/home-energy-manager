@@ -51,6 +51,59 @@ fn config_dir_mutex() -> &'static parking_lot::Mutex<()> {
     MUTEX.get_or_init(|| parking_lot::Mutex::new(()))
 }
 
+/// Resolve a naive local wall-clock time to a unix timestamp without
+/// panicking on DST spring-forward nights (review H14).
+///
+/// The skipped hour returns `LocalResult::None`, which
+/// `.earliest().unwrap()` turned into a panic — the four forecast fixtures
+/// that seed a week of hourly history failed for ~a week after every
+/// spring-forward, never reproducing in TZ=UTC CI. The skipped wall-clock
+/// time resolves to its UTC interpretation instead: the synthetic rows
+/// only need *a* timestamp, not a zone-correct one.
+fn local_wall_clock_ts<Tz: chrono::TimeZone>(tz: &Tz, naive: chrono::NaiveDateTime) -> i64 {
+    match tz.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => dt.timestamp(),
+        chrono::LocalResult::Ambiguous(dt, _) => dt.timestamp(),
+        chrono::LocalResult::None => naive.and_utc().timestamp(),
+    }
+}
+
+#[test]
+fn local_wall_clock_ts_survives_the_spring_forward_gap() {
+    use chrono_tz::Europe::London;
+    // 2026-03-29 01:30 does not exist in London (01:00 GMT → 02:00 BST);
+    // this is the exact shape that used to panic the history-seeding
+    // fixtures. It must resolve to a timestamp (the UTC interpretation).
+    let skipped = chrono::NaiveDate::from_ymd_opt(2026, 3, 29)
+        .unwrap()
+        .and_hms_opt(1, 30, 0)
+        .unwrap();
+    assert_eq!(
+        local_wall_clock_ts(&London, skipped),
+        skipped.and_utc().timestamp(),
+        "the skipped wall-clock time falls back to the UTC interpretation"
+    );
+    // An existing time resolves through the zone: 03:00 BST == 02:00 UTC.
+    let exists = chrono::NaiveDate::from_ymd_opt(2026, 3, 29)
+        .unwrap()
+        .and_hms_opt(3, 0, 0)
+        .unwrap();
+    assert_eq!(
+        local_wall_clock_ts(&London, exists),
+        exists.and_utc().timestamp() - 3600
+    );
+    // Ambiguous fall-back times resolve to the earliest instant.
+    let ambiguous = chrono::NaiveDate::from_ymd_opt(2026, 10, 25)
+        .unwrap()
+        .and_hms_opt(1, 30, 0)
+        .unwrap();
+    assert_eq!(
+        local_wall_clock_ts(&London, ambiguous),
+        ambiguous.and_utc().timestamp() - 3600,
+        "the first pass through the repeated hour"
+    );
+}
+
 struct IsolatedConfig {
     _lock: parking_lot::MutexGuard<'static, ()>,
     dir: std::path::PathBuf,
@@ -1865,7 +1918,6 @@ async fn forecast_endpoint_degrades_cleanly_with_empty_state() {
 /// consumption profile and a battery projection wired through settings.
 #[tokio::test]
 async fn forecast_endpoint_serves_seeded_forecast() {
-    use chrono::TimeZone;
     use givenergy_local::forecast::ForecastSolarHour;
     use givenergy_local::history::{ForecastValueRow, HistoryDb};
     use givenergy_local::inverter::model::InverterSnapshot;
@@ -1898,11 +1950,7 @@ async fn forecast_endpoint_serves_seeded_forecast() {
     while date < now.date_naive() {
         let mut counter = 0.0_f64;
         for hour in 0..24u32 {
-            let ts = chrono::Local
-                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
-                .earliest()
-                .unwrap()
-                .timestamp();
+            let ts = local_wall_clock_ts(&chrono::Local, date.and_hms_opt(hour, 0, 0).unwrap());
             db.insert_reading(&InverterSnapshot {
                 timestamp: ts,
                 home_energy_today_kwh: counter as f32,
@@ -1966,7 +2014,7 @@ async fn forecast_endpoint_serves_seeded_forecast() {
 /// overnight while Eco bleeds to the reserve (issue #297).
 #[tokio::test]
 async fn forecast_endpoint_includes_current_schedule_when_slots_enabled() {
-    use chrono::{TimeZone, Timelike};
+    use chrono::Timelike;
     use givenergy_local::forecast::{META_FORECAST_PR, META_FORECAST_PR_DAYS};
     use givenergy_local::history::{ForecastValueRow, HistoryDb};
     use givenergy_local::inverter::model::{InverterSnapshot, ScheduleSlot};
@@ -2008,11 +2056,7 @@ async fn forecast_endpoint_includes_current_schedule_when_slots_enabled() {
     while date < now.date_naive() {
         let mut counter = 0.0_f64;
         for hour in 0..24u32 {
-            let ts = chrono::Local
-                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
-                .earliest()
-                .unwrap()
-                .timestamp();
+            let ts = local_wall_clock_ts(&chrono::Local, date.and_hms_opt(hour, 0, 0).unwrap());
             db.insert_reading(&InverterSnapshot {
                 timestamp: ts,
                 home_energy_today_kwh: counter as f32,
@@ -2118,7 +2162,6 @@ async fn forecast_plan_endpoint_degrades_to_no_plan() {
 /// exact Apply payload the UI posts to the existing control endpoints.
 #[tokio::test]
 async fn forecast_plan_endpoint_recommends_overnight_charge() {
-    use chrono::TimeZone;
     use givenergy_local::history::{ForecastValueRow, HistoryDb};
     use givenergy_local::inverter::model::InverterSnapshot;
 
@@ -2157,11 +2200,7 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     while date < now.date_naive() {
         let mut counter = 0.0_f64;
         for hour in 0..24u32 {
-            let ts = chrono::Local
-                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
-                .earliest()
-                .unwrap()
-                .timestamp();
+            let ts = local_wall_clock_ts(&chrono::Local, date.and_hms_opt(hour, 0, 0).unwrap());
             db.insert_reading(&InverterSnapshot {
                 timestamp: ts,
                 home_energy_today_kwh: counter as f32,
@@ -2336,7 +2375,6 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
 /// window is in progress, passed, or beyond the cycle → no_export).
 #[tokio::test]
 async fn forecast_plan_endpoint_includes_export_advice() {
-    use chrono::TimeZone;
     use chrono::Timelike;
     use givenergy_local::history::{ForecastValueRow, HistoryDb};
     use givenergy_local::inverter::model::InverterSnapshot;
@@ -2374,11 +2412,7 @@ async fn forecast_plan_endpoint_includes_export_advice() {
     while date < now.date_naive() {
         let mut counter = 0.0_f64;
         for hour in 0..24u32 {
-            let ts = chrono::Local
-                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
-                .earliest()
-                .unwrap()
-                .timestamp();
+            let ts = local_wall_clock_ts(&chrono::Local, date.and_hms_opt(hour, 0, 0).unwrap());
             db.insert_reading(&InverterSnapshot {
                 timestamp: ts,
                 home_energy_today_kwh: counter as f32,
