@@ -233,6 +233,7 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
@@ -303,6 +304,40 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     // "Slot 1" / "Slot 2" mentions in the slot-ordering warning callout.
     await timedDischargeSection();
     await timedExportSection();
+  });
+
+  it('does not show Charging on an enabled zero-length Cosy slot', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-09-03T03:00:00'));
+    vi.mocked(apiGet).mockImplementationOnce(async (path: string) => {
+      if (path === '/api/cosy')
+        return {
+          ok: true,
+          enabled: true,
+          slots: [
+            emptySlot({ enabled: true }),
+            emptySlot({
+              enabled: true,
+              start_hour: 2,
+              end_hour: 5,
+              target_soc: 80,
+            }),
+            emptySlot(),
+          ],
+        };
+      throw new Error(`unexpected apiGet path in cosy badge test: ${path}`);
+    });
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ cosy_enabled: true, cosy_active: true }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+
+    render(<ControlPage />);
+
+    const select = await screen.findByRole('combobox');
+    expect((select as HTMLSelectElement).value).toBe('cosy');
+    expect(screen.getAllByText('Charging')).toHaveLength(1);
   });
 
   it('still renders Timed Discharge + Timed Export in Standard mode (regression guard)', async () => {

@@ -18679,6 +18679,79 @@ mod tests {
         .await;
     }
 
+    /// A slow postcode save must merge its resolved location into weather
+    /// changes made while the resolver was in flight. Replacing the whole
+    /// snapshotted config here loses both API writes and poll-loop progress.
+    #[tokio::test]
+    async fn set_weather_merges_with_concurrent_updates_after_postcode_lookup() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            {
+                let mut ws = state.weather.lock().await;
+                ws.config.enabled = true;
+            }
+            crate::settings::Settings::update(|settings| {
+                settings.weather_config.enabled = true;
+            })
+            .expect("initial weather config must persist");
+
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+            let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+            let resolver = move |_postcode: String| async move {
+                let _ = started_tx.send(());
+                let _ = proceed_rx.await;
+                Some(("SO16 0AS".to_string(), 50.9, -1.4))
+            };
+
+            let state_for_task = state.clone();
+            let postcode_task = tokio::spawn(async move {
+                apply_weather_update(state_for_task, json!({ "postcode": "SO160AS" }), resolver)
+                    .await
+            });
+
+            started_rx.await.expect("resolver must start");
+
+            let no_lookup = |_postcode: String| async move {
+                panic!("enabled-only update must not need a postcode lookup");
+                #[allow(unreachable_code)]
+                None
+            };
+            let (status, _) =
+                apply_weather_update(state.clone(), json!({ "enabled": false }), no_lookup).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let completed = chrono::NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+            {
+                let mut ws = state.weather.lock().await;
+                ws.config.last_backfill_completed = Some(completed);
+            }
+            crate::settings::Settings::update(|settings| {
+                settings.weather_config.last_backfill_completed = Some(completed);
+            })
+            .expect("backfill progress must persist");
+
+            let _ = proceed_tx.send(());
+            let (status, _) = postcode_task.await.expect("postcode task must complete");
+            assert_eq!(status, StatusCode::OK);
+
+            let ws = state.weather.lock().await;
+            assert!(!ws.config.enabled, "concurrent enabled update was lost");
+            assert_eq!(ws.config.last_backfill_completed, Some(completed));
+            assert_eq!(ws.config.postcode, "SO16 0AS");
+            assert_eq!(ws.config.latitude, Some(50.9));
+            assert_eq!(ws.config.longitude, Some(-1.4));
+            drop(ws);
+
+            let persisted = crate::settings::Settings::load().weather_config;
+            assert!(!persisted.enabled, "persisted enabled update was lost");
+            assert_eq!(persisted.last_backfill_completed, Some(completed));
+            assert_eq!(persisted.postcode, "SO16 0AS");
+            assert_eq!(persisted.latitude, Some(50.9));
+            assert_eq!(persisted.longitude, Some(-1.4));
+        })
+        .await;
+    }
+
     /// Manual coordinates take precedence — the postcode lookup must not
     /// even start.
     #[tokio::test]

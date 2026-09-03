@@ -3421,6 +3421,47 @@ mod tests {
     }
 
     #[test]
+    fn find_next_slot_skips_zero_length_slot_before_real_future_slot() {
+        let slots = vec![
+            CosySlot {
+                enabled: true,
+                start_hour: 0,
+                start_minute: 0,
+                end_hour: 0,
+                end_minute: 0,
+                target_soc: 100,
+            },
+            CosySlot {
+                enabled: true,
+                start_hour: 2,
+                start_minute: 0,
+                end_hour: 5,
+                end_minute: 0,
+                target_soc: 80,
+            },
+        ];
+
+        let (idx, slot, until) = find_next_cosy_slot(23 * 60 + 30, &slots).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(slot.target_soc, 80);
+        assert_eq!(until, 150);
+    }
+
+    #[test]
+    fn find_next_slot_returns_none_when_only_enabled_slots_are_zero_length() {
+        let slots = vec![CosySlot {
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 2,
+            end_minute: 0,
+            target_soc: 100,
+        }];
+
+        assert!(find_next_cosy_slot(23 * 60 + 30, &slots).is_none());
+    }
+
+    #[test]
     fn find_next_slot_returns_none_when_no_enabled() {
         let slots = vec![CosySlot {
             enabled: false,
