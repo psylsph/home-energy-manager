@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::inverter::model::ScheduleSlot;
@@ -1532,12 +1532,18 @@ pub struct AlertsConfig {
     #[serde(default)]
     pub telegram_chat_id: String,
     /// Minimum cooldown between same-type alerts (minutes).
+    // Every field below carries a serde default: a settings.json written
+    // before the field shipped must parse rather than fail the whole file
+    // and silently reset all settings (review C1).
+    #[serde(default = "default_alert_cooldown_minutes")]
     pub cooldown_minutes: u32,
 
     // -- Thresholds --
     /// Battery temperature alert minimum (°C). 0 = disabled.
+    #[serde(default)]
     pub batt_temp_min: f32,
     /// Battery temperature alert maximum (°C). 0 = disabled.
+    #[serde(default)]
     pub batt_temp_max: f32,
     /// Inverter temperature alert minimum (°C). Defaults to 8°C.
     #[serde(default = "default_inverter_temp_min")]
@@ -1546,10 +1552,13 @@ pub struct AlertsConfig {
     #[serde(default = "default_inverter_temp_max")]
     pub inverter_temp_max: f32,
     /// Battery SOC alert minimum (%). 0 = disabled.
+    #[serde(default = "default_alert_soc_min")]
     pub soc_min: u8,
     /// Battery SOC alert maximum (%). 100 = disabled.
+    #[serde(default = "default_alert_soc_max")]
     pub soc_max: u8,
     /// Alert on grid loss.
+    #[serde(default)]
     pub grid_offline_enabled: bool,
     /// Alert when the inverter reports a fault/trip state.
     #[serde(default)]
@@ -1559,6 +1568,7 @@ pub struct AlertsConfig {
     #[serde(default)]
     pub connection_lost_enabled: bool,
     /// Alert on battery over-temperature flag.
+    #[serde(default)]
     pub battery_over_temp_enabled: bool,
     /// Notify when a known battery stops answering BMS reads for several
     /// consecutive poll cycles (issue #272) — e.g. a tripped battery
@@ -1594,15 +1604,34 @@ pub struct AlertsConfig {
 
     // -- Daily consumption report --
     /// Whether to send a daily consumption report.
+    #[serde(default)]
     pub daily_report_enabled: bool,
     /// Hour to send the daily report (0-23, local time).
+    #[serde(default = "default_daily_report_hour")]
     pub daily_report_hour: u8,
     /// Minute to send the daily report (0-59, local time).
+    #[serde(default)]
     pub daily_report_minute: u8,
 }
 
 fn default_ntfy_server() -> String {
     "https://ntfy.sh".to_string()
+}
+
+fn default_alert_cooldown_minutes() -> u32 {
+    30
+}
+
+fn default_alert_soc_min() -> u8 {
+    4
+}
+
+fn default_alert_soc_max() -> u8 {
+    100
+}
+
+fn default_daily_report_hour() -> u8 {
+    8
 }
 
 fn default_inverter_temp_min() -> f32 {
@@ -1782,6 +1811,33 @@ impl Settings {
         Self::settings_dir().join("settings.json")
     }
 
+    /// Copy an unparseable settings file aside so the user can recover their
+    /// configuration by hand.
+    ///
+    /// Review C1: `load()` used to fall back to defaults leaving the corrupt
+    /// file in place, and the next save then rotated that corrupt file onto
+    /// `settings.json.bak` — destroying the last known-good copy. The
+    /// quarantine copy keeps the (possibly mostly-valid) content available at
+    /// `settings.json.corrupt` no matter what happens afterwards.
+    fn quarantine_corrupt_file(path: &Path) {
+        let corrupt_path = path.with_extension("json.corrupt");
+        match fs::copy(path, &corrupt_path) {
+            Ok(_) => tracing::error!(
+                "Settings file {} is unreadable — a copy has been saved to {}. \
+                 Fix or delete one of the two files; defaults are in use until \
+                 settings are saved again.",
+                path.display(),
+                corrupt_path.display()
+            ),
+            Err(e) => tracing::error!(
+                "Settings file {} is unreadable ({e}) and could not be copied \
+                 aside to {} — defaults are in use until settings are saved again.",
+                path.display(),
+                corrupt_path.display()
+            ),
+        }
+    }
+
     /// Load settings from disk, creating defaults if the file doesn't exist.
     pub fn load() -> Self {
         let path = Self::settings_path();
@@ -1793,6 +1849,7 @@ impl Settings {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse settings: {}, using defaults", e);
+                    Self::quarantine_corrupt_file(&path);
                     Self::default()
                 }
             },
@@ -1834,10 +1891,28 @@ impl Settings {
         // manually revert if a save corrupts their config (e.g. a migration
         // that rewrites settings on first load). The .bak always holds the
         // file as it was *before* this save.
+        //
+        // Review C1: only rotate when the on-disk file actually parses. If
+        // the current file is corrupt, copying it here would destroy the last
+        // known-good backup the moment defaults get saved over it; the
+        // corrupt content is quarantined at `settings.json.corrupt` instead.
         let bak_path = path.with_extension("json.bak");
         if path.exists() {
-            if let Err(e) = fs::copy(&path, &bak_path) {
-                tracing::warn!("Failed to create settings backup: {e}");
+            let current_parses = fs::read_to_string(&path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<Settings>(&content).ok())
+                .is_some();
+            if current_parses {
+                if let Err(e) = fs::copy(&path, &bak_path) {
+                    tracing::warn!("Failed to create settings backup: {e}");
+                }
+            } else {
+                Self::quarantine_corrupt_file(&path);
+                tracing::warn!(
+                    "Not updating settings backup: current file is unparseable, \
+                     previous backup at {} is preserved",
+                    bak_path.display()
+                );
             }
         }
 
@@ -3893,5 +3968,122 @@ mod tests {
             }
         })
         .await;
+    }
+
+    // =======================================================================
+    // Corrupt-file handling (review C1): an unparseable settings.json must
+    // be quarantined for recovery, and a save over it must never rotate the
+    // corrupt content onto the last good `.bak`.
+    // =======================================================================
+
+    #[test]
+    fn corrupt_settings_file_is_quarantined_and_left_in_place() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let dir = Settings::settings_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            // Wrong type for `port` — the classic hand-edit typo.
+            let corrupt = r#"{ "host": "192.168.1.50", "port": "oops" }"#;
+            std::fs::write(dir.join("settings.json"), corrupt).unwrap();
+
+            let loaded = Settings::load();
+
+            assert_eq!(loaded.host, "", "an unreadable file must load defaults");
+            // The user's file is preserved verbatim for manual recovery.
+            let quarantined = std::fs::read_to_string(dir.join("settings.json.corrupt")).unwrap();
+            assert_eq!(
+                quarantined, corrupt,
+                "quarantine copy must hold the corrupt content"
+            );
+            // The live file is left untouched — defaults must not be written
+            // over it by a mere load.
+            assert_eq!(
+                std::fs::read_to_string(dir.join("settings.json")).unwrap(),
+                corrupt,
+                "load() must not overwrite the (corrupt) file"
+            );
+        });
+    }
+
+    #[test]
+    fn save_over_corrupt_file_preserves_last_good_backup() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let dir = Settings::settings_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+
+            // Two good saves so `.bak` holds a known-good version.
+            let good = Settings {
+                host: "192.168.1.10".to_string(),
+                ..Settings::default()
+            };
+            good.save().unwrap();
+            let mut second = Settings::load();
+            second.poll_interval = 30;
+            second.save().unwrap();
+            let bak_path = dir.join("settings.json.bak");
+            let bak_before = std::fs::read_to_string(&bak_path).unwrap();
+            assert!(
+                bak_before.contains("192.168.1.10"),
+                "precondition: .bak holds the last good version"
+            );
+
+            // Corrupt the live file the way a hand edit or a crash mid-write
+            // (pre-sync-all) would.
+            let corrupt = "{ not json";
+            std::fs::write(dir.join("settings.json"), corrupt).unwrap();
+
+            // Loading returns defaults and quarantines the bad content...
+            let loaded = Settings::load();
+            assert_eq!(loaded.host, "");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("settings.json.corrupt")).unwrap(),
+                corrupt
+            );
+
+            // ...and the next save must NOT copy the corrupt file over the
+            // last good backup.
+            let after = Settings {
+                host: "192.168.1.20".to_string(),
+                ..Settings::default()
+            };
+            after.save().unwrap();
+
+            let bak_after = std::fs::read_to_string(&bak_path).unwrap();
+            assert_eq!(
+                bak_after, bak_before,
+                "the corrupt file must not be rotated onto the last good .bak"
+            );
+            assert!(
+                std::fs::read_to_string(dir.join("settings.json"))
+                    .unwrap()
+                    .contains("192.168.1.20"),
+                "the save itself must still succeed with the new values"
+            );
+        });
+    }
+
+    #[test]
+    fn alerts_config_omitted_fields_get_documented_defaults() {
+        // A settings.json written before these AlertsConfig fields shipped
+        // must parse. Missing `#[serde(default)]` on any of them used to
+        // fail the WHOLE settings file, silently resetting every setting
+        // (review C1's latent trip-wire).
+        let legacy = r#"{
+            "enabled": true,
+            "telegram_bot_token": "tok",
+            "telegram_chat_id": "chat"
+        }"#;
+        let cfg: AlertsConfig = serde_json::from_str(legacy).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.telegram_bot_token, "tok");
+        assert_eq!(cfg.cooldown_minutes, 30);
+        assert_eq!(cfg.batt_temp_min, 0.0);
+        assert_eq!(cfg.batt_temp_max, 0.0);
+        assert_eq!(cfg.soc_min, 4);
+        assert_eq!(cfg.soc_max, 100);
+        assert!(!cfg.grid_offline_enabled);
+        assert!(!cfg.battery_over_temp_enabled);
+        assert!(!cfg.daily_report_enabled);
+        assert_eq!(cfg.daily_report_hour, 8);
+        assert_eq!(cfg.daily_report_minute, 0);
     }
 }
