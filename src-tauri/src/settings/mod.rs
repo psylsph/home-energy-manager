@@ -514,7 +514,16 @@ impl CosySlot {
         }
         let start = self.start_hour as u16 * 60 + self.start_minute as u16;
         let end = self.end_hour as u16 * 60 + self.end_minute as u16;
-        if end <= start {
+        if start == end {
+            // Zero-length slot — a no-op. Review H9: without this guard,
+            // `start == end` fell into the midnight-crossing branch where
+            // `now >= start || now < end` is always true, so a slot left
+            // at its 00:00/00:00 defaults force-charged the battery all
+            // day. Matches the write-side convention that 00:00–00:00
+            // means "disabled".
+            return false;
+        }
+        if end < start {
             // Crosses midnight (e.g. 22:00-05:00)
             now_minutes >= start || now_minutes < end
         } else {
@@ -3103,6 +3112,48 @@ mod tests {
             target_soc: 100,
         };
         assert!(!slot.contains_minutes(180)); // 03:00, slot is disabled
+    }
+
+    #[test]
+    fn cosy_slot_zero_length_is_never_active() {
+        // Review H9: `start == end` used to fall into the midnight-crossing
+        // branch, where `now >= start || now < end` is always true — a slot
+        // left at its 00:00/00:00 defaults force-charged the battery all
+        // day. A zero-length slot is a no-op, matching the write-side
+        // convention that 00:00–00:00 means "disabled".
+        let midnight = CosySlot {
+            enabled: true,
+            start_hour: 0,
+            start_minute: 0,
+            end_hour: 0,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        for minute in [0u16, 1, 720, 1439] {
+            assert!(
+                !midnight.contains_minutes(minute),
+                "00:00–00:00 slot matched at minute {minute}"
+            );
+        }
+
+        // Same for a zero-length slot away from midnight (02:00–02:00).
+        let two_am = CosySlot {
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 2,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        for minute in [0u16, 119, 120, 121, 1439] {
+            assert!(
+                !two_am.contains_minutes(minute),
+                "02:00–02:00 slot matched at minute {minute}"
+            );
+        }
+
+        // And through the aggregate helper.
+        assert_eq!(cosy_active_slot(120, &[two_am]), None);
     }
 
     #[test]
