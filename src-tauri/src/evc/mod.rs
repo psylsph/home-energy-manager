@@ -390,11 +390,35 @@ impl SessionLatch {
 // Poll loop
 // ---------------------------------------------------------------------------
 
+/// Connect timeout for the EVC poll loop's Modbus TCP handshake.
+///
+/// Review H12: `tcp::connect_slave` had no deadline, so a blackholed host
+/// blocked the loop forever while `/api/evc/status` kept serving a frozen
+/// snapshot as `reachable: true`. 3 s matches the inverter client's
+/// per-request budget; `probe_evc_host` uses a tighter 800 ms budget for
+/// subnet scans, which this loop doesn't need.
+const EVC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Per-read timeout for the EVC poll loop's register reads. Same rationale
+/// as [`EVC_CONNECT_TIMEOUT`] — a charger that accepts and then goes silent
+/// must drop the connection, not freeze the poll loop inside one read.
+const EVC_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Background poll loop for the EV charger. Reads settings from the shared
 /// `AppState` to determine the EVC host/port. When configured, polls via
 /// standard Modbus TCP every 10 seconds and broadcasts `PollMessage::Evc`
 /// to all WebSocket clients.
 pub async fn run_evc_poll_loop(state: Arc<AppState>) {
+    run_evc_poll_loop_with_timeouts(state, EVC_CONNECT_TIMEOUT, EVC_READ_TIMEOUT).await;
+}
+
+/// Inner poll loop with injectable connect/read timeouts so tests can
+/// exercise the blackhole paths in milliseconds instead of seconds.
+pub(crate) async fn run_evc_poll_loop_with_timeouts(
+    state: Arc<AppState>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) {
     let mut backoff = Duration::from_secs(10);
     let poll_interval = Duration::from_secs(10);
 
@@ -437,8 +461,10 @@ pub async fn run_evc_poll_loop(state: Arc<AppState>) {
             }
         };
 
-        let ctx = match tcp::connect_slave(addr, Slave(1)).await {
-            Ok(ctx) => {
+        let connect_result =
+            tokio::time::timeout(connect_timeout, tcp::connect_slave(addr, Slave(1))).await;
+        let ctx = match connect_result {
+            Ok(Ok(ctx)) => {
                 tracing::info!(host = %evc_host, "EVC: connected");
                 backoff = Duration::from_secs(10);
                 // Broadcast a connect event immediately so the frontend can
@@ -451,7 +477,20 @@ pub async fn run_evc_poll_loop(state: Arc<AppState>) {
                 let _ = state.tx.send(PollMessage::EvcConnected);
                 ctx
             }
-            Err(e) => {
+            Err(_) => {
+                tracing::warn!(
+                    "EVC: connect timed out after {connect_timeout:?} — host unreachable or blackholed"
+                );
+                {
+                    let mut evc = state.latest_evc.lock().await;
+                    *evc = None;
+                }
+                let _ = state.tx.send(PollMessage::EvcDisconnected);
+                sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(120));
+                continue;
+            }
+            Ok(Err(e)) => {
                 tracing::warn!("EVC: connect failed: {e}");
                 {
                     let mut evc = state.latest_evc.lock().await;
@@ -492,36 +531,50 @@ pub async fn run_evc_poll_loop(state: Arc<AppState>) {
             }
 
             // Read block 1: HR 0–59
-            let result1 = ctx
-                .as_mut()
-                .unwrap()
-                .read_holding_registers(0x0000, 60)
-                .await;
+            let result1 = tokio::time::timeout(
+                read_timeout,
+                ctx.as_mut().unwrap().read_holding_registers(0x0000, 60),
+            )
+            .await;
             let regs1 = match result1 {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
+                Ok(Ok(Ok(r))) => r,
+                Ok(Ok(Err(e))) => {
                     tracing::warn!("EVC: Modbus exception reading HR 0–59: {e:?}");
                     ctx.take();
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!("EVC: read error HR 0–59: {e}");
+                    ctx.take();
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!("EVC: read timed out after {read_timeout:?} on HR 0–59");
                     ctx.take();
                     break;
                 }
             };
 
             // Read block 2: HR 60–114
-            let result2 = ctx.as_mut().unwrap().read_holding_registers(60, 55).await;
+            let result2 = tokio::time::timeout(
+                read_timeout,
+                ctx.as_mut().unwrap().read_holding_registers(60, 55),
+            )
+            .await;
             let regs2 = match result2 {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
+                Ok(Ok(Ok(r))) => r,
+                Ok(Ok(Err(e))) => {
                     tracing::warn!("EVC: Modbus exception reading HR 60–114: {e:?}");
                     ctx.take();
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!("EVC: read error HR 60–114: {e}");
+                    ctx.take();
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!("EVC: read timed out after {read_timeout:?} on HR 60–114");
                     ctx.take();
                     break;
                 }
@@ -993,6 +1046,80 @@ mod tests {
 
             let evc = state.latest_evc.lock().await;
             assert!(evc.is_none(), "no EVC snapshot should be cached");
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------
+    // run_evc_poll_loop: charger stops answering (review H12)
+    //
+    // A charger that completes the TCP handshake and then never responds
+    // (lost power without RST, blackholed host) must not wedge the loop
+    // forever. The read must time out, the frozen snapshot must be
+    // dropped from `latest_evc` and EvcDisconnected must be broadcast so
+    // `/api/evc/status` stops claiming `reachable: true`.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_evc_poll_loop_times_out_when_charger_stops_answering() {
+        use crate::inverter::poll::{AppState, PollMessage};
+        use tokio::net::TcpListener;
+
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            // Accept the connection and then go silent — the exact failure
+            // mode of a charger that lost power without sending RST.
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                if let Ok((_socket, _)) = listener.accept().await {
+                    // Hold the socket open without ever writing a response.
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            });
+
+            let state = Arc::new(AppState::new());
+            {
+                let mut s = state.settings.lock().await;
+                s.evc_host = "127.0.0.1".to_string();
+                s.evc_port = port;
+            }
+            let mut rx = state.tx.subscribe();
+
+            let state_clone = state.clone();
+            let handle = tokio::spawn(async move {
+                run_evc_poll_loop_with_timeouts(
+                    state_clone,
+                    std::time::Duration::from_millis(500),
+                    std::time::Duration::from_millis(300),
+                )
+                .await
+            });
+
+            // The read must time out and surface as EvcDisconnected.
+            let saw_disconnected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match rx.recv().await {
+                        Ok(PollMessage::EvcDisconnected) => break true,
+                        Ok(PollMessage::EvcConnected) => continue,
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await;
+
+            assert_eq!(
+                saw_disconnected,
+                Ok(true),
+                "EvcDisconnected must be broadcast when the charger stops answering"
+            );
+            let evc = state.latest_evc.lock().await;
+            assert!(
+                evc.is_none(),
+                "a frozen snapshot must not stay cached as reachable"
+            );
+            handle.abort();
         })
         .await;
     }
