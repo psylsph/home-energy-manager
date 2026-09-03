@@ -6,6 +6,9 @@ fn main() {
     if args.iter().any(|a| a == "--headless") {
         givenergy_local::run_headless(&args);
     } else {
+        // Must precede the Tauri builder: on Raspberry Pi hardware the
+        // accelerated WebKitGTK path corrupts the first paint (issue #298).
+        givenergy_local::pi_render::apply_pi_webkit_workaround();
         givenergy_local::run();
     }
 }

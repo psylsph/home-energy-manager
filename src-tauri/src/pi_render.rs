@@ -29,8 +29,11 @@ const DEVICE_TREE_MODEL: &str = "/proc/device-tree/model";
 /// unrelated SBCs whose names happen to contain "Pi" (Banana Pi, Orange Pi)
 /// do not match. The device tree terminates the string with a NUL byte,
 /// which is tolerated.
-pub fn is_raspberry_pi_model(_model: &str) -> bool {
-    false
+pub fn is_raspberry_pi_model(model: &str) -> bool {
+    model
+        .trim_end_matches('\0')
+        .to_ascii_lowercase()
+        .contains("raspberry pi")
 }
 
 /// Which WebKitGTK software-rendering env vars should be applied?
@@ -42,11 +45,55 @@ pub fn is_raspberry_pi_model(_model: &str) -> bool {
 /// untouched, mirroring `scripts/run-with-software-renderer.sh`. When
 /// `allow_gpu` is true nothing is set at all.
 pub fn software_rendering_overrides(
-    _dmabuf: Option<&str>,
-    _compositing: Option<&str>,
-    _allow_gpu: bool,
+    dmabuf: Option<&str>,
+    compositing: Option<&str>,
+    allow_gpu: bool,
 ) -> &'static [(&'static str, &'static str)] {
-    &[]
+    if allow_gpu {
+        return &[];
+    }
+    match (dmabuf.is_none(), compositing.is_none()) {
+        (true, true) => &[
+            ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+            ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
+        ],
+        (true, false) => &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")],
+        (false, true) => &[("WEBKIT_DISABLE_COMPOSITING_MODE", "1")],
+        (false, false) => &[],
+    }
+}
+
+/// Apply the workaround when running on Raspberry Pi hardware.
+///
+/// Reads the device-tree model; on a Raspberry Pi, sets the WebKitGTK
+/// software-rendering env vars the process was launched without (an explicit
+/// per-var value from the caller's environment always wins) unless
+/// [`ALLOW_GPU_RENDERER_ENV`] is set to a non-empty value other than `0`.
+/// A no-op everywhere else. Must run before the Tauri builder constructs a
+/// webview — call it at the top of `main()` on the GUI path, where no threads
+/// have been spawned yet (env mutation is not thread-safe).
+pub fn apply_pi_webkit_workaround() {
+    let is_pi = std::fs::read_to_string(DEVICE_TREE_MODEL)
+        .map(|model| is_raspberry_pi_model(&model))
+        .unwrap_or(false);
+    if !is_pi {
+        return;
+    }
+    let allow_gpu = std::env::var(ALLOW_GPU_RENDERER_ENV).is_ok_and(|v| !v.is_empty() && v != "0");
+    let dmabuf = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").ok();
+    let compositing = std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").ok();
+    let overrides =
+        software_rendering_overrides(dmabuf.as_deref(), compositing.as_deref(), allow_gpu);
+    if overrides.is_empty() {
+        return;
+    }
+    for (name, value) in overrides {
+        std::env::set_var(name, value);
+    }
+    eprintln!(
+        "Raspberry Pi detected: forcing WebKitGTK software rendering to avoid \
+         first-paint corruption (set {ALLOW_GPU_RENDERER_ENV}=1 to keep the accelerated renderer)"
+    );
 }
 
 #[cfg(test)]
@@ -65,7 +112,9 @@ mod tests {
         assert!(is_raspberry_pi_model("Raspberry Pi 4 Model B Rev 1.4"));
         assert!(is_raspberry_pi_model("Raspberry Pi 3 Model B Plus Rev 1.3"));
         assert!(is_raspberry_pi_model("Raspberry Pi Zero 2 W Rev 1.0"));
-        assert!(is_raspberry_pi_model("Raspberry Pi Compute Module 5 Rev 1.0"));
+        assert!(is_raspberry_pi_model(
+            "Raspberry Pi Compute Module 5 Rev 1.0"
+        ));
     }
 
     #[test]
@@ -114,7 +163,10 @@ mod tests {
             software_rendering_overrides(None, Some("0"), false),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
-        assert_eq!(software_rendering_overrides(Some("1"), Some("1"), false), &[]);
+        assert_eq!(
+            software_rendering_overrides(Some("1"), Some("1"), false),
+            &[]
+        );
     }
 
     #[test]

@@ -563,9 +563,15 @@ A few important points:
 
 On Raspberry Pi GPU stacks (notably the Pi 5's VideoCore VII, and Pi 4 with the default Raspberry Pi OS desktop) WebKitGTK's DMA-BUF GPU renderer can fail to produce a first paint, show banded / torn output, or stop the window from opening at all. This is the same family of bugs tracked upstream at [tauri-apps/tauri#13885](https://github.com/tauri-apps/tauri/issues/13885) and [launchpad.net/bugs/2037015](https://bugs.launchpad.net/bugs/2037015).
 
-The fix is to force WebKitGTK to its legacy software path by setting two environment variables **before** the `givenergy-local` process starts — Tauri's setup hook runs too late. A small wrapper script in `scripts/run-with-software-renderer.sh` does this and forwards any flags you give it (`--headless`, `--port 8080`, etc.) to the real binary.
+The fix is to force WebKitGTK to its legacy software path by setting two environment variables **before** the `givenergy-local` process starts — Tauri's setup hook runs too late.
 
-Fetch and install it once:
+Recent versions do this automatically: on launch the app checks the board model (`/proc/device-tree/model`) and, on Raspberry Pi hardware, falls back to software rendering by itself (issue #298). No wrapper or extra configuration is needed. If you specifically want the accelerated renderer back — for example to test whether a newer Pi OS image has fixed the underlying WebKitGTK bugs — set:
+
+```bash
+GIVENERGY_LOCAL_ALLOW_GPU_RENDERER=1 givenergy-local
+```
+
+For older versions, or to control the environment manually, a small wrapper script in `scripts/run-with-software-renderer.sh` sets the same variables and forwards any flags you give it (`--headless`, `--port 8080`, etc.) to the real binary. Fetch and install it once:
 
 ```bash
 sudo install -m 0755 \
@@ -573,7 +579,7 @@ sudo install -m 0755 \
   /usr/local/bin/givenergy-local-safe
 ```
 
-Then launch the GUI through it instead of the bare binary:
+Then launch the GUI through it instead of the bare binary (on a current version this is only needed to override the automatic detection):
 
 ```bash
 givenergy-local-safe                  # opens the app window
