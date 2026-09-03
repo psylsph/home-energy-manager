@@ -879,11 +879,23 @@ impl ModbusClient {
         let start = buf.len();
         let chunk = 4096;
         buf.resize(start + chunk, 0);
-        let n = tokio::time::timeout(timeout, reader.read(&mut buf[start..]))
-            .await
-            .map_err(|_| ClientError::Timeout)?
-            .map_err(|e| ClientError::ReceiveFailed(format!("TCP read: {e}")))?;
+        // Review H7: the resize fills the tail with zeros before the read.
+        // Every error path must truncate back so the padding never lingers —
+        // otherwise the next call sees `buf.len() >= total_frame_len` and
+        // delivers `real bytes + fabricated zeros` as a complete frame.
+        let n = match tokio::time::timeout(timeout, reader.read(&mut buf[start..])).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                buf.truncate(start);
+                return Err(ClientError::ReceiveFailed(format!("TCP read: {e}")));
+            }
+            Err(_) => {
+                buf.truncate(start);
+                return Err(ClientError::Timeout);
+            }
+        };
         if n == 0 {
+            buf.truncate(start);
             return Err(ClientError::NotConnected);
         }
         tracing::trace!("Modbus reader: received {n} bytes");
@@ -906,11 +918,22 @@ impl ModbusClient {
         buf.resize(needed, 0);
         let mut read = 0usize;
         while read < missing {
-            let n = tokio::time::timeout(timeout, reader.read(&mut buf[start + read..]))
-                .await
-                .map_err(|_| ClientError::Timeout)?
-                .map_err(|e| ClientError::ReceiveFailed(format!("TCP read: {e}")))?;
+            // Review H7: on error, keep only the genuinely-received bytes —
+            // truncate away both the unread padding and the zero fill.
+            let n = match tokio::time::timeout(timeout, reader.read(&mut buf[start + read..])).await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
+                    buf.truncate(start + read);
+                    return Err(ClientError::ReceiveFailed(format!("TCP read: {e}")));
+                }
+                Err(_) => {
+                    buf.truncate(start + read);
+                    return Err(ClientError::Timeout);
+                }
+            };
             if n == 0 {
+                buf.truncate(start + read);
                 return Err(ClientError::NotConnected);
             }
             read += n;
@@ -4278,5 +4301,70 @@ pub(crate) mod tests {
             "should succeed after retry on stale frame: {result:?}"
         );
         assert_eq!(result.unwrap()[0], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Frame-buffer hygiene on read timeout (review H7)
+    // -----------------------------------------------------------------------
+
+    /// A stalled dongle response must not leave zero padding in the
+    /// persistent frame buffer. `fill_read_buf` / `fill_read_buf_demand`
+    /// grow the buffer with zeros *before* awaiting the read; if the read
+    /// times out, that padding used to survive, so the next call found
+    /// `buf.len() >= total_frame_len` and handed back
+    /// `real partial bytes + fabricated zeros` as a complete frame (the
+    /// framer's CRC leniency lets it decode). The error paths must
+    /// truncate back to the genuinely-received bytes.
+    #[tokio::test]
+    async fn read_one_frame_timeout_does_not_leave_zero_padding_in_buffer() {
+        use tokio::io::AsyncWriteExt;
+
+        // A real loopback connection (TcpStream::pair is not available with
+        // the workspace's tokio feature set).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        server.set_nonblocking(true).expect("nonblocking");
+        let mut server = tokio::net::TcpStream::from_std(server).expect("tokio server");
+        let (reader, _writer) = client.into_split();
+        let mut reader = reader;
+
+        let full = crate::modbus::framer::encode_frame(
+            "TEST123456",
+            0x11,
+            0x03,
+            &[0x00, 0x02, 0x00, 0x2A],
+        );
+        // marker(4) + length(2) + a few body bytes — a genuinely partial frame.
+        let split = 10usize;
+        assert!(full.len() > split + 4, "test frame too small to split");
+
+        // Send only the head, then stall.
+        server.write_all(&full[..split]).await.expect("write head");
+        server.flush().await.expect("flush head");
+
+        let mut buf = Vec::new();
+        let first =
+            ModbusClient::read_one_frame(&mut reader, &mut buf, Duration::from_millis(150)).await;
+        assert!(
+            matches!(first, Err(ClientError::Timeout)),
+            "a stalled frame must time out, got {first:?}"
+        );
+
+        // The stall clears: send the remainder of the frame.
+        server.write_all(&full[split..]).await.expect("write tail");
+        server.flush().await.expect("flush tail");
+
+        let second =
+            ModbusClient::read_one_frame(&mut reader, &mut buf, Duration::from_millis(500)).await;
+        match second {
+            Ok(frame) => assert_eq!(
+                frame, full,
+                "the reassembled frame must be exactly what the dongle sent — \
+                 zero padding in the buffer would fabricate the middle"
+            ),
+            Err(e) => panic!("second read should complete once the stall clears: {e}"),
+        }
     }
 }
