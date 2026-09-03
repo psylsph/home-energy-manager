@@ -2806,41 +2806,44 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 let in_grace = readings_since_connect < GRACE_READINGS;
                                 let (sanitized, prev_modules) = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    let mut s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts, &mut rate_release_counts);
-                                    if carry_forward_optional_block_values(
+                                    // Only sanitize_snapshot's verdict may mark
+                                    // the cycle corrupt and trigger the
+                                    // immediate re-poll. Review H3: carry-forward
+                                    // of a block that was deliberately not
+                                    // polled (Gateway fast scope reads only the
+                                    // live-telemetry IR blocks) or failed its
+                                    // single non-fatal attempt is normal
+                                    // operation, not corruption — treating it
+                                    // as such made Gateway installs re-poll
+                                    // back-to-back with no sleep (~10× the
+                                    // intended poll rate).
+                                    let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts, &mut rate_release_counts);
+                                    let _ = carry_forward_optional_block_values(
                                         &mut snapshot,
                                         prev.as_ref(),
                                         has_ac_config_block,
                                         has_extended_slots_block,
                                         has_three_phase_config_block,
                                         has_ems_plant_block,
-                                    ) {
-                                        s = true;
-                                    }
-                                    if carry_forward_three_phase_high_config_values(
+                                    );
+                                    let _ = carry_forward_three_phase_high_config_values(
                                         &mut snapshot,
                                         prev.as_ref(),
                                         has_three_phase_high_config_block,
-                                    ) {
-                                        s = true;
-                                    }
-                                    if carry_forward_three_phase_fault_block_values(
+                                    );
+                                    let _ = carry_forward_three_phase_fault_block_values(
                                         &mut snapshot,
                                         prev.as_ref(),
                                         has_three_phase_fault_block,
-                                    ) {
-                                        s = true;
-                                    }
+                                    );
                                     if snapshot.device_type == DeviceType::Gateway {
                                         if let Some(p) = prev.as_ref() {
                                             if !has_gateway_discharge_detail_block {
                                                 snapshot.per_aio_discharge_today_kwh =
                                                     p.per_aio_discharge_today_kwh;
-                                                s = true;
                                             }
                                             if !has_gateway_serial_block {
                                                 snapshot.per_aio_serial = p.per_aio_serial.clone();
-                                                s = true;
                                             }
                                         }
                                     }
@@ -5271,7 +5274,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                         tokio::select! {
                             _ = state.write_notify.notified() => {
                                 // Writes queued - wake immediately
-                                tracing::debug!("Write notification received, waking early");
                                 break;
                             }
                             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -8878,6 +8880,17 @@ mod tests {
     /// map closely enough to drive the real connect → warmup → decode →
     /// sanitize → broadcast path without a live inverter.
     async fn run_keyed_register_mock(listener: tokio::net::TcpListener) {
+        run_keyed_register_mock_inner(listener, false).await;
+    }
+
+    /// Variant serving plausible Gateway registers (DTC, battery config,
+    /// grid voltage) so gateway-scope tests see a device the sanitizer has
+    /// nothing to correct.
+    async fn run_keyed_register_mock_gateway(listener: tokio::net::TcpListener) {
+        run_keyed_register_mock_inner(listener, true).await;
+    }
+
+    async fn run_keyed_register_mock_inner(listener: tokio::net::TcpListener, gateway: bool) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -8933,6 +8946,39 @@ mod tests {
                 }
                 if count > 59 {
                     data[59] = 50; // 50% SOC
+                }
+            }
+            if gateway {
+                // Gateway: plausible DTC + eco mode so the loop detects and
+                // locks the device type instead of seeing Unknown(0).
+                if decoded.function == 3 && base == 0 {
+                    if count > 0 {
+                        data[0] = 0x7001; // Gateway DTC
+                    }
+                    if count > 27 {
+                        data[27] = 1; // battery mode: eco
+                    }
+                }
+                // Plausible battery config (HR 110/111/112/116 live in the
+                // HR 60-119 block) so the sanitizer has nothing to clamp.
+                if decoded.function == 3 && base == 60 {
+                    if count > 50 {
+                        data[50] = 4; // HR 110 battery reserve 4%
+                    }
+                    if count > 51 {
+                        data[51] = 50; // HR 111 charge rate 50%
+                    }
+                    if count > 52 {
+                        data[52] = 50; // HR 112 discharge rate 50%
+                    }
+                    if count > 56 {
+                        data[56] = 100; // HR 116 charge target 100%
+                    }
+                }
+                // Gateway aggregation bank: a plausible grid voltage so the
+                // sanitizer's voltage range check passes.
+                if decoded.function == 4 && base == 1600 && count > 8 {
+                    data[8] = 2410; // IR(1608) v_grid = 241.0 V
                 }
             }
 
@@ -9120,6 +9166,77 @@ mod tests {
                 state.latest_snapshot.lock().await.is_none(),
                 "fingerprint-corrupted cycles must never broadcast a snapshot"
             );
+
+            poll_task.abort();
+            server.abort();
+        })
+        .await;
+    }
+
+    /// Review H3: a Gateway fast-scope poll deliberately reads only the
+    /// live-telemetry IR blocks — the AIO detail and serial blocks are
+    /// absent and their values are carried forward from the previous
+    /// snapshot. That is normal operation, not corruption: the old code
+    /// set `sanitized` on every carry-forward, so every fast poll
+    /// re-polled back-to-back with no sleep (~10× the intended poll rate,
+    /// the exact behaviour blamed for overnight dongle stalls). Pin the
+    /// cadence: with a 10 s interval, an 8 s window may contain only the
+    /// initial detail poll, the first fast poll and (at worst) the
+    /// detection re-poll — not one broadcast per back-to-back cycle.
+    #[tokio::test]
+    async fn gateway_fast_scope_absent_detail_blocks_do_not_trigger_immediate_repoll() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_keyed_register_mock_gateway(listener));
+
+            let state = Arc::new(AppState::new());
+            {
+                let mut settings = state.settings.lock().await;
+                // "GW" prefix → prefilled as Gateway, so the loop uses the
+                // fast live-telemetry scope with Detail every 10th poll.
+                settings.host = "127.0.0.1".to_string();
+                settings.port = port;
+                settings.serial = "GWTEST1234".to_string();
+                settings.interval_secs = 5;
+            }
+
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let mut rx = state.tx.subscribe();
+
+            // Collect the first four snapshot broadcasts. The gap between
+            // broadcasts 1→2 is the model-detection immediate re-poll; the
+            // settled fast-scope cadence is broadcasts 2→3 and 3→4. With the
+            // fix each fast cycle honours the 5 s interval — a floor, since
+            // scheduler jitter can only lengthen it. The old behaviour
+            // flagged every fast cycle as corrupt and re-polled back-to-back,
+            // collapsing the gap to the ~2 s block-pacing floor.
+            let window = std::time::Instant::now();
+            let mut stamps: Vec<std::time::Instant> = Vec::new();
+            while stamps.len() < 4 && window.elapsed() < Duration::from_secs(45) {
+                match tokio::time::timeout(Duration::from_secs(20), rx.recv()).await {
+                    Ok(Ok(PollMessage::Snapshot(_))) => stamps.push(std::time::Instant::now()),
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(_)) => break,
+                    Err(_) => break, // 20 s with no snapshot at all
+                }
+            }
+
+            assert!(
+                stamps.len() >= 4,
+                "expected 4 snapshot broadcasts, got {}",
+                stamps.len()
+            );
+            for w in [1usize, 2] {
+                let gap = stamps[w + 1].duration_since(stamps[w]);
+                assert!(
+                    gap >= Duration::from_secs(4),
+                    "fast-scope Gateway polls are spinning: gap between snapshots {w} and \
+                     {} was {gap:?} (absent detail blocks must not mark the cycle corrupt)",
+                    w + 1
+                );
+            }
 
             poll_task.abort();
             server.abort();
