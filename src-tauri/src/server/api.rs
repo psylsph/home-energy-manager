@@ -6876,16 +6876,49 @@ async fn resolve_postcode_blocking(postcode: String) -> Option<(String, f64, f64
         .unwrap_or(None)
 }
 
+/// Fields owned by one partial weather-config request.
+///
+/// Keeping this as a patch, rather than a whole config snapshot, lets a slow
+/// postcode lookup merge its result into fields changed by the poll loop or a
+/// concurrent API request while the lookup was in flight.
+#[derive(Clone, Default)]
+struct WeatherConfigPatch {
+    enabled: Option<bool>,
+    postcode: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    open_meteo_base_url: Option<String>,
+}
+
+impl WeatherConfigPatch {
+    fn apply_to(&self, config: &mut crate::settings::WeatherConfig) {
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(postcode) = &self.postcode {
+            config.postcode.clone_from(postcode);
+        }
+        if let Some(latitude) = self.latitude {
+            config.latitude = Some(latitude);
+        }
+        if let Some(longitude) = self.longitude {
+            config.longitude = Some(longitude);
+        }
+        if let Some(base_url) = &self.open_meteo_base_url {
+            config.open_meteo_base_url.clone_from(base_url);
+        }
+    }
+}
+
 /// Merge a weather-config update into the shared state.
 ///
 /// Review H15: the postcode lookup is a blocking HTTP call (10 s timeout).
 /// It must never run while the shared weather mutex is held — a slow or
 /// blackholed postcodes.io would stall every concurrent `GET /api/weather`
 /// AND the poll loop's weather tick, which takes the same lock. The config
-/// is therefore snapshotted under a short lock, mutated with the lookup
-/// running lock-free, and published under a second short lock. The trade is
-/// that two overlapping saves are last-writer-wins per whole config rather
-/// than per field; weather config saves are user-driven and rare.
+/// is therefore snapshotted under a short lock and used only to decide whether
+/// a lookup is needed. Request-owned fields are published as a patch into the
+/// latest config under a second short lock, preserving concurrent changes.
 ///
 /// The resolver is injected so tests can hold it mid-flight and prove the
 /// lock is free during the lookup.
@@ -6898,60 +6931,60 @@ where
     S: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Option<(String, f64, f64)>>,
 {
-    let mut config = { state.weather.lock().await.config.clone() };
+    let mut patch = WeatherConfigPatch {
+        enabled: body.get("enabled").and_then(|v| v.as_bool()),
+        postcode: body
+            .get("postcode")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        latitude: body.get("latitude").and_then(|v| v.as_f64()),
+        longitude: body.get("longitude").and_then(|v| v.as_f64()),
+        open_meteo_base_url: body
+            .get("open_meteo_base_url")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim_end_matches('/'))
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+    };
 
-    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
-        config.enabled = v;
-    }
-    if let Some(v) = body.get("postcode").and_then(|v| v.as_str()) {
-        config.postcode = v.to_string();
-    }
-    // Manual coordinate override — takes precedence over any postcode.
-    if let Some(lat) = body.get("latitude").and_then(|v| v.as_f64()) {
-        config.latitude = Some(lat);
-    }
-    if let Some(lon) = body.get("longitude").and_then(|v| v.as_f64()) {
-        config.longitude = Some(lon);
-    }
-    if let Some(v) = body.get("open_meteo_base_url").and_then(|v| v.as_str()) {
-        let trimmed = v.trim_end_matches('/');
-        if !trimmed.is_empty() {
-            config.open_meteo_base_url = trimmed.to_string();
-        }
-    }
+    let mut lookup_config = { state.weather.lock().await.config.clone() };
+    patch.apply_to(&mut lookup_config);
 
     // If we have a postcode but no coordinates, try to resolve now so the
     // user gets immediate feedback (rather than waiting for the next poll
     // tick). Failure is non-fatal — the user can enter coords manually.
     // Runs WITHOUT the weather lock held (see doc comment).
-    if !config.postcode.is_empty() && (config.latitude.is_none() || config.longitude.is_none()) {
-        match resolve_postcode(config.postcode.clone()).await {
+    if !lookup_config.postcode.is_empty()
+        && (lookup_config.latitude.is_none() || lookup_config.longitude.is_none())
+    {
+        match resolve_postcode(lookup_config.postcode.clone()).await {
             Some((canonical, lat, lon)) => {
-                config.postcode = canonical;
-                config.latitude = Some(lat);
-                config.longitude = Some(lon);
+                patch.postcode = Some(canonical);
+                patch.latitude = Some(lat);
+                patch.longitude = Some(lon);
             }
             None => {
                 tracing::info!(
-                    postcode = %config.postcode,
+                    postcode = %lookup_config.postcode,
                     "postcode lookup failed; leaving coordinates unset",
                 );
             }
         }
     }
 
-    // Publish the merged config under a short lock.
+    // Publish only this request's fields into the latest shared config.
     {
         let mut ws = state.weather.lock().await;
-        ws.config = config.clone();
+        patch.apply_to(&mut ws.config);
     }
 
     // Persist to settings.json so the config survives a restart.
     // Transactional save (review #1 follow-up): the whole
-    // read-modify-write happens under the settings lock.
-    let snapshot = config;
+    // read-modify-write happens under the settings lock. Apply the same
+    // field-level patch so writers between publication and persistence do
+    // not have unrelated fields replaced by a stale shared-state snapshot.
     if let Err(e) = crate::settings::Settings::update(|app_settings| {
-        app_settings.weather_config = snapshot.clone();
+        patch.apply_to(&mut app_settings.weather_config);
     }) {
         tracing::warn!("Failed to persist weather config: {e}");
         return server_error(&format!("Failed to save: {e}"));

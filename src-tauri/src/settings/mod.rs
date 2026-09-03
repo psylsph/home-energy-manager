@@ -555,7 +555,7 @@ pub fn find_next_cosy_slot<'a>(
     let enabled: Vec<(usize, &CosySlot)> = slots
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.enabled)
+        .filter(|(_, s)| s.enabled && (s.start_hour, s.start_minute) != (s.end_hour, s.end_minute))
         .collect();
     if enabled.is_empty() {
         return None;

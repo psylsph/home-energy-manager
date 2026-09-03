@@ -1146,8 +1146,8 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
             const nowMins = now.getHours() * 60 + now.getMinutes();
             const startMins = slot.start_hour * 60 + slot.start_minute;
             const endMins = slot.end_hour * 60 + slot.end_minute;
-            const crossesMidnight = endMins <= startMins;
-            const slotActive = slot.enabled && cosyActive && (
+            const crossesMidnight = endMins < startMins;
+            const slotActive = slot.enabled && cosyActive && startMins !== endMins && (
               crossesMidnight
                 ? (nowMins >= startMins || nowMins < endMins)
                 : (nowMins >= startMins && nowMins < endMins)
