@@ -5,6 +5,7 @@ pub mod history;
 pub mod inverter;
 pub mod modbus;
 pub mod octopus;
+pub mod pi_render;
 pub mod server;
 pub mod settings;
 #[cfg(test)]
