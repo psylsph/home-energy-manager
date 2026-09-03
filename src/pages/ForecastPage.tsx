@@ -346,7 +346,19 @@ export default function ForecastPage() {
     maxPowerW: number;
   }>({ soc: null, maxPowerW: 0 });
 
-  const load = async () => {
+  /**
+   * Fetch the forecast, plan and settings.
+   *
+   * `syncForm` controls whether the Plan settings INPUT fields are
+   * rewritten from the server. The initial mount populates them; every
+   * background refetch must leave them alone — review H17: a SOC-triggered
+   * or 30 s refetch used to clobber unsaved edits mid-typing (a "45" being
+   * typed into "Minimum battery level" snapped back to the saved value).
+   * The form inputs only change through this page's own saves, and those
+   * handlers already update both the input and the committed state, so
+   * there is nothing to re-sync afterwards.
+   */
+  const load = async (syncForm = true) => {
     try {
       const [forecastRes, planRes, settingsRes] = await Promise.all([
         apiGet<{ ok: boolean; data: ForecastData }>('/api/forecast'),
@@ -367,24 +379,28 @@ export default function ForecastPage() {
       setPlan(planRes.data);
       if (settingsRes.data.forecast_min_soc_pct != null) {
         const v = Math.round(settingsRes.data.forecast_min_soc_pct);
-        setMinSocPctInput(String(v));
         setMinSocPct(v);
       }
       setPlanAutoRefresh(settingsRes.data.forecast_plan_auto_refresh ?? false);
-      setChargeEffInput(
-        settingsRes.data.forecast_charge_efficiency != null
-          ? String(Math.round(settingsRes.data.forecast_charge_efficiency * 100))
-          : '90',
-      );
-      setDischargeEffInput(
-        settingsRes.data.forecast_discharge_efficiency != null
-          ? String(Math.round(settingsRes.data.forecast_discharge_efficiency * 100))
-          : '95',
-      );
       setPlanAutoApply(settingsRes.data.forecast_plan_auto_apply_enabled ?? false);
-      setPlanAutoApplyLeadInput(
-        String(settingsRes.data.forecast_plan_auto_apply_lead_minutes ?? 30),
-      );
+      if (syncForm) {
+        if (settingsRes.data.forecast_min_soc_pct != null) {
+          setMinSocPctInput(String(Math.round(settingsRes.data.forecast_min_soc_pct)));
+        }
+        setChargeEffInput(
+          settingsRes.data.forecast_charge_efficiency != null
+            ? String(Math.round(settingsRes.data.forecast_charge_efficiency * 100))
+            : '90',
+        );
+        setDischargeEffInput(
+          settingsRes.data.forecast_discharge_efficiency != null
+            ? String(Math.round(settingsRes.data.forecast_discharge_efficiency * 100))
+            : '95',
+        );
+        setPlanAutoApplyLeadInput(
+          String(settingsRes.data.forecast_plan_auto_apply_lead_minutes ?? 30),
+        );
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load forecast');
@@ -423,7 +439,7 @@ export default function ForecastPage() {
     ) {
       lastRefetchRef.current = now;
       lastTriggerRef.current = { soc: newSoc, maxPowerW: newMaxPower };
-      void load();
+      void load(false);
     } else {
       // Track the latest snapshot state either way so the next call has
       // a current SOC for delta comparison.
@@ -447,7 +463,7 @@ export default function ForecastPage() {
       await apiPost('/api/settings', { forecast_min_soc_pct: next });
       setMinSocPct(next);
       // Refetch — the planner sees the new floor on the next call.
-      await load();
+      await load(false);
     } catch (e) {
       setMinSocError(e instanceof Error ? e.message : 'Save failed');
     } finally {
@@ -485,7 +501,7 @@ export default function ForecastPage() {
       setPlanAutoRefresh(false);
       setPlanAutoApplyLeadDirty(false);
       // Refetch so the plan note and trigger time reflect the new state.
-      await load();
+      await load(false);
     } catch (e) {
       setPlanAutoApplyError(e instanceof Error ? e.message : 'Save failed');
     } finally {
@@ -515,7 +531,7 @@ export default function ForecastPage() {
       setChargeEffPct(charge);
       setDischargeEffPct(discharge);
       // Refetch — the planner sees the new efficiencies on the next call.
-      await load();
+      await load(false);
     } catch (e) {
       setEffError(e instanceof Error ? e.message : 'Save failed');
     } finally {

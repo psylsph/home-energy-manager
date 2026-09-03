@@ -1101,6 +1101,65 @@ describe('ForecastPage min SOC input', () => {
   });
 });
 
+describe('ForecastPage plan settings edits survive background refetches', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  it('preserves unsaved edits across a SOC-triggered refetch (review H17)', async () => {
+    // Review H17: every background refetch rewrote the Plan settings form
+    // from /api/settings — typing a new value into "Minimum battery level"
+    // snapped back mid-edit whenever the SOC moved by a point and the page
+    // refetched.
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_charge_needed');
+      if (path === '/api/settings') {
+        return {
+          ok: true,
+          data: {
+            forecast_min_soc_pct: 20,
+            forecast_charge_efficiency: 0.9,
+            forecast_discharge_efficiency: 0.95,
+            forecast_plan_auto_apply_lead_minutes: 30,
+          },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+    useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 3000 } as never });
+    render(<ForecastPage />);
+
+    const minSoc = (await waitFor(() =>
+      screen.getByTestId('forecast-min-soc-input'),
+    )) as HTMLInputElement;
+    expect(minSoc.value).toBe('20');
+
+    // The user starts typing a new value — not saved yet.
+    fireEvent.change(minSoc, { target: { value: '45' } });
+    expect(minSoc.value).toBe('45');
+
+    apiGetMock.mockClear();
+    // SOC moves 2 pp → the page refetches in the background.
+    await act(async () => {
+      useInverterStore.setState({ snapshot: { soc: 52, max_battery_power_w: 3000 } as never });
+    });
+    await waitFor(() => {
+      expect(apiGetMock.mock.calls.some((c) => c[0] === '/api/forecast/plan')).toBe(true);
+    });
+
+    // The unsaved edit must survive the refetch.
+    expect(
+      (screen.getByTestId('forecast-min-soc-input') as HTMLInputElement).value,
+    ).toBe('45');
+  });
+});
+
 describe('ForecastPage issue #283 feedback fixes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
