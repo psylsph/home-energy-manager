@@ -1922,7 +1922,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     // responses (including duplicate write ACKs) are silently
                     // dropped during the read cycle. No explicit flush needed.
 
-                    let (poll_ok, sanitized, connection_lost) = async {
+                    let (poll_ok, sanitized, connection_lost, block_suspicious) = async {
                         let gateway_scope = gateway_poll_scope(
                             known_device_type,
                             gateway_detail_poll_countdown,
@@ -2043,23 +2043,15 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             );
                                         }
                                     }
-                                }
-                                if block_suspicious {
-                                    consecutive_suspicious += 1;
-                                    if consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
-                                        tracing::warn!(
-                                            suspicious = consecutive_suspicious,
-                                            max = MAX_SUSPICIOUS_CYCLES,
-                                            "Persistent fingerprint corruption - reconnecting"
-                                        );
-                                    } else {
-                                        tracing::warn!(
-                                            suspicious = consecutive_suspicious,
-                                            max = MAX_SUSPICIOUS_CYCLES,
-                                            "Dongle memory-leak corruption detected - skipping broadcast, waiting for next poll cycle"
-                                        );
-                                    }
-                                    return (true, false, false);
+                                    // Skip decode and broadcast entirely — the
+                                    // registers are the dongle's own TCP memory.
+                                    // Review H2: this used to report sanitized
+                                    // = false, so the caller reset the streak
+                                    // counter on the very cycle it should have
+                                    // accumulated, and the force-reconnect path
+                                    // was unreachable. The counter now lives in
+                                    // the caller (see the poll_ok match below).
+                                    return (true, true, false, true);
                                 }
                                 let has_ac_config_block = blocks.iter().any(|b| {
                                     b.block.register_type == crate::modbus::registers::RegisterType::Holding
@@ -2188,7 +2180,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             has_model_specific_blocks,
                                             "Model-specific poll enabled - re-reading immediately"
                                         );
-                                        return (true, true, false);
+                                        return (true, true, false, false);
                                     }
 
                                 } else if let Some(cached_type) = known_device_type {
@@ -5150,7 +5142,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
                                 publish_snapshot(&state, snapshot).await;
 
-                                (true, sanitized || block_suspicious, false)
+                                (true, sanitized, false, false)
                             }
                             Err(e) => {
                                 if e.is_hard_failure() {
@@ -5160,7 +5152,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         error = %e,
                                         "TCP connection lost — reconnecting"
                                     );
-                                    (false, false, true)
+                                    (false, false, true, false)
                                 } else {
                                     // Timeout — the dongle is slow but the
                                     // TCP socket is fine.
@@ -5171,7 +5163,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         error = %e,
                                         "Poll read failed (transient) — continuing"
                                     );
-                                    (false, false, false)
+                                    (false, false, false, false)
                                 }
                             }
                         }
@@ -5179,6 +5171,30 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
                     match poll_ok {
                         true => {
+                            // Review H2: a fingerprint cycle never decoded
+                            // real register data, so it must NOT reset the
+                            // streak — it accumulates here and forces a
+                            // reconnect once the threshold is crossed. (The
+                            // old code reset the counter at the top of this
+                            // arm on the suspicious cycle itself, making the
+                            // reconnect path dead code.)
+                            if block_suspicious {
+                                consecutive_suspicious += 1;
+                                if consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
+                                    tracing::warn!(
+                                        suspicious = consecutive_suspicious,
+                                        max = MAX_SUSPICIOUS_CYCLES,
+                                        "Persistent fingerprint corruption - forcing reconnect"
+                                    );
+                                    break;
+                                }
+                                tracing::warn!(
+                                    suspicious = consecutive_suspicious,
+                                    max = MAX_SUSPICIOUS_CYCLES,
+                                    "Dongle memory-leak corruption detected - skipping broadcast, re-polling immediately"
+                                );
+                                continue;
+                            }
                             consecutive_suspicious = 0;
                             // Fresh, sanitized data reached the UI/history.
                             // Resets the sustained-timeout streak, marks the
@@ -5233,19 +5249,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                             tokio::time::sleep(Duration::from_secs(2)).await;
                             continue;
                         }
-                    }
-
-                    // If consecutive fingerprint corruption exceeds the
-                    // threshold, break out of the inner loop to force a
-                    // reconnect (the dongle may have crashed and needs a
-                    // fresh TCP session to recover).
-                    if consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
-                        tracing::warn!(
-                            suspicious = consecutive_suspicious,
-                            max = MAX_SUSPICIOUS_CYCLES,
-                            "Persistent fingerprint corruption - disconnecting"
-                        );
-                        break;
                     }
 
                     // Sleep for the configured interval, but wake early if:
@@ -8991,6 +8994,135 @@ mod tests {
             assert_eq!(snapshot.grid_frequency, 50.0);
             assert_eq!(snapshot.battery_temperature, 25.0);
             assert_eq!(snapshot.device_type_code, "0000");
+        })
+        .await;
+    }
+
+    /// Serves every read with the dongle memory-leak fingerprint planted in
+    /// the first standard input block (IR 0–59), and reports each accepted
+    /// TCP connection over the channel — one message per session, so the
+    /// test can observe the forced reconnect.
+    async fn run_fingerprint_mock(
+        listener: tokio::net::TcpListener,
+        connections: tokio::sync::mpsc::Sender<u32>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut session: u32 = 0;
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            session += 1;
+            let _ = connections.send(session).await;
+            loop {
+                let mut header = [0u8; 6];
+                if stream.read_exact(&mut header).await.is_err() {
+                    break;
+                }
+                let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+                let mut body = vec![0u8; length];
+                if stream.read_exact(&mut body).await.is_err() {
+                    break;
+                }
+
+                let mut frame = header.to_vec();
+                frame.extend_from_slice(&body);
+                let decoded = match crate::modbus::framer::decode_frame(&frame) {
+                    Ok(decoded) => decoded,
+                    Err(_) => break,
+                };
+                if decoded.payload.len() < 4 {
+                    break;
+                }
+
+                let base = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
+                let count = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]) as usize;
+                let mut data = vec![0u16; count];
+
+                // Six known-leaked values at their characteristic offsets —
+                // is_block_suspicious needs more than five.
+                if decoded.function == 4 && base == 0 && count == 60 {
+                    data[28] = 0x4C32;
+                    data[30] = 0xA119;
+                    data[31] = 0x34EA;
+                    data[32] = 0xE77F;
+                    data[33] = 0xD475;
+                    data[35] = 0x4500;
+                }
+
+                let mut payload = Vec::with_capacity(14 + count * 2);
+                payload.extend_from_slice(b"TEST123456");
+                payload.extend_from_slice(&base.to_be_bytes());
+                payload.extend_from_slice(&(count as u16).to_be_bytes());
+                for value in data {
+                    payload.extend_from_slice(&value.to_be_bytes());
+                }
+                let response = crate::modbus::framer::encode_frame(
+                    "TEST123456",
+                    decoded.slave,
+                    decoded.function,
+                    &payload,
+                );
+                if stream.write_all(&response).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The MAX_SUSPICIOUS_CYCLES reconnect contract (review H2): cycles
+    /// whose blocks match the dongle memory-leak fingerprint must
+    /// accumulate (without broadcasting a snapshot), and once the streak
+    /// crosses the threshold the poll loop must force a fresh TCP session.
+    /// The old code reset the streak counter on the suspicious cycle
+    /// itself, so the reconnect was unreachable and the UI froze on stale
+    /// data indefinitely.
+    #[tokio::test]
+    async fn poll_loop_forces_reconnect_after_persistent_fingerprint_corruption() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (conn_tx, mut conn_rx) = tokio::sync::mpsc::channel::<u32>(16);
+            let server = tokio::spawn(run_fingerprint_mock(listener, conn_tx));
+
+            let state = Arc::new(AppState::new());
+            {
+                let mut settings = state.settings.lock().await;
+                settings.host = "127.0.0.1".to_string();
+                settings.port = port;
+                settings.serial = "TEST123456".to_string();
+                settings.interval_secs = 1;
+            }
+
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+
+            // First message = the initial session; the second proves the
+            // loop disconnected and reconnected after the streak crossed
+            // MAX_SUSPICIOUS_CYCLES (initial reconnect backoff is 5 s).
+            let saw_second_session = tokio::time::timeout(Duration::from_secs(20), async {
+                let mut sessions = 0;
+                while let Some(n) = conn_rx.recv().await {
+                    sessions = n;
+                    if sessions >= 2 {
+                        break;
+                    }
+                }
+                sessions
+            })
+            .await
+            .expect("poll loop never reconnected after persistent fingerprint corruption");
+            assert_eq!(saw_second_session, 2);
+
+            // No suspicious cycle may broadcast a snapshot.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                state.latest_snapshot.lock().await.is_none(),
+                "fingerprint-corrupted cycles must never broadcast a snapshot"
+            );
+
+            poll_task.abort();
+            server.abort();
         })
         .await;
     }
