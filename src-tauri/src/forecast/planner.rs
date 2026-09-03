@@ -1099,10 +1099,15 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
             inputs.now_ts,
         );
     }
-    inject_export_discharge(&mut final_hours, &selected.run, &window, max_export_kw);
+    // Review H11: the sellable energy is what is actually injected — the
+    // spare discharge capacity after the house's net load — not the
+    // theoretical `max_export_kw × duration` window output. The household
+    // is served first and shares the cap; advertising the full cap as sold
+    // energy overstated the earnings (and the EXPORT_MIN_KWH gate) whenever
+    // the home draws anything during the window.
+    let kwh = inject_export_discharge(&mut final_hours, &selected.run, &window, max_export_kw);
     let final_sim = crate::forecast::simulate::simulate_battery(&final_hours, inputs.params);
     let after_min_soc_pct = trough_after(&final_sim.hours);
-    let kwh = max_export_kw * window_duration_minutes(&window) as f64 / 60.0;
     if kwh < EXPORT_MIN_KWH || after_min_soc_pct < inputs.floor_pct {
         return ExportAdvice::NoExport {
             reason: format!(
@@ -1169,18 +1174,24 @@ fn window_runs_for_window(
         .collect()
 }
 
-/// Inject a max-rate export discharge on the given hour indices, sized
-/// by each hour's overlap with `window`. Modelled as a virtual load
-/// (supply subtracted from solar): the eco simulator covers it from
-/// the battery up to the discharge rate cap, which is exactly the
-/// physics of max-power export — home load is served first, the rest
-/// leaves for the grid, and the reserve floor stops the drain.
+/// Inject the spare-capacity export discharge on the given hour indices,
+/// sized by each hour's overlap with `window`, and return the total energy
+/// injected (kWh, AC side) — the energy the inverter can actually sell.
+///
+/// Modelled as a virtual load (supply subtracted from solar), which the eco
+/// simulator covers from the battery up to the discharge rate cap. Review
+/// H11: the household shares that cap and is served first, so the injected
+/// load is the SPARE capacity — `max_export_kw` minus the hour's net house
+/// load — not the full rate. Injecting the full rate fabricated energy the
+/// inverter could never export (and a grid import to boot) whenever the
+/// home drew power during the window.
 fn inject_export_discharge(
     hours: &mut [SimHourInput],
     run: &[usize],
     window: &ChargeWindow,
     max_export_kw: f64,
-) {
+) -> f64 {
+    let mut injected_kwh = 0.0;
     for &i in run {
         let Some(hour) = hours.get_mut(i) else {
             continue;
@@ -1189,8 +1200,13 @@ fn inject_export_discharge(
         if overlap_hours <= 0.0 {
             continue;
         }
-        hour.solar_kwh -= max_export_kw * overlap_hours;
+        let net_load_kw = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
+        let spare_kw = (max_export_kw - net_load_kw).max(0.0);
+        let injection = spare_kw * overlap_hours;
+        hour.solar_kwh -= injection;
+        injected_kwh += injection;
     }
+    injected_kwh
 }
 
 #[cfg(test)]
@@ -2797,6 +2813,143 @@ mod tests {
         assert_eq!(window.start_min, 16 * 60);
         assert_eq!(window.end_min, 16 * 60 + 45);
         assert!((kwh - 2.5 * 45.0 / 60.0).abs() < 1e-9, "kwh = {kwh}");
+    }
+
+    /// Review H11: the sellable energy is bounded by the discharge cap
+    /// MINUS the house's net load — the home is served first, and only
+    /// the spare capacity can leave for the grid.
+    fn hours_with_peak_load(load_kwh: f64) -> Vec<SimHourInput> {
+        idle_day_hours(0)
+            .into_iter()
+            .map(|mut h| {
+                // Flux peak window 16:00–21:00.
+                if h.timestamp >= hour_ts(16, 0) && h.timestamp < hour_ts(21, 0) {
+                    h.consumption_kwh = load_kwh;
+                }
+                h
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inject_export_discharge_limits_to_spare_capacity_after_house_load() {
+        // 2.5 kW cap. Hour 16 carries a 2 kW house load (no solar): the
+        // battery's discharge capacity is already committed to the home for
+        // all but 0.5 kW, so only 0.5 kWh of that hour can be sold. Hour 17
+        // is idle: the full 2.5 kW is spare.
+        let mut hours = vec![
+            SimHourInput {
+                timestamp: hour_ts(16, 0),
+                solar_kwh: 0.0,
+                consumption_kwh: 2.0,
+            },
+            SimHourInput {
+                timestamp: hour_ts(17, 0),
+                solar_kwh: 0.0,
+                consumption_kwh: 0.0,
+            },
+        ];
+        let window = ChargeWindow {
+            start_min: 16 * 60,
+            end_min: 18 * 60,
+            rate: 0.35,
+            tomorrow: false,
+        };
+        let injected = inject_export_discharge(&mut hours, &[0usize, 1], &window, 2.5);
+        assert!(
+            (injected - 3.0).abs() < 1e-9,
+            "0.5 kWh (loaded hour) + 2.5 kWh (idle hour) = 3.0, got {injected}"
+        );
+        assert!(
+            (hours[0].solar_kwh - (-0.5)).abs() < 1e-9,
+            "loaded hour: only the spare 0.5 kW injected, got {}",
+            hours[0].solar_kwh
+        );
+        assert!(
+            (hours[1].solar_kwh - (-2.5)).abs() < 1e-9,
+            "idle hour: full 2.5 kW injected, got {}",
+            hours[1].solar_kwh
+        );
+    }
+
+    #[test]
+    fn export_advice_does_not_sell_the_house_loads_share_of_the_cap() {
+        // Review H11: a 2 kW cooking hour inside the export window shares
+        // the 2.5 kW discharge cap — only 0.5 kW of that hour is spare.
+        // The advice must therefore sell strictly less than the
+        // theoretical cap × duration output.
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        // One cooking hour at the start of an otherwise idle peak, so the
+        // chosen window (which starts at the peak open) always overlaps it.
+        let hours: Vec<SimHourInput> = idle_day_hours(0)
+            .into_iter()
+            .map(|mut h| {
+                if h.timestamp == hour_ts(16, 0) {
+                    h.consumption_kwh = 2.0;
+                }
+                h
+            })
+            .collect();
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &flux_tariff(),
+            &flux_tariff(),
+            None,
+            now,
+        ));
+        let ExportAdvice::Export {
+            window,
+            kwh,
+            after_min_soc_pct,
+            ..
+        } = advice
+        else {
+            panic!("expected an export recommendation, got {advice:?}");
+        };
+        let theoretical = 2.5 * window_duration_minutes(&window) as f64 / 60.0;
+        assert!(
+            kwh < theoretical - 1.0,
+            "the cooking hour's 2 kW must come out of the sold energy: kwh {kwh} vs \
+             theoretical {theoretical}"
+        );
+        assert!(
+            after_min_soc_pct >= 20.0,
+            "floor must hold, got {after_min_soc_pct}"
+        );
+    }
+
+    #[test]
+    fn export_advice_rejects_when_house_load_exceeds_the_discharge_cap() {
+        // 4 kW house load against a 2.5 kW cap: the battery is fully
+        // committed to the home for the whole peak — nothing is spare to
+        // sell, however much stored energy sits above the floor.
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        let hours = hours_with_peak_load(4.0);
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&export_inputs(
+            &hours,
+            &p,
+            &flux_tariff(),
+            &flux_tariff(),
+            None,
+            now,
+        ));
+        let ExportAdvice::NoExport { reason } = advice else {
+            panic!("expected a no-export verdict, got {advice:?}");
+        };
+        let reason = reason.to_lowercase();
+        assert!(
+            reason.contains("spare") || reason.contains("floor"),
+            "reason should explain nothing is spare: {reason}"
+        );
     }
 
     #[test]
