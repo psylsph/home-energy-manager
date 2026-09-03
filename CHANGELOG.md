@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **On Raspberry Pi the app now starts with a clean picture.** Recent Raspberry Pi OS versions could show the window mangled by horizontal lines on launch, and only maximising it fixed the display. The app now notices it is running on a Pi and starts its display in the compatibility mode that avoids the corruption — no launcher tricks or settings needed. If you want to try the normal accelerated display again anyway, `GIVENERGY_LOCAL_ALLOW_GPU_RENDERER=1` switches it back on. (fixes #298)
+
 ## [0.79.0] - 2026-09-02
 
 ### Added
