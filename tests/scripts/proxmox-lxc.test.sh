@@ -390,6 +390,33 @@ assert_contains "retains only three newest backups" "3" "${#BACKUPS[@]}"
 assert_contains "preserves the configured port" "ExecStart=/usr/bin/givenergy-local --headless --port 7444" "$UPGRADED_SERVICE"
 
 echo
+echo "5b. failed pre-update backup restarts the existing service without replacing the package"
+FAIL_STAGE="$(mktemp -d)"
+mkdir -p "$FAIL_STAGE/bin" "$FAIL_STAGE/root/var/lib/givenergy-local"
+: >"$FAIL_STAGE/commands.log"
+printf '{"inverter_host":"192.0.2.20"}\n' >"$FAIL_STAGE/root/var/lib/givenergy-local/settings.json"
+make_mock "$FAIL_STAGE/bin" tar <<'EOF'
+#!/bin/bash
+exit 42
+EOF
+set +e
+PATH="$FAIL_STAGE/bin:$STAGE/bin:/usr/bin:/bin" \
+  HEM_TEST_LOG="$FAIL_STAGE/commands.log" \
+  HEM_TEST_DEB="$STAGE/deb-fixture" \
+  HEM_TEST_DIGEST="$DIGEST" \
+  HEM_TEST_INSTALLED_VERSION="1.2.2" \
+  HEM_ROOT="$FAIL_STAGE/root" \
+  HEM_PORT=7444 \
+  bash "$REPO_ROOT/scripts/proxmox/install.sh" >"$FAIL_STAGE/output.log" 2>&1
+BACKUP_FAILURE_RC=$?
+set -e
+BACKUP_FAILURE_COMMANDS="$(cat "$FAIL_STAGE/commands.log")"
+assert_eq "backup failure reports non-zero" "42" "$BACKUP_FAILURE_RC"
+assert_contains "restarts the existing service" "systemctl enable --now home-energy-manager.service" "$BACKUP_FAILURE_COMMANDS"
+assert_not_contains "does not replace the package" "apt install -y /tmp/" "$BACKUP_FAILURE_COMMANDS"
+rm -rf "$FAIL_STAGE"
+
+echo
 echo "6. failed post-update health check restores the previous package"
 : >"$STAGE/commands.log"
 rm -f "$STAGE/health-state"
