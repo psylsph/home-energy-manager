@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -293,6 +293,54 @@ describe('OctopusPage — range, loading, error, derived values', () => {
       await waitFor(() => {
         expect(screen.getByText('Not configured')).toBeDefined();
       });
+    });
+  });
+
+  describe('stale fetch guard', () => {
+    it('does not render a slow previous-range response over the newer range', async () => {
+      // Review H6: switching ranges while a fetch for the previous range is
+      // still in flight let the stale response land last and overwrite the
+      // newer range's series — 30-day figures rendered under the 1-year tab.
+      let resolve1y: () => void = () => {};
+      const deferred1y = new Promise<void>((resolve) => {
+        resolve1y = resolve;
+      });
+      vi.mocked(apiGet).mockImplementation(async (path: string) => {
+        if (path === '/api/octopus/status') return statusResponse();
+        if (path.startsWith('/api/octopus/summary')) return billingSummary();
+        if (path.startsWith('/api/octopus/comparison')) return comparisonResponse();
+        if (path.includes('range=1y')) {
+          // The user's first range click is slow to answer.
+          await deferred1y;
+          return historyResponse({ electricity_import: [{ t: 1, v: 9.0 }] });
+        }
+        if (path.includes('range=6m')) {
+          // The follow-up range click answers quickly.
+          return historyResponse({ electricity_import: [{ t: 1, v: 7.0 }] });
+        }
+        return historyResponse({ electricity_import: [{ t: 1, v: 4.0 }] });
+      });
+
+      render(<OctopusPage />);
+      // Initial 30d load: import total 4.000 kWh.
+      await screen.findAllByText('4.000 kWh');
+
+      // Click "1 year" — its fetch hangs (deferred).
+      fireEvent.click(screen.getByRole('button', { name: '1 year' }));
+      // Click "6 months" — resolves fast: import total 7.000 kWh.
+      fireEvent.click(screen.getByRole('button', { name: '6 months' }));
+      await screen.findAllByText('7.000 kWh');
+
+      // The slow 1-year response finally lands — it must NOT clobber the
+      // newer 6-month data.
+      resolve1y();
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // The stale 1-year series must not have replaced the 6-month data.
+      expect(screen.queryByText('9.000 kWh')).toBeNull();
+      expect(screen.getAllByText('7.000 kWh').length).toBeGreaterThan(0);
     });
   });
 });

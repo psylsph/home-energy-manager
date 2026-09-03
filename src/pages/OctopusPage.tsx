@@ -205,7 +205,7 @@ export default function OctopusPage() {
   const [error, setError] = useState<string | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: { cancelled: boolean }) => {
     try {
       const [nextStatus, history, summary, nextComparison] = await Promise.all([
         apiGet<StatusResponse>('/api/octopus/status'),
@@ -213,27 +213,33 @@ export default function OctopusPage() {
         apiGet<SummaryResponse>(`/api/octopus/summary?range=${range}`),
         apiGet<ComparisonResponse>(`/api/octopus/comparison?range=${range}`),
       ]);
+      // Review H6: the effect's cancellation flag must gate the setStates
+      // of an in-flight load, not just whether a new one starts — a slow
+      // response for the previous range would otherwise land after a range
+      // switch and render stale data under the new range's tab.
+      if (signal.cancelled) return;
       setStatus(nextStatus);
       setSeries(history.data ?? {});
       setBilling(summary);
       setComparison(nextComparison);
       setError(null);
     } catch (cause) {
+      if (signal.cancelled) return;
       setError(cause instanceof Error ? cause.message : 'Unable to load Octopus data');
     } finally {
-      setLoading(false);
+      if (!signal.cancelled) {
+        setLoading(false);
+      }
     }
   }, [range]);
 
   useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      if (!cancelled) await load();
-    };
+    const signal = { cancelled: false };
+    const run = () => void load(signal);
     void run();
-    const id = window.setInterval(() => void run(), 30_000);
+    const id = window.setInterval(run, 30_000);
     return () => {
-      cancelled = true;
+      signal.cancelled = true;
       window.clearInterval(id);
     };
   }, [load]);
