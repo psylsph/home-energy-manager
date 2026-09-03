@@ -938,6 +938,35 @@ fn telegram_agent() -> &'static ureq::Agent {
     })
 }
 
+/// Hard end-to-end timeout for any single ntfy / Pushover send (review H13).
+///
+/// Both senders used to call `ureq::post(...)` — the process-wide default
+/// agent, which has **no** timeout at all and keeps pooled connections.
+/// They are also the only senders on that default agent, so they inherited
+/// exactly the stale-pooled-socket stall the [`telegram_agent`] rework
+/// root-caused, but unbounded: a self-hosted ntfy server that blackholes
+/// packets held its sender for the OS TCP timeout (minutes). Both now share
+/// this dedicated agent — fresh connection per send, hard ceiling. Unlike
+/// Telegram there is no long-poll, so 10 s is a comfortable budget.
+const NOTIFY_HTTP_TIMEOUT: u64 = 10;
+
+/// Shared HTTP agent for all ntfy and Pushover sends. See
+/// [`NOTIFY_HTTP_TIMEOUT`] for why this exists and is not the default agent.
+fn notify_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(NOTIFY_HTTP_TIMEOUT)))
+            // Never reuse a pooled socket — same rationale as
+            // [`telegram_agent`]'s pooling disable.
+            .max_idle_connections(0)
+            .max_idle_connections_per_host(0)
+            .http_status_as_error(false)
+            .build();
+        ureq::Agent::new_with_config(config)
+    })
+}
+
 /// Send a notification via the Telegram Bot API.
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
@@ -1080,10 +1109,22 @@ pub fn send_telegram_document(
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
 pub fn send_ntfy_message(topic: &str, server: &str, text: &str) -> Result<(), String> {
+    send_ntfy_message_via(notify_agent(), topic, server, text)
+}
+
+/// Inner ntfy send taking the agent explicitly so tests can inject one
+/// with a short timeout instead of waiting out the production budget.
+fn send_ntfy_message_via(
+    agent: &ureq::Agent,
+    topic: &str,
+    server: &str,
+    text: &str,
+) -> Result<(), String> {
     let url = format!("{}/{}", server.trim_end_matches('/'), topic);
 
     let server_display = server;
-    let resp = match ureq::post(&url)
+    let resp = match agent
+        .post(&url)
         .content_type("text/plain")
         .send(text.to_string())
     {
@@ -1120,8 +1161,24 @@ pub fn send_ntfy_message(topic: &str, server: &str, text: &str) -> Result<(), St
 /// Pushover accepts `application/json`, so this mirrors
 /// [`send_telegram_message`] rather than form-encoding.
 pub fn send_pushover_message(app_token: &str, user_key: &str, text: &str) -> Result<(), String> {
-    let url = "https://api.pushover.net/1/messages.json";
+    send_pushover_message_via(
+        notify_agent(),
+        "https://api.pushover.net/1/messages.json",
+        app_token,
+        user_key,
+        text,
+    )
+}
 
+/// Inner Pushover send taking the agent and URL explicitly so tests can
+/// inject a short-timeout agent against a local mock server.
+fn send_pushover_message_via(
+    agent: &ureq::Agent,
+    url: &str,
+    app_token: &str,
+    user_key: &str,
+    text: &str,
+) -> Result<(), String> {
     let payload = serde_json::json!({
         "token": app_token,
         "user": user_key,
@@ -1130,7 +1187,7 @@ pub fn send_pushover_message(app_token: &str, user_key: &str, text: &str) -> Res
 
     let body = serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
 
-    let resp = match ureq::post(url).content_type("application/json").send(&body) {
+    let resp = match agent.post(url).content_type("application/json").send(&body) {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(code)) => {
             return Err(format!(
@@ -3389,6 +3446,107 @@ mod tests {
         assert!(
             err.contains("ntfy API"),
             "expected an ntfy API error, got: {err}"
+        );
+    }
+
+    // ================================================================
+    // Bounded send durations (review H13): the ntfy/Pushover agent must
+    // carry a hard timeout. A server that accepts the connection and then
+    // never responds must produce an error within the agent budget, not
+    // hang for the OS TCP timeout (minutes).
+    // ================================================================
+
+    /// Accepts one connection and then goes silent — the blackhole failure
+    /// mode of a dead self-hosted ntfy server.
+    struct MockSilentServer {
+        addr: std::net::SocketAddr,
+        _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl MockSilentServer {
+        async fn spawn() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ephemeral port");
+            let addr = listener.local_addr().expect("local addr");
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = shutdown_rx.await;
+                // The accepted socket is deliberately never answered.
+            });
+            // Accept outside the shutdown race so ureq's connect succeeds.
+            tokio::spawn(async move {
+                if let Ok((_socket, _)) = listener.accept().await {
+                    futures_util::future::pending::<()>().await;
+                }
+            });
+            Self {
+                addr,
+                _shutdown: Some(shutdown_tx),
+            }
+        }
+    }
+
+    impl Drop for MockSilentServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self._shutdown.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    fn short_timeout_agent() -> ureq::Agent {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(1)))
+            .max_idle_connections(0)
+            .max_idle_connections_per_host(0)
+            .http_status_as_error(false)
+            .build();
+        ureq::Agent::new_with_config(config)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_ntfy_message_times_out_against_silent_server() {
+        let mock = MockSilentServer::spawn().await;
+        let start = std::time::Instant::now();
+        let res = send_ntfy_message_via(
+            &short_timeout_agent(),
+            "hem-alerts",
+            &format!("http://{}", mock.addr),
+            "battery temp high",
+        );
+        let elapsed = start.elapsed();
+        assert!(res.is_err(), "a silent server must yield an error");
+        assert!(
+            !res.unwrap_err().contains("ntfy API"),
+            "failure must be a transport-level error, not an API status"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "send must be bounded by the agent timeout, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_pushover_message_times_out_against_silent_server() {
+        let mock = MockSilentServer::spawn().await;
+        let start = std::time::Instant::now();
+        let res = send_pushover_message_via(
+            &short_timeout_agent(),
+            &format!("http://{}/1/messages.json", mock.addr),
+            "app-token",
+            "user-key",
+            "battery temp high",
+        );
+        let elapsed = start.elapsed();
+        assert!(res.is_err(), "a silent server must yield an error");
+        assert!(
+            !res.unwrap_err().contains("Pushover API"),
+            "failure must be a transport-level error, not an API status"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "send must be bounded by the agent timeout, took {elapsed:?}"
         );
     }
 }
