@@ -243,6 +243,14 @@ function TimePicker({
   );
 }
 
+/** Human-readable one-liner for a failed control POST (review H16). */
+function describeSaveFailure(e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.length > 0
+    ? `${message}. The slider has been reset to the inverter's current setting.`
+    : 'the write did not reach the inverter. The slider has been reset to the inverter\'s current setting.';
+}
+
 function InverterWriteProgress({ detail = 'This can take several seconds. Please keep this page open.' }: { detail?: string }) {
   return createPortal(
     <div
@@ -2960,6 +2968,12 @@ export default function ControlPage() {
     || chargeRateSaving
     || dischargeRateSaving
     || activePowerSaving;
+  // Review H16: a failed power-limit / Minimum-SOC save used to be swallowed
+  // (console.warn only) and the optimistic draft never reconciled, so the
+  // slider kept showing the rejected value and the write looked confirmed.
+  // Failures surface here and clear the draft so the slider snaps back to
+  // the inverter's actual setting.
+  const [powerControlSaveError, setPowerControlSaveError] = useState<string | null>(null);
   // Duration (in minutes) for Force Charge and Force Discharge quick actions.
   // The UI offers five-minute increments from 5m to 24h on a logarithmic
   // track. The backend clamps the submitted 1440-minute endpoint to 1439
@@ -3287,7 +3301,12 @@ export default function ControlPage() {
     setReserveSaving(true);
     try {
       await apiPost('/api/control/reserve', { soc: reserveSoc });
-    } catch (e: unknown) { console.warn("Slot save failed:", e); }
+      setPowerControlSaveError(null);
+    } catch (e: unknown) {
+      console.warn("Minimum SOC save failed:", e);
+      setPowerControlSaveError(`Minimum SOC save failed: ${describeSaveFailure(e)}`);
+      setDraftReserve(null);
+    }
     setReserveSaving(false);
   };
 
@@ -3296,7 +3315,12 @@ export default function ControlPage() {
     setChargeRateSaving(true);
     try {
       await apiPost('/api/control/charge-rate', { limit: Math.round(chargeRate / rateDisplayMultiplier) });
-    } catch (e: unknown) { console.warn("Slot save failed:", e); }
+      setPowerControlSaveError(null);
+    } catch (e: unknown) {
+      console.warn("Charge power limit save failed:", e);
+      setPowerControlSaveError(`Charge power limit save failed: ${describeSaveFailure(e)}`);
+      setDraftCharge(null);
+    }
     setChargeRateSaving(false);
   };
 
@@ -3305,7 +3329,12 @@ export default function ControlPage() {
     setDischargeRateSaving(true);
     try {
       await apiPost('/api/control/discharge-rate', { limit: Math.round(dischargeRate / rateDisplayMultiplier) });
-    } catch (e: unknown) { console.warn("Slot save failed:", e); }
+      setPowerControlSaveError(null);
+    } catch (e: unknown) {
+      console.warn("Discharge power limit save failed:", e);
+      setPowerControlSaveError(`Discharge power limit save failed: ${describeSaveFailure(e)}`);
+      setDraftDischarge(null);
+    }
     setDischargeRateSaving(false);
   };
 
@@ -3314,7 +3343,12 @@ export default function ControlPage() {
     setActivePowerSaving(true);
     try {
       await apiPost('/api/control/active-power-rate', { rate: activePowerRate });
-    } catch (e: unknown) { console.warn("Slot save failed:", e); }
+      setPowerControlSaveError(null);
+    } catch (e: unknown) {
+      console.warn("Active power rate save failed:", e);
+      setPowerControlSaveError(`Active power rate save failed: ${describeSaveFailure(e)}`);
+      setDraftActivePower(null);
+    }
     setActivePowerSaving(false);
   };
 
@@ -3820,6 +3854,14 @@ export default function ControlPage() {
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
         {powerControlSaving && <InverterWriteProgress />}
+        {powerControlSaveError && (
+          <div
+            role="alert"
+            className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300"
+          >
+            {powerControlSaveError}
+          </div>
+        )}
         {/* EPS is deliberately a separate card so its switch cannot be mistaken
             for a master toggle controlling the settings below it. */}
         {supportsEps && (
