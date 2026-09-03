@@ -6836,56 +6836,91 @@ pub async fn set_weather(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let mut ws = state.weather.lock().await;
+    apply_weather_update(state, body, resolve_postcode_blocking).await
+}
+
+/// Production postcode resolver: the lookup is a blocking ureq call, so it
+/// runs on the blocking pool instead of stalling a Tokio worker.
+async fn resolve_postcode_blocking(postcode: String) -> Option<(String, f64, f64)> {
+    tokio::task::spawn_blocking(move || lookup_postcode(&postcode))
+        .await
+        .unwrap_or(None)
+}
+
+/// Merge a weather-config update into the shared state.
+///
+/// Review H15: the postcode lookup is a blocking HTTP call (10 s timeout).
+/// It must never run while the shared weather mutex is held — a slow or
+/// blackholed postcodes.io would stall every concurrent `GET /api/weather`
+/// AND the poll loop's weather tick, which takes the same lock. The config
+/// is therefore snapshotted under a short lock, mutated with the lookup
+/// running lock-free, and published under a second short lock. The trade is
+/// that two overlapping saves are last-writer-wins per whole config rather
+/// than per field; weather config saves are user-driven and rare.
+///
+/// The resolver is injected so tests can hold it mid-flight and prove the
+/// lock is free during the lookup.
+pub(crate) async fn apply_weather_update<S, Fut>(
+    state: Arc<AppState>,
+    body: serde_json::Value,
+    resolve_postcode: S,
+) -> (StatusCode, Json<Value>)
+where
+    S: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<(String, f64, f64)>>,
+{
+    let mut config = { state.weather.lock().await.config.clone() };
 
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
-        ws.config.enabled = v;
+        config.enabled = v;
     }
     if let Some(v) = body.get("postcode").and_then(|v| v.as_str()) {
-        ws.config.postcode = v.to_string();
+        config.postcode = v.to_string();
     }
     // Manual coordinate override — takes precedence over any postcode.
     if let Some(lat) = body.get("latitude").and_then(|v| v.as_f64()) {
-        ws.config.latitude = Some(lat);
+        config.latitude = Some(lat);
     }
     if let Some(lon) = body.get("longitude").and_then(|v| v.as_f64()) {
-        ws.config.longitude = Some(lon);
+        config.longitude = Some(lon);
     }
     if let Some(v) = body.get("open_meteo_base_url").and_then(|v| v.as_str()) {
         let trimmed = v.trim_end_matches('/');
         if !trimmed.is_empty() {
-            ws.config.open_meteo_base_url = trimmed.to_string();
+            config.open_meteo_base_url = trimmed.to_string();
         }
     }
 
     // If we have a postcode but no coordinates, try to resolve now so the
     // user gets immediate feedback (rather than waiting for the next poll
     // tick). Failure is non-fatal — the user can enter coords manually.
-    if !ws.config.postcode.is_empty()
-        && (ws.config.latitude.is_none() || ws.config.longitude.is_none())
-    {
-        match lookup_postcode(&ws.config.postcode) {
+    // Runs WITHOUT the weather lock held (see doc comment).
+    if !config.postcode.is_empty() && (config.latitude.is_none() || config.longitude.is_none()) {
+        match resolve_postcode(config.postcode.clone()).await {
             Some((canonical, lat, lon)) => {
-                ws.config.postcode = canonical;
-                ws.config.latitude = Some(lat);
-                ws.config.longitude = Some(lon);
+                config.postcode = canonical;
+                config.latitude = Some(lat);
+                config.longitude = Some(lon);
             }
             None => {
                 tracing::info!(
-                    postcode = %ws.config.postcode,
+                    postcode = %config.postcode,
                     "postcode lookup failed; leaving coordinates unset",
                 );
             }
         }
     }
 
-    let config_clone = ws.config.clone();
-    drop(ws);
+    // Publish the merged config under a short lock.
+    {
+        let mut ws = state.weather.lock().await;
+        ws.config = config.clone();
+    }
 
     // Persist to settings.json so the config survives a restart.
     // Transactional save (review #1 follow-up): the whole
     // read-modify-write happens under the settings lock.
-    let snapshot = config_clone;
+    let snapshot = config;
     if let Err(e) = crate::settings::Settings::update(|app_settings| {
         app_settings.weather_config = snapshot.clone();
     }) {
@@ -18558,6 +18593,88 @@ mod tests {
                 vec![4, 4, 60, 100, 100, 100, 100],
                 "target_soc must be clamped to [4, 100] after truncation-safe coerce"
             );
+        })
+        .await;
+    }
+
+    // -------------------------------------------------------------------
+    // set_weather (review H15): the postcode lookup is a blocking HTTP
+    // call and must never run while the shared weather mutex is held —
+    // the poll loop's weather tick takes the same lock.
+    // -------------------------------------------------------------------
+
+    /// While a (held-up) postcode lookup is in flight, the weather mutex
+    /// must be free for other users.
+    #[tokio::test]
+    async fn set_weather_does_not_hold_weather_lock_across_postcode_lookup() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+            let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+            let resolver = move |_postcode: String| async move {
+                let _ = started_tx.send(());
+                let _ = proceed_rx.await;
+                Some(("SO16 0AS".to_string(), 50.9, -1.4))
+            };
+
+            let state_for_task = state.clone();
+            let task = tokio::spawn(async move {
+                apply_weather_update(state_for_task, json!({ "postcode": "SO160AS" }), resolver)
+                    .await
+            });
+
+            started_rx.await.expect("resolver must start");
+
+            // The lookup is deliberately stalled in flight — the shared
+            // weather mutex must be free for the poll loop and readers.
+            let probe = state.weather.try_lock();
+            assert!(
+                probe.is_ok(),
+                "weather lock must not be held across the postcode lookup"
+            );
+            drop(probe);
+
+            let _ = proceed_tx.send(());
+            let (status, _) = task.await.expect("apply task must complete");
+            assert_eq!(status, StatusCode::OK);
+
+            let ws = state.weather.lock().await;
+            assert_eq!(
+                ws.config.postcode, "SO16 0AS",
+                "resolved postcode persisted"
+            );
+            assert_eq!(ws.config.latitude, Some(50.9));
+            assert_eq!(ws.config.longitude, Some(-1.4));
+        })
+        .await;
+    }
+
+    /// Manual coordinates take precedence — the postcode lookup must not
+    /// even start.
+    #[tokio::test]
+    async fn set_weather_manual_coords_skip_postcode_lookup() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+
+            let resolver = |_postcode: String| async move {
+                panic!("lookup must not run when coordinates are provided");
+                #[allow(unreachable_code)]
+                None
+            };
+
+            let (status, _) = apply_weather_update(
+                state.clone(),
+                json!({ "postcode": "X1 1XX", "latitude": 1.0, "longitude": 2.0 }),
+                resolver,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let ws = state.weather.lock().await;
+            assert_eq!(ws.config.latitude, Some(1.0));
+            assert_eq!(ws.config.longitude, Some(2.0));
+            assert_eq!(ws.config.postcode, "X1 1XX");
         })
         .await;
     }
