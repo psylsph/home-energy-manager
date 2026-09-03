@@ -261,8 +261,11 @@ pub enum ControlCommand {
     ThreePhaseCosyExit,
     /// Drive the inverter through its native slot schedule for an Agile
     /// cheap-window charge. Writes the slot times, target SOC, and enable
-    /// flag — no `BATTERY_POWER_MODE` flip (the inverter stays in Eco).
-    /// Single-phase variant (HR 94/95 + HR 96 + HR 20 + HR 116).
+    /// flag, and restores eco mode + clears the discharge enable — a
+    /// plunge price can follow an armed export slot directly (no mid-band
+    /// clear), and the stale export configuration would keep the battery
+    /// discharging through the charge window. Single-phase variant
+    /// (HR 27 + HR 59 + HR 94/95 + HR 96 + HR 20 + HR 116).
     AgileChargeSlot {
         /// Packed HHMM start time of the cheap run.
         start_hhmm: u16,
@@ -592,14 +595,24 @@ impl ControlCommand {
                 target_soc,
             } => {
                 // Drive the inverter's native slot 1 schedule for the
-                // cheap run. Eco mode stays on (`HR_BATTERY_POWER_MODE`
-                // untouched) so the inverter will charge during the slot
-                // to absorb cheap grid power, then fall back to
-                // self-consumption outside the window.
+                // cheap run, then fall back to self-consumption outside
+                // the window.
+                //
+                // Review H18: the price can step straight from the
+                // discharge threshold to the charge threshold in one
+                // half-hour (plunge after a peak), skipping the mid-band
+                // AgileClearActiveSlot that would have restored Eco. The
+                // discharge path leaves `HR_BATTERY_POWER_MODE = 0`
+                // (export) and `HR_ENABLE_DISCHARGE = 1` armed; without
+                // an explicit reset here the battery keeps exporting at
+                // 5p instead of charging. Mirror the three-phase twin:
+                // restore eco and clear the stale discharge enable first.
                 validate_hhmm(*start_hhmm, "agile charge slot start")?;
                 validate_hhmm(*end_hhmm, "agile charge slot end")?;
                 validate_range(*target_soc, 4, 100, "agile target SOC")?;
                 vec![
+                    rw(HR_BATTERY_POWER_MODE, 1), // eco (clears armed export)
+                    rw(HR_ENABLE_DISCHARGE, 0),   // clear stale discharge
                     rw(HR_CHARGE_SLOT_1_START, *start_hhmm),
                     rw(HR_CHARGE_SLOT_1_END, *end_hhmm),
                     rw(HR_ENABLE_CHARGE_TARGET, 1),
@@ -1590,35 +1603,37 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn agile_charge_slot_writes_slot_times_enable_charge_and_target_soc() {
-        // Drive a 02:00–04:30 cheap run with target SOC 100. The slot
-        // times + enable flag + target SOC enable should land in the
-        // registers, and BATTERY_POWER_MODE must NOT be touched (the
-        // inverter stays in eco for the slot).
+    fn agile_charge_slot_resets_export_mode_and_clears_discharge() {
+        // Drive a 02:00–04:30 cheap run with target SOC 100. The charge
+        // slot writes must ALSO restore eco mode and clear the discharge
+        // enable (review H18): a plunge price can arrive straight from an
+        // armed export slot (peak → plunge in one half-hour, no mid-band
+        // clear in between), and the discharge path leaves
+        // BATTERY_POWER_MODE = 0 + ENABLE_DISCHARGE = 1 behind. Without
+        // the reset the inverter keeps exporting at 5p instead of
+        // charging — mirroring the three-phase twin.
         let cmd = ControlCommand::AgileChargeSlot {
             start_hhmm: 200,
             end_hhmm: 430,
             target_soc: 100,
         };
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 5);
-        assert_eq!(writes[0].address, HR_CHARGE_SLOT_1_START);
-        assert_eq!(writes[0].value, 200);
-        assert_eq!(writes[1].address, HR_CHARGE_SLOT_1_END);
-        assert_eq!(writes[1].value, 430);
-        assert_eq!(writes[2].address, HR_ENABLE_CHARGE_TARGET);
-        assert_eq!(writes[2].value, 1);
-        assert_eq!(writes[3].address, HR_CHARGE_TARGET_SOC);
-        assert_eq!(writes[3].value, 100);
-        assert_eq!(writes[4].address, HR_ENABLE_CHARGE);
+        assert_eq!(writes.len(), 7);
+        // Export-mode reset first, before any slot arithmetic.
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1); // eco
+        assert_eq!(writes[1].address, HR_ENABLE_DISCHARGE);
+        assert_eq!(writes[1].value, 0); // clear stale discharge
+        assert_eq!(writes[2].address, HR_CHARGE_SLOT_1_START);
+        assert_eq!(writes[2].value, 200);
+        assert_eq!(writes[3].address, HR_CHARGE_SLOT_1_END);
+        assert_eq!(writes[3].value, 430);
+        assert_eq!(writes[4].address, HR_ENABLE_CHARGE_TARGET);
         assert_eq!(writes[4].value, 1);
-        // Important regression guard: do NOT flip BATTERY_POWER_MODE in
-        // the slot-based charge path. The inverter should stay in eco
-        // mode and charge during the slot natively.
-        assert!(
-            writes.iter().all(|w| w.address != HR_BATTERY_POWER_MODE),
-            "AgileChargeSlot must not touch BATTERY_POWER_MODE"
-        );
+        assert_eq!(writes[5].address, HR_CHARGE_TARGET_SOC);
+        assert_eq!(writes[5].value, 100);
+        assert_eq!(writes[6].address, HR_ENABLE_CHARGE);
+        assert_eq!(writes[6].value, 1);
     }
 
     #[test]
