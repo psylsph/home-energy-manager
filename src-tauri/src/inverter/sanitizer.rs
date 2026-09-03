@@ -1878,6 +1878,31 @@ pub(crate) fn sanitize_snapshot(
         }
     }
 
+    // SOC: absolute range check (0–100).
+    //
+    // Review H4: AGENTS.md documents a 0–100 range for SOC, but only the two
+    // special cases below existed. The decoder wraps IR(59) into a u8, so a
+    // corrupt register value of 200 broadcast "SOC 200%", landed in history
+    // and fed alerts and the forecast SOC projection. Same treatment as the
+    // battery-reserve clamp: prefer the previous reading, else clamp.
+    if !(0..=100).contains(&snap.soc) {
+        if let Some(p) = prev {
+            tracing::warn!(
+                raw = snap.soc,
+                prev = p.soc,
+                "SOC out of range (0-100) - using previous",
+            );
+            snap.soc = p.soc.clamp(0, 100);
+        } else {
+            tracing::warn!(
+                raw = snap.soc,
+                "SOC out of range (0-100) - clamping to valid range",
+            );
+            snap.soc = snap.soc.clamp(0, 100);
+        }
+        sanitized = true;
+    }
+
     // SOC: if 0 but power is flowing, clearly a garbled register
     //
     // Only carry-forward when the previous reading was meaningfully above
@@ -2145,6 +2170,11 @@ pub(crate) fn sanitize_snapshot(
             snap.today_consumption_kwh,
             prev.map(|p| p.today_consumption_kwh)
         );
+        // Review H5 mirror, absolute phase: keep home_energy_today_kwh in
+        // lockstep when the absolute range check corrected the real field
+        // (covers the no-previous / grace-period case). See the delta-phase
+        // mirror below for the full rationale.
+        snap.home_energy_today_kwh = snap.today_consumption_kwh;
         check_energy_field!(
             "today_ac_charge_kwh",
             snap.today_ac_charge_kwh,
@@ -2441,6 +2471,14 @@ pub(crate) fn sanitize_snapshot(
                 // decreases that happen to land within it.
                 0.5_f32
             );
+            // Review H5: home_energy_today_kwh mirrors today_consumption_kwh
+            // (the decoder derives both from the same terms, or both from the
+            // same direct register). The checks above correct the real field,
+            // but the mirror was never touched — a corrupt spike rejected on
+            // today_consumption_kwh still landed in home_energy_today_kwh,
+            // then in history.db and the consumption profile that drives the
+            // forecast plan. Re-mirror after correction.
+            snap.home_energy_today_kwh = snap.today_consumption_kwh;
             check_energy_delta!(
                 "today_ac_charge_kwh",
                 snap.today_ac_charge_kwh,
@@ -5826,6 +5864,113 @@ mod tests {
             "in-range EPS reading must not be flagged, got sanitized=true"
         );
         assert_eq!(snap.eps_power_w, 2400);
+    }
+
+    // -------------------------------------------------------------------
+    // SOC absolute range (review H4) — AGENTS.md documents SOC 0–100,
+    // but only the SOC=0-with-power and SOC=100-while-charging special
+    // cases existed. The decoder wraps IR(59) into a u8, so a corrupt
+    // register value of 200 broadcast "SOC 200%", landed in history and
+    // fed alerts and the forecast SOC projection.
+    // -------------------------------------------------------------------
+
+    fn soc_test_snap(soc: u8) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            grid_online: true,
+            soc,
+            battery_reserve: 4,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_soc_above_100_without_previous() {
+        let mut snap = soc_test_snap(200);
+        let sanitized = sanitize_for_test(&mut snap, None);
+        assert!(sanitized, "SOC 200 must be flagged as corruption");
+        assert!(
+            snap.soc <= 100,
+            "SOC must stay within the documented 0–100 range, got {}",
+            snap.soc
+        );
+    }
+
+    #[test]
+    fn sanitize_soc_above_100_falls_back_to_previous() {
+        let mut prev = soc_test_snap(50);
+        prev.timestamp = 40;
+        let mut snap = prev.clone();
+        snap.timestamp = 100;
+        snap.soc = 200;
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized, "SOC 200 must be flagged as corruption");
+        assert_eq!(snap.soc, 50, "must fall back to the previous in-range SOC");
+    }
+
+    #[test]
+    fn sanitize_accepts_soc_at_range_boundaries() {
+        let mut zero = soc_test_snap(0);
+        assert!(
+            !sanitize_for_test(&mut zero, None),
+            "SOC 0 with no live power is legitimate"
+        );
+        let mut hundred = soc_test_snap(100);
+        assert!(
+            !sanitize_for_test(&mut hundred, None),
+            "SOC 100 with no charge current is legitimate"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // home_energy_today_kwh mirror (review H5) — the decoder derives it
+    // from the same terms as today_consumption_kwh, but the sanitizer
+    // only corrected the latter, so a corrupt spike rejected on
+    // today_consumption_kwh still landed in home_energy_today_kwh,
+    // history.db and the forecast's consumption profile.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn home_energy_today_follows_corrected_consumption() {
+        let mut prev = soc_test_snap(50);
+        prev.today_consumption_kwh = 10.0;
+        prev.home_energy_today_kwh = 10.0;
+        prev.timestamp = 100;
+        let mut snap = prev.clone();
+        snap.timestamp = 160; // 60 s later → max_increase ≈ 1.17 kWh
+        snap.today_consumption_kwh = 150.0;
+        snap.home_energy_today_kwh = 150.0;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(sanitized, "a 140 kWh jump in one poll must be corrected");
+        assert!(
+            (snap.today_consumption_kwh - 150.0).abs() > f32::EPSILON,
+            "precondition: the spike on today_consumption_kwh must be corrected"
+        );
+        assert_eq!(
+            snap.home_energy_today_kwh, snap.today_consumption_kwh,
+            "the home-energy mirror must follow the corrected consumption"
+        );
+    }
+
+    #[test]
+    fn home_energy_today_unchanged_when_consumption_is_plausible() {
+        let mut prev = soc_test_snap(50);
+        prev.today_consumption_kwh = 10.0;
+        prev.home_energy_today_kwh = 10.0;
+        prev.timestamp = 100;
+        let mut snap = prev.clone();
+        snap.timestamp = 160; // 60 s later → well within the rate limit
+        snap.today_consumption_kwh = 10.5;
+        snap.home_energy_today_kwh = 10.5;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+        assert!(!sanitized, "a plausible increase must not be flagged");
+        assert!((snap.home_energy_today_kwh - 10.5).abs() < f32::EPSILON);
+        assert!((snap.today_consumption_kwh - 10.5).abs() < f32::EPSILON);
     }
 
     #[test]
