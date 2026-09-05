@@ -4,10 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.80.0] - 2026-09-05
+
+### Added
+
+- **Applying a Forecast plan can no longer leave you half-scheduled.** If the second step of applying the recommended charge window fails, the part that already went through is rolled back — your previous slot restored, or the slot cleared if there wasn't one — instead of leaving an armed charging window you didn't ask for.
+- **The charge-mode dropdown responds instantly.** Switching between Eco and the timed modes now updates straight away and reconciles with the inverter in the background, instead of waiting for the next poll to catch up — and a request that fails puts the old mode back.
+
 ### Fixed
 
 - **On Raspberry Pi the app now starts with a clean picture.** Recent Raspberry Pi OS versions could show the window mangled by horizontal lines on launch, and only maximising it fixed the display. The app now notices it is running on a Pi and starts its display in the compatibility mode that avoids the corruption — no launcher tricks or settings needed. If you want to try the normal accelerated display again anyway, `GIVENERGY_LOCAL_ALLOW_GPU_RENDERER=1` switches it back on. (fixes #298)
 - **History repair will never run without a safety copy.** If the database cannot be backed up — for example because the disk is full or read-only — startup stops rather than rewriting history without a recoverable original.
+- **Weather settings no longer occasionally revert.** Saving your location or forecast options at just the wrong moment could silently undo the change; the weather refresh now merges its update instead of overwriting what you saved.
+- **A glitched day no longer overcounts history.** When the inverter's daily counter falsely resets twice in a day, the energy and cost figures no longer count the phantom segment twice — while a genuine reset from a same-day reboot is still counted properly.
+- **EV charger session stats hold steady through flaky reads.** A momentary failed read no longer blanks the charger's voltages or resets the session figures, sessions longer than 18 hours no longer gain phantom hours, and a charger that answers the network but then fails its reads shows as Disconnected rather than Not Found.
+- **An unplugged CT clamp now drops off the dashboard instead of freezing.** A meter that stops responding used to leave its last power reading on screen indefinitely; it now disappears after a few failed reads, while a brief hiccup still rides through untouched.
+- **A completely flat battery stays visible.** A battery resting at 0% was treated as missing and vanished from the battery panel; it now shows as empty.
+- **A Cosy schedule with an invalid time no longer fakes a session.** A slot with a malformed start or end time is skipped instead of the app reporting an active Cosy session that never charges anything.
+- **The Logs page survives a backend restart.** Restarting the app no longer makes the logs view show duplicate lines under clashing row keys.
 
 ## [0.79.0] - 2026-09-02
 
