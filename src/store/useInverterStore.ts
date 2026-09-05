@@ -14,6 +14,7 @@ type ThemeMode = 'dark' | 'light';
  */
 export type BatteryModeKind = 'eco' | 'timed_charge' | 'timed_export' | 'timed_discharge';
 export type BatteryModePending = { kind: BatteryModeKind; enabled: boolean };
+export type EvcConnectionState = 'never_connected' | 'connected' | 'degraded' | 'disconnected';
 
 interface InverterState {
   snapshot: InverterSnapshot | null;
@@ -123,8 +124,18 @@ interface InverterState {
    * fresh attempt.
    */
   evcEverConnected: boolean;
+  /** Backend-reported EVC connection state, including the outage grace period. */
+  evcConnectionState: EvcConnectionState;
+  /** Whether the displayed EVC snapshot is older than the last successful read. */
+  evcStale: boolean;
+  /** Epoch millis of the most recent successful EVC register read. */
+  evcLastSuccessAtEpochMs: number | null;
+  /** Age in seconds reported by the backend for the displayed EVC data. */
+  evcAgeSeconds: number | null;
   /** Epoch millis when the current connection was established (null when disconnected). */
   connectedSince: number | null;
+  /** Duration in seconds of the most recently completed connection session. */
+  lastConnectedDurationSec: number | null;
   /** Consecutive connection failures since last successful connect. */
   connectFailures: number;
   /**
@@ -194,6 +205,16 @@ interface InverterState {
     chargingState?: string,
     cableConnected?: boolean,
     sessionEnergyKwh?: number,
+    lastSuccessAtEpochMs?: number | null,
+    stale?: boolean,
+    ageSeconds?: number | null,
+  ) => void;
+  setEvcStatus: (
+    reachable: boolean,
+    stale: boolean,
+    connectionState: EvcConnectionState,
+    lastSuccessAtEpochMs: number | null,
+    ageSeconds: number | null,
   ) => void;
   /**
    * Mark the EVC as "we just successfully reached the host" without
@@ -439,8 +460,13 @@ export const useInverterStore = create<InverterState>((set) => ({
   evcCharging: false,
   evcConnected: false,
   evcCableConnected: false,
-  evcSessionEnergyKwh: 0,
+    evcSessionEnergyKwh: 0,
   evcEverConnected: false,
+  evcConnectionState: 'never_connected',
+  evcStale: false,
+  evcLastSuccessAtEpochMs: null,
+  evcAgeSeconds: null,
+  lastConnectedDurationSec: null,
   setSnapshot: (snapshot) => set({ snapshot }),
   clearSnapshot: () => set({ snapshot: null }),
   setConnection: (state, host, connectedSince) =>
@@ -448,6 +474,10 @@ export const useInverterStore = create<InverterState>((set) => ({
       connectionState: state,
       connectedHost: host ?? null,
       connectedSince: state === 'connected' ? (connectedSince ?? Date.now()) : null,
+      lastConnectedDurationSec:
+        state !== 'connected' && prev.connectionState === 'connected' && prev.connectedSince != null
+          ? Math.max(0, (Date.now() - prev.connectedSince) / 1000)
+          : prev.lastConnectedDurationSec,
       connectFailures: state === 'connected' ? 0 : prev.connectFailures,
     })),
   markReconnectRequested: (ts) => set({ reconnectRequestedAt: ts }),
@@ -544,7 +574,17 @@ export const useInverterStore = create<InverterState>((set) => ({
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
   setInverterTempConfig: (config) => set({ inverterTempConfig: config }),
   setEvcHost: (host) => set({ evcHost: host }),
-  setEvcData: (power, charging, connected = true, chargingState = '', cableConnected = false, sessionEnergyKwh = 0) =>
+  setEvcData: (
+    power,
+    charging,
+    connected = true,
+    chargingState = '',
+    cableConnected = false,
+    sessionEnergyKwh = 0,
+    lastSuccessAtEpochMs,
+    stale = false,
+    ageSeconds,
+  ) =>
     set((prev) => ({
       evcPower: power,
       evcChargingState: chargingState,
@@ -552,15 +592,44 @@ export const useInverterStore = create<InverterState>((set) => ({
       evcConnected: connected,
       evcCableConnected: cableConnected,
       evcSessionEnergyKwh: sessionEnergyKwh,
+      evcConnectionState: connected ? (stale ? 'degraded' : 'connected') : 'disconnected',
+      evcStale: connected ? stale : prev.evcLastSuccessAtEpochMs != null,
+      evcLastSuccessAtEpochMs: connected
+        ? (lastSuccessAtEpochMs ?? Date.now())
+        : prev.evcLastSuccessAtEpochMs,
+      evcAgeSeconds: connected ? (ageSeconds ?? 0) : prev.evcAgeSeconds,
       // Latch: once we've ever seen a live EVC snapshot, stay latched.
       // SettingsPage calls `resetEvc()` when the user saves a new host so
       // the flag clears cleanly at that point.
       evcEverConnected: prev.evcEverConnected || connected,
     })),
+  setEvcStatus: (reachable, stale, connectionState, lastSuccessAtEpochMs, ageSeconds) =>
+    set((prev) => ({
+      evcConnected: reachable,
+      evcConnectionState: connectionState,
+      evcStale: stale,
+      evcLastSuccessAtEpochMs: lastSuccessAtEpochMs,
+      evcAgeSeconds: ageSeconds,
+      ...(reachable
+        ? {}
+        : {
+            evcPower: 0,
+            evcChargingState: '',
+            evcCharging: false,
+            evcCableConnected: false,
+            evcSessionEnergyKwh: 0,
+          }),
+      evcEverConnected:
+        connectionState === 'never_connected' && lastSuccessAtEpochMs == null
+          ? false
+          : prev.evcEverConnected || reachable,
+    })),
   markEvcConnectedReached: () =>
     set({
       evcConnected: true,
       evcEverConnected: true,
+      evcConnectionState: 'connected',
+      evcStale: false,
     }),
   resetEvc: () =>
     set({
@@ -571,5 +640,9 @@ export const useInverterStore = create<InverterState>((set) => ({
       evcCableConnected: false,
       evcSessionEnergyKwh: 0,
       evcEverConnected: false,
+      evcConnectionState: 'never_connected',
+      evcStale: false,
+      evcLastSuccessAtEpochMs: null,
+      evcAgeSeconds: null,
     }),
 }));

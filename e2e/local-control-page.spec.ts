@@ -53,6 +53,7 @@ test.describe('Control Page - Quick Actions', () => {
   });
 
   test('Pause Discharge via API should hold discharge while leaving charging available', async ({ baseUrl }) => {
+    test.setTimeout(60_000);
     const resp = await fetch(`${baseUrl}/api/control/pause`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -60,6 +61,15 @@ test.describe('Control Page - Quick Actions', () => {
     });
     const data = await resp.json();
     expect(data.ok).toBe(true);
+
+    // Resume discharge so the pause doesn't outlive this test. The
+    // backend's discharge-control arbiter gives an active pause priority
+    // over Timed Export-owned writes for as long as the inverter reports
+    // Eco Paused, so a leftover 30-minute pause would starve every later
+    // discharge-schedule write on this shared simulator (mirrors the
+    // Force Charge cleanup above).
+    const resume = await fetch(`${baseUrl}/api/control/unpause`, { method: 'POST' });
+    expect((await resume.json()).ok).toBe(true);
   });
 
   test('Sync Clock via API should succeed', async ({ baseUrl }) => {
@@ -106,14 +116,18 @@ test.describe('Control Page - Battery Mode', () => {
     expect(data.ok).toBe(true);
   });
 
-  test('should switch to timed_export mode via API', async ({ baseUrl }) => {
+  test('should reject timed_export mode when no discharge slot is configured', async ({ baseUrl }) => {
+    // mode=timed_export routes through the managed Timed Export schedule,
+    // which refuses to arm when no discharge slot is configured (live or
+    // restored from backup) — a raw mode write would otherwise recreate
+    // all-day export with no schedule behind it (issue #289).
     const resp = await fetch(`${baseUrl}/api/control/mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: 'timed_export' }),
     });
     const data = await resp.json();
-    expect(data.ok).toBe(true);
+    expect(data.ok).toBe(false);
   });
 
   test('should reject unknown mode', async ({ baseUrl }) => {
@@ -172,12 +186,19 @@ test.describe('Control Page - Charge Schedule', () => {
 });
 
 test.describe('Control Page - Discharge Schedule', () => {
-  test('should show Discharge Schedule heading', async ({ page }) => {
+  test('should show the Timed Export heading', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Discharge Schedule')).toBeVisible({ timeout: 15_000 });
+    // The discharge-schedule section is titled "Timed Export" since the
+    // managed-schedule redesign absorbed the raw DC discharge schedule.
+    await expect(page.getByRole('heading', { name: 'Timed Export' })).toBeVisible({ timeout: 15_000 });
   });
 
   test('should set a discharge slot via API', async ({ baseUrl }) => {
+    // The save's register writes queue behind every earlier test's batches
+    // (an eco switch alone clears up to 20 slot registers at 1.5 s pacing),
+    // and the backend correctly waits for them rather than erroring, so
+    // allow up to two minutes for the confirmation round-trip.
+    test.setTimeout(120_000);
     const resp = await fetch(`${baseUrl}/api/control/discharge-slot`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

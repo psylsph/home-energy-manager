@@ -44,6 +44,13 @@ export interface TestSettingsOverrides {
   httpPort: number;
   /** Poll interval in seconds (default: 5). */
   pollInterval?: number;
+  /**
+   * Milliseconds between consecutive queued Modbus writes (default: 1500 —
+   * the real dongle gap). The local simulator has no firmware pacing
+   * requirement, so suites driving it set a low value to drain long slot
+   * batches in seconds instead of minutes.
+   */
+  writePacingMs?: number;
   /** Optional override tag appended to the temp dir name (helps debugging). */
   tag?: string;
   /**
@@ -114,6 +121,7 @@ export async function writeTestSettings(
     port: overrides.port,
     serial: overrides.serial ?? '',
     poll_interval: overrides.pollInterval ?? 5,
+    write_pacing_ms: overrides.writePacingMs ?? 1500,
     http_port: overrides.httpPort,
     auto_connect: true,
     // CRITICAL: never let the test backend scan the user's LAN if the

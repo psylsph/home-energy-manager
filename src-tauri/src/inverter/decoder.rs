@@ -36,7 +36,7 @@
 //!   IR(49):   system_mode
 //!   IR(50):   v_battery (/100 V)
 //!   IR(51):   i_battery (int16 /100 A)
-//!   IR(52):   p_battery (int16 W, signed, positive=charging)
+//!   IR(52):   p_battery (int16 W, signed, positive=discharging)
 //!   IR(55):   t_charger (/10 °C)
 //!   IR(56):   t_battery (/10 °C)
 //!   IR(59):   battery_soc (%)
@@ -139,24 +139,27 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
     let start_val = get_reg(data, start_idx);
     let end_val = get_reg(data, end_idx);
 
-    // Disabled when both start and end are the same value (zero-duration slot).
+    // Decode and validate both values before applying the zero-duration rule.
+    // This keeps malformed HHMM values (including values that happen to be
+    // equal) out of the snapshot rather than treating them as a valid time.
+    let (Some((sh, sm)), Some((eh, em))) = (decode_hhmm(start_val), decode_hhmm(end_val)) else {
+        return ScheduleSlot::default();
+    };
+
     // Per givenergy-modbus reference: writing (0, 0) clears a slot, but any
     // equal pair (e.g. 600, 600) is also a zero-length window and effectively
     // disabled. A valid slot always has start != end.
-    if start_val == end_val {
+    if (sh, sm) == (eh, em) {
         return ScheduleSlot::default();
     }
 
-    match (decode_hhmm(start_val), decode_hhmm(end_val)) {
-        (Some((sh, sm)), Some((eh, em))) => ScheduleSlot {
-            enabled: true,
-            start_hour: sh,
-            start_minute: sm,
-            end_hour: eh,
-            end_minute: em,
-            target_soc: 4,
-        },
-        _ => ScheduleSlot::default(),
+    ScheduleSlot {
+        enabled: true,
+        start_hour: sh,
+        start_minute: sm,
+        end_hour: eh,
+        end_minute: em,
+        target_soc: 4,
     }
 }
 
@@ -222,7 +225,7 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Input, 1240) => "input_1240_1299",
         (RegisterType::Input, 1300) => "input_1300_1359",
         (RegisterType::Input, 1360) => "input_1360_1413",
-        (RegisterType::Input, 180) => "input_180_181",
+        (RegisterType::Input, 180) => "input_180_183",
         // Gateway aggregation bank (IR 1600-1859) — see GATEWAY_INPUT_BLOCKS.
         (RegisterType::Input, 1600) => "input_1600_1659",
         (RegisterType::Input, 1660) => "input_1660_1719",
@@ -327,9 +330,9 @@ pub(crate) fn decode_snapshot_with_solar_position(
         ..Default::default()
     };
     let mut raw = RawConfig {
-        battery_power_mode: 0,
+        battery_power_mode: 1,
         enable_discharge: false,
-        battery_soc_reserve: 0,
+        battery_soc_reserve: 4,
     };
 
     // Hybrid HV Gen3 (0x81xx) exists in the field with both telemetry layouts:
@@ -391,7 +394,7 @@ pub(crate) fn decode_snapshot_with_solar_position(
                     decode_input_1360_1413(data, &mut snap)
                 }
             }
-            "input_180_181" => decode_input_180_181(data, &mut snap),
+            "input_180_183" => decode_input_180_183(data, &mut snap),
             // Gateway aggregation bank decoders.
             "input_1600_1659" => decode_gateway_1600_1659(data, &mut snap),
             "input_1660_1719" => decode_gateway_1660_1719(data, &mut snap),
@@ -912,17 +915,24 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
 /// Gen1 firmware revisions do the *opposite* and leave alt2 at 0 while
 /// populating alt1 (see issue #164). The final consumption recomputation
 /// in `decode_snapshot` picks up any override here.
-fn decode_input_180_181(data: &[u16], snap: &mut InverterSnapshot) {
+fn decode_input_180_183(data: &[u16], snap: &mut InverterSnapshot) {
     // IR(180)/IR(181) are confirmed by givenergy-modbus as alternative
-    // battery total energy counters (deci-kWh). `get_reg` is bounds-safe,
-    // so even if a future caller hands us fewer than 4 registers the decode
-    // degrades to 0 rather than panicking.
-    snap.total_discharge_kwh = get_reg(data, 0) as f32 * 0.1; // IR(180): e_battery_discharge_total_alt1
-    snap.total_charge_kwh = get_reg(data, 1) as f32 * 0.1; // IR(181): e_battery_charge_total_alt1
+    // lifetime counters for Gen1 Hybrid only. Other models either do not
+    // populate these registers or have their lifetime totals in another
+    // telemetry bank, so their values must remain untouched here.
+    if snap.device_type == DeviceType::Gen1Hybrid {
+        let alt1_discharge_raw = get_reg(data, 0);
+        let alt1_charge_raw = get_reg(data, 1);
 
-    // For devices using alt1 counters (including AC coupled), calculate throughput
-    // from the charge + discharge values since IR(6-7) may not be available.
-    snap.total_throughput_kwh = snap.total_charge_kwh + snap.total_discharge_kwh;
+        // A zero pair is an absent/empty alternate source on some firmware;
+        // preserve the already-decoded base totals rather than replacing them
+        // with fabricated zero energy.
+        if alt1_discharge_raw != 0 || alt1_charge_raw != 0 {
+            snap.total_discharge_kwh = alt1_discharge_raw as f32 * 0.1;
+            snap.total_charge_kwh = alt1_charge_raw as f32 * 0.1;
+            snap.total_throughput_kwh = snap.total_charge_kwh + snap.total_discharge_kwh;
+        }
+    }
 
     // Gen1 Hybrid: the reference's `_BATTERY_ENERGY_SOURCE` table routes
     // daily battery energy to alt2 (IR(182)/IR(183)). Override the values
@@ -1177,6 +1187,12 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
     for i in 0..8u16 {
         let base = (246 + i * 3) as usize;
         let offset = base - 240;
+        // Check bounds before decoding a slot. A truncated 240-299 block
+        // must not turn a real start register plus missing end/target values
+        // into a fabricated overnight slot.
+        if offset + 2 >= data.len() {
+            break;
+        }
         let start_val = get_reg(data, offset);
         let end_val = get_reg(data, offset + 1);
         let target = (get_reg(data, offset + 2) as u8).clamp(4, 100);
@@ -1646,12 +1662,20 @@ fn decode_input_1180_1239(data: &[u16], snap: &mut InverterSnapshot) {
     snap.eps_power_w = ((p1 + p2 + p3) / 10).min(u32::MAX as u64) as u32;
 }
 
+/// Decode the secondary CT's power register in watts.
+fn decode_secondary_ct_power_w(data: &[u16]) -> f32 {
+    // IR(1244-1245) is a uint32 in deci-watts, matching the reference model's
+    // `p_meter2` definition.
+    uint32(get_reg(data, 4), get_reg(data, 5)) as f32 * 0.1
+}
+
 /// IR 1240-1299: Additional power meters (export, secondary meter).
 fn decode_input_1240_1299(data: &[u16], snap: &mut InverterSnapshot) {
     // IR(1240-1241): p_export (uint32 /10 W) — alternative address for export
     // IR(1244-1245): p_meter2 (uint32 /10 W) — second CT meter if installed
-    let p_meter2 = uint32(get_reg(data, 4), get_reg(data, 5)) as f32 * 0.1;
+    let p_meter2 = decode_secondary_ct_power_w(data);
     if p_meter2 > 0.0 {
+        let p_meter2_w = p_meter2 as i32;
         snap.meters.push(MeterData {
             address: 0x09, // second external CT
             v_phase_1: snap.grid_voltage,
@@ -1662,12 +1686,12 @@ fn decode_input_1240_1299(data: &[u16], snap: &mut InverterSnapshot) {
             i_phase_3: 0.0,
             i_ln: 0.0,
             i_total: 0.0,
-            p_active_phase_1: p_meter2 as i32,
+            p_active_phase_1: p_meter2_w,
             p_active_phase_2: 0,
             p_active_phase_3: 0,
-            p_active_total: -p_meter2 as i32, // positive = import
+            p_active_total: -p_meter2_w, // positive = import
             p_reactive_total: 0,
-            p_apparent_total: p_meter2 * 10.0, // rough: apparent ≈ active for resistive loads
+            p_apparent_total: p_meter2, // apparent ≈ active for resistive loads
             pf_total: 1.0,
             frequency: snap.grid_frequency,
             e_import_active_kwh: 0.0,
@@ -1785,8 +1809,8 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
 ///   IR(63-67): i_phase_1..3, i_ln, i_total (/100 A)
 ///   IR(68-71): p_active_phase_1..3, p_active_total (int16 W)
 ///   IR(72-75): p_reactive_phase_1..3, p_reactive_total (int16 var)
-///   IR(76-79): p_apparent_phase_1..3, p_apparent_total (unsigned /10 VA)
-///   IR(80-83): pf_phase_1..3, pf_total (signed /10000)
+///   IR(76-79): p_apparent_phase_1..3, p_apparent_total (signed VA)
+///   IR(80-83): pf_phase_1..3, pf_total (signed /1000)
 ///   IR(84):    frequency (/100 Hz)
 ///   IR(85-86): e_import_active, e_import_reactive (/10 kWh)
 ///   IR(87-88): e_export_active, e_export_reactive (/10 kWh)
@@ -1824,8 +1848,8 @@ pub fn decode_meter_data(data: &[u16], address: u8) -> MeterData {
         p_active_phase_3,
         p_active_total,
         p_reactive_total: signed(15),
-        p_apparent_total: get(19) as f32 * 0.1,
-        pf_total: signed(23) as f32 * 0.0001,
+        p_apparent_total: signed(19) as f32,
+        pf_total: signed(23) as f32 * 0.001,
         frequency: get(24) as f32 * 0.01,
         e_import_active_kwh: get(25) as f32 * 0.1,
         e_export_active_kwh: get(27) as f32 * 0.1,
@@ -1887,8 +1911,10 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
     // SOC: IR(100)
     let soc = (get_reg(data, 100 - 60) as u8).min(100);
 
-    // Temperature: use t_max from IR(103)
-    let temperature = get_reg(data, 103 - 60) as f32 * 0.1;
+    // Temperature: use signed t_max from IR(103). The BMS transmits its
+    // internal-zero absent-slot sentinel as 0xF556 (-273.0 °C); the poll path
+    // rejects that response before this module is added to the snapshot.
+    let temperature = signed(get_reg(data, 103 - 60)) as f32 * 0.1;
 
     // Serial number: IR(110-114)
     let serial = decode_serial(data, 110 - 60, 5);
@@ -1991,7 +2017,7 @@ pub struct HvBcuCluster {
     pub battery_voltage: f32,
     /// Pack current in A (IR 76, int16 /10).
     pub battery_current: f32,
-    /// Pack power in W (IR 79, /1000 → kW × 1000).
+    /// Pack power in watts (IR 79, signed raw register value).
     pub battery_power_w: i32,
     /// Highest SOC reported by any module (IR 80 hi byte).
     pub battery_soc_max: u8,
@@ -2036,9 +2062,9 @@ pub fn decode_hv_bcu_cluster(data: &[u16]) -> HvBcuCluster {
 
     let battery_voltage = get_reg(data, 73 - 60) as f32 * 0.1;
     let battery_current = signed(get_reg(data, 76 - 60)) as f32 * 0.1;
-    // IR(79) is battery_power in milliwatts (unsigned u16 in reference, but
-    // some firmware versions may use two's complement for discharge). Use
-    // signed() like battery_current for consistency.
+    // IR(79) is battery power in raw watts (unsigned u16 in the reference,
+    // but some firmware versions may use two's complement for discharge).
+    // Use signed() like battery_current for consistency.
     let battery_power_w = signed(get_reg(data, 79 - 60));
 
     let soc_packed = get_reg(data, 80 - 60);
@@ -2591,6 +2617,50 @@ mod tests {
     }
 
     #[test]
+    fn decode_battery_block_handles_empty_and_short_slices() {
+        for data in [&[][..], &[0u16, 51, 2][..]] {
+            let mut snapshot = InverterSnapshot::default();
+
+            decode_battery_block_into(data, 3, &mut snapshot, "");
+
+            let module = snapshot
+                .battery_modules
+                .first()
+                .expect("short BMS data should still produce a bounds-safe module");
+            assert_eq!(module.index, 3);
+            assert_eq!(module.soc, 0);
+            assert_eq!(module.temperature, 0.0);
+            assert_eq!(module.voltage, 0.0);
+            assert!(module.cell_voltages.is_empty());
+            assert_eq!(module.cell_temperatures, vec![0.0; 4]);
+            assert!(module.serial.is_empty());
+            assert_eq!(module.capacity_ah, 0.0);
+            assert_eq!(module.design_capacity_ah, 0.0);
+            assert_eq!(module.remaining_capacity_ah, 0.0);
+        }
+    }
+
+    #[test]
+    fn decode_secondary_ct_power_uses_consistent_watts_for_active_and_apparent() {
+        let mut data = vec![0u16; 60];
+        // IR(1244-1245): 7,500 deci-watts = 750 W.
+        data[4] = 0;
+        data[5] = 7_500;
+        let mut snapshot = InverterSnapshot::default();
+
+        decode_input_1240_1299(&data, &mut snapshot);
+
+        let meter = snapshot
+            .meters
+            .iter()
+            .find(|meter| meter.address == 0x09)
+            .expect("secondary CT should be surfaced");
+        assert_eq!(meter.p_active_phase_1, 750);
+        assert_eq!(meter.p_active_total, -750);
+        assert_eq!(meter.p_apparent_total, 750.0);
+    }
+
+    #[test]
     fn decode_meter_data_includes_neutral_line_current_ir66() {
         let mut data = vec![0u16; 30];
         // IR(66) = i_ln at offset 6: 250 → 2.50 A
@@ -2673,26 +2743,41 @@ mod tests {
     }
 
     #[test]
-    fn decode_meter_data_scales_apparent_power_as_unsigned_deci_va() {
-        let mut data = vec![0u16; 30];
-        // IR(79) is an unsigned 0.1 VA magnitude. This value is deliberately
-        // above i16::MAX to prove it must not be decoded as signed power.
-        data[19] = 40_000;
+    fn decode_meter_data_uses_signed_va_and_milli_power_factor_units() {
+        let mut positive = vec![0u16; 30];
+        positive[19] = 750; // IR(79): +750 VA
+        positive[23] = 950; // IR(83): +0.950
+        let meter = decode_meter_data(&positive, 0x01);
+        assert_eq!(meter.p_apparent_total, 750.0);
+        assert!((meter.pf_total - 0.95).abs() < f32::EPSILON);
 
-        let meter = decode_meter_data(&data, 0x01);
-
-        assert!((meter.p_apparent_total - 4_000.0).abs() < f32::EPSILON);
+        let mut negative = vec![0u16; 30];
+        negative[19] = (-750i16) as u16; // IR(79): -750 VA
+        negative[23] = (-950i16) as u16; // IR(83): -0.950
+        let meter = decode_meter_data(&negative, 0x01);
+        assert_eq!(meter.p_apparent_total, -750.0);
+        assert!((meter.pf_total - (-0.95)).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn decode_meter_data_scales_power_factor_as_signed_ten_thousandths() {
+    fn decode_meter_data_scales_apparent_power_as_signed_va() {
         let mut data = vec![0u16; 30];
-        // Captured export value: raw 64670 is -866 as i16, hence -0.0866.
+        data[19] = (-4_000i16) as u16;
+
+        let meter = decode_meter_data(&data, 0x01);
+
+        assert_eq!(meter.p_apparent_total, -4_000.0);
+    }
+
+    #[test]
+    fn decode_meter_data_scales_power_factor_as_signed_milli() {
+        let mut data = vec![0u16; 30];
+        // Raw 64670 is -866 as i16, hence -0.866 in milli-units.
         data[23] = 64_670;
 
         let meter = decode_meter_data(&data, 0x01);
 
-        assert!((meter.pf_total - (-0.0866)).abs() < 0.000_01);
+        assert!((meter.pf_total - (-0.866)).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -2740,6 +2825,18 @@ mod tests {
             snap.inverter_time, "2026-06-30 00:05:00",
             "inverter_time must be populated from HR(35-40) in holding_0_59"
         );
+    }
+
+    #[test]
+    fn missing_base_holding_block_uses_safe_snapshot_defaults() {
+        let snap = decode_snapshot(&[]);
+
+        assert_eq!(snap.battery_mode, BatteryMode::Eco);
+        assert_eq!(snap.battery_power_mode, 1);
+        assert_eq!(snap.battery_reserve, 4);
+        assert_eq!(snap.target_soc, 4);
+        assert_ne!(snap.battery_mode, BatteryMode::ExportPaused);
+        assert_ne!(snap.battery_mode, BatteryMode::TimedExport);
     }
 
     fn test_blocks() -> Vec<BlockRead> {
@@ -2822,19 +2919,28 @@ mod tests {
     }
 
     #[test]
-    fn input_180_181_block_decodes_alternative_battery_totals() {
+    fn input_180_183_block_decodes_alternative_battery_totals() {
         // IR(180)=12345 → 1234.5 kWh lifetime discharge,
         // IR(181)=60000 → 6000.0 kWh lifetime charge.
         // The block now reads count=4 (see STANDARD_POLL_BLOCKS); confirm
         // the dispatch + decode handle a 4-element slice and scale by 0.1.
-        // No device type is supplied, so the alt2 daily registers are ignored.
-        let blocks = vec![make_block(
-            RegisterType::Input,
-            180,
-            4,
-            "input_180_181",
-            vec![12345, 60000, 9876, 5432],
-        )];
+        let holding = make_block(
+            RegisterType::Holding,
+            0,
+            60,
+            "holding_0_59",
+            vec![0x2001; 60],
+        );
+        let blocks = vec![
+            holding,
+            make_block(
+                RegisterType::Input,
+                180,
+                4,
+                "input_180_183",
+                vec![12345, 60000, 0, 0],
+            ),
+        ];
         let snap = decode_snapshot(&blocks);
         assert!((snap.total_discharge_kwh - 1234.5).abs() < 1e-6);
         assert!((snap.total_charge_kwh - 6000.0).abs() < 1e-6);
@@ -2845,19 +2951,55 @@ mod tests {
     }
 
     #[test]
-    fn input_180_181_block_is_bounds_safe_when_underfilled() {
+    fn input_180_183_block_is_bounds_safe_when_underfilled() {
         // A short slice (e.g. an empty read) must not panic — get_reg clamps
         // to 0, so all four decoded values degrade to 0.0 rather than crashing.
         let blocks = vec![make_block(
             RegisterType::Input,
             180,
             4,
-            "input_180_181",
+            "input_180_183",
             vec![],
         )];
         let snap = decode_snapshot(&blocks);
         assert_eq!(snap.total_discharge_kwh, 0.0);
         assert_eq!(snap.total_charge_kwh, 0.0);
+    }
+
+    #[test]
+    fn zero_alt1_totals_do_not_overwrite_non_gen1_base_totals() {
+        for device_type in [DeviceType::ACCoupled, DeviceType::AllInOne6kW] {
+            let mut snapshot = InverterSnapshot {
+                device_type,
+                total_discharge_kwh: 123.4,
+                total_charge_kwh: 567.8,
+                total_throughput_kwh: 991.2,
+                ..Default::default()
+            };
+
+            decode_input_180_183(&[0, 0, 0, 0], &mut snapshot);
+
+            assert_eq!(snapshot.total_discharge_kwh, 123.4);
+            assert_eq!(snapshot.total_charge_kwh, 567.8);
+            assert_eq!(snapshot.total_throughput_kwh, 991.2);
+        }
+    }
+
+    #[test]
+    fn nonzero_alt1_totals_override_gen1_base_totals() {
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::Gen1Hybrid,
+            total_discharge_kwh: 1.0,
+            total_charge_kwh: 2.0,
+            total_throughput_kwh: 3.0,
+            ..Default::default()
+        };
+
+        decode_input_180_183(&[12_345, 60_000, 0, 0], &mut snapshot);
+
+        assert!((snapshot.total_discharge_kwh - 1_234.5).abs() < f32::EPSILON);
+        assert!((snapshot.total_charge_kwh - 6_000.0).abs() < f32::EPSILON);
+        assert!((snapshot.total_throughput_kwh - 7_234.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -2889,7 +3031,7 @@ mod tests {
         let mut alt_data = vec![0u16; 4];
         alt_data[2] = 99; // IR(182): alt2 discharge today = 9.9 kWh
         alt_data[3] = 77; // IR(183): alt2 charge today = 7.7 kWh
-        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_183", alt_data);
 
         let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
         assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
@@ -2928,7 +3070,7 @@ mod tests {
         let mut alt_data = vec![0u16; 4];
         alt_data[2] = 99; // alt2 discharge today = 9.9 kWh (should be ignored)
         alt_data[3] = 77; // alt2 charge today = 7.7 kWh (should be ignored)
-        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_183", alt_data);
 
         let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
         assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
@@ -2972,7 +3114,7 @@ mod tests {
         // alt1 totals are populated; alt2 daily registers (IR(182)/IR(183))
         // read 0 on this firmware, so the override must be skipped.
         let alt_data = vec![12345u16, 60000, 0, 0];
-        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_183", alt_data);
 
         let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
         assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
@@ -3017,7 +3159,7 @@ mod tests {
 
         // IR(183) populated (55 → 5.5 kWh), IR(182) zero — partial alt2.
         let alt_data = vec![12345u16, 60000, 0, 55];
-        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_181", alt_data);
+        let alt_block = make_block(RegisterType::Input, 180, 4, "input_180_183", alt_data);
 
         let snap = decode_snapshot(&[holding_block, input_block, alt_block]);
         assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
@@ -4145,6 +4287,25 @@ mod tests {
         assert_eq!(
             snap.charge_slots[0].target_soc, 60,
             "three-phase per-slot target from HR 242 must be stored even when the slot is not yet enabled"
+        );
+    }
+
+    #[test]
+    fn truncated_extended_charge_block_does_not_create_partial_slot() {
+        let mut data = vec![0u16; 28];
+        // HR 267 is the final slot-10 start register. Its end and target
+        // registers are absent from this truncated block.
+        data[267 - 240] = 1200;
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        decode_holding_240_299(&data, &mut snapshot);
+
+        assert!(
+            !snapshot.charge_slots[9].enabled,
+            "a partial final slot must not be inferred from missing registers"
         );
     }
 
@@ -6003,6 +6164,20 @@ mod tests {
             !snap.charge_slots[0].enabled,
             "12:00-12:00 should be disabled"
         );
+    }
+
+    #[test]
+    fn decode_timeslot_rejects_invalid_hhmm_components() {
+        assert!(!decode_timeslot(&[2400, 2400], 0, 1).enabled);
+        assert!(!decode_timeslot(&[1260, 1300], 0, 1).enabled);
+        assert!(!decode_timeslot(&[2360, 100], 0, 1).enabled);
+    }
+
+    #[test]
+    fn decode_timeslot_compares_decoded_times_for_zero_duration() {
+        assert!(!decode_timeslot(&[0, 0], 0, 1).enabled);
+        assert!(!decode_timeslot(&[60, 60], 0, 1).enabled);
+        assert!(!decode_timeslot(&[1200, 1200], 0, 1).enabled);
     }
 
     #[test]

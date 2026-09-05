@@ -66,6 +66,15 @@ describe('<BatterySocChart/>', () => {
     fetchHistoryMock.mockResolvedValue({ soc: [] });
     const { container } = render(<BatterySocChart />);
     await waitFor(() => {
+      expect(container.textContent).toContain('No SOC history in the last 24h');
+    });
+  });
+
+  it('uses today-specific empty-state copy for the today scale', async () => {
+    useInverterStore.setState({ panelGraphsScale: 'today' });
+    fetchHistoryMock.mockResolvedValue({ soc: [] });
+    const { container } = render(<BatterySocChart />);
+    await waitFor(() => {
       expect(container.textContent).toContain('No SOC history yet today');
     });
   });

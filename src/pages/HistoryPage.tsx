@@ -34,6 +34,7 @@ import { computeTempDifferential, computeBatteryExternalDifferential } from '../
 import { computeTightDomain } from '../lib/chartDomain';
 import { openExternal } from '../lib/openExternal';
 import { formatEnergy } from '../lib/format';
+import { buildHistoryCsv } from '../lib/historyCsv';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -647,53 +648,7 @@ function exportCSV(
   onExported: () => void,
   fileLabel?: string,
 ) {
-  // Collect all unique field names across all charts
-  const allFields = [...new Set(charts.flatMap((c) => [
-    ...c.fields.map((f) => f.field),
-    ...(c.requires ?? []),
-  ]))];
-
-  // Build merged time series
-  const timestamps = new Set<number>();
-  for (const field of allFields) {
-    const pts = data[field];
-    if (pts) for (const p of pts) timestamps.add(p.t);
-  }
-  const sortedTs = [...timestamps].sort((a, b) => a - b);
-
-  // Apply any client-side derivations (e.g. temperature differentials) so
-  // their derived fields appear in the CSV. Cost/income are plain server
-  // fields and need no preprocess.
-  const derivedCharts = charts.filter((c) => c.preprocess);
-  let processed: Record<string, number>[] = [];
-  if (derivedCharts.length > 0) {
-    const rawMerged = sortedTs.map((t) => {
-      const row: Record<string, number> = { t };
-      for (const f of allFields) {
-        const pt = data[f]?.find((p) => p.t === t);
-        if (pt) row[f] = pt.v;
-      }
-      return row;
-    });
-    for (const c of derivedCharts) {
-      if (c.preprocess) processed = c.preprocess(rawMerged);
-    }
-  }
-
-  // Build header + rows
-  const header = ['Timestamp', ...allFields];
-  const rows = sortedTs.map((t) => {
-    const processedRow = processed.find((r) => r.t === t);
-    const iso = new Date(t).toISOString();
-    const values = allFields.map((f) => {
-      if (processedRow && f in processedRow) return processedRow[f]?.toString() ?? '';
-      const pt = data[f]?.find((p) => p.t === t);
-      return pt?.v?.toString() ?? '';
-    });
-    return [iso, ...values];
-  });
-
-  const csvContent = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  const csvContent = buildHistoryCsv(charts, data);
 
   // Caller-supplied label (e.g. 'history' for the combined export) wins over
   // the default per-tab label of the first chart's key.
@@ -748,6 +703,7 @@ export default function HistoryPage() {
     key: string;
     data: HistorySummary | null;
   }>({ key: '', data: null });
+  const summaryRequestGeneration = useRef(0);
   // Whether an import Standing Charge is configured. Drives the Cost tab's
   // import-cost breakdown lines: with no standing charge there's nothing to
   // break out, so the chart stays as Import Cost + Export Income.
@@ -769,6 +725,9 @@ export default function HistoryPage() {
 
   const now = useNow();
   const rolling = isRollingHistoryRange(range);
+  useEffect(() => {
+    lastDateRef.current = getHistoryPickerValue(range, offset);
+  }, [range, offset, now]);
   const refreshKey = shouldRefreshHistoryRange(range, offset) ? now : 0;
   // Keep the selected window fixed even when history only contains recent
   // startup data. Cropping 1h/6h to the first point can collapse the axis to
@@ -808,12 +767,17 @@ export default function HistoryPage() {
   useEffect(() => {
     let cancelled = false;
     const requestedKey = summaryKey;
+    const requestGeneration = ++summaryRequestGeneration.current;
     fetchHistorySummary(range, offset, rolling)
       .then((result) => {
-        if (!cancelled) setSummaryState({ key: requestedKey, data: result });
+        if (!cancelled && requestGeneration === summaryRequestGeneration.current) {
+          setSummaryState({ key: requestedKey, data: result });
+        }
       })
       .catch(() => {
-        if (!cancelled) setSummaryState({ key: requestedKey, data: null });
+        if (!cancelled && requestGeneration === summaryRequestGeneration.current) {
+          setSummaryState({ key: requestedKey, data: null });
+        }
       });
     return () => { cancelled = true; };
   }, [range, offset, refreshKey, rolling, summaryKey]);

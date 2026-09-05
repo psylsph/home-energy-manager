@@ -60,6 +60,7 @@ function resetStore() {
     connectionState: 'disconnected',
     connectedHost: null,
     connectedSince: null,
+    lastConnectedDurationSec: null,
     connectFailures: 0,
     evcHost: '',
     evcPower: 0,
@@ -67,6 +68,10 @@ function resetStore() {
     evcCharging: false,
     evcConnected: false,
     evcEverConnected: false,
+    evcConnectionState: 'never_connected',
+    evcStale: false,
+    evcLastSuccessAtEpochMs: null,
+    evcAgeSeconds: null,
   });
 }
 
@@ -242,6 +247,60 @@ describe('useWebSocket', () => {
     expect(state.evcPower).toBe(0);
     expect(state.evcCharging).toBe(false);
     expect(state.evcConnected).toBe(false);
+  });
+
+  it('keeps EVC data during the grace period and clears it after expiry', () => {
+    renderHook(() => useWebSocket());
+
+    const ws = mockWsInstances[0];
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: 'evc',
+        charging_state: 'Charging',
+        connection_status: 'Connected',
+        active_power: 3500,
+        session_energy_kwh: 1.2,
+      }),
+    });
+    const lastSuccessAt = useInverterStore.getState().evcLastSuccessAtEpochMs;
+    expect(lastSuccessAt).not.toBeNull();
+
+    ws.onmessage?.({ data: JSON.stringify({ type: 'evc_disconnected' }) });
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: 'evc_status',
+        connection_state: 'degraded',
+        reachable: true,
+        stale: true,
+        last_success_at_epoch_ms: lastSuccessAt,
+        age_seconds: 1,
+      }),
+    });
+
+    let state = useInverterStore.getState();
+    expect(state.evcPower).toBe(3500);
+    expect(state.evcConnected).toBe(true);
+    expect(state.evcStale).toBe(true);
+    expect(state.evcConnectionState).toBe('degraded');
+    expect(state.evcAgeSeconds).toBe(1);
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: 'evc_status',
+        connection_state: 'disconnected',
+        reachable: false,
+        stale: true,
+        last_success_at_epoch_ms: lastSuccessAt,
+        age_seconds: 31,
+      }),
+    });
+
+    state = useInverterStore.getState();
+    expect(state.evcPower).toBe(0);
+    expect(state.evcConnected).toBe(false);
+    expect(state.evcStale).toBe(true);
+    expect(state.evcConnectionState).toBe('disconnected');
+    expect(state.evcAgeSeconds).toBe(31);
   });
 
   it('reconnects after close with non-1000 code', () => {

@@ -9,10 +9,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { act, fireEvent, render, screen, within, cleanup } from '@testing-library/react';
+import { act, fireEvent, render, screen, within, cleanup, waitFor } from '@testing-library/react';
 import ControlPage from '../../src/pages/ControlPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
-import { apiGet } from '../../src/lib/api';
+import { apiGet, apiPost } from '../../src/lib/api';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
 // Mock the API layer
@@ -455,6 +455,73 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             expect(
                 screen.queryByText(/Timed Export is active/)
             ).not.toBeInTheDocument();
+        });
+
+        it('does not let an old Timed Export GET undo a newer slot save', async () => {
+            let releaseInitialGet: ((value: unknown) => void) | undefined;
+            const initialGet = new Promise((resolve) => {
+                releaseInitialGet = resolve;
+            });
+            const savedSlot = configuredSlot({ start_hour: 18, end_hour: 21 });
+            let timedExportGets = 0;
+            vi.mocked(apiGet).mockImplementation((path: string) => {
+                if (path === '/api/timed-export') {
+                    timedExportGets += 1;
+                    if (timedExportGets === 1) return initialGet;
+                    return Promise.resolve({
+                        ok: true,
+                        data: { schedule_enabled: true, slots: [savedSlot], machine_state: 'Configured' },
+                    });
+                }
+                return Promise.resolve({ ok: true, data: null });
+            });
+            vi.mocked(apiPost).mockImplementation(async (path: string) => {
+                if (path === '/api/control/discharge-slot') {
+                    return {
+                        ok: true,
+                        schedule: { schedule_enabled: true, slots: [savedSlot] },
+                        data: {},
+                    };
+                }
+                return { ok: true, data: {} };
+            });
+
+            await renderWithSnapshot(makeSnapshot({
+                battery_power_mode: 1,
+                enable_discharge: false,
+                discharge_slots: [
+                    emptySlot({ start_hour: 16, end_hour: 19 }),
+                    emptySlot(),
+                ],
+            }));
+
+            await waitFor(() => expect(timedExportGets).toBe(1));
+            const section = await screen.findByRole('heading', { name: 'Timed Export', exact: true });
+            const timedExportSection = section.closest('section')!;
+            fireEvent.click(within(timedExportSection).getByLabelText('Slot 1 disabled'));
+            fireEvent.click(within(timedExportSection).getAllByRole('button', { name: 'Save' })[0]);
+
+            await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+                '/api/control/discharge-slot',
+                expect.objectContaining({ slot: 1, enabled: true }),
+            ));
+            await waitFor(() => expect(screen.getByRole('button', {
+                name: /Timed Export — Configured/,
+            })).toHaveAttribute('aria-pressed', 'true'));
+
+            // This is the response from the GET started before the save. It
+            // must not replace the just-saved schedule in the editor/toggle.
+            await act(async () => {
+                releaseInitialGet?.({
+                    ok: true,
+                    data: { schedule_enabled: false, slots: [], machine_state: 'Off' },
+                });
+                await initialGet;
+            });
+
+            await waitFor(() => expect(screen.getByRole('button', {
+                name: /Timed Export — Configured/,
+            })).toHaveAttribute('aria-pressed', 'true'));
         });
     });
 

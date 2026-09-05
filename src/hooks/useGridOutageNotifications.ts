@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { formatPercent, formatPower } from '../lib/format';
+import { formatPercent, formatPower, formatVoltage } from '../lib/format';
 import { gridFaultReason } from '../lib/gridFault';
 import { useInverterStore } from '../store/useInverterStore';
 
@@ -77,7 +77,7 @@ export function useGridOutageNotifications() {
       if (prev === 'grid' || prev === 'inverter') {
         sendNotification(
           'Grid power restored',
-          `Grid voltage is back at ${snapshot.grid_voltage.toFixed(1)}V. Battery SOC is ${formatPercent(snapshot.soc)}.`,
+          `Grid voltage is back at ${formatVoltage(snapshot.grid_voltage)}. Battery SOC is ${formatPercent(snapshot.soc)}.`,
         );
       } else if (prev === 'battery_temp') {
         sendNotification(

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -276,6 +276,30 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     expect(apiPost).not.toHaveBeenCalledWith('/api/control/timed-export', { enabled: true });
   });
 
+  it('treats an enabled zero-length discharge slot as unconfigured', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        enable_discharge: false,
+        discharge_slots: [
+          emptySlot({ enabled: true, start_hour: 16, end_hour: 16 }),
+          emptySlot(),
+        ],
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await batteryModeSection();
+    const button = timedExportControl(section);
+    expect(button).toBeDisabled();
+    expect(
+      within(section).getByText(
+        'Configure at least one discharge slot before enabling Timed Export.',
+      ),
+    ).toBeDefined();
+  });
+
   it('keeps Timed Export available to turn off if the inverter reports a bad no-slot state', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({
@@ -449,5 +473,35 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
       end_hour: 4,
       end_minute: 0,
     });
+  });
+
+  it('reports an unconfirmed Timed Discharge save when readback times out', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(apiPost).mockResolvedValueOnce({ ok: true, data: {} });
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '8001', battery_pause_mode: 0 }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const heading = await screen.findByRole('heading', { name: 'Timed Discharge', exact: true });
+    const section = heading.closest('section');
+    if (!section) throw new Error('Timed Discharge heading has no <section> ancestor');
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/control/timed-discharge',
+      expect.objectContaining({ enabled: false }),
+    ));
+
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+
+    expect(within(section).getByRole('alert').textContent).toContain(
+      'Timed Discharge did not confirm the change. Please try again.',
+    );
+    expect(within(section).queryByText('✓ Saved')).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // SettingsPage already has SettingsPage.test.tsx (shell + hydration + alerts)
@@ -105,13 +105,13 @@ function alertConfig(overrides: SettingsShape = {}): SettingsShape {
   };
 }
 
-function mountApiMocks(settingsOverrides: SettingsShape = {}) {
+function mountApiMocks(settingsOverrides: SettingsShape = {}, alertOverrides: SettingsShape = alertConfig()) {
   apiGetMock.mockImplementation(async (path: string) => {
     if (path === '/api/settings') {
       return { ok: true, data: defaultSettings(settingsOverrides) };
     }
     if (path === '/api/alerts') {
-      return { ok: true, data: { config: alertConfig() } };
+      return { ok: true, data: { config: alertOverrides } };
     }
     if (path === '/api/weather') {
       return {
@@ -158,6 +158,42 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     localStorage.removeItem('saved_host');
   });
 
+  it('preserves defaults for alert fields omitted by an older backend', async () => {
+    mountApiMocks({}, {
+      enabled: true,
+      telegram_bot_token: '',
+      telegram_chat_id: '',
+      cooldown_minutes: 30,
+      batt_temp_min: 0,
+      batt_temp_max: 0,
+      soc_min: 4,
+      soc_max: 100,
+      grid_offline_enabled: false,
+      inverter_trip_enabled: false,
+      battery_over_temp_enabled: false,
+      connection_lost_enabled: false,
+      ntfy_topic: '',
+      ntfy_server: 'https://ntfy.sh',
+    });
+    render(<SettingsPage />);
+
+    await screen.findByText('Save Notification Settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Save Notification Settings' }));
+
+    await waitFor(() => {
+      const alertSave = apiPostMock.mock.calls.find(([path]) => path === '/api/alerts');
+      expect(alertSave?.[1]).toMatchObject({
+        inverter_temp_min: 8,
+        inverter_temp_max: 60,
+        battery_connection_lost_enabled: true,
+        solar_clipping_enabled: false,
+        solar_clipping_ceiling_w: 0,
+        pushover_app_token: '',
+        pushover_user_key: '',
+      });
+    });
+  });
+
   describe('refresh interval change', () => {
     it('posts the new interval and flashes a success message', async () => {
       mountApiMocks({ interval_secs: 20 });
@@ -183,6 +219,83 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       await waitFor(() => {
         expect(screen.getByText('server unreachable')).toBeDefined();
       });
+    });
+
+    it('does not let an older flash clear a newer message', async () => {
+      vi.useFakeTimers();
+      try {
+        mountApiMocks({ interval_secs: 20 });
+        render(<SettingsPage />);
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        await act(async () => {
+          fireEvent.click(screen.getByText('15s'));
+          await Promise.resolve();
+        });
+        expect(screen.getByText('Refresh interval set to 15s')).toBeDefined();
+
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+        await act(async () => {
+          fireEvent.click(screen.getByText('30s'));
+          await Promise.resolve();
+        });
+        expect(screen.getByText('Refresh interval set to 30s')).toBeDefined();
+
+        await act(async () => {
+          vi.advanceTimersByTime(3000);
+        });
+        expect(screen.getByText('Refresh interval set to 30s')).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('clears the flash timer when the page unmounts', async () => {
+      vi.useFakeTimers();
+      try {
+        mountApiMocks({ interval_secs: 20 });
+        const { unmount } = render(<SettingsPage />);
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        await act(async () => {
+          fireEvent.click(screen.getByText('15s'));
+          await Promise.resolve();
+        });
+
+        expect(vi.getTimerCount()).toBe(1);
+        unmount();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('read-only API key save', () => {
+    it('shows a failure and re-enables the button when saving the key fails', async () => {
+      mountApiMocks();
+      useInverterStore.setState({ developerMode: true });
+      apiPostMock.mockRejectedValueOnce(new Error('read-only server unavailable'));
+      render(<SettingsPage />);
+
+      const keyInput = await screen.findByLabelText('API Key');
+      fireEvent.change(keyInput, { target: { value: 'secret-key' } });
+      const saveButton = screen.getByRole('button', { name: 'Save API Key' });
+      fireEvent.click(saveButton);
+
+      await waitFor(() => {
+        expect(screen.getByText('read-only server unavailable')).toBeDefined();
+      });
+      expect(saveButton).not.toBeDisabled();
+      expect((keyInput as HTMLInputElement).value).toBe('secret-key');
+      expect(screen.queryByText('API key saved. Restart the app for the read-only server to start.')).toBeNull();
     });
   });
 
@@ -220,6 +333,43 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       await waitFor(() => {
         expect(screen.getByText(/HTTP port set to 8000/)).toBeDefined();
       });
+    });
+
+    it('rejects a blank HTTP port without posting zero', async () => {
+      mountApiMocks({ http_port: 7337 });
+      render(<SettingsPage />);
+      const portHeading = await screen.findByText('HTTP Port');
+      const section = portHeading.closest('section')!;
+      const portInput = section.querySelector('input[type="number"]') as HTMLInputElement;
+      const saveBtn = Array.from(section.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Save',
+      )!;
+
+      fireEvent.change(portInput, { target: { value: '' } });
+      fireEvent.click(saveBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText('HTTP port cannot be blank')).toBeDefined();
+      });
+      expect(apiPostMock).not.toHaveBeenCalledWith('/api/settings', { http_port: 0 });
+    });
+  });
+
+  describe('read-only API port save', () => {
+    it('rejects a blank API port without posting zero', async () => {
+      mountApiMocks({ api_port: 7338 });
+      useInverterStore.setState({ developerMode: true });
+      render(<SettingsPage />);
+
+      const portInput = await screen.findByLabelText('Port');
+      const saveButton = screen.getByRole('button', { name: 'Save API Key' });
+      fireEvent.change(portInput, { target: { value: '' } });
+      fireEvent.click(saveButton);
+
+      await waitFor(() => {
+        expect(screen.getByText('API port cannot be blank')).toBeDefined();
+      });
+      expect(apiPostMock).not.toHaveBeenCalledWith('/api/settings', { api_key: '', api_port: 0 });
     });
   });
 

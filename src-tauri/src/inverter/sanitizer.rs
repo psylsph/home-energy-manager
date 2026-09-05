@@ -512,28 +512,22 @@ pub(crate) fn carry_forward_battery_modules_with(
                 snap.battery_modules = prev.to_vec();
                 return;
             }
-            // If we got fewer modules than before, fill in the gaps by index.
-            // Modules are identified by their `index` field (0-based).
-            let max_index = snap
-                .battery_modules
-                .iter()
-                .map(|m| m.index)
-                .max()
-                .unwrap_or(0);
-            let prev_max = prev.iter().map(|m| m.index).max().unwrap_or(0);
-            if prev_max > max_index {
-                let present: std::collections::HashSet<usize> =
-                    snap.battery_modules.iter().map(|m| m.index).collect();
-                for prev_mod in prev {
-                    if !present.contains(&prev_mod.index) {
-                        tracing::debug!(
-                            index = prev_mod.index,
-                            "Battery module missing this cycle - carrying forward"
-                        );
-                        snap.battery_modules.push(prev_mod.clone());
-                    }
+            // Fill every missing address, not only indexes above the current
+            // maximum. A failed lowest-index read must be restored even when
+            // a higher-index module was read successfully this cycle.
+            let present: std::collections::HashSet<usize> =
+                snap.battery_modules.iter().map(|m| m.index).collect();
+            for prev_mod in prev {
+                if !present.contains(&prev_mod.index) {
+                    tracing::debug!(
+                        index = prev_mod.index,
+                        "Battery module missing this cycle - carrying forward"
+                    );
+                    snap.battery_modules.push(prev_mod.clone());
                 }
-                // Re-sort by index for consistent ordering
+            }
+            if snap.battery_modules.len() > present.len() {
+                // Re-sort by index for consistent ordering.
                 snap.battery_modules.sort_by_key(|m| m.index);
             }
         }
@@ -1518,10 +1512,40 @@ const DAILY_RESET_WINDOW_MINS: u32 = 65;
 /// place `inverter_time` is populated) after model detection, and a corrupt
 /// HR(35-40) read decodes to an empty string — in both cases the inverter
 /// clock cannot be trusted, so the historical host-local behaviour is kept.
-fn is_within_daily_reset_window(timestamp_secs: i64, inverter_time: &str) -> bool {
-    if let Some(minute_of_day) = inverter_minute_of_day(inverter_time) {
-        return minute_of_day <= DAILY_RESET_WINDOW_MINS
-            || minute_of_day >= 1440 - DAILY_RESET_WINDOW_MINS;
+const INVERTER_CLOCK_MAX_HOST_SKEW_SECS: i64 = 3 * 60 * 60;
+const INVERTER_CLOCK_MAX_PLAUSIBLE_ADVANCE_SECS: i64 = 15 * 60;
+
+fn is_within_daily_reset_window(
+    timestamp_secs: i64,
+    inverter_time: &str,
+    previous_inverter_time: Option<&str>,
+) -> bool {
+    if let Some(inverter_dt) = parse_inverter_time(inverter_time) {
+        let host_dt = chrono::DateTime::from_timestamp(timestamp_secs, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local).naive_local());
+        let close_to_host = host_dt.is_some_and(|host| {
+            inverter_dt.signed_duration_since(host).num_seconds().abs()
+                <= INVERTER_CLOCK_MAX_HOST_SKEW_SECS
+        });
+        let advances_plausibly = previous_inverter_time
+            .and_then(parse_inverter_time)
+            .map(|previous| inverter_dt.signed_duration_since(previous).num_seconds())
+            .is_some_and(|advance| {
+                (0..=INVERTER_CLOCK_MAX_PLAUSIBLE_ADVANCE_SECS).contains(&advance)
+            });
+
+        if close_to_host || advances_plausibly {
+            let minute_of_day = inverter_dt.hour() * 60 + inverter_dt.minute();
+            return minute_of_day <= DAILY_RESET_WINDOW_MINS
+                || minute_of_day >= 1440 - DAILY_RESET_WINDOW_MINS;
+        }
+
+        // A parseable but stale/frozen clock is not evidence of a reset. Keep
+        // the host fallback and leave a diagnostic breadcrumb for operators.
+        tracing::debug!(
+            inverter_time,
+            "Inverter clock is not close to host or advancing plausibly; using host reset window"
+        );
     }
 
     let Some(dt) = chrono::DateTime::from_timestamp(timestamp_secs, 0) else {
@@ -1533,12 +1557,10 @@ fn is_within_daily_reset_window(timestamp_secs: i64, inverter_time: &str) -> boo
 }
 
 /// Parse `inverter_time` ("YYYY-MM-DD HH:MM:SS", produced by `decode_system_time`)
-/// and return its minute-of-day, or `None` when the string is empty, malformed,
-/// or carries out-of-range fields — the signal for [`is_within_daily_reset_window`]
-/// to fall back to the host clock.
-fn inverter_minute_of_day(inverter_time: &str) -> Option<u32> {
-    let dt = chrono::NaiveDateTime::parse_from_str(inverter_time, "%Y-%m-%d %H:%M:%S").ok()?;
-    Some(dt.hour() * 60 + dt.minute())
+/// or return `None` when the string is empty, malformed, or carries
+/// out-of-range fields.
+fn parse_inverter_time(inverter_time: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(inverter_time, "%Y-%m-%d %H:%M:%S").ok()
 }
 
 /// Sanitize a snapshot against physically impossible register values.
@@ -1579,16 +1601,38 @@ pub(crate) fn sanitize_snapshot(
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW - residential battery limit
     let max_grid_power: i32 = 15_000; // 15 kW - UK single-phase import can exceed 10 kW with EV charging (100A fuse ≈ 23 kW); matches max_home_power which carries the same EV-charging margin. Corruption spikes (e.g. ±32767) are still well above this.
-    let max_solar_power: i32 = if snap.device_type == DeviceType::HybridHvGen3 {
-        // Hybrid HV Gen3 permits DC oversizing to 150% of rated AC power
-        // (0x8103: 10 kW AC / 15 kW PV input). Derive this from the full DTC
-        // because the coarse family fallback cannot distinguish 6/8/10 kW.
-        let raw_dtc = u16::from_str_radix(&snap.device_type_code, 16).unwrap_or(0);
-        let rated_ac =
-            DeviceType::max_ac_power_for_dtc(raw_dtc, snap.device_type.max_ac_power_w()) as i32;
-        (rated_ac * 3 / 2).max(10_000)
-    } else {
-        10_000 // default residential PV limit
+    let max_solar_power: i32 = match snap.device_type {
+        DeviceType::HybridHvGen3 => {
+            // Hybrid HV Gen3 permits DC oversizing to 150% of rated AC power
+            // (0x8103: 10 kW AC / 15 kW PV input). Derive this from the full
+            // DTC because the coarse family fallback cannot distinguish
+            // 6/8/10 kW.
+            let raw_dtc = u16::from_str_radix(&snap.device_type_code, 16).unwrap_or(0);
+            let rated_ac = DeviceType::max_ac_power_for_dtc(
+                raw_dtc,
+                snap.max_ac_power_w.max(snap.device_type.max_ac_power_w()),
+            ) as i32;
+            (rated_ac * 3 / 2).max(10_000)
+        }
+        DeviceType::ThreePhase | DeviceType::AioCommercial | DeviceType::ACThreePhase => {
+            // Larger three-phase installations can legitimately exceed the
+            // residential 10 kW ceiling. Preserve the full-DTC rated AC
+            // value when available and allow 150% PV oversizing, with a
+            // 15 kW floor for commercial/three-phase families whose coarse
+            // model fallback is only 6 kW.
+            let raw_dtc = u16::from_str_radix(&snap.device_type_code, 16).unwrap_or(0);
+            let rated_ac = DeviceType::max_ac_power_for_dtc(
+                raw_dtc,
+                snap.max_ac_power_w.max(snap.device_type.max_ac_power_w()),
+            ) as i32;
+            (rated_ac * 3 / 2).max(15_000)
+        }
+        DeviceType::Ems | DeviceType::EmsCommercial => {
+            // EMS devices aggregate plant-level PV and do not expose a
+            // useful inverter-rated AC fallback in DeviceType.
+            25_000
+        }
+        _ => 10_000, // default residential PV limit
     };
     let max_home_power: i32 = 15_000; // 15 kW - includes EV charging margin
 
@@ -1808,19 +1852,20 @@ pub(crate) fn sanitize_snapshot(
 
     // -- EPS power (IR(31) p_backup) --
     // Reference libraries cap the raw value at 50 kW and treat it as
-    // uint16. The residential installs we care about (AC-coupled, AIO)
-    // typically peak around 3-5 kW on the EPS leg, so a 10 kW ceiling is
-    // conservative. Anything ≥ HARD_CORRUPTION_CEILING (the int16
-    // saturation fingerprint) is the dongle memory-leak corruption that
-    // affects every adjacent register, so reuse the same soft-then-hard
-    // strategy as the other power fields rather than treating EPS as a
-    // special case.
+    // uint16. Use the model's rated AC output as the physical ceiling rather
+    // than the generic home-load ceiling: the latter includes EV-charging
+    // margin that does not apply to an inverter's EPS output. Anything ≥
+    // HARD_CORRUPTION_CEILING (the int16 saturation fingerprint) is the
+    // dongle memory-leak corruption that affects every adjacent register, so
+    // reuse the same soft-then-hard strategy as the other power fields rather
+    // than treating EPS as a special case.
     let prev_eps = prev.map(|p| p.eps_power_w as i32);
     let raw_eps = snap.eps_power_w as i32;
+    let max_eps_power = snap.device_type.max_eps_power_w(snap.max_ac_power_w) as i32;
     let (eps_val, eps_was_sanitized) = check_power_field(
         raw_eps,
         prev_eps,
-        max_home_power, // same residential ceiling as home_power
+        max_eps_power,
         "eps_power_w",
         suspect_counts,
     );
@@ -2181,11 +2226,11 @@ pub(crate) fn sanitize_snapshot(
             prev.map(|p| p.today_ac_charge_kwh)
         );
 
-        // Lifetime total energy (total_import_kwh / total_export_kwh):
-        // These are cumulative counters that monotonically increase over the
-        // lifetime of the inverter. They can reach tens of thousands of kWh
-        // for a multi-year installation. The same absolute range check
-        // pattern applies, but with a much higher ceiling (100,000 kWh).
+        // Lifetime total energy counters:
+        // These cumulative counters monotonically increase over the lifetime
+        // of the inverter. They can reach tens of thousands of kWh for a
+        // multi-year installation. The same absolute range check pattern
+        // applies, but with a much higher ceiling (100,000 kWh).
         // Lifetime totals are uint32 with 0.1 scaling, so the native max is
         // ~430,000 kWh; we cap at 100,000 as a generous residential bound.
         // Delta checks are even more important here since a single corrupted
@@ -2226,6 +2271,11 @@ pub(crate) fn sanitize_snapshot(
             prev.map(|p| p.total_export_kwh)
         );
         check_total_energy_field!(
+            "total_solar_kwh",
+            snap.total_solar_kwh,
+            prev.map(|p| p.total_solar_kwh)
+        );
+        check_total_energy_field!(
             "total_charge_kwh",
             snap.total_charge_kwh,
             prev.map(|p| p.total_charge_kwh)
@@ -2234,6 +2284,11 @@ pub(crate) fn sanitize_snapshot(
             "total_discharge_kwh",
             snap.total_discharge_kwh,
             prev.map(|p| p.total_discharge_kwh)
+        );
+        check_total_energy_field!(
+            "total_throughput_kwh",
+            snap.total_throughput_kwh,
+            prev.map(|p| p.total_throughput_kwh)
         );
     }
 
@@ -2298,7 +2353,11 @@ pub(crate) fn sanitize_snapshot(
                 else if raw < prev_val
                     && raw < 5.0
                     && prev_val > 5.0
-                    && is_within_daily_reset_window(snap.timestamp, &snap.inverter_time)
+                    && is_within_daily_reset_window(
+                        snap.timestamp,
+                        &snap.inverter_time,
+                        prev.map(|p| p.inverter_time.as_str()),
+                    )
                 {
                     // Legitimate midnight reset - accept raw as-is
                     delta_corrections.0.remove($name);
@@ -2627,6 +2686,12 @@ pub(crate) fn sanitize_snapshot(
                 0.25_f32
             );
             check_total_energy_delta!(
+                "total_solar_kwh",
+                snap.total_solar_kwh,
+                p.total_solar_kwh,
+                0.25_f32
+            );
+            check_total_energy_delta!(
                 "total_charge_kwh",
                 snap.total_charge_kwh,
                 p.total_charge_kwh,
@@ -2636,6 +2701,12 @@ pub(crate) fn sanitize_snapshot(
                 "total_discharge_kwh",
                 snap.total_discharge_kwh,
                 p.total_discharge_kwh,
+                0.25_f32
+            );
+            check_total_energy_delta!(
+                "total_throughput_kwh",
+                snap.total_throughput_kwh,
+                p.total_throughput_kwh,
                 0.25_f32
             );
         }
@@ -2785,6 +2856,11 @@ pub(crate) fn sanitize_snapshot(
                         "Battery mode flicker (3rd different value) - keeping previous"
                     );
                     snap.battery_mode = p.battery_mode;
+                    // The pending candidate is now stale: a third value
+                    // superseded it, so no future reading can match it and
+                    // the debounce would freeze on `previous` forever. Drop
+                    // it so the next mode starts a fresh two-read debounce.
+                    *pending_mode = None;
                     sanitized = true;
                 }
             } else {
@@ -2869,15 +2945,15 @@ pub(crate) fn sanitize_snapshot(
             }
         }
 
-        // Target SOC (HR 116): must be 0-100 (validated on decode, but
+        // Target SOC (HR 116): must be 4-100 (validated on decode, but
         // double-check here too since it drives charging behavior).
-        if snap.target_soc > 100 {
+        if !(4..=100).contains(&snap.target_soc) {
             tracing::warn!(
                 raw = snap.target_soc,
                 prev = p.target_soc,
                 "Target SOC out of range - using previous"
             );
-            snap.target_soc = p.target_soc;
+            snap.target_soc = p.target_soc.clamp(4, 100);
             sanitized = true;
         }
 
@@ -2891,13 +2967,23 @@ pub(crate) fn sanitize_snapshot(
             snap.battery_reserve = p.battery_reserve.clamp(4, 100);
             sanitized = true;
         }
-    } else if !(4..=100).contains(&snap.battery_reserve) {
-        tracing::warn!(
-            raw = snap.battery_reserve,
-            "Battery reserve out of range - clamping to valid range"
-        );
-        snap.battery_reserve = snap.battery_reserve.clamp(4, 100);
-        sanitized = true;
+    } else {
+        if !(4..=100).contains(&snap.target_soc) {
+            tracing::warn!(
+                raw = snap.target_soc,
+                "Target SOC out of range - clamping to valid range"
+            );
+            snap.target_soc = snap.target_soc.clamp(4, 100);
+            sanitized = true;
+        }
+        if !(4..=100).contains(&snap.battery_reserve) {
+            tracing::warn!(
+                raw = snap.battery_reserve,
+                "Battery reserve out of range - clamping to valid range"
+            );
+            snap.battery_reserve = snap.battery_reserve.clamp(4, 100);
+            sanitized = true;
+        }
     }
 
     sanitized
@@ -2924,6 +3010,9 @@ pub(crate) fn sanitize_snapshot(
 ///
 /// 3. **Calibrated capacity** (IR 84-85, uint32 0.01 Ah) - must be > 0.
 ///    A non-existent battery returns 0.
+///
+/// 4. **Maximum temperature** (IR 103) - must not be the `0xF556` absent-slot
+///    sentinel (`-273.0 °C`).
 pub(crate) fn validate_battery_bms(data: &[u16]) -> bool {
     // 1. Serial number must be printable and non-empty
     let serial = crate::inverter::decoder::decode_serial(data, 110 - 60, 5);
@@ -2951,7 +3040,46 @@ pub(crate) fn validate_battery_bms(data: &[u16]) -> bool {
         return false;
     }
 
+    // An unpopulated LV battery address can return the BMS's internal-zero
+    // temperature sentinel. Do not let that response become a battery module.
+    if data.get(103 - 60).copied() == Some(0xF556) {
+        return false;
+    }
+
     true
+}
+
+#[cfg(test)]
+mod battery_bms_validation_tests {
+    use super::validate_battery_bms;
+
+    fn valid_battery_block() -> Vec<u16> {
+        let mut data = vec![0u16; 60];
+        // IR(82-83): 50.0 V in milli-volts.
+        data[22] = 0;
+        data[23] = 50_000;
+        // IR(84-85): 160 Ah in centi-Ah.
+        data[24] = 0;
+        data[25] = 16_000;
+        for (index, bytes) in b"BG1234G567".chunks_exact(2).enumerate() {
+            data[50 + index] = u16::from_be_bytes([bytes[0], bytes[1]]);
+        }
+        data[43] = 250; // IR(103): 25.0 °C.
+        data
+    }
+
+    #[test]
+    fn battery_bms_validation_accepts_only_a_complete_present_block() {
+        let valid = valid_battery_block();
+        assert!(validate_battery_bms(&valid));
+
+        let mut sentinel = valid.clone();
+        sentinel[43] = 0xF556;
+        assert!(!validate_battery_bms(&sentinel));
+
+        assert!(!validate_battery_bms(&[0; 60]));
+        assert!(!validate_battery_bms(&[0; 20]));
+    }
 }
 
 // ===========================================================================
@@ -3020,7 +3148,7 @@ mod tests {
                 "holding_60_119",
                 vec![0u16; 60],
             ),
-            make_block(RegisterType::Input, 180, 4, "input_180_181", vec![0u16; 4]),
+            make_block(RegisterType::Input, 180, 4, "input_180_183", vec![0u16; 4]),
         ]
     }
 
@@ -3081,13 +3209,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_timestamp_handles_a_dst_spring_forward_gap() {
+        let london = chrono_tz::Europe::London;
+        let spring_forward = chrono::NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
+
+        assert!(local_timestamp_for(&london, spring_forward, 1, 30).is_none());
+        assert!(local_timestamp_for(&london, spring_forward, 0, 30).is_some());
+    }
+
+    fn local_timestamp_for<Tz: chrono::TimeZone>(
+        timezone: &Tz,
+        date: chrono::NaiveDate,
+        hour: u32,
+        minute: u32,
+    ) -> Option<i64> {
+        let naive = date.and_hms_opt(hour, minute, 0)?;
+        timezone
+            .from_local_datetime(&naive)
+            .earliest()
+            .map(|datetime| datetime.timestamp())
+    }
+
     fn local_timestamp(hour: u32, minute: u32) -> i64 {
-        let date = chrono::Local::now().date_naive();
-        let naive = date.and_hms_opt(hour, minute, 0).unwrap();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        local_timestamp_for(&chrono::Local, date, hour, minute)
+            .expect("fixed sanitizer test date must contain every test time")
+    }
+
+    fn fixed_local_timestamp(value: &str) -> i64 {
+        let naive = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+            .expect("fixed test timestamp must parse");
         chrono::Local
             .from_local_datetime(&naive)
             .earliest()
-            .unwrap()
+            .expect("fixed test timestamp must exist")
             .timestamp()
     }
 
@@ -3122,6 +3278,37 @@ mod tests {
         // Capacity and max_power must remain untouched (single-phase path).
         assert_eq!(snap.battery_capacity_kwh, 5.12);
         assert_eq!(snap.max_battery_power_w, 3600);
+    }
+
+    #[test]
+    fn carry_forward_battery_modules_restores_a_missing_lowest_index() {
+        let previous = vec![
+            BatteryModule {
+                index: 0,
+                voltage: 51.0,
+                ..Default::default()
+            },
+            BatteryModule {
+                index: 1,
+                voltage: 52.0,
+                ..Default::default()
+            },
+        ];
+        let mut current = InverterSnapshot {
+            battery_modules: vec![BatteryModule {
+                index: 1,
+                voltage: 52.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        carry_forward_battery_modules_with(&mut current, Some(&previous));
+
+        assert_eq!(current.battery_modules.len(), 2);
+        assert_eq!(current.battery_modules[0].index, 0);
+        assert_eq!(current.battery_modules[0].voltage, 51.0);
+        assert_eq!(current.battery_modules[1].voltage, 52.5);
     }
 
     #[test]
@@ -3299,6 +3486,104 @@ mod tests {
     }
 
     #[test]
+    fn mode_debounce_drops_a_stale_pending_candidate_on_a_third_value() {
+        // Live failure from the local E2E suite: Eco (prev) with TimedDemand
+        // pending, then EcoPaused arrives — the guard kept the previous mode
+        // but left the stale TimedDemand candidate pending, so no subsequent
+        // reading could ever confirm (candidate != reading) and every poll
+        // warned "flicker" for minutes while the mode stayed frozen. The
+        // third value must clear the stale candidate so the next mode can
+        // start a fresh debounce and confirm after two consecutive reads.
+        let prev = InverterSnapshot {
+            timestamp: 1_000,
+            battery_mode: BatteryMode::Eco,
+            soc: 50,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            ..Default::default()
+        };
+        let mut pending_mode = Some(BatteryMode::TimedDemand);
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let mut snap = InverterSnapshot {
+            timestamp: 2_000,
+            battery_mode: BatteryMode::EcoPaused,
+            soc: 50,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            ..Default::default()
+        };
+        sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            true,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+        assert_eq!(
+            snap.battery_mode,
+            BatteryMode::Eco,
+            "third value keeps previous"
+        );
+        assert_eq!(pending_mode, None, "stale candidate must be dropped");
+
+        // From here a stable EcoPaused confirms after two consecutive reads.
+        let prev2 = snap;
+        let mut snap2 = InverterSnapshot {
+            timestamp: 3_000,
+            battery_mode: BatteryMode::EcoPaused,
+            soc: 50,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            ..Default::default()
+        };
+        sanitize_snapshot(
+            &mut snap2,
+            Some(&prev2),
+            true,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+        assert_eq!(
+            snap2.battery_mode,
+            BatteryMode::Eco,
+            "first EcoPaused read pends"
+        );
+        assert_eq!(pending_mode, Some(BatteryMode::EcoPaused));
+
+        let prev3 = snap2;
+        let mut snap3 = InverterSnapshot {
+            timestamp: 4_000,
+            battery_mode: BatteryMode::EcoPaused,
+            soc: 50,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            ..Default::default()
+        };
+        sanitize_snapshot(
+            &mut snap3,
+            Some(&prev3),
+            true,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+        assert_eq!(
+            snap3.battery_mode,
+            BatteryMode::EcoPaused,
+            "confirmed on second read"
+        );
+        assert_eq!(pending_mode, None);
+    }
+
+    #[test]
     fn all_hybrid_hv_gen3_variants_accept_510v_battery_ceiling() {
         // The 0x81xx family uses the same 120-510 V HV battery architecture.
         // A full stack must not be treated as corrupt above 400 V.
@@ -3377,6 +3662,66 @@ mod tests {
 
             assert_eq!(snap.solar_power, pv_w, "DTC {code}");
         }
+    }
+
+    #[test]
+    fn large_three_phase_solar_ceiling_accepts_twelve_kw_but_residential_does_not() {
+        let sanitize_solar = |device_type: DeviceType,
+                              device_type_code: &str,
+                              max_ac_power_w: u32,
+                              previous_solar: i32| {
+            let prev = InverterSnapshot {
+                timestamp: 1_000,
+                device_type,
+                device_type_code: device_type_code.to_string(),
+                max_ac_power_w,
+                solar_power: previous_solar,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                soc: 50,
+                battery_reserve: 4,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                timestamp: 5_000,
+                device_type,
+                device_type_code: device_type_code.to_string(),
+                max_ac_power_w,
+                solar_power: 12_000,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                soc: 50,
+                battery_reserve: 4,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let mut delta_corrections = DeltaCorrectionCounts::default();
+            let mut suspect_counts = ConsecutiveSuspectCounts::default();
+            let mut rate_release_counts = RateReleaseCounts::default();
+
+            let sanitized = sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                true,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+                &mut rate_release_counts,
+            );
+            (sanitized, snap)
+        };
+
+        let (large_sanitized, large) =
+            sanitize_solar(DeviceType::ThreePhase, "4004", 11_000, 11_000);
+        assert!(!large_sanitized);
+        assert_eq!(large.solar_power, 12_000);
+
+        let (residential_sanitized, residential) =
+            sanitize_solar(DeviceType::Gen3Hybrid, "2001", 5_000, 5_000);
+        assert!(residential_sanitized);
+        assert_eq!(residential.solar_power, 5_000);
     }
 
     #[test]
@@ -3463,21 +3808,27 @@ mod tests {
 
     #[test]
     fn grace_median_handles_all_cumulative_fields_independently() {
-        let mk = |consumption: f32, import: f32, total_import: f32| GraceCumulativeSamples {
-            today_consumption_kwh: Some(consumption),
-            today_import_kwh: Some(import),
-            total_import_kwh: Some(total_import),
-            ..Default::default()
+        let mk = |consumption: f32, import: f32, total_import: f32, solar: f32, throughput: f32| {
+            GraceCumulativeSamples {
+                today_consumption_kwh: Some(consumption),
+                today_import_kwh: Some(import),
+                total_import_kwh: Some(total_import),
+                total_solar_kwh: Some(solar),
+                total_throughput_kwh: Some(throughput),
+                ..Default::default()
+            }
         };
         let samples = [
-            mk(43.4, 5.0, 1000.0),
-            mk(44.5, 50.0, 1000.0), // corrupted daily import spike
-            mk(43.5, 5.1, 1000.1),
+            mk(43.4, 5.0, 1000.0, 2000.0, 3000.0),
+            mk(44.5, 50.0, 1000.0, 9000.0, 8000.0), // corrupted daily/lifetime spikes
+            mk(43.5, 5.1, 1000.1, 2000.1, 3000.1),
         ];
         let median = GraceCumulativeSamples::median(&samples);
         assert_eq!(median.today_consumption_kwh, Some(43.5));
         assert_eq!(median.today_import_kwh, Some(5.1));
         assert_eq!(median.total_import_kwh, Some(1000.0));
+        assert_eq!(median.total_solar_kwh, Some(2000.1));
+        assert_eq!(median.total_throughput_kwh, Some(3000.1));
     }
 
     #[test]
@@ -4222,20 +4573,82 @@ mod tests {
     }
 
     #[test]
+    fn daily_energy_reset_does_not_trust_stale_inverter_midnight_at_host_midday() {
+        // A partially corrupted HR(35-40) read can retain a valid date while
+        // zeroing only the time fields. At host midday that must not open the
+        // midnight reset gate and accept a large daily-counter decrease.
+        let prev = InverterSnapshot {
+            timestamp: fixed_local_timestamp("2026-09-03 11:59:00"),
+            inverter_time: "2026-09-03 11:59:00".to_string(),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 9.5,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: fixed_local_timestamp("2026-09-03 12:00:00"),
+            inverter_time: "2026-09-03 00:00:00".to_string(),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 0.0,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+
+        assert!(sanitized, "stale inverter midnight must be rejected");
+        assert_eq!(snap.today_pv2_kwh, prev.today_pv2_kwh);
+    }
+
+    #[test]
     fn daily_energy_reset_window_is_sixty_five_minutes_each_side_of_host_midnight() {
         // Fallback path: no inverter clock, so the host's local time governs.
-        assert!(is_within_daily_reset_window(local_timestamp(22, 55), ""));
-        assert!(!is_within_daily_reset_window(local_timestamp(22, 54), ""));
-        assert!(is_within_daily_reset_window(local_timestamp(1, 5), ""));
-        assert!(!is_within_daily_reset_window(local_timestamp(1, 6), ""));
+        assert!(is_within_daily_reset_window(
+            local_timestamp(22, 55),
+            "",
+            None
+        ));
+        assert!(!is_within_daily_reset_window(
+            local_timestamp(22, 54),
+            "",
+            None
+        ));
+        assert!(is_within_daily_reset_window(
+            local_timestamp(1, 5),
+            "",
+            None
+        ));
+        assert!(!is_within_daily_reset_window(
+            local_timestamp(1, 6),
+            "",
+            None
+        ));
         // A garbage inverter_time string also falls back to host-local.
         assert!(is_within_daily_reset_window(
             local_timestamp(23, 58),
-            "garbage"
+            "garbage",
+            None,
         ));
         assert!(!is_within_daily_reset_window(
             local_timestamp(12, 0),
-            "garbage"
+            "garbage",
+            None,
         ));
     }
 
@@ -4248,35 +4661,42 @@ mod tests {
         // Inverter just past midnight (00:05) with host at noon: in-window.
         assert!(is_within_daily_reset_window(
             local_timestamp(12, 0),
-            "2026-07-01 00:05:00"
+            "2026-07-01 00:05:00",
+            Some("2026-07-01 00:04:00"),
         ));
         // Inverter just before midnight (23:55) with host at noon: in-window.
         assert!(is_within_daily_reset_window(
             local_timestamp(12, 0),
-            "2026-07-01 23:55:00"
+            "2026-07-01 23:55:00",
+            Some("2026-07-01 23:54:00"),
         ));
         // Inverter at midday (12:00) with host at midnight: the inverter clock
         // takes precedence, so NOT in window even though host-local would say yes.
         assert!(!is_within_daily_reset_window(
             local_timestamp(23, 59),
-            "2026-07-01 12:00:00"
+            "2026-07-01 12:00:00",
+            Some("2026-07-01 11:59:00"),
         ));
         // Boundary: 65 min either side of inverter midnight.
         assert!(is_within_daily_reset_window(
             local_timestamp(12, 0),
-            "2026-07-01 01:05:00"
+            "2026-07-01 01:05:00",
+            Some("2026-07-01 01:04:00"),
         ));
         assert!(!is_within_daily_reset_window(
             local_timestamp(12, 0),
-            "2026-07-01 01:06:00"
+            "2026-07-01 01:06:00",
+            Some("2026-07-01 01:05:00"),
         ));
         assert!(is_within_daily_reset_window(
             local_timestamp(12, 0),
-            "2026-07-01 22:55:00"
+            "2026-07-01 22:55:00",
+            Some("2026-07-01 22:54:00"),
         ));
         assert!(!is_within_daily_reset_window(
             local_timestamp(12, 0),
-            "2026-07-01 22:54:00"
+            "2026-07-01 22:54:00",
+            Some("2026-07-01 22:53:00"),
         ));
     }
 
@@ -4854,6 +5274,82 @@ mod tests {
             !delta_corrections.0.contains_key("total_export_kwh")
                 || *delta_corrections.0.get("total_export_kwh").unwrap() == 0
         );
+    }
+
+    fn sanitize_lifetime_solar_and_throughput(
+        prev_solar: f32,
+        raw_solar: f32,
+        prev_throughput: f32,
+        raw_throughput: f32,
+        skip_delta: bool,
+    ) -> (bool, InverterSnapshot) {
+        let prev = InverterSnapshot {
+            timestamp: 100,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            soc: 50,
+            battery_reserve: 4,
+            total_solar_kwh: prev_solar,
+            total_throughput_kwh: prev_throughput,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 103,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            soc: 50,
+            battery_reserve: 4,
+            total_solar_kwh: raw_solar,
+            total_throughput_kwh: raw_throughput,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            skip_delta,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+        (sanitized, snap)
+    }
+
+    #[test]
+    fn lifetime_solar_and_throughput_reject_impossible_absolute_values() {
+        let (sanitized, snap) =
+            sanitize_lifetime_solar_and_throughput(100.0, 100_001.0, 200.0, 100_001.0, true);
+
+        assert!(sanitized);
+        assert_eq!(snap.total_solar_kwh, 100.0);
+        assert_eq!(snap.total_throughput_kwh, 200.0);
+    }
+
+    #[test]
+    fn lifetime_solar_and_throughput_reject_backward_movement() {
+        let (sanitized, snap) =
+            sanitize_lifetime_solar_and_throughput(100.0, 90.0, 200.0, 190.0, false);
+
+        assert!(sanitized);
+        assert_eq!(snap.total_solar_kwh, 100.0);
+        assert_eq!(snap.total_throughput_kwh, 200.0);
+    }
+
+    #[test]
+    fn lifetime_solar_and_throughput_accept_valid_monotonic_growth() {
+        let (sanitized, snap) =
+            sanitize_lifetime_solar_and_throughput(100.0, 100.1, 200.0, 200.1, false);
+
+        assert!(!sanitized);
+        assert_eq!(snap.total_solar_kwh, 100.1);
+        assert_eq!(snap.total_throughput_kwh, 200.1);
     }
 
     #[test]
@@ -5866,6 +6362,27 @@ mod tests {
         assert_eq!(snap.eps_power_w, 2400);
     }
 
+    #[test]
+    fn eps_power_uses_the_model_ac_power_ceiling() {
+        let mut prev = base_grid_connected_snap();
+        prev.device_type = DeviceType::ACCoupled;
+        prev.max_ac_power_w = 3000;
+        prev.eps_power_w = 2400;
+        let mut snap = prev.clone();
+        snap.timestamp = 220;
+        snap.device_type = DeviceType::ACCoupled;
+        snap.max_ac_power_w = 3000;
+        snap.eps_power_w = 4000;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+
+        assert!(
+            sanitized,
+            "EPS power above the model rating must be flagged"
+        );
+        assert_eq!(snap.eps_power_w, 2400);
+    }
+
     // -------------------------------------------------------------------
     // SOC absolute range (review H4) — AGENTS.md documents SOC 0–100,
     // but only the SOC=0-with-power and SOC=100-while-charging special
@@ -5885,6 +6402,48 @@ mod tests {
             battery_reserve: 4,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn sanitize_rejects_target_soc_below_battery_safe_floor_without_previous() {
+        let mut snap = base_grid_connected_snap();
+        snap.target_soc = 0;
+
+        let sanitized = sanitize_for_test(&mut snap, None);
+
+        assert!(
+            sanitized,
+            "target SOC below 4% must be flagged as corruption"
+        );
+        assert_eq!(snap.target_soc, 4);
+    }
+
+    #[test]
+    fn sanitize_target_soc_out_of_range_uses_previous_value() {
+        let mut prev = base_grid_connected_snap();
+        prev.target_soc = 20;
+        let mut snap = prev.clone();
+        snap.timestamp = 103;
+        snap.target_soc = 0;
+
+        let sanitized = sanitize_for_test(&mut snap, Some(&prev));
+
+        assert!(sanitized);
+        assert_eq!(snap.target_soc, 20);
+    }
+
+    #[test]
+    fn sanitize_rejects_target_soc_above_100_without_previous() {
+        let mut snap = base_grid_connected_snap();
+        snap.target_soc = 101;
+
+        let sanitized = sanitize_for_test(&mut snap, None);
+
+        assert!(
+            sanitized,
+            "target SOC above 100% must be flagged as corruption"
+        );
+        assert_eq!(snap.target_soc, 100);
     }
 
     #[test]

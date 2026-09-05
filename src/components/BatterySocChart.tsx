@@ -35,6 +35,10 @@ function chartTitle(scale: 'today' | '24h'): string {
   return scale === '24h' ? 'SOC — Last 24h' : 'SOC Today';
 }
 
+function emptyStateMessage(scale: 'today' | '24h'): string {
+  return scale === '24h' ? 'No SOC history in the last 24h' : 'No SOC history yet today';
+}
+
 function useNow(): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -92,7 +96,7 @@ export default function BatterySocChart() {
         </div>
       ) : !hasData ? (
         <div className="flex flex-col items-center justify-center h-[180px] gap-1">
-          <p className="text-text-secondary text-sm font-sans">No SOC history yet today</p>
+          <p className="text-text-secondary text-sm font-sans">{emptyStateMessage(scale)}</p>
           <p className="text-text-secondary/50 text-xs font-sans">
             History is recorded while the app is running and connected
           </p>

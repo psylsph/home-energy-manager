@@ -499,6 +499,7 @@ function Layout() {
           {page('/meters', <MetersPage />, true)}
           {page('/inverter', <InverterPage />, true)}
           {developerMode && page('/logs', <LogsPage />)}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
 

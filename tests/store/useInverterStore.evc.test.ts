@@ -23,6 +23,10 @@ describe('useInverterStore — EVC state machine (issue #138)', () => {
       evcCharging: false,
       evcConnected: false,
       evcCableConnected: false,
+      evcConnectionState: 'never_connected',
+      evcStale: false,
+      evcLastSuccessAtEpochMs: null,
+      evcAgeSeconds: null,
       evcEverConnected: false,
     });
   });

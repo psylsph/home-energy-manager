@@ -7,7 +7,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { execSync, spawn } from 'child_process';
+import { spawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -15,6 +15,9 @@ import { fileURLToPath } from 'url';
 import { writeTestSettings } from './test-settings.js';
 import type { TestSettingsFixture } from './test-settings.js';
 import { simulatorBinaryPath } from './binary-path.js';
+import { attachErrorHandler } from './process-errors.js';
+import { stopChildProcess } from './process-lifecycle.js';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,18 +67,7 @@ async function waitForSnapshot(
 }
 
 async function stopProcess(process: ChildProcess | null) {
-  if (!process || process.exitCode !== null) return;
-  process.kill('SIGTERM');
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => {
-      process.kill('SIGKILL');
-      resolve();
-    }, 5_000);
-    process.once('exit', () => {
-      clearTimeout(timeout);
-      resolve();
-    });
-  });
+  await stopChildProcess(process, 'adaptive process', 5_000);
 }
 
 function attachLogs(label: string, process: ChildProcess) {
@@ -99,7 +91,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
       }
     }
     for (const port of [MODBUS_PORT, HTTP_PORT]) {
-      execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
+      killPort(port);
     }
 
     simulator = spawn(SIMULATOR_PATH, [
@@ -113,6 +105,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
       '--modbus', `127.0.0.1:${MODBUS_PORT}`,
       '--evc-port', '19920',
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    attachErrorHandler(simulator, 'adaptive simulator');
     attachLogs('adaptive-sim', simulator);
 
     settingsFixture = await writeTestSettings({
@@ -120,6 +113,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
       port: MODBUS_PORT,
       httpPort: HTTP_PORT,
       pollInterval: 2,
+      writePacingMs: 25,
     });
 
     backend = spawn(
@@ -130,6 +124,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
         env: { ...process.env, ...settingsFixture.env },
       },
     );
+    attachErrorHandler(backend, 'adaptive backend');
     attachLogs('adaptive-backend', backend);
 
     await waitForSnapshot((value) => value.soc === 27, 45_000);

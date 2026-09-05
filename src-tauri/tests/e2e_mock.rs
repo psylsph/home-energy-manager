@@ -874,6 +874,99 @@ async fn history_summary_route_is_wired() {
     assert_eq!(body["error"], "History database not available");
 }
 
+#[tokio::test]
+async fn history_routes_validate_bounds_over_http_before_opening_database() {
+    let router = fresh_router();
+    let routes = ["/api/history", "/api/history/summary", "/api/report"];
+    let invalid_queries = [
+        ("offset=-1", "Invalid history offset"),
+        ("offset=10001", "Invalid history offset"),
+        ("range=not-a-range", "Invalid range"),
+        (
+            "start_ms=1000",
+            "start_ms and end_ms must be provided together",
+        ),
+        (
+            "start_ms=2000&end_ms=1000",
+            "start_ms must be before end_ms",
+        ),
+    ];
+
+    for route in routes {
+        for (query, expected_error) in invalid_queries {
+            let (status, body) = get_json(&router, &format!("{route}?{query}")).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{route}?{query} should be rejected before the missing test DB"
+            );
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(expected_error)),
+                "{route}?{query} returned unexpected error: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn uncovered_control_routes_validate_json_and_connection_guards_over_http() {
+    let router = fresh_router();
+    let required_fields = [
+        ("/api/control/mode", "Missing 'mode' field"),
+        ("/api/control/charge-slot", "Missing 'slot' field"),
+        ("/api/control/discharge-slot", "Missing 'slot' field"),
+        ("/api/control/reserve", "Missing 'soc' field"),
+        ("/api/control/charge-rate", "Missing 'limit' field"),
+        ("/api/control/discharge-rate", "Missing 'limit' field"),
+        ("/api/control/eps", "Missing 'enabled' field"),
+        ("/api/control/active-power-rate", "Missing 'rate' field"),
+        ("/api/control/export-limit", "Missing 'watts' field"),
+        ("/api/control/calibration", "Missing 'stage' field"),
+    ];
+
+    for (route, expected_error) in required_fields {
+        let (status, body) = post_json(&router, route, &json!({})).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{route} should reject {{}}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected_error)),
+            "{route} returned unexpected error: {body}"
+        );
+    }
+
+    // These routes have no required JSON fields, but still need HTTP-level
+    // coverage because their connection guards protect the write surface.
+    let (status, body) = post_json(&router, "/api/control/force-charge", &json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].as_str().unwrap().contains("snapshot"));
+
+    let (status, body) = post_json(&router, "/api/control/reboot", &json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].as_str().unwrap().contains("snapshot"));
+
+    let (status, body) = post_json(&router, "/api/control/force-charge/stop", &json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("No force charge"));
+
+    let (status, body) = post_json(&router, "/api/control/force-discharge/stop", &json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("No force discharge"));
+
+    let (status, body) = post_json(&router, "/api/control/sync-clock", &json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Clock sync queued");
+}
+
 /// The E2E harness reset endpoint is gated behind `--e2e-admin`: production
 /// launches (and this default test state) must not expose it at all.
 #[tokio::test]

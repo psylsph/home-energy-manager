@@ -143,10 +143,39 @@ assert_eq "Type field"                  "Application" "$(desktop_field "$DESKTOP
 # AND so the recorded Exec path is deterministic. The DESKTOP entry
 # stores the literal path — symlink resolution happens at launch.
 EXPECTED_EXEC="$REPO_ROOT/src-tauri/target/debug/givenergy-local"
-assert_eq "Exec points at the dev binary path" "$EXPECTED_EXEC" "$(desktop_field "$DESKTOP_FILE" Exec)"
+assert_eq "Exec points at the dev binary path" "\"$EXPECTED_EXEC\"" "$(desktop_field "$DESKTOP_FILE" Exec)"
 assert_eq "Icon is the repo icon"       "$REPO_ROOT/src-tauri/icons/128x128.png" "$(desktop_field "$DESKTOP_FILE" Icon)"
 assert_eq "Terminal=false"              "false" "$(desktop_field "$DESKTOP_FILE" Terminal)"
 rm -rf "$XDG" "$STAGE"
+
+# Test 1b: paths containing spaces must be encoded according to the desktop
+# entry rules. Exec uses its command-line quoting; Icon uses string escapes.
+echo
+echo "1b. quotes and escapes paths containing spaces"
+SPECIAL_PARENT="$(mktemp -d)"
+SPECIAL_ROOT="$SPECIAL_PARENT/repo with spaces"
+mkdir -p "$SPECIAL_ROOT/scripts" "$SPECIAL_ROOT/src-tauri/target/debug" "$SPECIAL_ROOT/src-tauri/icons"
+cp "$INSTALLER" "$SPECIAL_ROOT/scripts/install-dev-desktop.sh"
+chmod +x "$SPECIAL_ROOT/scripts/install-dev-desktop.sh"
+: > "$SPECIAL_ROOT/src-tauri/target/debug/givenergy-local"
+: > "$SPECIAL_ROOT/src-tauri/icons/128x128.png"
+XDG="$(stage_xdg_home)"
+HOME="$XDG" XDG_DATA_HOME="$XDG" \
+  bash "$SPECIAL_ROOT/scripts/install-dev-desktop.sh" >"$XDG/install.out" 2>&1
+SPECIAL_DESKTOP="$XDG/applications/com.givenergy.local.desktop"
+SPECIAL_BINARY="$SPECIAL_ROOT/src-tauri/target/debug/givenergy-local"
+SPECIAL_ICON="$SPECIAL_ROOT/src-tauri/icons/128x128.png"
+EXPECTED_ESCAPED_ICON="${SPECIAL_ICON// /\\s}"
+assert_eq "Exec quotes the binary path" "\"$SPECIAL_BINARY\"" "$(desktop_field "$SPECIAL_DESKTOP" Exec)"
+assert_eq "Icon escapes spaces" "$EXPECTED_ESCAPED_ICON" "$(desktop_field "$SPECIAL_DESKTOP" Icon)"
+if command -v desktop-file-validate >/dev/null 2>&1; then
+  set +e
+  desktop-file-validate "$SPECIAL_DESKTOP"
+  SPECIAL_VALIDATE_EXIT=$?
+  set -e
+  assert_eq "space-containing desktop file validates" "0" "$SPECIAL_VALIDATE_EXIT"
+fi
+rm -rf "$XDG" "$SPECIAL_PARENT"
 
 # Test 2: app_id / filename must match `com.givenergy.local`. The
 # installer uses this filename for a reason — it's the GTK app_id

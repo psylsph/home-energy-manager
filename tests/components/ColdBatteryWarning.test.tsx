@@ -77,6 +77,19 @@ describe('<ColdBatteryWarning/>', () => {
     expect(container.querySelector('.bg-blue-900\\/30')).toBeNull();
   });
 
+  it('warns when a negative battery temperature is below a negative threshold', async () => {
+    vi.mocked(apiGet).mockResolvedValue({
+      ok: true,
+      data: { config: { batt_temp_min: -10 } },
+    });
+    setSnapshot(-15.0);
+    const { container } = renderWarning();
+    await waitFor(() => {
+      expect(container.querySelector('.bg-blue-900\\/30')).not.toBeNull();
+    });
+    expect(container.textContent).toContain('-15.0°C');
+  });
+
   it('renders nothing and does not throw when battery_temperature is null (Gateway)', async () => {
     // The Gateway (DTC 0x70xx) doesn't expose per-pack temperature — the
     // backend sets f32::NAN, serde_json serialises it as null. Before the

@@ -40,7 +40,12 @@ describe('<LogsPage/>', () => {
     // GET /api/log-level on mount + GET /api/logs
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/log-level') return { ok: true, level: 'WARN' };
-      if (path === '/api/logs') return { ok: true, lines: SAMPLE_LINES, count: SAMPLE_LINES.length };
+      if (path === '/api/logs') {
+        return { ok: true, lines: SAMPLE_LINES, count: SAMPLE_LINES.length, next: SAMPLE_LINES.length };
+      }
+      if (path.startsWith('/api/logs?after=')) {
+        return { ok: true, lines: [], count: 0, next: SAMPLE_LINES.length };
+      }
       return { ok: true };
     });
     apiPutMock.mockResolvedValue({ ok: true, level: 'INFO' });
@@ -145,12 +150,16 @@ describe('<LogsPage/>', () => {
   it('Refresh button re-fetches logs', async () => {
     render(<LogsPage />);
     await screen.findByText(/connection refused/);
-    const initialLogsCalls = apiGetMock.mock.calls.filter((c) => c[0] === '/api/logs').length;
+    const initialLogsCalls = apiGetMock.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].startsWith('/api/logs'),
+    ).length;
 
     fireEvent.click(screen.getByText('Refresh'));
 
     await waitFor(() => {
-      const after = apiGetMock.mock.calls.filter((c) => c[0] === '/api/logs').length;
+      const after = apiGetMock.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].startsWith('/api/logs'),
+      ).length;
       expect(after).toBeGreaterThan(initialLogsCalls);
     });
   });
@@ -179,12 +188,51 @@ describe('<LogsPage/>', () => {
   it('polls for new logs on the interval', async () => {
     render(<LogsPage />);
     await screen.findByText(/connection refused/);
-    const initialCalls = apiGetMock.mock.calls.filter((c) => c[0] === '/api/logs').length;
+    const initialCalls = apiGetMock.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].startsWith('/api/logs'),
+    ).length;
 
     // The polling interval is 2s. Advance real time past it.
     await new Promise((r) => setTimeout(r, 2200));
 
-    const after = apiGetMock.mock.calls.filter((c) => c[0] === '/api/logs').length;
+    const after = apiGetMock.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].startsWith('/api/logs'),
+    ).length;
     expect(after).toBeGreaterThan(initialCalls);
+  });
+
+  it('appends incremental ring entries, trims old entries, and keeps follow mode at capacity', async () => {
+    const initialLines = Array.from(
+      { length: 2_000 },
+      (_, index) => `10:30:00.000 INFO [test] entry-${String(index).padStart(4, '0')}`,
+    );
+    const newLines = Array.from(
+      { length: 5 },
+      (_, index) => `10:30:01.000 INFO [test] entry-${String(2_000 + index).padStart(4, '0')}`,
+    );
+    let initialFetches = 0;
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/log-level') return { ok: true, level: 'INFO' };
+      if (path === '/api/logs' && initialFetches++ === 0) {
+        return { ok: true, lines: initialLines, count: initialLines.length, next: 2_000 };
+      }
+      if (path === '/api/logs?after=2000') {
+        return { ok: true, lines: newLines, count: newLines.length, next: 2_005 };
+      }
+      throw new Error(`unexpected log request: ${path}`);
+    });
+
+    const { container } = render(<LogsPage />);
+    await screen.findByText('entry-0000');
+
+    fireEvent.click(screen.getByText('Refresh'));
+
+    await screen.findByText('entry-2004');
+    expect(screen.queryByText('entry-0000')).not.toBeInTheDocument();
+    expect(screen.getByText('entry-1999')).toBeInTheDocument();
+    // No scroll-to-bottom affordance means the page stayed in follow mode
+    // while the ring rotated, even though the rendered length stayed capped.
+    expect(screen.queryByText('↓ Scroll to bottom')).not.toBeInTheDocument();
+    expect(container.textContent).toContain('2000/2000 lines');
   });
 });

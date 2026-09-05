@@ -24,7 +24,14 @@ TARGET_ARCHITECTURES = {
 
 
 def msix_version(version: str) -> str:
-    """Convert semver (optionally prefixed with v) to MSIX's four-part version."""
+    """Convert semver (optionally prefixed with v) to MSIX's four-part version.
+
+    Microsoft Store packages cannot use zero as the first version component.
+    Offset the semver major by one so the current 0.x release line maps to a
+    valid 1.x Store version, while preserving ordering when the project reaches
+    1.x (which will map to 2.x). The fourth component remains the Store-owned
+    zero for the normal three-component release input.
+    """
     core = re.split(r"[-+]", version.removeprefix("v"), maxsplit=1)[0]
     parts = core.split(".")
     if len(parts) < 3 or len(parts) > 4 or any(not part.isdigit() for part in parts):
@@ -32,6 +39,11 @@ def msix_version(version: str) -> str:
     numbers = [int(part) for part in parts]
     if any(number > 65535 for number in numbers):
         raise ValueError(f"MSIX version components must be at most 65535: {version}")
+    if len(numbers) == 4 and numbers[3] != 0:
+        raise ValueError("MSIX version fourth component is reserved for Store: " + version)
+    numbers[0] += 1
+    if numbers[0] > 65535:
+        raise ValueError(f"MSIX version major component cannot be offset: {version}")
     return ".".join(str(number) for number in (*numbers, 0, 0, 0, 0)[:4])
 
 
@@ -51,6 +63,16 @@ def render_manifest(template: str, replacements: dict[str, str]) -> str:
     if unresolved:
         raise ValueError(f"unresolved manifest tokens: {', '.join(unresolved)}")
     return rendered
+
+
+def remove_staging_path(path: Path) -> None:
+    """Remove a stale staging directory, file, or symlink without following it."""
+    if not os.path.lexists(path):
+        return
+    if path.is_symlink() or not path.is_dir():
+        path.unlink()
+    else:
+        shutil.rmtree(path)
 
 
 def stage_msix(
@@ -75,8 +97,7 @@ def stage_msix(
 
     bundle_dir = release_dir / "bundle" / "msix"
     stage_dir = bundle_dir / "stage"
-    if stage_dir.exists():
-        shutil.rmtree(stage_dir)
+    remove_staging_path(stage_dir)
     (stage_dir / "Assets").mkdir(parents=True)
 
     shutil.copy2(executable, stage_dir / executable.name)

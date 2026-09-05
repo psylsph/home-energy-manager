@@ -11,9 +11,11 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 type ApiGetCall = { path: string };
 
 const apiGetCalls: ApiGetCall[] = [];
+let reportFailure = false;
 const apiGetMock = vi.fn(async (path: string) => {
   apiGetCalls.push({ path });
   if (path.startsWith('/api/report')) {
+    if (reportFailure) throw new Error('report unavailable');
     return {
       ok: true,
       import_cost_gbp: 5.42,
@@ -68,6 +70,7 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
   beforeEach(() => {
     silenceConsoleError();
     apiGetCalls.length = 0;
+    reportFailure = false;
     apiGetMock.mockClear();
     fetchHistoryMock.mockClear();
     vi.stubGlobal('ResizeObserver', class ResizeObserver {
@@ -159,6 +162,44 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
       });
       const reportCall = apiGetCalls.find((c) => c.path.startsWith('/api/report'));
       expect(reportCall!.path).not.toContain('standing_charge');
+    });
+
+    it('does not export costs from the previous range after a report failure', async () => {
+      fetchHistoryMock.mockResolvedValue(powerHistoryFixture());
+      const written: string[] = [];
+      const openedWindow = {
+        document: {
+          open: vi.fn(),
+          write: vi.fn((html: string) => written.push(html)),
+          close: vi.fn(),
+        },
+        focus: vi.fn(),
+      };
+      vi.spyOn(window, 'open').mockReturnValue(openedWindow as unknown as Window);
+
+      render(<PowerPage />);
+      await waitFor(() => {
+        expect(apiGetCalls.some((call) => call.path.includes('range=24h'))).toBe(true);
+      });
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Consumption Report/i })).not.toBeDisabled();
+      });
+
+      reportFailure = true;
+      fireEvent.change(screen.getByLabelText('Select time range'), {
+        target: { value: '7d' },
+      });
+      await waitFor(() => {
+        expect(apiGetCalls.some((call) => call.path.includes('range=7d'))).toBe(true);
+      });
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Consumption Report/i })).not.toBeDisabled();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Consumption Report/i }));
+      await waitFor(() => expect(written).toHaveLength(1));
+      expect(written[0]).not.toContain('£5.42');
+      expect(written[0]).not.toContain('£1.13');
     });
   });
 

@@ -22,7 +22,7 @@ export default defineConfig([
   },
   // E2E test files — Node.js environment, no React
   {
-    files: ['e2e/**/*.ts'],
+    files: ['e2e/**/*.ts', 'e2e/**/*.mjs'],
     extends: [
       js.configs.recommended,
       tseslint.configs.recommended,

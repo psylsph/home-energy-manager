@@ -224,6 +224,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     cleanup();
     useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
@@ -392,6 +393,34 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     await waitFor(() => {
       expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
     });
+  });
+
+  it('reports an unconfirmed charge-slot save when readback times out', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(apiPost).mockResolvedValueOnce({ ok: true, data: {} });
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/control/charge-slot',
+      expect.objectContaining({ slot: 1 }),
+    ));
+
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+
+    expect(within(section).getByRole('alert').textContent).toContain(
+      'Charge slot did not confirm the change. Please try again.',
+    );
+    expect(within(section).queryByText('✓ Saved')).toBeNull();
   });
 
   it('shows the planner-ownership banner on slot 1 when auto-refresh is on', async () => {

@@ -7,12 +7,15 @@
  */
 
 import { type FullConfig } from '@playwright/test';
-import { ChildProcess, execSync, spawn } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 import { simulatorBinaryPath } from './binary-path.js';
+import { attachErrorHandler } from './process-errors.js';
+import { stopChildProcess } from './process-lifecycle.js';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,10 +46,8 @@ let settingsFixture: TestSettingsFixture | null = null;
  * unexpected exit to prevent orphaned backends from blocking the ports.
  */
 function killLeftoverProcesses() {
-  try {
-    execSync(`fuser -k 18899/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    execSync(`fuser -k 17337/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-  } catch { /* ignore */ }
+  killPort(MODBUS_PORT);
+  killPort(HTTP_PORT);
 }
 
 // Guard against orphaned processes when the test runner is killed
@@ -107,6 +108,7 @@ export default async function globalSetup(_config: FullConfig) {
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
+  attachErrorHandler(simulatorProcess, 'local simulator');
 
   const logLine = (prefix: string, data: Buffer) => {
     const lines = data.toString().trim().split('\n');
@@ -131,13 +133,24 @@ export default async function globalSetup(_config: FullConfig) {
     port: MODBUS_PORT,
     httpPort: HTTP_PORT,
     pollInterval: 5,
+      writePacingMs: 25,
   });
 
   // Start the headless backend
   console.log('[local-setup] Starting headless backend on port', HTTP_PORT);
   backendProcess = spawn(
     BACKEND_PATH,
-    ['--headless', '--port', String(HTTP_PORT), '--dist', DIST_DIR],
+    [
+      '--headless',
+      '--port',
+      String(HTTP_PORT),
+      '--dist',
+      DIST_DIR,
+      // Arms the harness-only POST /api/test/reset endpoint so specs can
+      // start from a canonical state (desired schedule, #137 backup, force
+      // reverts and queued writes cleared) no matter what earlier files did.
+      '--e2e-admin',
+    ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
@@ -146,6 +159,7 @@ export default async function globalSetup(_config: FullConfig) {
       },
     },
   );
+  attachErrorHandler(backendProcess, 'local backend');
 
   backendProcess.stdout?.on('data', (d: Buffer) => logLine('backend:out', d));
   backendProcess.stderr?.on('data', (d: Buffer) => logLine('backend:err', d));
@@ -200,32 +214,12 @@ export default async function globalSetup(_config: FullConfig) {
 async function cleanup() {
   if (backendProcess) {
     console.log('[local-setup] Stopping backend...');
-    backendProcess.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        backendProcess?.kill('SIGKILL');
-        resolve();
-      }, 5000);
-      backendProcess?.on('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
+    await stopChildProcess(backendProcess, 'local backend', 5000);
     backendProcess = null;
   }
   if (simulatorProcess) {
     console.log('[local-setup] Stopping simulator...');
-    simulatorProcess.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        simulatorProcess?.kill('SIGKILL');
-        resolve();
-      }, 5000);
-      simulatorProcess?.on('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
+    await stopChildProcess(simulatorProcess, 'local simulator', 5000);
     simulatorProcess = null;
   }
   // Small delay to let file handles close

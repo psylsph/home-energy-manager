@@ -23,9 +23,14 @@
 //!   floor. Household demand outside slot hours keeps draining to the
 //!   global reserve as in Eco.
 
-use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
+use crate::forecast::simulate::{
+    simulate_battery_segment, SimHourInput, SimHourResult, SimulationParams,
+};
+use crate::forecast::time_windows::{
+    split_hour_segments, window_overlap_hours as absolute_window_overlap_hours,
+    window_overlap_segments as absolute_window_overlap_segments,
+};
 use crate::inverter::model::InverterSnapshot;
-use chrono::Timelike;
 
 /// One timed window: an enabled inverter slot, resolved to wall-clock
 /// minutes and kW.
@@ -98,21 +103,11 @@ impl CurrentSchedule {
 /// spends inside `window`. Midnight-wrapping windows are handled by
 /// splitting them at 24:00.
 fn window_overlap_hours(timestamp: i64, window: &ScheduledWindow) -> f64 {
-    let Some(dt) = chrono::DateTime::from_timestamp(timestamp, 0) else {
-        return 0.0;
-    };
-    let local = dt.with_timezone(&chrono::Local);
-    let hour_start = local.hour() as u16 * 60 + local.minute() as u16;
-    let hour_end = hour_start.saturating_add(60);
-    let overlap = |start: u16, end: u16| hour_end.min(end).saturating_sub(hour_start.max(start));
-    let overlap_min = if window.end_min > window.start_min {
-        overlap(window.start_min, window.end_min)
-    } else if window.end_min < window.start_min {
-        overlap(window.start_min, 1440) + overlap(0, window.end_min)
-    } else {
-        0
-    };
-    f64::from(overlap_min) / 60.0
+    absolute_window_overlap_hours(timestamp, window.start_min, window.end_min, &chrono::Local)
+}
+
+fn window_overlap_segments(timestamp: i64, window: &ScheduledWindow) -> Vec<(f64, f64)> {
+    absolute_window_overlap_segments(timestamp, window.start_min, window.end_min, &chrono::Local)
 }
 
 /// Run the eco simulation with the schedule's timed windows applied to
@@ -139,8 +134,6 @@ pub fn simulate_current_schedule(
     let mut soc = params.start_soc_pct;
     let mut out = Vec::with_capacity(hours.len());
     for hour in hours {
-        let mut hour = *hour;
-        let mut reserve = params.reserve_soc_pct;
         // Charge windows take priority: the inverter cannot charge and
         // export-discharge the same hour. On multiple overlapping windows
         // the longest-overlap one wins (a tie is arbitrary but stable).
@@ -149,55 +142,81 @@ pub fn simulate_current_schedule(
             .iter()
             .map(|w| (w, window_overlap_hours(hour.timestamp, w)))
             .filter(|(_, ov)| *ov > 0.0)
-            .max_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((w, ov)) = charge {
-            // Grid charge for this bucket, capped by the AC energy that
-            // still fits between the running SOC and the slot target.
-            // Solar surplus (if any) rides on top un-capped — a real
-            // inverter feeds surplus into the battery during its slot
-            // too, so one-hour buckets may legitimately overshoot.
-            let room_ac = (w.target_soc_pct - soc).max(0.0) / 100.0 * capacity / eta_c;
-            let charge_ac = (w.rate_kw * ov).min(room_ac);
-            // While the slot is active the inverter holds rather than
-            // discharges, so the home's otherwise-unmet load is grid
-            // supplied (same injection shape the charge planner uses).
-            let unmet_load = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
-            hour.solar_kwh += charge_ac + unmet_load * ov;
-        } else if let Some((w, ov)) = schedule
-            .discharge_windows
-            .iter()
-            .map(|w| (w, window_overlap_hours(hour.timestamp, w)))
-            .filter(|(_, ov)| *ov > 0.0)
             .max_by(|a, b| a.1.total_cmp(&b.1))
-        {
-            // The slot floor also bounds household drain this hour: while
-            // Timed Export holds the floor, home load falls back to the
-            // grid. Raising the per-hour reserve models exactly that.
-            reserve = reserve.max(w.target_soc_pct);
-            let available_ac = (soc - w.target_soc_pct).max(0.0) / 100.0 * capacity * eta_d;
-            let export_ac = (w.rate_kw * ov).min(available_ac);
-            // Virtual load: the eco simulator covers it from the battery
-            // up to the discharge-rate cap, which is exactly the physics
-            // of max-power export (same injection the export planner uses).
-            hour.solar_kwh -= export_ac;
+            .map(|(w, _)| w);
+        let discharge = if charge.is_none() {
+            schedule
+                .discharge_windows
+                .iter()
+                .map(|w| (w, window_overlap_hours(hour.timestamp, w)))
+                .filter(|(_, ov)| *ov > 0.0)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(w, _)| w)
+        } else {
+            None
+        };
+
+        let active = charge
+            .map(|w| window_overlap_segments(hour.timestamp, w))
+            .or_else(|| discharge.map(|w| window_overlap_segments(hour.timestamp, w)))
+            .unwrap_or_default();
+        let segments = split_hour_segments(&active);
+        let mut combined = SimHourResult {
+            timestamp: hour.timestamp,
+            soc_pct: soc,
+            import_kwh: 0.0,
+            export_kwh: 0.0,
+            charge_kwh: 0.0,
+            discharge_kwh: 0.0,
+        };
+        for (start, end, inside) in segments {
+            let fraction = end - start;
+            let mut segment_hour = SimHourInput {
+                timestamp: hour.timestamp,
+                solar_kwh: hour.solar_kwh * fraction,
+                consumption_kwh: hour.consumption_kwh * fraction,
+            };
+            let mut segment_params = SimulationParams {
+                start_soc_pct: soc,
+                ..*params
+            };
+            if inside {
+                if let Some(w) = charge {
+                    // Grid charge for this segment, capped by the AC energy
+                    // that still fits between the running SOC and target.
+                    let room_ac = (w.target_soc_pct - soc).max(0.0) / 100.0 * capacity / eta_c;
+                    let charge_ac = (w.rate_kw * fraction).min(room_ac);
+                    // The slot holds the battery instead of discharging for
+                    // household load; grid supply is represented as extra
+                    // solar for this segment only.
+                    let unmet_load = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
+                    segment_hour.solar_kwh += charge_ac + unmet_load * fraction;
+                } else if let Some(w) = discharge {
+                    // The slot floor also bounds household drain while
+                    // Timed Export is active. Its export is represented as
+                    // additional virtual load for this segment only.
+                    segment_params.reserve_soc_pct =
+                        segment_params.reserve_soc_pct.max(w.target_soc_pct);
+                    let available_ac = (soc - w.target_soc_pct).max(0.0) / 100.0 * capacity * eta_d;
+                    let export_ac = (w.rate_kw * fraction).min(available_ac);
+                    segment_hour.solar_kwh -= export_ac;
+                }
+            }
+            let Some(res) = simulate_battery_segment(segment_hour, &segment_params, fraction)
+            else {
+                // Invalid parameters (no capacity / unknown rates / bad
+                // start SOC) — the caller gets no projection, matching the
+                // API's degradation path.
+                return Vec::new();
+            };
+            soc = res.soc_pct;
+            combined.soc_pct = res.soc_pct;
+            combined.import_kwh += res.import_kwh;
+            combined.export_kwh += res.export_kwh;
+            combined.charge_kwh += res.charge_kwh;
+            combined.discharge_kwh += res.discharge_kwh;
         }
-        let hour_params = SimulationParams {
-            start_soc_pct: soc,
-            reserve_soc_pct: reserve,
-            ..*params
-        };
-        let Some(res) = simulate_battery(&[hour], &hour_params)
-            .hours
-            .into_iter()
-            .next()
-        else {
-            // Invalid parameters (no capacity / unknown rates / bad start
-            // SOC) — the caller gets no projection, matching the API's
-            // degradation path.
-            return Vec::new();
-        };
-        soc = res.soc_pct;
-        out.push((hour.timestamp, res.soc_pct));
+        out.push((hour.timestamp, combined.soc_pct));
     }
     out
 }
@@ -205,6 +224,7 @@ pub fn simulate_current_schedule(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forecast::simulate::simulate_battery;
     use crate::inverter::model::{InverterSnapshot, ScheduleSlot};
     use chrono::TimeZone;
 
@@ -578,6 +598,69 @@ mod tests {
         assert!((out[0].1 - 43.5).abs() < 1e-6, "hour 1 = {}", out[0].1);
         assert!((out[1].1 - 65.0).abs() < 1e-6, "hour 2 = {}", out[1].1);
         assert!((out[2].1 - 65.0).abs() < 1e-6, "hour 3 = {}", out[2].1);
+    }
+
+    #[test]
+    fn partial_charge_overlap_keeps_outside_household_load_in_eco_balance() {
+        // The 00:30–01:00 charge slot covers only the second half of the
+        // bucket. The first half must still run Eco and discharge to serve
+        // the home; only the second half gets grid charge. Compare the
+        // hourly projection with the equivalent two explicit half-hour
+        // steps so a partial overlap cannot make the first half disappear.
+        let day = chrono::Local
+            .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let schedule = CurrentSchedule {
+            charge_windows: vec![ScheduledWindow {
+                start_min: 30,
+                end_min: 60,
+                rate_kw: 3.0,
+                target_soc_pct: 65.0,
+            }],
+            discharge_windows: Vec::new(),
+        };
+        let hour = SimHourInput {
+            timestamp: day,
+            solar_kwh: 0.0,
+            consumption_kwh: 2.0,
+        };
+        let out = simulate_current_schedule(&[hour], &params(), &schedule);
+
+        let mut half_params = params();
+        half_params.max_charge_kw *= 0.5;
+        half_params.max_discharge_kw *= 0.5;
+        let first = simulate_battery(
+            &[SimHourInput {
+                timestamp: day,
+                solar_kwh: 0.0,
+                consumption_kwh: 1.0,
+            }],
+            &half_params,
+        )
+        .hours[0];
+        let second_params = SimulationParams {
+            start_soc_pct: first.soc_pct,
+            ..half_params
+        };
+        let second = simulate_battery(
+            &[SimHourInput {
+                timestamp: day + 1800,
+                solar_kwh: 2.5,
+                consumption_kwh: 1.0,
+            }],
+            &second_params,
+        )
+        .hours[0];
+
+        assert_eq!(out.len(), 1);
+        assert!(
+            (out[0].1 - second.soc_pct).abs() < 1e-9,
+            "partial-slot hour must match explicit half-hour steps: {} vs {}",
+            out[0].1,
+            second.soc_pct
+        );
     }
 
     #[test]

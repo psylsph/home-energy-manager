@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone, Timelike};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Timelike};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -53,6 +53,25 @@ fn error_response(error: &str) -> (StatusCode, Json<Value>) {
         StatusCode::BAD_REQUEST,
         Json(json!({ "ok": false, "error": error })),
     )
+}
+
+fn encode_hhmm_for_write(hour: u8, minute: u8) -> Result<u16, String> {
+    encode_hhmm(hour, minute)
+        .ok_or_else(|| format!("invalid HHMM components: hour {hour}, minute {minute}"))
+}
+
+/// Return the disabled wire value rather than emitting a plausible schedule
+/// when a previously captured value is corrupt. Callers use this only while
+/// restoring state that was already read from the inverter; user input is
+/// rejected by the request parsers before it reaches this fallback.
+fn encode_hhmm_or_clear(hour: u8, minute: u8) -> u16 {
+    match encode_hhmm(hour, minute) {
+        Some(value) => value,
+        None => {
+            tracing::warn!(hour, minute, "invalid captured HHMM; clearing slot");
+            0
+        }
+    }
 }
 
 /// Return a 500 Internal Server Error response. Use for backend failures
@@ -179,6 +198,129 @@ fn discharge_slot_command_for_device(
     }
 }
 
+fn parse_timed_mode_discharge_slots(
+    device_type: DeviceType,
+    value: &Value,
+) -> Result<Vec<RegisterWrite>, String> {
+    let slots = value
+        .as_array()
+        .ok_or_else(|| "discharge_slots must be an array".to_string())?;
+    if slots.is_empty() {
+        return Err("discharge_slots must contain at least one configured slot".to_string());
+    }
+
+    let max_slots = device_type.max_discharge_slots();
+    let mut seen_slots = std::collections::HashSet::new();
+    let mut configured = false;
+    let mut writes = Vec::new();
+
+    for (index, slot_obj) in slots.iter().enumerate() {
+        let slot_obj = slot_obj
+            .as_object()
+            .ok_or_else(|| format!("discharge slot {} must be an object", index + 1))?;
+        let slot_raw = slot_obj
+            .get("slot")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("discharge slot {} is missing a numeric 'slot'", index + 1))?;
+        let slot = u8::try_from(slot_raw).map_err(|_| {
+            format!(
+                "discharge slot {} must be 1..{}, got {}",
+                index + 1,
+                max_slots,
+                slot_raw
+            )
+        })?;
+        if !(1..=max_slots).contains(&slot) {
+            return Err(format!(
+                "discharge slot {} is not supported on this inverter model (max {})",
+                slot, max_slots
+            ));
+        }
+        if !seen_slots.insert(slot) {
+            return Err(format!(
+                "discharge slot {} is specified more than once",
+                slot
+            ));
+        }
+
+        let enabled = match slot_obj.get("enabled") {
+            None => true,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| format!("discharge slot {} has an invalid 'enabled' value", slot))?,
+        };
+
+        let parse_u8_field = |field: &str, default: u8| -> Result<u8, String> {
+            let Some(value) = slot_obj.get(field) else {
+                return Ok(default);
+            };
+            let raw = value.as_u64().ok_or_else(|| {
+                format!("discharge slot {} has an invalid '{}' value", slot, field)
+            })?;
+            u8::try_from(raw).map_err(|_| {
+                format!(
+                    "discharge slot {} '{}' must be 0..255, got {}",
+                    slot, field, raw
+                )
+            })
+        };
+        let start_hour = parse_u8_field("start_hour", 0)?;
+        let start_minute = parse_u8_field("start_minute", 0)?;
+        let end_hour = parse_u8_field("end_hour", 0)?;
+        let end_minute = parse_u8_field("end_minute", 0)?;
+        let target_soc = parse_u8_field("target_soc", 100)?;
+
+        if start_hour > 23 || end_hour > 23 {
+            return Err(format!("discharge slot {} hour must be 0-23", slot));
+        }
+        if start_minute > 59 || end_minute > 59 {
+            return Err(format!("discharge slot {} minute must be 0-59", slot));
+        }
+        if target_soc > 100 {
+            return Err(format!("discharge slot {} target_soc must be 0-100", slot));
+        }
+        if enabled
+            && device_type.uses_extended_schedule_slots()
+            && target_soc != 0
+            && target_soc < 4
+        {
+            return Err(format!(
+                "discharge slot {} target_soc must be 4-100 or 0 to omit the target",
+                slot
+            ));
+        }
+
+        let start = encode_hhmm_for_write(start_hour, start_minute)?;
+        let end = encode_hhmm_for_write(end_hour, end_minute)?;
+        if enabled && start != end {
+            configured = true;
+        }
+
+        let cmd = discharge_slot_command_for_device(device_type, slot, enabled, start, end)
+            .map_err(|error| format!("discharge slot {}: {}", slot, error))?;
+        let mut slot_writes = cmd
+            .encode()
+            .map_err(|error| format!("discharge slot {}: {}", slot, error))?;
+
+        if enabled && target_soc > 0 && device_type.uses_extended_schedule_slots() {
+            let target_writes = ControlCommand::SetDischargeTargetSocSlot {
+                slot,
+                soc: target_soc as u16,
+            }
+            .encode()
+            .map_err(|error| format!("discharge slot {}: {}", slot, error))?;
+            slot_writes.extend(target_writes);
+        }
+        writes.extend(slot_writes);
+    }
+
+    if !configured {
+        return Err("discharge_slots must contain at least one configured slot".to_string());
+    }
+
+    Ok(writes)
+}
+
 /// Produce whitelist-validated register writes that clear both standard
 /// discharge slots (1 and 2) by setting them to 00:00–00:00 (disabled).
 /// Produce whitelist-validated register writes that clear **every**
@@ -259,8 +401,20 @@ fn restore_discharge_slot_writes(
         }
 
         let slot_num = (idx + 1) as u8;
-        let start = encode_hhmm(slot.start_hour, slot.start_minute);
-        let end = encode_hhmm(slot.end_hour, slot.end_minute);
+        let Some(start) = encode_hhmm(slot.start_hour, slot.start_minute) else {
+            tracing::warn!(
+                slot_num,
+                "Skipping backed-up discharge slot with invalid start time"
+            );
+            continue;
+        };
+        let Some(end) = encode_hhmm(slot.end_hour, slot.end_minute) else {
+            tracing::warn!(
+                slot_num,
+                "Skipping backed-up discharge slot with invalid end time"
+            );
+            continue;
+        };
 
         let cmd = match discharge_slot_command_for_device(
             device_type,
@@ -357,9 +511,12 @@ async fn capture_discharge_schedule_backup(
     // Transactional save (review #1 follow-up): holds the settings lock
     // across the read-modify-write so a concurrent writer can't clobber
     // this update.
-    if let Err(e) = crate::settings::Settings::update(|s| {
-        s.discharge_slots_backup = Some(backup.clone());
-    }) {
+    let backup_for_persist = backup.clone();
+    if let Err(e) = crate::settings::Settings::update_async(move |s| {
+        s.discharge_slots_backup = Some(backup_for_persist);
+    })
+    .await
+    {
         tracing::warn!(
             "Failed to persist discharge-slot backup, schedule may not round-trip on next Timed toggle: {e}"
         );
@@ -387,8 +544,8 @@ fn force_charge_slot_writes(
     let minutes = minutes.clamp(1, 1439);
     let start = Local::now();
     let end = start + ChronoDuration::minutes(minutes as i64);
-    let start_hhmm = encode_hhmm(start.hour() as u8, start.minute() as u8);
-    let end_hhmm = encode_hhmm(end.hour() as u8, end.minute() as u8);
+    let start_hhmm = encode_hhmm_for_write(start.hour() as u8, start.minute() as u8)?;
+    let end_hhmm = encode_hhmm_for_write(end.hour() as u8, end.minute() as u8)?;
     charge_slot_command_for_device(device_type, 1, true, start_hhmm, end_hhmm)?.encode()
 }
 
@@ -408,12 +565,12 @@ fn force_charge_slot_writes(
 fn force_discharge_slot_writes(
     device_type: DeviceType,
     minutes: u64,
+    start: DateTime<Local>,
 ) -> Result<Vec<RegisterWrite>, String> {
     let minutes = minutes.clamp(1, 1439);
-    let start = Local::now();
     let end = start + ChronoDuration::minutes(minutes as i64);
-    let start_hhmm = encode_hhmm(start.hour() as u8, start.minute() as u8);
-    let end_hhmm = encode_hhmm(end.hour() as u8, end.minute() as u8);
+    let start_hhmm = encode_hhmm_for_write(start.hour() as u8, start.minute() as u8)?;
+    let end_hhmm = encode_hhmm_for_write(end.hour() as u8, end.minute() as u8)?;
     let mut out = Vec::new();
     // Slot 1: now → now+minutes
     match discharge_slot_command_for_device(device_type, 1, true, start_hhmm, end_hhmm) {
@@ -496,8 +653,8 @@ async fn queue_owned_writes_with_completion(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
     owner: DischargeControlOwner,
-) -> tokio::sync::oneshot::Receiver<WriteOutcome> {
-    queue_writes_with_policy_completion(
+) -> (tokio::sync::oneshot::Receiver<WriteOutcome>, Duration) {
+    queue_writes_with_completion_budget(
         state,
         writes,
         WriteBatchPolicy::ContinueOnError,
@@ -513,8 +670,8 @@ async fn queue_owned_writes_transactional(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
     owner: DischargeControlOwner,
-) -> tokio::sync::oneshot::Receiver<WriteOutcome> {
-    queue_writes_with_policy_completion(
+) -> (tokio::sync::oneshot::Receiver<WriteOutcome>, Duration) {
+    queue_writes_with_completion_budget(
         state,
         writes,
         WriteBatchPolicy::FailFastTransactional,
@@ -540,8 +697,8 @@ async fn queue_owned_writes_transactional(
 async fn queue_writes_transactional(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
-) -> tokio::sync::oneshot::Receiver<WriteOutcome> {
-    queue_writes_with_policy_completion(
+) -> (tokio::sync::oneshot::Receiver<WriteOutcome>, Duration) {
+    queue_writes_with_completion_budget(
         state,
         writes,
         WriteBatchPolicy::FailFastTransactional,
@@ -571,15 +728,29 @@ async fn queue_writes_with_policy(
     state.write_notify.notify_one();
 }
 
-async fn queue_writes_with_policy_completion(
+/// Queue a completion-backed batch and return the outcome receiver together
+/// with a completion timeout scaled to the work ahead of it: the batch's own
+/// size plus every write already queued in front of it. Each write costs its
+/// 1.5 s inter-write pacing, so a user action queued behind an eco
+/// slot-clear batch would otherwise spuriously time out (and roll back)
+/// even though its registers are still progressing normally.
+async fn queue_writes_with_completion_budget(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
     policy: WriteBatchPolicy,
     owner: Option<DischargeControlOwner>,
-) -> tokio::sync::oneshot::Receiver<WriteOutcome> {
+) -> (tokio::sync::oneshot::Receiver<WriteOutcome>, Duration) {
+    let write_count = writes.len();
+    let queued_ahead: usize = state
+        .pending_writes
+        .lock()
+        .await
+        .iter()
+        .map(|batch| batch.writes.len())
+        .sum();
     let (tx, rx) = tokio::sync::oneshot::channel();
     queue_writes_with_policy(state, writes, policy, Some(tx), owner).await;
-    rx
+    (rx, batch_completion_timeout(queued_ahead + write_count))
 }
 
 /// How long to wait for the poll loop to finish executing a write batch
@@ -599,18 +770,8 @@ fn batch_completion_timeout(write_count: usize) -> Duration {
     WRITE_COMPLETION_TIMEOUT + Duration::from_millis(write_count as u64 * 1500)
 }
 
-/// Await the outcome of a write batch queued via
-/// [`queue_writes_with_completion`]. Returns `Ok(())` when every register was
-/// accepted, or `Err(message)` naming the first register the inverter
-/// rejected. A timeout is treated as success (see [`WRITE_COMPLETION_TIMEOUT`]).
-async fn await_write_outcome(
-    rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
-) -> Result<(), String> {
-    await_write_outcome_with_timeout(rx, WRITE_COMPLETION_TIMEOUT).await
-}
-
-/// Testable implementation of [`await_write_outcome`] with an injectable
-/// timeout. Production callers use [`WRITE_COMPLETION_TIMEOUT`]; tests can
+/// Testable implementation with an injectable timeout. Production callers
+/// pass [`WRITE_COMPLETION_TIMEOUT`] (or a batch-scaled budget); tests can
 /// exercise the slow-but-progressing fallback without waiting 15 seconds.
 async fn await_write_outcome_with_timeout(
     rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
@@ -640,23 +801,6 @@ async fn await_write_outcome_with_timeout(
 /// confirmation, a timeout is an error: callers must not persist or report a
 /// schedule whose required physical writes are still deferred. Dropping the
 /// receiver also tells a `FailFastTransactional` batch to cancel.
-async fn await_required_write_outcome(
-    rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
-) -> Result<(), String> {
-    await_required_write_outcome_with_timeout(rx, WRITE_COMPLETION_TIMEOUT).await
-}
-
-/// Await a required multi-register batch with enough time for the poll loop's
-/// mandatory inter-write pacing. Extended Timed Export schedules can contain
-/// dozens of slot and target-SOC writes, so the fixed base timeout is only
-/// suitable for short mode-transition batches.
-async fn await_required_batch_write_outcome(
-    rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
-    write_count: usize,
-) -> Result<(), String> {
-    await_required_write_outcome_with_timeout(rx, batch_completion_timeout(write_count)).await
-}
-
 async fn await_required_write_outcome_with_timeout(
     rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
     timeout: Duration,
@@ -823,8 +967,8 @@ fn build_force_charge_stop_writes(
         // explicit "no slot" value.
         let (start_h, start_m) = revert.charge_slot_1_start.unwrap_or((0, 0));
         let (end_h, end_m) = revert.charge_slot_1_end.unwrap_or((0, 0));
-        let start_hhmm = encode_hhmm(start_h, start_m);
-        let end_hhmm = encode_hhmm(end_h, end_m);
+        let start_hhmm = encode_hhmm_or_clear(start_h, start_m);
+        let end_hhmm = encode_hhmm_or_clear(end_h, end_m);
         writes.push(RegisterWrite {
             address: HR_CHARGE_SLOT_1_START,
             value: start_hhmm,
@@ -966,21 +1110,21 @@ fn build_force_discharge_stop_writes(
         let (e1h, e1m) = revert.discharge_slot_1_end.unwrap_or((0, 0));
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_1_START,
-            value: encode_hhmm(s1h, s1m),
+            value: encode_hhmm_or_clear(s1h, s1m),
         });
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_1_END,
-            value: encode_hhmm(e1h, e1m),
+            value: encode_hhmm_or_clear(e1h, e1m),
         });
         let (s2h, s2m) = revert.discharge_slot_2_start.unwrap_or((0, 0));
         let (e2h, e2m) = revert.discharge_slot_2_end.unwrap_or((0, 0));
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_2_START,
-            value: encode_hhmm(s2h, s2m),
+            value: encode_hhmm_or_clear(s2h, s2m),
         });
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_2_END,
-            value: encode_hhmm(e2h, e2m),
+            value: encode_hhmm_or_clear(e2h, e2m),
         });
 
         // Default to eco (1) on restore. `battery_power_mode` is not in the
@@ -1103,9 +1247,22 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     )
 }
 
+fn api_key_last4(api_key: &str) -> String {
+    api_key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
 /// GET /api/settings
 pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
+    let api_key_configured = !settings.api_key.is_empty();
+    let api_key_last4 = api_key_last4(&settings.api_key);
     (
         StatusCode::OK,
         Json(json!({
@@ -1141,7 +1298,10 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // an older settings.json simply reports them as off.
             "minimise_to_tray": settings.minimise_to_tray,
             "start_minimised": settings.start_minimised,
-            "api_key": settings.api_key,
+            // The read-only API key is secret. Return only metadata so an
+            // unauthenticated main-server request cannot exfiltrate it.
+            "api_key_configured": api_key_configured,
+            "api_key_last4": api_key_last4,
             "api_port": settings.api_port,
             // Issue #137: surface the discharge-slot backup so the frontend
             // can stage it as pending edits after a Timed→Eco round-trip.
@@ -1224,20 +1384,26 @@ pub async fn update_settings(
     // nothing). The closure returns the post-mutation snapshot for the
     // log/response block below — captured under the lock, so it cannot
     // race with a concurrent writer the way a post-save load() would.
-    let save_result = crate::settings::Settings::try_update(|persist| {
-        if !incoming.host.is_empty() {
-            persist.host = incoming.host.clone();
+    // Serialize the persistence commit with the runtime mirror update. This
+    // prevents two handlers from applying their post-await snapshots out of
+    // order (notably EVC host/port settings).
+    let mut settings = state.settings.lock().await;
+    let incoming_for_update = incoming.clone();
+    let body_for_response = body.clone();
+    let save_result = crate::settings::Settings::try_update_async(move |persist| {
+        if !incoming_for_update.host.is_empty() {
+            persist.host = incoming_for_update.host.clone();
         }
-        persist.port = if incoming.port != 0 {
-            incoming.port
+        persist.port = if incoming_for_update.port != 0 {
+            incoming_for_update.port
         } else {
             persist.port
         };
-        if !incoming.serial.is_empty() || body.get("serial").is_some() {
-            persist.serial = incoming.serial.clone();
+        if !incoming_for_update.serial.is_empty() || body.get("serial").is_some() {
+            persist.serial = incoming_for_update.serial.clone();
         }
-        if incoming.interval_secs > 0 {
-            persist.poll_interval = incoming.interval_secs;
+        if incoming_for_update.interval_secs > 0 {
+            persist.poll_interval = incoming_for_update.interval_secs;
         }
         persist.auto_connect = true;
         // Tariff fields: only write the field if it was actually present
@@ -1270,8 +1436,8 @@ pub async fn update_settings(
         if let Some(ref cfg) = export_tariff_config {
             persist.export_tariff_config = Some(cfg.clone());
         }
-        if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
-            persist.http_port = hp.min(u16::MAX as u64) as u16;
+        if let Some(value) = body.get("http_port") {
+            persist.http_port = parse_u16_json(value, "http_port")?;
         }
         if let Some(enabled) = body.get("octopus_enabled").and_then(|v| v.as_bool()) {
             persist.octopus_enabled = enabled;
@@ -1321,8 +1487,8 @@ pub async fn update_settings(
         if let Some(evc_host) = body.get("evc_host").and_then(|v| v.as_str()) {
             persist.evc_host = evc_host.to_string();
         }
-        if let Some(evc_port) = body.get("evc_port").and_then(|v| v.as_u64()) {
-            persist.evc_port = evc_port.min(u16::MAX as u64) as u16;
+        if let Some(value) = body.get("evc_port") {
+            persist.evc_port = parse_u16_json(value, "evc_port")?;
         }
         if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
             persist.disable_auto_discovery = d;
@@ -1355,8 +1521,8 @@ pub async fn update_settings(
         if let Some(k) = body.get("api_key").and_then(|v| v.as_str()) {
             persist.api_key = k.to_string();
         }
-        if let Some(p) = body.get("api_port").and_then(|v| v.as_u64()) {
-            persist.api_port = p.min(u16::MAX as u64) as u16;
+        if let Some(value) = body.get("api_port") {
+            persist.api_port = parse_u16_json(value, "api_port")?;
         }
         // Issue #110: solar array capacities for "% of max" display. Negative
         // ratings are clamped to 0 (a negative array size is nonsensical and
@@ -1433,7 +1599,8 @@ pub async fn update_settings(
         // We must clone here because the closure's `persist` is dropped
         // when the lock is released at the end of Settings::update.
         Ok(persist.clone())
-    });
+    })
+    .await;
     // Outer Err = lock/save failure (500); inner Err = validation
     // rejection (400, nothing persisted); Ok = saved, snapshot returned.
     let persist_for_log = match save_result {
@@ -1447,7 +1614,7 @@ pub async fn update_settings(
     // request body). The snapshot was captured inside the closure above
     // — no post-save Settings::load() that could race with a concurrent
     // writer (review #1 follow-up).
-    let fields = settings_log_fields(&body, &persist_for_log);
+    let fields = settings_log_fields(&body_for_response, &persist_for_log);
     let msg = if fields.is_empty() {
         "Settings updated: (no fields in request body)".to_string()
     } else {
@@ -1470,9 +1637,9 @@ pub async fn update_settings(
     // Adding a new solar-derived setting means extending BOTH this
     // condition and the poll loop's stamping, or saves of the new field
     // won't restamp the current snapshot.
-    if body.get("pv1_rated_kw").is_some()
-        || body.get("pv2_rated_kw").is_some()
-        || body.get("solar_arrays").is_some()
+    if body_for_response.get("pv1_rated_kw").is_some()
+        || body_for_response.get("pv2_rated_kw").is_some()
+        || body_for_response.get("solar_arrays").is_some()
     {
         let mut snapshot = state.latest_snapshot.lock().await;
         if let Some(snap) = snapshot.as_mut() {
@@ -1483,13 +1650,13 @@ pub async fn update_settings(
 
     let response = ok_response(&msg);
 
-    // Now that disk is updated, apply changes to the in-memory state.
-    // Lock is held briefly — no file I/O while holding it.
-    let mut settings = state.settings.lock().await;
-
+    // Now that disk is updated, apply changes to the in-memory state while the
+    // commit lock above is still held.
     let prev_host = settings.host.clone();
     let prev_port = settings.port;
     let prev_serial = settings.serial.clone();
+    let prev_evc_host = settings.evc_host.clone();
+    let prev_evc_port = settings.evc_port;
 
     if !incoming.host.is_empty() {
         settings.host = incoming.host.clone();
@@ -1499,7 +1666,7 @@ pub async fn update_settings(
     } else {
         settings.port
     };
-    if !incoming.serial.is_empty() || body.get("serial").is_some() {
+    if !incoming.serial.is_empty() || body_for_response.get("serial").is_some() {
         settings.serial = incoming.serial.clone();
     }
     if incoming.interval_secs > 0 {
@@ -1512,9 +1679,11 @@ pub async fn update_settings(
     settings.evc_host = persist_for_log.evc_host.clone();
     settings.evc_port = persist_for_log.evc_port;
     settings.disable_auto_discovery = persist_for_log.disable_auto_discovery;
+    settings.write_pacing_ms = persist_for_log.write_pacing_ms;
 
     let connection_changed =
         settings.host != prev_host || settings.port != prev_port || settings.serial != prev_serial;
+    let evc_changed = settings.evc_host != prev_evc_host || settings.evc_port != prev_evc_port;
 
     if connection_changed {
         settings.version = settings.version.wrapping_add(1);
@@ -1524,6 +1693,10 @@ pub async fn update_settings(
     }
 
     drop(settings);
+
+    if evc_changed {
+        crate::evc::reset_evc_state(&state).await;
+    }
 
     response
 }
@@ -1687,10 +1860,185 @@ fn validate_dongle_serial(serial: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_finite_threshold_value(value: f64, field: &str) -> Result<f64, String> {
+    if !value.is_finite() {
+        return Err(format!("{field} must be finite"));
+    }
+    Ok(value)
+}
+
+fn validate_finite_range(value: f64, field: &str, min: f64, max: f64) -> Result<f64, String> {
+    let value = validate_finite_threshold_value(value, field)?;
+    if !(min..=max).contains(&value) {
+        return Err(format!("{field} must be between {min} and {max}"));
+    }
+    Ok(value)
+}
+
+fn parse_optional_f64_threshold(
+    body: &Value,
+    field: &str,
+    min: f64,
+    max: f64,
+) -> Result<Option<f64>, String> {
+    let Some(value) = body.get(field) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_f64()
+        .ok_or_else(|| format!("{field} must be a finite number"))?;
+    Ok(Some(validate_finite_range(value, field, min, max)?))
+}
+
+fn parse_optional_finite_threshold(
+    body: &Value,
+    field: &str,
+    min: f64,
+    max: f64,
+) -> Result<Option<f32>, String> {
+    parse_optional_f64_threshold(body, field, min, max)?.map_or(Ok(None), |value| {
+        let value = value as f32;
+        if !value.is_finite() {
+            return Err(format!("{field} must be representable as a finite number"));
+        }
+        Ok(Some(value))
+    })
+}
+
+fn parse_optional_clamped_threshold(
+    body: &Value,
+    field: &str,
+    min: f64,
+    max: f64,
+) -> Result<Option<f32>, String> {
+    let Some(value) = body.get(field) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_f64()
+        .ok_or_else(|| format!("{field} must be a finite number"))?;
+    let value = validate_finite_threshold_value(value, field)?.clamp(min, max) as f32;
+    Ok(Some(value))
+}
+
+fn parse_optional_clamped_integer(
+    body: &Value,
+    field: &str,
+    max: u64,
+) -> Result<Option<u8>, String> {
+    let Some(value) = body.get(field) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_u64()
+        .ok_or_else(|| format!("{field} must be an integer between 0 and {max}"))?;
+    Ok(Some(value.min(max) as u8))
+}
+
+fn validate_auto_winter_thresholds(cold: f32, recovery: f32) -> Result<(), String> {
+    let cold = validate_finite_range(cold as f64, "cold_threshold", 0.0, 20.0)?;
+    let recovery = validate_finite_range(recovery as f64, "recovery_threshold", 1.0, 25.0)?;
+    if recovery <= cold {
+        return Err("recovery_threshold must be above cold_threshold".to_string());
+    }
+    Ok(())
+}
+
+fn validate_agile_thresholds(charge: f64, discharge: f64) -> Result<(), String> {
+    let charge = validate_finite_range(charge, "charge_threshold", 0.0, 50.0)?;
+    let discharge = validate_finite_range(discharge, "discharge_threshold", 5.0, 100.0)?;
+    if charge >= discharge {
+        return Err("charge_threshold must be below discharge_threshold".to_string());
+    }
+    Ok(())
+}
+
+fn validate_alert_threshold_pair(
+    low: f32,
+    high: f32,
+    low_field: &str,
+    high_field: &str,
+) -> Result<(), String> {
+    let low = validate_finite_threshold_value(low as f64, low_field)?;
+    let high = validate_finite_threshold_value(high as f64, high_field)?;
+    // Zero disables either alert. When both sides are active, preserve a
+    // real hysteresis band instead of making every reading trigger one side.
+    if low > 0.0 && high > 0.0 && low >= high {
+        return Err(format!("{low_field} must be below {high_field}"));
+    }
+    Ok(())
+}
+
+fn validate_alert_thresholds(config: &crate::settings::AlertsConfig) -> Result<(), String> {
+    validate_alert_threshold_pair(
+        config.batt_temp_min,
+        config.batt_temp_max,
+        "batt_temp_min",
+        "batt_temp_max",
+    )?;
+    validate_alert_threshold_pair(
+        config.inverter_temp_min,
+        config.inverter_temp_max,
+        "inverter_temp_min",
+        "inverter_temp_max",
+    )?;
+    if config.soc_min > 0 && config.soc_max < 100 && config.soc_min >= config.soc_max {
+        return Err("soc_min must be below soc_max".to_string());
+    }
+    Ok(())
+}
+
+fn parse_u16_json(value: &Value, field: &str) -> Result<u16, String> {
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{field} must be an integer between 0 and {}", u16::MAX))?;
+    u16::try_from(raw).map_err(|_| format!("{field} must be between 0 and {}, got {raw}", u16::MAX))
+}
+
+fn parse_optional_u8(value: Option<&Value>, field: &str, default: u8) -> Result<u8, String> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{field} must be an integer between 0 and 255"))?;
+    u8::try_from(raw).map_err(|_| format!("{field} must be between 0 and 255, got {raw}"))
+}
+
+fn parse_slot_times(body: &Value) -> Result<(u8, u8, u8, u8), String> {
+    let start_hour = parse_optional_u8(body.get("start_hour"), "start_hour", 0)?;
+    let start_minute = parse_optional_u8(body.get("start_minute"), "start_minute", 0)?;
+    let end_hour = parse_optional_u8(body.get("end_hour"), "end_hour", 0)?;
+    let end_minute = parse_optional_u8(body.get("end_minute"), "end_minute", 0)?;
+    if start_hour > 23 || end_hour > 23 {
+        return Err("Hour must be 0-23".to_string());
+    }
+    if start_minute > 59 || end_minute > 59 {
+        return Err("Minute must be 0-59".to_string());
+    }
+    Ok((start_hour, start_minute, end_hour, end_minute))
+}
+
+fn parse_soc_json(value: &Value, field: &str) -> Result<u8, String> {
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{field} must be an integer between 4 and 100"))?;
+    if !(4..=100).contains(&raw) {
+        return Err(format!("{field} must be between 4 and 100, got {raw}"));
+    }
+    u8::try_from(raw).map_err(|_| format!("{field} must be between 4 and 100, got {raw}"))
+}
+
+fn parse_optional_soc(value: Option<&Value>, field: &str, default: u8) -> Result<u8, String> {
+    value.map_or(Ok(default), |value| parse_soc_json(value, field))
+}
+
 fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
     let host = body["host"].as_str().unwrap_or("").to_string();
-    let port_raw = body.get("port").and_then(|v| v.as_u64());
-    let port = port_raw.unwrap_or(0) as u16;
+    let port = match body.get("port") {
+        Some(value) => parse_u16_json(value, "port")?,
+        None => 0,
+    };
     let serial = body["serial"].as_str().unwrap_or("").to_string();
     validate_dongle_serial(&serial)?;
     // Only overwrite interval if explicitly provided; otherwise keep current value.
@@ -1723,6 +2071,7 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
         evc_host: String::new(), // merged from disk settings separately
         evc_port: 502,
         disable_auto_discovery,
+        write_pacing_ms: 1500, // synced from disk settings by the caller
     })
 }
 
@@ -1781,8 +2130,11 @@ pub async fn set_mode(
     // reserve rather than silently resetting it to the 4% default — the same
     // omit-default clobber class as the 0.74.10 charge-slot `target_soc` fix.
     // An explicit value always wins.
-    let soc_reserve = match body["soc_reserve"].as_u64() {
-        Some(v) => v as u16,
+    let soc_reserve = match body.get("soc_reserve") {
+        Some(value) => match parse_soc_json(value, "soc_reserve") {
+            Ok(value) => u16::from(value),
+            Err(error) => return error_response(&error),
+        },
         None => state
             .latest_snapshot
             .lock()
@@ -1795,6 +2147,27 @@ pub async fn set_mode(
     };
 
     let is_timed = mode_str == "timed_demand" || mode_str == "timed_export";
+
+    // Validate an explicit Timed Demand schedule before changing the managed
+    // schedule state or encoding the mode command. Every slot must be valid;
+    // silently dropping a malformed slot could otherwise leave the later
+    // HR59=1 mode write armed with no real discharge window.
+    let explicit_timed_demand_slot_writes = if mode_str == "timed_demand" {
+        match body.get("discharge_slots") {
+            Some(value) => {
+                let device_type = latest_device_type(&state).await;
+                match parse_timed_mode_discharge_slots(device_type, value) {
+                    Ok(writes) => Some(writes),
+                    Err(error) => {
+                        return error_response(&format!("Invalid discharge_slots: {error}"));
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
 
     // Issue #289 / code-review finding: `mode=timed_export` must not bypass
     // the HEM-managed schedule. The raw `SetTimedExportMode` command writes
@@ -1834,7 +2207,7 @@ pub async fn set_mode(
         // before the mode batch lands, the restart resumes the exit — and a
         // crash can never leave the marker and the schedule disagreeing.
         if let Err(error) =
-            persist_timed_export_schedule_with_stop_pending(&state, false, slots, true).await
+            persist_timed_export_schedule_with_stop_pending(&state, false, slots, false).await
         {
             return error_response(&format!(
                 "Could not save the Timed Export schedule: {error}"
@@ -1937,68 +2310,8 @@ pub async fn set_mode(
             // overrides any stale snapshot from earlier in the day.
             if is_timed {
                 let device_type = latest_device_type(&state).await;
-                if let Some(slots) = body["discharge_slots"].as_array() {
+                if let Some(slot_writes) = explicit_timed_demand_slot_writes {
                     // Prepend slot writes before the mode writes.
-                    let mut slot_writes = Vec::new();
-                    for slot_obj in slots {
-                        let slot_num = match slot_obj["slot"].as_u64() {
-                            Some(s) => s as u8,
-                            None => continue,
-                        };
-                        let enabled = slot_obj["enabled"].as_bool().unwrap_or(true);
-                        let start_hour = slot_obj["start_hour"].as_u64().unwrap_or(0) as u8;
-                        let start_minute = slot_obj["start_minute"].as_u64().unwrap_or(0) as u8;
-                        let end_hour = slot_obj["end_hour"].as_u64().unwrap_or(0) as u8;
-                        let end_minute = slot_obj["end_minute"].as_u64().unwrap_or(0) as u8;
-                        let target_soc = slot_obj["target_soc"].as_u64().unwrap_or(100) as u8;
-
-                        let (start, end) = (
-                            encode_hhmm(start_hour, start_minute),
-                            encode_hhmm(end_hour, end_minute),
-                        );
-
-                        let cmd = match discharge_slot_command_for_device(
-                            device_type,
-                            slot_num,
-                            enabled,
-                            start,
-                            end,
-                        ) {
-                            Ok(cmd) => cmd,
-                            Err(e) => {
-                                tracing::warn!("Skipping discharge slot {}: {}", slot_num, e);
-                                continue;
-                            }
-                        };
-
-                        match cmd.encode() {
-                            Ok(mut w) => {
-                                // Write per-slot discharge target SOC for extended models.
-                                if enabled
-                                    && target_soc > 0
-                                    && device_type.uses_extended_schedule_slots()
-                                {
-                                    if let Ok(target_writes) =
-                                        (ControlCommand::SetDischargeTargetSocSlot {
-                                            slot: slot_num,
-                                            soc: target_soc as u16,
-                                        }
-                                        .encode())
-                                    {
-                                        w.extend(target_writes);
-                                    }
-                                }
-                                slot_writes.extend(w);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to encode discharge slot {}: {}",
-                                    slot_num,
-                                    e
-                                );
-                            }
-                        }
-                    }
                     // Slot writes go FIRST so they're on the inverter before
                     // HR59=1 is set.
                     let mut combined = slot_writes;
@@ -2012,7 +2325,7 @@ pub async fn set_mode(
                     // 2877466 pattern in `set_timed_export`). Until then
                     // the backup must stay on disk so a rejected write
                     // doesn't silently destroy the user's schedule.
-                    let settings = crate::settings::Settings::load();
+                    let settings = crate::settings::Settings::load_async().await;
                     if let Some(backup) = settings.discharge_slots_backup.as_ref() {
                         if let Some(slot_writes) =
                             restore_discharge_slot_writes(device_type, backup)
@@ -2032,23 +2345,25 @@ pub async fn set_mode(
             if restoring_backup {
                 // Await confirmation before consuming the #137 backup
                 // (same invariant as set_timed_export, see 2877466).
-                let rx = queue_writes_with_policy_completion(
+                let (rx, budget) = queue_writes_with_completion_budget(
                     &state,
                     writes,
                     WriteBatchPolicy::ContinueOnError,
                     Some(owner),
                 )
                 .await;
-                match await_write_outcome(rx).await {
+                match await_write_outcome_with_timeout(rx, budget).await {
                     Ok(()) => {
                         // Transactional save (review #1 follow-up): the
                         // backup clear happens under the settings lock so
                         // a concurrent writer can't sneak a backup-reseed
                         // in between our read and our save. Matches the
                         // pattern in set_timed_export.
-                        if let Err(e) = crate::settings::Settings::update(|s| {
+                        if let Err(e) = crate::settings::Settings::update_async(|s| {
                             s.discharge_slots_backup = None;
-                        }) {
+                        })
+                        .await
+                        {
                             tracing::warn!(
                                 "Failed to clear discharge-slot backup after set_mode restore: {e}"
                             );
@@ -2289,9 +2604,10 @@ async fn persist_timed_export_schedule_with_backup_clear(
     clear_backup: bool,
     stop_pending: Option<bool>,
 ) -> Result<(), String> {
-    crate::settings::Settings::update(|s| {
+    let slots_for_update = slots.clone();
+    crate::settings::Settings::update_async(move |s| {
         s.timed_export_schedule_enabled = schedule_enabled;
-        s.timed_export_slots = slots.clone();
+        s.timed_export_slots = slots_for_update;
         if clear_backup {
             s.discharge_slots_backup = None;
         }
@@ -2299,6 +2615,7 @@ async fn persist_timed_export_schedule_with_backup_clear(
             s.timed_export_stop_pending = pending;
         }
     })
+    .await
     .map_err(|error| error.to_string())?;
     if let Some(pending) = stop_pending {
         state
@@ -2363,8 +2680,11 @@ async fn compensate_discharge_slots(
     tracing::warn!(
         "Timed Export slot {slot}: queueing {count} compensation write(s) to restore the prior physical schedule"
     );
-    let rx = queue_writes_transactional(state, writes).await;
-    if await_required_batch_write_outcome(rx, count).await.is_ok() {
+    let (rx, budget) = queue_writes_transactional(state, writes).await;
+    if await_required_write_outcome_with_timeout(rx, budget)
+        .await
+        .is_ok()
+    {
         return Ok(());
     }
     tracing::error!(
@@ -2373,13 +2693,13 @@ async fn compensate_discharge_slots(
     );
     // Best-effort disarm so a corrupted physical window cannot keep
     // exporting against unexpected times.
-    let rx = queue_owned_writes_transactional(
+    let (rx, budget) = queue_owned_writes_transactional(
         state,
         crate::inverter::state_machines::build_timed_export_disable_writes(device_type),
         DischargeControlOwner::ManualMode,
     )
     .await;
-    if let Err(disarm_msg) = await_required_write_outcome(rx).await {
+    if let Err(disarm_msg) = await_required_write_outcome_with_timeout(rx, budget).await {
         tracing::error!(
             "Timed Export slot {slot}: disarm after failed compensation also failed: {disarm_msg}"
         );
@@ -2465,6 +2785,17 @@ pub async fn set_timed_export(
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     let enabled = body["enabled"].as_bool().unwrap_or(true);
+    let requested_soc_reserve = if enabled {
+        match body.get("soc_reserve") {
+            Some(value) => match parse_soc_json(value, "soc_reserve") {
+                Ok(value) => Some(u16::from(value)),
+                Err(error) => return error_response(&error),
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
     // Serialise the whole enable or disable against every other Timed
     // Export mutation (slot edits, backup-restore, test reset) so the
     // poll loop cannot interleave between a clone of the desired schedule
@@ -2525,7 +2856,7 @@ pub async fn set_timed_export(
             {
                 desired_slots = live_slots;
             } else {
-                let settings = crate::settings::Settings::load();
+                let settings = crate::settings::Settings::load_async().await;
                 match settings.discharge_slots_backup.clone() {
                     Some(backup) => {
                         if restore_discharge_slot_writes(device_type, &backup).is_none() {
@@ -2578,8 +2909,8 @@ pub async fn set_timed_export(
             device_type,
             &desired_slots,
         );
-        let reserve_writes = if let Some(soc) = body["soc_reserve"].as_u64() {
-            match reserve_writes_for_device(device_type, soc as u16) {
+        let reserve_writes = if let Some(soc) = requested_soc_reserve {
+            match reserve_writes_for_device(device_type, soc) {
                 Ok(writes) => writes,
                 Err(error) => return error_response(&format!("Validation error: {error}")),
             }
@@ -2587,9 +2918,8 @@ pub async fn set_timed_export(
             Vec::new()
         };
         if (!rearm_confirmed || arm_now) && !slot_writes.is_empty() {
-            let write_count = slot_writes.len();
-            let rx = queue_writes_transactional(&state, slot_writes).await;
-            if let Err(msg) = await_required_batch_write_outcome(rx, write_count).await {
+            let (rx, budget) = queue_writes_transactional(&state, slot_writes).await;
+            if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                 tracing::warn!("Timed Export slot restore rejected: {msg}");
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -2611,13 +2941,13 @@ pub async fn set_timed_export(
                 "SetTimedExport reserve writes encoded: {:?}",
                 reserve_writes
             );
-            let rx = queue_owned_writes_transactional(
+            let (rx, budget) = queue_owned_writes_transactional(
                 &state,
                 reserve_writes,
                 DischargeControlOwner::TimedExport,
             )
             .await;
-            if let Err(msg) = await_required_write_outcome(rx).await {
+            if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                 tracing::warn!("Timed Export reserve write rejected: {msg}");
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -2647,13 +2977,13 @@ pub async fn set_timed_export(
                 // User-issued Eco restore (the user just enabled a future
                 // window): queue as ManualMode so a register-derived
                 // ExplicitPause cannot starve it (see the stop path).
-                let rx = queue_owned_writes_transactional(
+                let (rx, budget) = queue_owned_writes_transactional(
                     &state,
                     eco_writes,
                     DischargeControlOwner::ManualMode,
                 )
                 .await;
-                if let Err(msg) = await_required_write_outcome(rx).await {
+                if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                     tracing::warn!("Timed Export Eco baseline restore rejected: {msg}");
                     return (
                         StatusCode::BAD_GATEWAY,
@@ -2700,13 +3030,13 @@ pub async fn set_timed_export(
                 ),
             );
             tracing::info!("SetTimedExport arm encoded: {:?}", arm_writes);
-            let rx = queue_owned_writes_transactional(
+            let (rx, budget) = queue_owned_writes_transactional(
                 &state,
                 arm_writes,
                 DischargeControlOwner::TimedExport,
             )
             .await;
-            if let Err(msg) = await_required_write_outcome(rx).await {
+            if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                 tracing::warn!("Timed Export arm rejected: {msg}");
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -2774,13 +3104,8 @@ pub async fn set_timed_export(
 
         if !slot_clear_writes.is_empty() {
             tracing::info!("SetTimedExport slot-clear encoded: {:?}", slot_clear_writes);
-            let rx = queue_writes_transactional(&state, slot_clear_writes.clone()).await;
-            if let Err(msg) = await_required_write_outcome_with_timeout(
-                rx,
-                batch_completion_timeout(slot_clear_writes.len()),
-            )
-            .await
-            {
+            let (rx, budget) = queue_writes_transactional(&state, slot_clear_writes.clone()).await;
+            if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                 tracing::warn!("Timed Export stop failed clearing slots: {msg}");
                 // CODE_REVIEW.md finding 2: the writes failed after the
                 // schedule was persisted disabled, so the reconciler must
@@ -2820,13 +3145,13 @@ pub async fn set_timed_export(
         // drain within one poll cycle against every derived state.
         // Entering export (the arm batch) keeps the TimedExport owner
         // so an explicit pause still blocks it (issue #289).
-        let rx = queue_owned_writes_transactional(
+        let (rx, budget) = queue_owned_writes_transactional(
             &state,
             disarm_writes,
             DischargeControlOwner::ManualMode,
         )
         .await;
-        if let Err(msg) = await_required_write_outcome(rx).await {
+        if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
             tracing::warn!("Timed Export stop failed disarming: {msg}");
             // CODE_REVIEW.md finding 2: the disarm failed after the
             // schedule was persisted disabled — arm the reconciler into
@@ -2891,13 +3216,15 @@ pub async fn test_reset(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     // mutation completes.
     let _timed_export_action = state.timed_export_action_lock.lock().await;
 
-    if let Err(error) = crate::settings::Settings::update(|s| {
+    if let Err(error) = crate::settings::Settings::update_async(|s| {
         s.timed_export_schedule_enabled = false;
         s.timed_export_slots = Vec::new();
         s.timed_export_slots_require_clear = false;
         s.discharge_slots_backup = None;
         s.timed_export_stop_pending = false;
-    }) {
+    })
+    .await
+    {
         return error_response(&format!("Could not reset settings: {error}"));
     }
     state
@@ -2962,18 +3289,18 @@ pub async fn set_timed_discharge(
     let mut writes = Vec::new();
 
     if enabled {
-        let start_hour = body["start_hour"].as_u64().unwrap_or(0) as u8;
-        let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
-        let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
-        let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
-        if start_hour > 23 || end_hour > 23 {
-            return error_response("Hour must be 0-23");
-        }
-        if start_minute > 59 || end_minute > 59 {
-            return error_response("Minute must be 0-59");
-        }
-        let pause_start = encode_hhmm(end_hour, end_minute);
-        let pause_end = encode_hhmm(start_hour, start_minute);
+        let (start_hour, start_minute, end_hour, end_minute) = match parse_slot_times(&body) {
+            Ok(times) => times,
+            Err(error) => return error_response(&error),
+        };
+        let pause_start = match encode_hhmm_for_write(end_hour, end_minute) {
+            Ok(value) => value,
+            Err(error) => return error_response(&error),
+        };
+        let pause_end = match encode_hhmm_for_write(start_hour, start_minute) {
+            Ok(value) => value,
+            Err(error) => return error_response(&error),
+        };
         for cmd in [
             ControlCommand::SetPauseSlot {
                 start: pause_start,
@@ -3057,7 +3384,7 @@ pub async fn set_charge_slot(
         },
     };
     if enabled && requested_charge_rate_pct.is_some() {
-        let settings = crate::settings::Settings::load();
+        let settings = crate::settings::Settings::load_async().await;
         if settings.adaptive_charge_enabled || settings.adaptive_charge_saved_limit.is_some() {
             return (
                 StatusCode::CONFLICT,
@@ -3069,10 +3396,10 @@ pub async fn set_charge_slot(
         }
     }
 
-    let start_hour = body["start_hour"].as_u64().unwrap_or(0) as u8;
-    let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
-    let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
-    let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
+    let (start_hour, start_minute, end_hour, end_minute) = match parse_slot_times(&body) {
+        Ok(times) => times,
+        Err(error) => return error_response(&error),
+    };
     // Target SOC semantics: an explicit value always wins. When omitted, do
     // NOT silently default to 100 ("no limit") — that disarms any armed
     // charge target via the `target_soc >= 100` branch below (HR 20 cleared,
@@ -3082,8 +3409,11 @@ pub async fn set_charge_slot(
     // unambiguous: the decoder clamps HR 116 to [4,100] with 4 meaning
     // "unset/minimum" (raw 0 → 4), and a decoded 100 already means no-limit,
     // which is the old default anyway.
-    let target_soc = match body["target_soc"].as_u64() {
-        Some(explicit) => explicit.clamp(4, 100) as u8,
+    let target_soc = match body.get("target_soc") {
+        Some(explicit) => match parse_soc_json(explicit, "target_soc") {
+            Ok(target_soc) => target_soc,
+            Err(error) => return error_response(&error),
+        },
         None => {
             let armed = state
                 .latest_snapshot
@@ -3110,10 +3440,13 @@ pub async fn set_charge_slot(
         return error_response("Minute must be 0-59");
     }
 
-    let (start, end) = (
-        encode_hhmm(start_hour, start_minute),
-        encode_hhmm(end_hour, end_minute),
-    );
+    let (start, end) = match (
+        encode_hhmm_for_write(start_hour, start_minute),
+        encode_hhmm_for_write(end_hour, end_minute),
+    ) {
+        (Ok(start), Ok(end)) => (start, end),
+        (Err(error), _) | (_, Err(error)) => return error_response(&error),
+    };
 
     match build_charge_slot_writes(
         device_type,
@@ -3310,10 +3643,10 @@ pub async fn set_discharge_slot(
 
     let enabled = body["enabled"].as_bool().unwrap_or(true);
 
-    let start_hour = body["start_hour"].as_u64().unwrap_or(0) as u8;
-    let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
-    let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
-    let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
+    let (start_hour, start_minute, end_hour, end_minute) = match parse_slot_times(&body) {
+        Ok(times) => times,
+        Err(error) => return error_response(&error),
+    };
     // An omitted `target_soc` must preserve the per-slot discharge floor
     // rather than silently writing the inert 100 ("never discharge")
     // default — same omit-default clobber class as the charge-slot fix.
@@ -3321,8 +3654,11 @@ pub async fn set_discharge_slot(
     // under the re-arm fallback the physical registers are zero), then
     // the live snapshot. Only a real configured floor (4-99) is preserved;
     // an explicit value always wins.
-    let target_soc = match body["target_soc"].as_u64() {
-        Some(v) => v as u8,
+    let target_soc = match body.get("target_soc") {
+        Some(value) => match parse_soc_json(value, "target_soc") {
+            Ok(target_soc) => target_soc,
+            Err(error) => return error_response(&error),
+        },
         None => {
             let desired = state
                 .timed_export_config
@@ -3354,10 +3690,13 @@ pub async fn set_discharge_slot(
         return error_response("Minute must be 0-59");
     }
 
-    let (start, end) = (
-        encode_hhmm(start_hour, start_minute),
-        encode_hhmm(end_hour, end_minute),
-    );
+    let (start, end) = match (
+        encode_hhmm_for_write(start_hour, start_minute),
+        encode_hhmm_for_write(end_hour, end_minute),
+    ) {
+        (Ok(start), Ok(end)) => (start, end),
+        (Err(error), _) | (_, Err(error)) => return error_response(&error),
+    };
     if enabled && start == end {
         return error_response("Start and end times must differ for an enabled Timed Export slot");
     }
@@ -3504,9 +3843,9 @@ pub async fn set_discharge_slot(
                     writes
                 };
                 if (!rearm_confirmed || arm_now) && !physical_slot_writes.is_empty() {
-                    let write_count = physical_slot_writes.len();
-                    let rx = queue_writes_transactional(&state, physical_slot_writes).await;
-                    if let Err(msg) = await_required_batch_write_outcome(rx, write_count).await {
+                    let (rx, budget) =
+                        queue_writes_transactional(&state, physical_slot_writes).await;
+                    if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                         tracing::warn!("Timed Export slot {slot} write failed: {msg}");
                         // The batch was rejected mid-way: earlier registers
                         // are already physically written (e.g. a new slot
@@ -3587,13 +3926,13 @@ pub async fn set_discharge_slot(
                         ),
                     );
                     tracing::info!("SetDischargeSlot {} arm encoded: {:?}", slot, arm_writes);
-                    let rx = queue_owned_writes_transactional(
+                    let (rx, budget) = queue_owned_writes_transactional(
                         &state,
                         arm_writes,
                         DischargeControlOwner::TimedExport,
                     )
                     .await;
-                    if let Err(msg) = await_required_write_outcome(rx).await {
+                    if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                         tracing::warn!("Timed Export arm failed after saving slot {slot}: {msg}");
                         return (
                             StatusCode::BAD_GATEWAY,
@@ -3623,7 +3962,7 @@ pub async fn set_discharge_slot(
                         // register-derived ExplicitPause cannot starve it
                         // (see the stop path and the poll.rs admission
                         // matrix).
-                        let rx = queue_owned_writes_transactional(
+                        let (rx, budget) = queue_owned_writes_transactional(
                             &state,
                             crate::inverter::state_machines::build_timed_export_disable_writes(
                                 device_type,
@@ -3631,7 +3970,9 @@ pub async fn set_discharge_slot(
                             DischargeControlOwner::ManualMode,
                         )
                         .await;
-                        if let Err(msg) = await_required_write_outcome(rx).await {
+                        if let Err(msg) =
+                            await_required_write_outcome_with_timeout(rx, budget).await
+                        {
                             tracing::warn!(
                                 "Timed Export Eco baseline restore failed after saving slot {slot}: {msg}"
                             );
@@ -3722,10 +4063,9 @@ pub async fn set_discharge_slot(
                 )
                 .await;
 
-                let write_count = writes.len();
                 tracing::info!("SetDischargeSlot {} clear encoded: {:?}", slot, writes);
-                let rx = queue_writes_transactional(&state, writes).await;
-                if let Err(msg) = await_required_batch_write_outcome(rx, write_count).await {
+                let (rx, budget) = queue_writes_transactional(&state, writes).await;
+                if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                     tracing::warn!("Timed Export slot {slot} clear failed: {msg}");
                     // The batch was rejected mid-way: some of its registers
                     // are already physically written, so first compensate the
@@ -3795,13 +4135,13 @@ pub async fn set_discharge_slot(
                         slot,
                         disarm_writes
                     );
-                    let rx = queue_owned_writes_transactional(
+                    let (rx, budget) = queue_owned_writes_transactional(
                         &state,
                         disarm_writes,
                         DischargeControlOwner::ManualMode,
                     )
                     .await;
-                    if let Err(msg) = await_required_write_outcome(rx).await {
+                    if let Err(msg) = await_required_write_outcome_with_timeout(rx, budget).await {
                         tracing::warn!(
                             "Timed Export disarm failed while disabling final slot {slot}: {msg}"
                         );
@@ -3864,8 +4204,11 @@ pub async fn set_reserve(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let soc: u16 = match body["soc"].as_u64() {
-        Some(s) => s as u16,
+    let soc = match body.get("soc") {
+        Some(value) => match parse_soc_json(value, "soc") {
+            Ok(soc) => u16::from(soc),
+            Err(error) => return error_response(&error),
+        },
         None => return error_response("Missing 'soc' field (4-100)"),
     };
 
@@ -3892,7 +4235,7 @@ pub async fn set_charge_rate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     if settings.adaptive_charge_enabled || settings.adaptive_charge_saved_limit.is_some() {
         return (
             StatusCode::CONFLICT,
@@ -3906,8 +4249,11 @@ pub async fn set_charge_rate(
             })),
         );
     }
-    let limit: u16 = match body["limit"].as_u64() {
-        Some(r) => r as u16,
+    let limit = match body.get("limit") {
+        Some(value) => match parse_u16_json(value, "limit") {
+            Ok(limit) => limit,
+            Err(error) => return error_response(&error),
+        },
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
@@ -3941,8 +4287,11 @@ pub async fn set_discharge_rate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let limit: u16 = match body["limit"].as_u64() {
-        Some(r) => r as u16,
+    let limit = match body.get("limit") {
+        Some(value) => match parse_u16_json(value, "limit") {
+            Ok(limit) => limit,
+            Err(error) => return error_response(&error),
+        },
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
@@ -4011,8 +4360,11 @@ pub async fn set_active_power_rate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let rate: u16 = match body["rate"].as_u64() {
-        Some(r) => r as u16,
+    let rate = match body.get("rate") {
+        Some(value) => match parse_u16_json(value, "rate") {
+            Ok(rate) => rate,
+            Err(error) => return error_response(&error),
+        },
         None => return error_response("Missing 'rate' field"),
     };
 
@@ -4112,9 +4464,11 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
         *saved = Some(crate::inverter::poll::LoadLimiterSaved { reserve });
 
         // Transactional save (review #1 follow-up): single-field update.
-        if let Err(e) = crate::settings::Settings::update(|s| {
+        if let Err(e) = crate::settings::Settings::update_async(move |s| {
             s.load_limiter_saved_reserve = Some(reserve);
-        }) {
+        })
+        .await
+        {
             tracing::warn!("Failed to persist pause reserve for manual unpause: {e}");
         }
     }
@@ -4136,10 +4490,10 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
     }
 
     tracing::info!("PauseBattery encoded: {:?}", writes);
-    let rx =
+    let (rx, budget) =
         queue_owned_writes_with_completion(&state, writes, DischargeControlOwner::ExplicitPause)
             .await;
-    match await_write_outcome(rx).await {
+    match await_write_outcome_with_timeout(rx, budget).await {
         Ok(()) => ok_response("Battery paused"),
         Err(msg) => {
             tracing::warn!("Pause discharge rejected: {msg}");
@@ -4201,7 +4555,7 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
     // Transactional save (review #1 follow-up): the five-field reset
     // happens under the settings lock so a concurrent writer can't
     // resurrect any of the flags between our read and our save.
-    if let Err(e) = crate::settings::Settings::update(|settings| {
+    if let Err(e) = crate::settings::Settings::update_async(move |settings| {
         if disabled_load_limiter {
             settings.load_limiter_enabled = false;
         }
@@ -4211,7 +4565,9 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         settings.load_limiter_active_persisted = false;
         settings.temperature_limiter_active_persisted = false;
         settings.load_limiter_saved_reserve = None;
-    }) {
+    })
+    .await
+    {
         tracing::warn!("Failed to persist load limiter reset during manual unpause: {e}");
     }
 
@@ -4237,10 +4593,10 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         "UnpauseBattery encoded: {:?}",
         writes
     );
-    let rx =
+    let (rx, budget) =
         queue_owned_writes_with_completion(&state, writes, DischargeControlOwner::ExplicitPause)
             .await;
-    match await_write_outcome(rx).await {
+    match await_write_outcome_with_timeout(rx, budget).await {
         Ok(()) => {}
         Err(msg) => {
             tracing::warn!("Resume discharge rejected: {msg}");
@@ -4284,6 +4640,15 @@ pub async fn force_charge(
     let _force_action_guard = state.force_action_lock.lock().await;
     if state.force_discharge_revert.lock().await.is_some() {
         return error_response("Stop Force Discharge before starting Force Charge");
+    }
+    if state.latest_snapshot.lock().await.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "Force Charge requires an inverter snapshot before it can start",
+            })),
+        );
     }
 
     let device_type = latest_device_type(&state).await;
@@ -4383,6 +4748,18 @@ pub async fn force_discharge(
     State(state): State<Arc<AppState>>,
     body: Option<Json<serde_json::Value>>,
 ) -> (StatusCode, Json<Value>) {
+    force_discharge_at(state, body, Local::now()).await
+}
+
+/// Implementation of force_discharge with an injected local timestamp.
+/// Keeping the timestamp at the boundary makes the duration slot and the
+/// auto-revert deadline agree exactly, while allowing the clock-sensitive
+/// behaviour to be tested without wall-clock slack.
+async fn force_discharge_at(
+    state: Arc<AppState>,
+    body: Option<Json<serde_json::Value>>,
+    now: DateTime<Local>,
+) -> (StatusCode, Json<Value>) {
     let _force_action_guard = state.force_action_lock.lock().await;
     if state.force_charge_revert.lock().await.is_some() {
         return error_response("Stop Force Charge before starting Force Discharge");
@@ -4412,11 +4789,11 @@ pub async fn force_discharge(
         // Compute expiry from the same `start + minutes` that the slot
         // helper uses, so the auto-revert fires when the inverter does.
         let clamped_minutes = minutes.clamp(1, 1439) as i64;
-        let expiry = Local::now() + ChronoDuration::minutes(clamped_minutes);
+        let expiry = now + ChronoDuration::minutes(clamped_minutes);
         if let Some(r) = revert.as_mut() {
             r.force_discharge_slot_end_ms = Some(expiry.timestamp_millis());
         }
-        match force_discharge_slot_writes(device_type, minutes) {
+        match force_discharge_slot_writes(device_type, minutes, now) {
             Ok(mut slot_writes) => writes.append(&mut slot_writes),
             Err(e) => return error_response(&format!("Failed to encode discharge slot: {}", e)),
         }
@@ -4583,6 +4960,12 @@ fn resolve_history_summary_window(
 ) -> Result<(crate::history::HistoryWindow, i64), String> {
     let range_str = params.range.as_deref().unwrap_or("24h");
     let offset = params.offset.unwrap_or(0);
+    if !(0..=crate::history::MAX_HISTORY_OFFSET).contains(&offset) {
+        return Err(format!(
+            "Invalid history offset: must be between 0 and {}",
+            crate::history::MAX_HISTORY_OFFSET
+        ));
+    }
     let rolling = params.rolling.unwrap_or(false);
     let (range_secs, bucket_secs) = match range_str {
         "1h" => (3600, 30),
@@ -4601,69 +4984,90 @@ fn resolve_history_summary_window(
             )
         }
     };
+    crate::history::validate_bucket_secs(bucket_secs)?;
 
-    let explicit_window = if let (Some(start_ms), Some(end_ms)) = (params.start_ms, params.end_ms) {
-        if start_ms >= end_ms {
-            return Err("Invalid history window: start_ms must be before end_ms".to_string());
+    let explicit_window = match (params.start_ms, params.end_ms) {
+        (Some(start_ms), Some(end_ms)) => {
+            if start_ms >= end_ms {
+                return Err("Invalid history window: start_ms must be before end_ms".to_string());
+            }
+            let rounded_end_ms = end_ms
+                .checked_add(999)
+                .ok_or_else(|| "Invalid history window: timestamp is out of range".to_string())?;
+            Some((start_ms.div_euclid(1000), rounded_end_ms.div_euclid(1000)))
         }
-        Some((start_ms.div_euclid(1000), (end_ms + 999).div_euclid(1000)))
+        (None, None) => None,
+        _ => {
+            return Err(
+                "Invalid history window: start_ms and end_ms must be provided together".to_string(),
+            )
+        }
+    };
+
+    let explicit_window = if explicit_window.is_some() {
+        explicit_window
     } else if rolling && range_str != "month" && range_str != "today" {
-        let end_ts = chrono::Utc::now().timestamp() - offset * range_secs;
-        Some((end_ts - range_secs, end_ts))
+        let offset_secs = offset
+            .checked_mul(range_secs)
+            .ok_or_else(|| "Invalid history window: offset is too large".to_string())?;
+        let end_ts = chrono::Utc::now()
+            .timestamp()
+            .checked_sub(offset_secs)
+            .ok_or_else(|| "Invalid history window: offset is too large".to_string())?;
+        let start_ts = end_ts
+            .checked_sub(range_secs)
+            .ok_or_else(|| "Invalid history window: timestamp is out of range".to_string())?;
+        Some((start_ts, end_ts))
     } else if range_str == "today" {
         let now = chrono::Local::now();
-        let start_date = now.date_naive() - chrono::Duration::days(offset);
-        let start_local = chrono::Local
-            .from_local_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
-            .earliest()
-            .unwrap();
-        let end_date = start_date.succ_opt().unwrap();
-        let end_local = chrono::Local
-            .from_local_datetime(&end_date.and_hms_opt(0, 0, 0).unwrap())
-            .earliest()
-            .unwrap();
-        Some((start_local.timestamp(), end_local.timestamp()))
+        let start_date = now
+            .date_naive()
+            .checked_sub_signed(chrono::Duration::days(offset))
+            .ok_or_else(|| "Invalid history window: local date is out of range".to_string())?;
+        let end_date = start_date
+            .succ_opt()
+            .ok_or_else(|| "Invalid history window: local date is out of range".to_string())?;
+        Some((
+            crate::history::local_midnight_timestamp(start_date)?,
+            crate::history::local_midnight_timestamp(end_date)?,
+        ))
     } else if range_str == "month" {
         let now = chrono::Local::now();
-        let total_months = now.year() * 12 + now.month() as i32 - 1 - offset as i32;
-        let target_year = total_months.div_euclid(12);
-        let target_month = (total_months.rem_euclid(12) + 1) as u32;
-        let start_local = chrono::Local
-            .from_local_datetime(
-                &chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap(),
-            )
-            .earliest()
-            .unwrap();
+        let total_months = i64::from(now.year())
+            .checked_mul(12)
+            .and_then(|months| months.checked_add(i64::from(now.month()) - 1))
+            .and_then(|months| months.checked_sub(offset))
+            .ok_or_else(|| "Invalid history window: local date is out of range".to_string())?;
+        let target_year = i32::try_from(total_months.div_euclid(12))
+            .map_err(|_| "Invalid history window: local date is out of range".to_string())?;
+        let target_month = u32::try_from(total_months.rem_euclid(12) + 1)
+            .map_err(|_| "Invalid history window: local date is out of range".to_string())?;
+        let start_date = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
+            .ok_or_else(|| "Invalid history window: local date is out of range".to_string())?;
         let (next_year, next_month) = if target_month == 12 {
-            (target_year + 1, 1)
+            (target_year.checked_add(1), 1)
         } else {
-            (target_year, target_month + 1)
+            (Some(target_year), target_month + 1)
         };
-        let end_local = chrono::Local
-            .from_local_datetime(
-                &chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap(),
-            )
-            .earliest()
-            .unwrap();
-        Some((start_local.timestamp(), end_local.timestamp()))
+        let next_year = next_year
+            .ok_or_else(|| "Invalid history window: local date is out of range".to_string())?;
+        let end_date = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+            .ok_or_else(|| "Invalid history window: local date is out of range".to_string())?;
+        Some((
+            crate::history::local_midnight_timestamp(start_date)?,
+            crate::history::local_midnight_timestamp(end_date)?,
+        ))
     } else {
         None
     };
 
-    Ok((
-        crate::history::HistoryWindow {
-            range_secs,
-            offset,
-            explicit_window,
-        },
-        bucket_secs,
-    ))
+    let window = crate::history::HistoryWindow {
+        range_secs,
+        offset,
+        explicit_window,
+    };
+    window.resolve()?;
+    Ok((window, bucket_secs))
 }
 
 /// GET /api/history — aggregated time-series data for charts.
@@ -4729,7 +5133,7 @@ pub async fn get_history(
     // Issue #131: also carry the import-side Standing Charge (pence/day)
     // so the cost series includes the daily fixed component.
     let cost_cfgs = if want_any_import_cost || want_export_income {
-        let s = crate::settings::Settings::load();
+        let s = crate::settings::Settings::load_async().await;
         let import_cfg = s
             .import_tariff_config
             .clone()
@@ -4896,9 +5300,12 @@ pub async fn get_history_summary(
         Ok(value) => value,
         Err(error) => return error_response(&error),
     };
-    let (start_ts, end_ts) = window.resolve();
+    let (start_ts, end_ts) = match window.resolve() {
+        Ok(bounds) => bounds,
+        Err(error) => return error_response(&error),
+    };
 
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     let import_tariff = settings
         .import_tariff_config
         .clone()
@@ -5006,9 +5413,12 @@ pub async fn get_report(
         Err(msg) => return error_response(&msg),
     };
 
-    let (start_ts, end_ts) = window.resolve();
+    let (start_ts, end_ts) = match window.resolve() {
+        Ok(bounds) => bounds,
+        Err(error) => return error_response(&error),
+    };
 
-    let s = crate::settings::Settings::load();
+    let s = crate::settings::Settings::load_async().await;
     let import_tariff = s
         .import_tariff_config
         .clone()
@@ -5111,44 +5521,60 @@ pub async fn set_auto_winter(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let mut config = state.auto_winter_config.lock().await;
+    let cold_threshold = match parse_optional_finite_threshold(&body, "cold_threshold", 0.0, 20.0) {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
+    let recovery_threshold =
+        match parse_optional_finite_threshold(&body, "recovery_threshold", 1.0, 25.0) {
+            Ok(value) => value,
+            Err(error) => return error_response(&error),
+        };
+    let mut config_guard = state.auto_winter_config.lock().await;
+    let mut candidate = config_guard.clone();
 
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
-        config.enabled = v;
+        candidate.enabled = v;
     }
-    if let Some(v) = body.get("cold_threshold").and_then(|v| v.as_f64()) {
-        config.cold_threshold = v as f32;
+    if let Some(v) = cold_threshold {
+        candidate.cold_threshold = v;
     }
-    if let Some(v) = body.get("recovery_threshold").and_then(|v| v.as_f64()) {
-        config.recovery_threshold = v as f32;
+    if let Some(v) = recovery_threshold {
+        candidate.recovery_threshold = v;
     }
     if let Some(v) = body.get("target_soc").and_then(|v| v.as_u64()) {
-        config.target_soc = v.clamp(4, 100) as u8;
+        candidate.target_soc = v.clamp(4, 100) as u8;
     }
     if let Some(v) = body.get("debounce_readings").and_then(|v| v.as_u64()) {
-        config.debounce_readings = v.max(1) as u32;
+        candidate.debounce_readings = v.max(1) as u32;
+    }
+    if let Err(error) =
+        validate_auto_winter_thresholds(candidate.cold_threshold, candidate.recovery_threshold)
+    {
+        return error_response(&error);
     }
 
-    tracing::info!("Auto winter config updated: {:?}", config);
+    tracing::info!("Auto winter config updated: {:?}", candidate);
 
     // Transactional save (review #1): the `Settings::update` helper holds
     // the settings lock across the read-modify-write so a concurrent
     // settings-save from another handler can't clobber this one's fields.
-    // Drop the in-memory config lock first — Settings::update takes its own
-    // settings lock; holding both at once would risk a deadlock if another
-    // path ever needed the two in the same order.
-    let snapshot = config.clone();
-    drop(config);
-    if let Err(e) = crate::settings::Settings::update(|app_settings| {
-        app_settings.auto_winter_enabled = snapshot.enabled;
-        app_settings.auto_winter_cold_threshold = snapshot.cold_threshold;
-        app_settings.auto_winter_recovery_threshold = snapshot.recovery_threshold;
-        app_settings.auto_winter_target_soc = snapshot.target_soc;
-        app_settings.auto_winter_debounce_readings = snapshot.debounce_readings;
-    }) {
+    // Publish the candidate only after persistence succeeds, so a failed
+    // save cannot leave the live state ahead of settings.json.
+    let candidate_for_persist = candidate.clone();
+    if let Err(e) = crate::settings::Settings::update_async(move |app_settings| {
+        app_settings.auto_winter_enabled = candidate_for_persist.enabled;
+        app_settings.auto_winter_cold_threshold = candidate_for_persist.cold_threshold;
+        app_settings.auto_winter_recovery_threshold = candidate_for_persist.recovery_threshold;
+        app_settings.auto_winter_target_soc = candidate_for_persist.target_soc;
+        app_settings.auto_winter_debounce_readings = candidate_for_persist.debounce_readings;
+    })
+    .await
+    {
         tracing::warn!("Failed to persist auto winter config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
+    *config_guard = candidate;
 
     ok_response("Auto winter config updated")
 }
@@ -5180,111 +5606,144 @@ pub async fn set_alerts(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let mut config = state.alert_config.lock().await;
+    let batt_temp_min = match parse_optional_clamped_threshold(&body, "batt_temp_min", -40.0, 120.0)
+    {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
+    let batt_temp_max = match parse_optional_clamped_threshold(&body, "batt_temp_max", 0.0, 120.0) {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
+    let inverter_temp_min =
+        match parse_optional_clamped_threshold(&body, "inverter_temp_min", -40.0, 120.0) {
+            Ok(value) => value,
+            Err(error) => return error_response(&error),
+        };
+    let inverter_temp_max =
+        match parse_optional_clamped_threshold(&body, "inverter_temp_max", 0.0, 120.0) {
+            Ok(value) => value,
+            Err(error) => return error_response(&error),
+        };
+    let soc_min = match parse_optional_clamped_integer(&body, "soc_min", 100) {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
+    let soc_max = match parse_optional_clamped_integer(&body, "soc_max", 100) {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
+    let mut config_guard = state.alert_config.lock().await;
+    let mut candidate = config_guard.clone();
 
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
-        config.enabled = v;
+        candidate.enabled = v;
     }
     if let Some(v) = body.get("telegram_bot_token").and_then(|v| v.as_str()) {
-        config.telegram_bot_token = v.to_string();
+        candidate.telegram_bot_token = v.to_string();
     }
     if let Some(v) = body.get("telegram_chat_id").and_then(|v| v.as_str()) {
-        config.telegram_chat_id = v.to_string();
+        candidate.telegram_chat_id = v.to_string();
     }
     if let Some(v) = body.get("cooldown_minutes").and_then(|v| v.as_u64()) {
-        config.cooldown_minutes = v.clamp(1, 1440) as u32;
+        candidate.cooldown_minutes = v.clamp(1, 1440) as u32;
     }
-    if let Some(v) = body.get("batt_temp_min").and_then(|v| v.as_f64()) {
-        config.batt_temp_min = v as f32;
+    if let Some(v) = batt_temp_min {
+        candidate.batt_temp_min = v;
     }
-    if let Some(v) = body.get("batt_temp_max").and_then(|v| v.as_f64()) {
-        config.batt_temp_max = v.clamp(0.0, 120.0) as f32;
+    if let Some(v) = batt_temp_max {
+        candidate.batt_temp_max = v;
     }
-    if let Some(v) = body.get("inverter_temp_min").and_then(|v| v.as_f64()) {
-        config.inverter_temp_min = v.clamp(0.0, 120.0) as f32;
+    if let Some(v) = inverter_temp_min {
+        candidate.inverter_temp_min = v;
     }
-    if let Some(v) = body.get("inverter_temp_max").and_then(|v| v.as_f64()) {
-        config.inverter_temp_max = v.clamp(0.0, 120.0) as f32;
+    if let Some(v) = inverter_temp_max {
+        candidate.inverter_temp_max = v;
     }
-    if let Some(v) = body.get("soc_min").and_then(|v| v.as_u64()) {
-        config.soc_min = v.min(100) as u8;
+    if let Some(v) = soc_min {
+        candidate.soc_min = v;
     }
-    if let Some(v) = body.get("soc_max").and_then(|v| v.as_u64()) {
-        config.soc_max = v.min(100) as u8;
+    if let Some(v) = soc_max {
+        candidate.soc_max = v;
     }
     if let Some(v) = body.get("grid_offline_enabled").and_then(|v| v.as_bool()) {
-        config.grid_offline_enabled = v;
+        candidate.grid_offline_enabled = v;
     }
     if let Some(v) = body.get("inverter_trip_enabled").and_then(|v| v.as_bool()) {
-        config.inverter_trip_enabled = v;
+        candidate.inverter_trip_enabled = v;
     }
     if let Some(v) = body
         .get("connection_lost_enabled")
         .and_then(|v| v.as_bool())
     {
-        config.connection_lost_enabled = v;
+        candidate.connection_lost_enabled = v;
     }
     if let Some(v) = body
         .get("battery_over_temp_enabled")
         .and_then(|v| v.as_bool())
     {
-        config.battery_over_temp_enabled = v;
+        candidate.battery_over_temp_enabled = v;
     }
     if let Some(v) = body
         .get("battery_connection_lost_enabled")
         .and_then(|v| v.as_bool())
     {
-        config.battery_connection_lost_enabled = v;
+        candidate.battery_connection_lost_enabled = v;
     }
     if let Some(v) = body.get("solar_clipping_enabled").and_then(|v| v.as_bool()) {
-        config.solar_clipping_enabled = v;
+        candidate.solar_clipping_enabled = v;
     }
     if let Some(v) = body
         .get("solar_clipping_ceiling_w")
         .and_then(|v| v.as_u64())
     {
         // Clamp to a sane range: 0 (disabled) up to 100kW.
-        config.solar_clipping_ceiling_w = v.min(100_000) as u32;
+        candidate.solar_clipping_ceiling_w = v.min(100_000) as u32;
     }
     if let Some(v) = body.get("daily_report_enabled").and_then(|v| v.as_bool()) {
-        config.daily_report_enabled = v;
+        candidate.daily_report_enabled = v;
     }
     if let Some(v) = body.get("daily_report_hour").and_then(|v| v.as_u64()) {
-        config.daily_report_hour = v.min(23) as u8;
+        candidate.daily_report_hour = v.min(23) as u8;
     }
     if let Some(v) = body.get("daily_report_minute").and_then(|v| v.as_u64()) {
-        config.daily_report_minute = v.min(59) as u8;
+        candidate.daily_report_minute = v.min(59) as u8;
     }
     if let Some(v) = body.get("ntfy_topic").and_then(|v| v.as_str()) {
-        config.ntfy_topic = v.to_string();
+        candidate.ntfy_topic = v.to_string();
     }
     if let Some(v) = body.get("ntfy_server").and_then(|v| v.as_str()) {
-        config.ntfy_server = v.to_string();
+        candidate.ntfy_server = v.to_string();
     }
     if let Some(v) = body.get("pushover_app_token").and_then(|v| v.as_str()) {
-        config.pushover_app_token = v.to_string();
+        candidate.pushover_app_token = v.to_string();
     }
     if let Some(v) = body.get("pushover_user_key").and_then(|v| v.as_str()) {
-        config.pushover_user_key = v.to_string();
+        candidate.pushover_user_key = v.to_string();
     }
-
-    // Reset debounce so toggling an alert off/on immediately re-enables
-    // notification delivery on the next poll cycle.
-    state.alert_debounce.lock().await.clear();
+    if let Err(error) = validate_alert_thresholds(&candidate) {
+        return error_response(&error);
+    }
 
     tracing::info!("Alert config updated");
 
     // Transactional save (review #1): see `set_auto_winter` for the
     // reasoning. Drop the in-memory config lock before taking the settings
-    // lock to keep the lock order consistent across handlers.
-    let snapshot = config.clone();
-    drop(config);
-    if let Err(e) = crate::settings::Settings::update(|app_settings| {
-        app_settings.alerts_config = snapshot;
-    }) {
+    // lock to keep the lock order consistent across handlers. Publish the
+    // candidate and reset debounce only after persistence succeeds.
+    let candidate_for_persist = candidate.clone();
+    if let Err(e) = crate::settings::Settings::update_async(move |app_settings| {
+        app_settings.alerts_config = candidate_for_persist;
+    })
+    .await
+    {
         tracing::warn!("Failed to persist alert config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
+    *config_guard = candidate;
+    // Reset debounce so toggling an alert off/on immediately re-enables
+    // notification delivery on the next poll cycle.
+    state.alert_debounce.lock().await.clear();
 
     ok_response("Alert config updated")
 }
@@ -5292,6 +5751,39 @@ pub async fn set_alerts(
 /// POST /api/alerts/test — send a test notification using the current alert config.
 ///
 /// Uses whatever credentials are currently saved.
+#[derive(Debug, serde::Serialize)]
+struct NotificationTestResult {
+    channel: &'static str,
+    ok: bool,
+    message: String,
+}
+
+impl NotificationTestResult {
+    fn success(channel: &'static str) -> Self {
+        Self {
+            channel,
+            ok: true,
+            message: "OK".to_string(),
+        }
+    }
+
+    fn failure(channel: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            channel,
+            ok: false,
+            message: message.into(),
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!("{}: {}", self.channel, self.message)
+    }
+}
+
+fn all_notification_tests_succeeded(results: &[NotificationTestResult]) -> bool {
+    results.iter().all(|result| result.ok)
+}
+
 pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let config = state.alert_config.lock().await.clone();
 
@@ -5310,7 +5802,7 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
         );
     }
 
-    let mut results: Vec<String> = Vec::new();
+    let mut results: Vec<NotificationTestResult> = Vec::new();
 
     if has_telegram {
         let token = config.telegram_bot_token.clone();
@@ -5324,9 +5816,12 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
         })
         .await;
         match r {
-            Ok(Ok(())) => results.push("Telegram: OK".into()),
-            Ok(Err(e)) => results.push(format!("Telegram: {e}")),
-            Err(_) => results.push("Telegram: internal error".into()),
+            Ok(Ok(())) => results.push(NotificationTestResult::success("Telegram")),
+            Ok(Err(e)) => results.push(NotificationTestResult::failure("Telegram", e)),
+            Err(_) => results.push(NotificationTestResult::failure(
+                "Telegram",
+                "internal error",
+            )),
         }
     }
 
@@ -5342,9 +5837,9 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
         })
         .await;
         match r {
-            Ok(Ok(())) => results.push("ntfy: OK".into()),
-            Ok(Err(e)) => results.push(format!("ntfy: {e}")),
-            Err(_) => results.push("ntfy: internal error".into()),
+            Ok(Ok(())) => results.push(NotificationTestResult::success("ntfy")),
+            Ok(Err(e)) => results.push(NotificationTestResult::failure("ntfy", e)),
+            Err(_) => results.push(NotificationTestResult::failure("ntfy", "internal error")),
         }
     }
 
@@ -5360,25 +5855,38 @@ pub async fn test_alerts(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
         })
         .await;
         match r {
-            Ok(Ok(())) => results.push("Pushover: OK".into()),
-            Ok(Err(e)) => results.push(format!("Pushover: {e}")),
-            Err(_) => results.push("Pushover: internal error".into()),
+            Ok(Ok(())) => results.push(NotificationTestResult::success("Pushover")),
+            Ok(Err(e)) => results.push(NotificationTestResult::failure("Pushover", e)),
+            Err(_) => results.push(NotificationTestResult::failure(
+                "Pushover",
+                "internal error",
+            )),
         }
     }
 
-    let all_ok = results
+    let all_ok = all_notification_tests_succeeded(&results);
+    let joined = results
         .iter()
-        .all(|r| r.contains("OK") || r.contains("delivered"));
-    let joined = results.join("; ");
+        .map(NotificationTestResult::summary)
+        .collect::<Vec<_>>()
+        .join("; ");
     tracing::info!("Test notification: {joined}");
     if all_ok {
-        ok_response(&format!("Sent! {joined}"))
+        (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "message": format!("Sent! {joined}"),
+                "results": results,
+            })),
+        )
     } else {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
                 "ok": false,
-                "message": joined
+                "message": joined,
+                "results": results,
             })),
         )
     }
@@ -5453,14 +5961,22 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<
 /// `EvcConnected` / `Evc(snapshot)` event and the diagram would stay
 /// pinned on the misleading "Not Found" label forever (issue #138).
 ///
-/// `reachable` is derived from the cached `latest_evc`: if a snapshot has
-/// been decoded since the process started, the configured host has been
-/// reached at least once. Once true, it stays true until process restart.
+/// `reachable` is derived from the EVC connection state and the bounded cache
+/// grace period. A transient failed poll reports a degraded but still
+/// reachable connection; once the last successful read is too old, the
+/// cached snapshot is marked stale and `reachable` becomes false.
+async fn evc_settings_snapshot(state: &Arc<AppState>) -> (String, u16) {
+    let settings = state.settings.lock().await;
+    (settings.evc_host.clone(), settings.evc_port)
+}
+
 pub async fn evc_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let evc_host = state.settings.lock().await.evc_host.clone();
-    let evc_port = state.settings.lock().await.evc_port;
+    let (evc_host, evc_port) = evc_settings_snapshot(&state).await;
+    let status = {
+        let reachability = state.evc_reachability.lock().await;
+        reachability.status_at(crate::evc::current_epoch_ms())
+    };
     let cached = state.latest_evc.lock().await.clone();
-    let reachable = cached.is_some();
     let last_snapshot = cached.map(|s| {
         serde_json::json!({
             "charging_state": s.charging_state,
@@ -5485,7 +6001,11 @@ pub async fn evc_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
             "ok": true,
             "evc_host": evc_host,
             "evc_port": evc_port,
-            "reachable": reachable,
+            "reachable": status.reachable,
+            "stale": status.stale,
+            "connection_state": status.connection_state,
+            "last_success_at_epoch_ms": status.last_success_at_epoch_ms,
+            "age_seconds": status.age_seconds,
             "snapshot": last_snapshot,
         })),
     )
@@ -5514,32 +6034,67 @@ pub async fn evc_discover(State(_state): State<Arc<AppState>>) -> (StatusCode, J
 // Unified charging mode + Adaptive Charge endpoints (issue #234)
 // ---------------------------------------------------------------------------
 
-fn parse_cosy_slots(value: Option<&serde_json::Value>) -> Option<Vec<crate::settings::CosySlot>> {
-    value?.as_array().map(|slots| {
-        slots
-            .iter()
-            .map(|slot| crate::settings::CosySlot {
-                enabled: slot["enabled"].as_bool().unwrap_or(false),
-                start_hour: slot["start_hour"]
-                    .as_u64()
-                    .map(|value| value.min(23))
-                    .unwrap_or(0) as u8,
-                start_minute: slot["start_minute"]
-                    .as_u64()
-                    .map(|value| value.min(59))
-                    .unwrap_or(0) as u8,
-                end_hour: slot["end_hour"]
-                    .as_u64()
-                    .map(|value| value.min(23))
-                    .unwrap_or(0) as u8,
-                end_minute: slot["end_minute"]
-                    .as_u64()
-                    .map(|value| value.min(59))
-                    .unwrap_or(0) as u8,
-                target_soc: slot["target_soc"].as_u64().unwrap_or(100).clamp(4, 100) as u8,
-            })
-            .collect()
-    })
+fn parse_cosy_slots(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<Vec<crate::settings::CosySlot>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let slots = value
+        .as_array()
+        .ok_or_else(|| "cosy slots must be an array".to_string())?;
+    let mut parsed = Vec::with_capacity(slots.len());
+    for (index, slot) in slots.iter().enumerate() {
+        let slot = slot
+            .as_object()
+            .ok_or_else(|| format!("cosy slot {} must be an object", index + 1))?;
+        let enabled = match slot.get("enabled") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| format!("cosy slot {} has an invalid 'enabled' value", index + 1))?,
+        };
+        let start_hour = parse_optional_u8(
+            slot.get("start_hour"),
+            &format!("cosy slot {} start_hour", index + 1),
+            0,
+        )?;
+        let start_minute = parse_optional_u8(
+            slot.get("start_minute"),
+            &format!("cosy slot {} start_minute", index + 1),
+            0,
+        )?;
+        let end_hour = parse_optional_u8(
+            slot.get("end_hour"),
+            &format!("cosy slot {} end_hour", index + 1),
+            0,
+        )?;
+        let end_minute = parse_optional_u8(
+            slot.get("end_minute"),
+            &format!("cosy slot {} end_minute", index + 1),
+            0,
+        )?;
+        if start_hour > 23 || end_hour > 23 {
+            return Err(format!("cosy slot {} hour must be 0-23", index + 1));
+        }
+        if start_minute > 59 || end_minute > 59 {
+            return Err(format!("cosy slot {} minute must be 0-59", index + 1));
+        }
+        let target_soc = parse_optional_soc(
+            slot.get("target_soc"),
+            &format!("cosy slot {} target_soc", index + 1),
+            100,
+        )?;
+        parsed.push(crate::settings::CosySlot {
+            enabled,
+            start_hour,
+            start_minute,
+            end_hour,
+            end_minute,
+            target_soc,
+        });
+    }
+    Ok(Some(parsed))
 }
 
 fn parse_charging_mode(value: &str) -> Option<crate::settings::ChargingMode> {
@@ -5575,7 +6130,7 @@ fn apply_charging_mode(
 }
 
 pub async fn get_charging_mode(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     let adaptive_state = state.adaptive_charge_state.lock().await.clone();
     (
         StatusCode::OK,
@@ -5604,7 +6159,7 @@ pub async fn set_charging_mode(
     // happens outside the settings lock; the actual mutation happens
     // inside the closure under the lock (review #1 follow-up).
     if mode == crate::settings::ChargingMode::Adaptive {
-        let pre_settings = crate::settings::Settings::load();
+        let pre_settings = crate::settings::Settings::load_async().await;
         if let Err(e) = pre_settings.adaptive_charge_config.validate() {
             return error_response(&format!("Invalid Adaptive Charge config: {e}"));
         }
@@ -5622,28 +6177,35 @@ pub async fn set_charging_mode(
         }
     }
 
-    let cosy_slots = parse_cosy_slots(body.get("cosy_slots"));
-    let mut previous_scope = crate::settings::AgileScope::Off;
+    let cosy_slots = match parse_cosy_slots(body.get("cosy_slots")) {
+        Ok(slots) => slots,
+        Err(error) => return error_response(&error),
+    };
     // Snapshot the fields `queue_cached_agile_action_for_settings` reads
     // so we can feed it the just-written state without re-reading disk
     // (review #1 follow-up: a post-save Settings::load() would race with
     // a concurrent writer, defeating the point of Settings::update).
-    let mut post_snapshot = crate::settings::Settings::default();
-    let save_result = crate::settings::Settings::update(|settings| {
-        previous_scope = crate::settings::agile_scope_for_settings(settings);
+    let save_result = crate::settings::Settings::update_async(move |settings| {
+        let previous_scope = crate::settings::agile_scope_for_settings(settings);
         apply_charging_mode(settings, mode);
         if let Some(slots) = cosy_slots.clone() {
             settings.cosy_slots = slots;
         }
-        post_snapshot.cosy_enabled = settings.cosy_enabled;
-        post_snapshot.agile_scope = settings.agile_scope;
-        post_snapshot.agile_enabled = settings.agile_enabled;
-        post_snapshot.agile_charge_threshold = settings.agile_charge_threshold;
-        post_snapshot.agile_discharge_threshold = settings.agile_discharge_threshold;
-    });
-    if let Err(e) = save_result {
-        return server_error(&format!("Failed to save charging mode: {e}"));
-    }
+        let post_snapshot = crate::settings::Settings {
+            cosy_enabled: settings.cosy_enabled,
+            agile_scope: settings.agile_scope,
+            agile_enabled: settings.agile_enabled,
+            agile_charge_threshold: settings.agile_charge_threshold,
+            agile_discharge_threshold: settings.agile_discharge_threshold,
+            ..Default::default()
+        };
+        (previous_scope, post_snapshot)
+    })
+    .await;
+    let (previous_scope, post_snapshot) = match save_result {
+        Ok(snapshot) => snapshot,
+        Err(e) => return server_error(&format!("Failed to save charging mode: {e}")),
+    };
 
     if previous_scope != crate::settings::AgileScope::Off
         && !matches!(
@@ -5677,7 +6239,7 @@ pub async fn set_charging_mode(
 }
 
 pub async fn get_adaptive_charge(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     let runtime = state.adaptive_charge_state.lock().await.clone();
     (
         StatusCode::OK,
@@ -5707,9 +6269,11 @@ pub async fn set_adaptive_charge(
     }
 
     // Transactional save (review #1 follow-up): single-field update.
-    if let Err(e) = crate::settings::Settings::update(|s| {
+    if let Err(e) = crate::settings::Settings::update_async(move |s| {
         s.adaptive_charge_config = config;
-    }) {
+    })
+    .await
+    {
         return server_error(&format!("Failed to save Adaptive Charge config: {e}"));
     }
     state.write_notify.notify_one();
@@ -5722,7 +6286,7 @@ pub async fn set_adaptive_charge(
 
 /// GET /api/cosy — get cosy charging config.
 pub async fn get_cosy(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     let active = *state.cosy_active.lock().await;
     (
         StatusCode::OK,
@@ -5741,7 +6305,10 @@ pub async fn set_cosy(
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     let enabled = body["enabled"].as_bool().unwrap_or(false);
-    let slots = parse_cosy_slots(body.get("slots"));
+    let slots = match parse_cosy_slots(body.get("slots")) {
+        Ok(slots) => slots,
+        Err(error) => return error_response(&error),
+    };
 
     // Transactional save (review #1 follow-up): capture the pre-change
     // agile scope inside the closure so a concurrent writer can't sneak a
@@ -5750,9 +6317,8 @@ pub async fn set_cosy(
     // concurrent writer's update). Slots parsing happens outside the
     // closure so we only re-run the (cheap) JSON validation, not the
     // load-and-save I/O.
-    let mut previous_agile_scope = None;
-    let save_result = crate::settings::Settings::update(|app_settings| {
-        previous_agile_scope = Some(crate::settings::agile_scope_for_settings(app_settings));
+    let save_result = crate::settings::Settings::update_async(move |app_settings| {
+        let previous_agile_scope = crate::settings::agile_scope_for_settings(app_settings);
         app_settings.cosy_enabled = enabled;
         if enabled {
             app_settings.adaptive_charge_enabled = false;
@@ -5762,12 +6328,16 @@ pub async fn set_cosy(
         if let Some(slots) = slots.clone() {
             app_settings.cosy_slots = slots;
         }
-    });
-    let previous_agile_scope = previous_agile_scope.expect("closure always runs");
-    if let Err(e) = save_result {
-        tracing::warn!("Failed to persist cosy config: {e}");
-        return server_error(&format!("Failed to save: {e}"));
-    }
+        previous_agile_scope
+    })
+    .await;
+    let previous_agile_scope = match save_result {
+        Ok(scope) => scope,
+        Err(e) => {
+            tracing::warn!("Failed to persist cosy config: {e}");
+            return server_error(&format!("Failed to save: {e}"));
+        }
+    };
 
     if enabled && previous_agile_scope != crate::settings::AgileScope::Off {
         let device_type = latest_device_type(&state).await;
@@ -5902,7 +6472,7 @@ async fn queue_cached_agile_action_for_settings(
 }
 
 pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     let scope = if settings.cosy_enabled {
         crate::settings::AgileScope::Off
     } else {
@@ -5965,8 +6535,23 @@ pub async fn set_agile(
         }
     });
     let region = body["region"].as_str().map(|s| s.to_string());
-    let charge_threshold = body["charge_threshold"].as_f64();
-    let discharge_threshold = body["discharge_threshold"].as_f64();
+    let charge_threshold = match parse_optional_f64_threshold(&body, "charge_threshold", 0.0, 50.0)
+    {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
+    let discharge_threshold =
+        match parse_optional_f64_threshold(&body, "discharge_threshold", 5.0, 100.0) {
+            Ok(value) => value,
+            Err(error) => return error_response(&error),
+        };
+    let current_settings = crate::settings::Settings::load_async().await;
+    if let Err(error) = validate_agile_thresholds(
+        charge_threshold.unwrap_or(current_settings.agile_charge_threshold),
+        discharge_threshold.unwrap_or(current_settings.agile_discharge_threshold),
+    ) {
+        return error_response(&error);
+    }
     let api_base_url = body["api_base_url"].as_str().map(|s| s.to_string());
 
     // Capture the post-mutation scope, thresholds, and cosy flag inside
@@ -5975,9 +6560,9 @@ pub async fn set_agile(
     // concurrent writer that mutated the same fields between our save
     // and our re-read, defeating the whole point of the transactional
     // helper. The closure is the only safe place to snapshot these.
-    let mut snapshot = crate::settings::Settings::default();
-    let mut price_source_changed_in_closure = false;
-    let save_result = crate::settings::Settings::update(|app_settings| {
+    let save_result = crate::settings::Settings::update_async(move |app_settings| {
+        let mut snapshot = crate::settings::Settings::default();
+        let mut price_source_changed_in_closure = false;
         let current_scope = match explicit_scope {
             Some(scope) => scope,
             None => match new_scope_from_legacy_toggle {
@@ -6015,11 +6600,16 @@ pub async fn set_agile(
         snapshot.agile_enabled = app_settings.agile_enabled;
         snapshot.agile_charge_threshold = app_settings.agile_charge_threshold;
         snapshot.agile_discharge_threshold = app_settings.agile_discharge_threshold;
-    });
-    if let Err(e) = save_result {
-        tracing::warn!("Failed to persist agile config: {e}");
-        return server_error(&format!("Failed to save: {e}"));
-    }
+        (snapshot, price_source_changed_in_closure)
+    })
+    .await;
+    let (snapshot, price_source_changed_in_closure) = match save_result {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!("Failed to persist agile config: {e}");
+            return server_error(&format!("Failed to save: {e}"));
+        }
+    };
 
     let price_source_changed = body.get("region").is_some()
         || body.get("api_base_url").is_some()
@@ -6118,50 +6708,56 @@ pub async fn set_load_limiter(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let mut config = state.load_limiter_config.lock().await;
+    let mut config_guard = state.load_limiter_config.lock().await;
+    let mut candidate = config_guard.clone();
 
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
-        config.enabled = v;
+        candidate.enabled = v;
     }
     if let Some(v) = body.get("threshold_w").and_then(|v| v.as_u64()) {
-        config.threshold_w = v.clamp(100, 50000) as u32;
+        candidate.threshold_w = v.clamp(100, 50000) as u32;
     }
     if let Some(v) = body.get("trigger_delay_minutes").and_then(|v| v.as_u64()) {
-        config.trigger_delay_minutes = v.clamp(1, 120) as u32;
+        candidate.trigger_delay_minutes = v.clamp(1, 120) as u32;
     }
     if let Some(v) = body.get("start_hour").and_then(|v| v.as_u64()) {
-        config.start_hour = v.min(23) as u8;
+        candidate.start_hour = v.min(23) as u8;
     }
     if let Some(v) = body.get("start_minute").and_then(|v| v.as_u64()) {
-        config.start_minute = v.min(59) as u8;
+        candidate.start_minute = v.min(59) as u8;
     }
     if let Some(v) = body.get("end_hour").and_then(|v| v.as_u64()) {
-        config.end_hour = v.min(23) as u8;
+        candidate.end_hour = v.min(23) as u8;
     }
     if let Some(v) = body.get("end_minute").and_then(|v| v.as_u64()) {
-        config.end_minute = v.min(59) as u8;
+        candidate.end_minute = v.min(59) as u8;
     }
 
-    tracing::info!("Load limiter config updated: {:?}", config);
+    tracing::info!("Load limiter config updated: {:?}", candidate);
 
     // Transactional save (review #1 follow-up): see `set_alerts` for the
     // pattern. Snapshot the merged config, drop the in-memory lock, then
     // let Settings::update serialise the read-modify-write against any
-    // other handler's save.
-    let snapshot = config.clone();
-    drop(config);
-    if let Err(e) = crate::settings::Settings::update(|app_settings| {
-        app_settings.load_limiter_enabled = snapshot.enabled;
-        app_settings.load_limiter_threshold_w = snapshot.threshold_w;
-        app_settings.load_limiter_trigger_delay_minutes = snapshot.trigger_delay_minutes;
-        app_settings.load_limiter_start_hour = snapshot.start_hour;
-        app_settings.load_limiter_start_minute = snapshot.start_minute;
-        app_settings.load_limiter_end_hour = snapshot.end_hour;
-        app_settings.load_limiter_end_minute = snapshot.end_minute;
-    }) {
+    // other handler's save. Publish the candidate only after persistence
+    // succeeds, so a failed save cannot leave the live state ahead of
+    // settings.json.
+    let candidate_for_persist = candidate.clone();
+    if let Err(e) = crate::settings::Settings::update_async(move |app_settings| {
+        app_settings.load_limiter_enabled = candidate_for_persist.enabled;
+        app_settings.load_limiter_threshold_w = candidate_for_persist.threshold_w;
+        app_settings.load_limiter_trigger_delay_minutes =
+            candidate_for_persist.trigger_delay_minutes;
+        app_settings.load_limiter_start_hour = candidate_for_persist.start_hour;
+        app_settings.load_limiter_start_minute = candidate_for_persist.start_minute;
+        app_settings.load_limiter_end_hour = candidate_for_persist.end_hour;
+        app_settings.load_limiter_end_minute = candidate_for_persist.end_minute;
+    })
+    .await
+    {
         tracing::warn!("Failed to persist load limiter config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
+    *config_guard = candidate;
 
     ok_response("Load limiter config updated")
 }
@@ -6194,7 +6790,8 @@ pub async fn set_discharge_floor(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let mut candidate = state.discharge_floor_config.lock().await.clone();
+    let mut config_guard = state.discharge_floor_config.lock().await;
+    let mut candidate = config_guard.clone();
 
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
         candidate.enabled = v;
@@ -6217,15 +6814,18 @@ pub async fn set_discharge_floor(
     // `discharge_floor_config_not_mutated_when_save_fails` test pins
     // this property).
     let snapshot = candidate;
-    if let Err(e) = crate::settings::Settings::update(|app_settings| {
-        app_settings.discharge_floor_enabled = snapshot.enabled;
-        app_settings.discharge_floor_soc = snapshot.floor_soc;
-    }) {
+    let snapshot_for_persist = snapshot.clone();
+    if let Err(e) = crate::settings::Settings::update_async(move |app_settings| {
+        app_settings.discharge_floor_enabled = snapshot_for_persist.enabled;
+        app_settings.discharge_floor_soc = snapshot_for_persist.floor_soc;
+    })
+    .await
+    {
         tracing::warn!("Failed to persist discharge floor config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
 
-    *state.discharge_floor_config.lock().await = snapshot;
+    *config_guard = snapshot;
     ok_response("Discharge floor guard config updated")
 }
 
@@ -6253,7 +6853,8 @@ pub async fn set_temperature_limiter(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let mut candidate = state.temperature_limiter_config.lock().await.clone();
+    let mut config_guard = state.temperature_limiter_config.lock().await;
+    let mut candidate = config_guard.clone();
     if let Some(value) = body.get("enabled").and_then(|value| value.as_bool()) {
         candidate.enabled = value;
     }
@@ -6290,22 +6891,44 @@ pub async fn set_temperature_limiter(
     // this property for the parallel case, and the same pattern is
     // upheld here.
     let snapshot = candidate.clone();
-    if let Err(error) = crate::settings::Settings::update(|app_settings| {
-        app_settings.temperature_limiter_enabled = snapshot.enabled;
-        app_settings.temperature_limiter_high_threshold = snapshot.high_threshold;
-        app_settings.temperature_limiter_recovery_threshold = snapshot.recovery_threshold;
-        app_settings.temperature_limiter_confirmation_readings = snapshot.confirmation_readings;
-    }) {
+    let snapshot_for_persist = snapshot.clone();
+    if let Err(error) = crate::settings::Settings::update_async(move |app_settings| {
+        app_settings.temperature_limiter_enabled = snapshot_for_persist.enabled;
+        app_settings.temperature_limiter_high_threshold = snapshot_for_persist.high_threshold;
+        app_settings.temperature_limiter_recovery_threshold =
+            snapshot_for_persist.recovery_threshold;
+        app_settings.temperature_limiter_confirmation_readings =
+            snapshot_for_persist.confirmation_readings;
+    })
+    .await
+    {
         return server_error(&format!("Failed to save: {error}"));
     }
 
-    *state.temperature_limiter_config.lock().await = snapshot;
+    *config_guard = snapshot;
     ok_response("Temperature limiter config updated")
 }
 
 // ---------------------------------------------------------------------------
 // Battery calibration endpoint (developer mode)
 // ---------------------------------------------------------------------------
+
+async fn require_connected_snapshot(
+    state: &Arc<AppState>,
+) -> Result<InverterSnapshot, (StatusCode, Json<Value>)> {
+    let snapshot = state.latest_snapshot.lock().await.clone();
+    let connected = *state.connection_state.lock().await == ConnectionState::Connected;
+    match (connected, snapshot) {
+        (true, Some(snapshot)) => Ok(snapshot),
+        _ => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "Inverter is not connected — wait for a live snapshot before using this control"
+            })),
+        )),
+    }
+}
 
 /// POST /api/control/calibration — set battery calibration stage.
 pub async fn set_calibration(
@@ -6316,6 +6939,14 @@ pub async fn set_calibration(
         Some(s) => s as u16,
         None => return error_response("Missing 'stage' field"),
     };
+
+    let snapshot = match require_connected_snapshot(&state).await {
+        Ok(snapshot) => snapshot,
+        Err(response) => return response,
+    };
+    if !snapshot.supports_battery_calibration {
+        return error_response("This inverter battery does not support manual calibration");
+    }
 
     let cmd = ControlCommand::SetCalibrationStage { stage };
     match cmd.encode() {
@@ -6330,6 +6961,9 @@ pub async fn set_calibration(
 
 /// POST /api/control/reboot — reboot the inverter.
 pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    if let Err(response) = require_connected_snapshot(&state).await {
+        return response;
+    }
     let cmd = ControlCommand::RebootInverter;
     match cmd.encode() {
         Ok(writes) => {
@@ -6411,15 +7045,23 @@ pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Js
             ws.config.latitude.zip(ws.config.longitude),
         )
     };
-    let settings = crate::settings::Settings::load();
-    let payload = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
-        db: history.as_deref(),
-        settings: &settings,
-        snapshot: snapshot.as_ref(),
-        weather_enabled,
-        weather_coords: coords,
-        now: chrono::Local::now(),
-    });
+    let settings = crate::settings::Settings::load_async().await;
+    let now = chrono::Local::now();
+    let payload = match tokio::task::spawn_blocking(move || {
+        crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
+            db: history.as_deref(),
+            settings: &settings,
+            snapshot: snapshot.as_ref(),
+            weather_enabled,
+            weather_coords: coords,
+            now,
+        })
+    })
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
+    };
     (StatusCode::OK, Json(json!({ "ok": true, "data": payload })))
 }
 
@@ -6439,22 +7081,24 @@ pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCod
             ws.config.latitude.zip(ws.config.longitude),
         )
     };
-    let settings = crate::settings::Settings::load();
-    let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
-        db: history.as_deref(),
-        settings: &settings,
-        snapshot: snapshot.as_ref(),
-        weather_enabled,
-        weather_coords: coords,
-        now: Local::now(),
-    });
-
-    let (charge, export_advice) = compute_full_plan(
-        &forecast,
-        &settings,
-        snapshot.as_ref(),
-        Local::now().timestamp(),
-    );
+    let settings = crate::settings::Settings::load_async().await;
+    let now = Local::now();
+    let (charge, export_advice) = match tokio::task::spawn_blocking(move || {
+        let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
+            db: history.as_deref(),
+            settings: &settings,
+            snapshot: snapshot.as_ref(),
+            weather_enabled,
+            weather_coords: coords,
+            now,
+        });
+        compute_full_plan(&forecast, &settings, snapshot.as_ref(), now.timestamp())
+    })
+    .await
+    {
+        Ok(plan) => plan,
+        Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
+    };
     let rec_value = plan_to_json_value(&charge);
     let apply = rec_value
         .get("apply")
@@ -6584,6 +7228,31 @@ fn compute_charge_plan_inner<'a>(
         SimHourInput, SimHourResult, SimulationOutput, SimulationParams,
     };
     let import_tariff = settings.import_tariff_config.as_ref();
+
+    if forecast
+        .status
+        .iter()
+        .any(|code| code == "forecast_stale" || code == "forecast_data_future")
+    {
+        let reason = if forecast
+            .status
+            .iter()
+            .any(|code| code == "forecast_data_future")
+        {
+            "the solar forecast has a future fetch timestamp — refresh it before scheduling a battery action"
+                .to_string()
+        } else {
+            let age = forecast.forecast_age_seconds.unwrap_or_default().max(0);
+            format!(
+                "the solar forecast is about {:.1} hours old — refresh it before scheduling a battery action",
+                age as f64 / 3600.0
+            )
+        };
+        return (
+            crate::forecast::planner::PlanRecommendation::NoPlan { reason },
+            None,
+        );
+    }
 
     // No battery projection -> straight NoPlan (and no export advice).
     let Some(battery) = &forecast.battery else {
@@ -6983,9 +7652,12 @@ where
     // read-modify-write happens under the settings lock. Apply the same
     // field-level patch so writers between publication and persistence do
     // not have unrelated fields replaced by a stale shared-state snapshot.
-    if let Err(e) = crate::settings::Settings::update(|app_settings| {
-        patch.apply_to(&mut app_settings.weather_config);
-    }) {
+    let patch_for_persist = patch.clone();
+    if let Err(e) = crate::settings::Settings::update_async(move |app_settings| {
+        patch_for_persist.apply_to(&mut app_settings.weather_config);
+    })
+    .await
+    {
         tracing::warn!("Failed to persist weather config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
@@ -7007,6 +7679,7 @@ pub async fn backfill_weather(State(state): State<Arc<AppState>>) -> (StatusCode
 mod tests {
     use super::*;
     use crate::test_util::with_isolated_config_dir_async;
+    use chrono::TimeZone;
 
     /// Construct a minimal `AppState` for use in endpoint tests that
     /// don't exercise the poll loop or websocket layer. The settings
@@ -7055,6 +7728,23 @@ mod tests {
         assert_eq!(desired.len(), 2);
         assert!(!desired[1].enabled);
         assert_eq!((desired[0].start_hour, desired[0].end_hour), (16, 19));
+    }
+
+    #[test]
+    fn alert_test_success_uses_structured_status() {
+        let failed = NotificationTestResult {
+            channel: "ntfy",
+            ok: false,
+            message: "message was delivered to the local queue, but the server rejected it".into(),
+        };
+        assert!(!all_notification_tests_succeeded(&[failed]));
+
+        let succeeded = NotificationTestResult {
+            channel: "ntfy",
+            ok: true,
+            message: "OK".into(),
+        };
+        assert!(all_notification_tests_succeeded(&[succeeded]));
     }
 
     #[tokio::test]
@@ -9495,8 +10185,14 @@ mod tests {
                     .map(|write| (write.address, write.value))
                     .collect::<Vec<_>>(),
                 vec![
-                    (HR_DISCHARGE_SLOT_1_START, encode_hhmm(sh, sm)),
-                    (HR_DISCHARGE_SLOT_1_END, encode_hhmm(eh, em)),
+                    (
+                        HR_DISCHARGE_SLOT_1_START,
+                        encode_hhmm(sh, sm).expect("valid test start time"),
+                    ),
+                    (
+                        HR_DISCHARGE_SLOT_1_END,
+                        encode_hhmm(eh, em).expect("valid test end time"),
+                    ),
                     (HR_DISCHARGE_TARGET_SOC_1, 40),
                     (HR_BATTERY_POWER_MODE, 0),
                     (HR_ENABLE_DISCHARGE, 1),
@@ -9566,8 +10262,14 @@ mod tests {
                     .map(|write| (write.address, write.value))
                     .collect::<Vec<_>>(),
                 vec![
-                    (HR_DISCHARGE_SLOT_3_START, encode_hhmm(sh, sm)),
-                    (HR_DISCHARGE_SLOT_3_END, encode_hhmm(eh, em)),
+                    (
+                        HR_DISCHARGE_SLOT_3_START,
+                        encode_hhmm(sh, sm).expect("valid test start time"),
+                    ),
+                    (
+                        HR_DISCHARGE_SLOT_3_END,
+                        encode_hhmm(eh, em).expect("valid test end time"),
+                    ),
                     (HR_DISCHARGE_TARGET_SOC_3, 10),
                     (HR_BATTERY_POWER_MODE, 0),
                     (HR_ENABLE_DISCHARGE, 1),
@@ -9616,8 +10318,14 @@ mod tests {
                     .map(|write| (write.address, write.value))
                     .collect::<Vec<_>>(),
                 vec![
-                    (HR_3PH_DISCHARGE_SLOT_1_START, encode_hhmm(sh, sm)),
-                    (HR_3PH_DISCHARGE_SLOT_1_END, encode_hhmm(eh, em)),
+                    (
+                        HR_3PH_DISCHARGE_SLOT_1_START,
+                        encode_hhmm(sh, sm).expect("valid test start time"),
+                    ),
+                    (
+                        HR_3PH_DISCHARGE_SLOT_1_END,
+                        encode_hhmm(eh, em).expect("valid test end time"),
+                    ),
                     (HR_DISCHARGE_TARGET_SOC_1, 40),
                     (HR_BATTERY_POWER_MODE, 0),
                     (HR_3PH_FORCE_DISCHARGE_ENABLE, 1),
@@ -9837,7 +10545,7 @@ mod tests {
             &[
                 WriteOutcome::Failed {
                     address: HR_DISCHARGE_SLOT_1_START,
-                    value: encode_hhmm(sh, sm),
+                    value: encode_hhmm(sh, sm).expect("valid test start time"),
                     error: "code 0".to_string(),
                 },
                 WriteOutcome::Ok,
@@ -9885,7 +10593,7 @@ mod tests {
                 }),
                 WriteOutcome::Failed {
                     address: HR_DISCHARGE_SLOT_1_START,
-                    value: encode_hhmm(18, 0),
+                    value: encode_hhmm(18, 0).expect("valid test start time"),
                     error: "code 0".to_string(),
                 },
             )
@@ -10910,12 +11618,14 @@ mod tests {
                 .iter()
                 .find(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 0);
             // …and the compensating restore of the prior physical slot.
-            let compensated_start = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == encode_hhmm(16, 0));
-            let compensated_end = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == encode_hhmm(19, 0));
+            let compensated_start = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_START
+                    && w.value == encode_hhmm(16, 0).expect("valid test start time")
+            });
+            let compensated_end = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_END
+                    && w.value == encode_hhmm(19, 0).expect("valid test end time")
+            });
             assert!(
                 clear_start.is_some(),
                 "the clear batch must have been queued: {writes:?}"
@@ -11072,15 +11782,18 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_GATEWAY);
 
             let writes = drain_pending_writes(&state).await;
-            let attempted_new_start = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == encode_hhmm(18, 0));
-            let compensated_start = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == encode_hhmm(16, 0));
-            let compensated_end = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == encode_hhmm(17, 0));
+            let attempted_new_start = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_START
+                    && w.value == encode_hhmm(18, 0).expect("valid test start time")
+            });
+            let compensated_start = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_START
+                    && w.value == encode_hhmm(16, 0).expect("valid test start time")
+            });
+            let compensated_end = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_END
+                    && w.value == encode_hhmm(17, 0).expect("valid test end time")
+            });
             assert!(
                 attempted_new_start,
                 "the new slot start must have been queued: {writes:?}"
@@ -11156,15 +11869,18 @@ mod tests {
             );
 
             let writes = drain_pending_writes(&state).await;
-            let attempted_new_start = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == encode_hhmm(18, 0));
-            let compensated_start = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == encode_hhmm(16, 0));
-            let compensated_end = writes
-                .iter()
-                .any(|w| w.address == HR_DISCHARGE_SLOT_1_END && w.value == encode_hhmm(17, 0));
+            let attempted_new_start = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_START
+                    && w.value == encode_hhmm(18, 0).expect("valid test start time")
+            });
+            let compensated_start = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_START
+                    && w.value == encode_hhmm(16, 0).expect("valid test start time")
+            });
+            let compensated_end = writes.iter().any(|w| {
+                w.address == HR_DISCHARGE_SLOT_1_END
+                    && w.value == encode_hhmm(17, 0).expect("valid test end time")
+            });
             assert!(
                 attempted_new_start,
                 "the new slot start must have landed: {writes:?}"
@@ -11598,6 +12314,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_mode_rejects_invalid_discharge_slots_without_arming() {
+        with_isolated_config_dir_async(|| async {
+            let invalid_requests = [
+                serde_json::json!({
+                    "mode": "timed_demand",
+                    "discharge_slots": [{
+                        "enabled": true,
+                        "start_hour": 16,
+                        "start_minute": 0,
+                        "end_hour": 19,
+                        "end_minute": 0,
+                        "target_soc": 50,
+                    }],
+                }),
+                serde_json::json!({
+                    "mode": "timed_demand",
+                    "discharge_slots": [{
+                        "slot": 99,
+                        "enabled": true,
+                        "start_hour": 16,
+                        "start_minute": 0,
+                        "end_hour": 19,
+                        "end_minute": 0,
+                        "target_soc": 50,
+                    }],
+                }),
+                serde_json::json!({
+                    "mode": "timed_demand",
+                    "discharge_slots": [{
+                        "slot": 1,
+                        "enabled": true,
+                        "start_hour": 24,
+                        "start_minute": 0,
+                        "end_hour": 19,
+                        "end_minute": 0,
+                        "target_soc": 50,
+                    }],
+                }),
+                serde_json::json!({
+                    "mode": "timed_demand",
+                    "discharge_slots": [],
+                }),
+            ];
+
+            for body in invalid_requests {
+                let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+                let (status, response) = set_mode(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(response.0["ok"], false);
+                assert!(response.0["error"].as_str().is_some_and(|error| {
+                    error.contains("discharge slot") || error.contains("discharge_slots")
+                }));
+                assert!(
+                    state.pending_writes.lock().await.is_empty(),
+                    "invalid slot input must not queue an HR59 arm write"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn set_mode_timed_export_routes_through_managed_schedule() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::{
@@ -11781,7 +12559,7 @@ mod tests {
             // completes immediately and we exit the loop. The backup is
             // then gone from disk (RED).
             let mut drained = false;
-            for _ in 0..100 {
+            for _ in 0..1000 {
                 if handle.is_finished() {
                     break;
                 }
@@ -11798,6 +12576,7 @@ mod tests {
                     }
                 }
                 drop(pw);
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 tokio::task::yield_now().await;
             }
             let (status, _) = handle.await.unwrap();
@@ -12017,6 +12796,25 @@ mod tests {
             assert!(writes
                 .iter()
                 .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_gateway_falls_back_to_single_phase_reserve_4() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_3PH_BATTERY_SOC_RESERVE, HR_BATTERY_SOC_RESERVE};
+
+            let state = make_state_with_device(DeviceType::Gateway).await;
+            let _ = drive_unpause_battery_completion(&state).await;
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 4));
+            assert!(!writes
+                .iter()
+                .any(|w| w.address == HR_3PH_BATTERY_SOC_RESERVE));
         })
         .await;
     }
@@ -12705,6 +13503,9 @@ mod tests {
                 (DeviceType::AllInOne6kW, HR_BATTERY_CHARGE_LIMIT),
                 (DeviceType::AllInOne3_6kW, HR_BATTERY_CHARGE_LIMIT),
                 (DeviceType::AllInOne5kW, HR_BATTERY_CHARGE_LIMIT),
+                // Gateway is single-phase-class for control, so charge-rate
+                // writes use the standard HR 111 path.
+                (DeviceType::Gateway, HR_BATTERY_CHARGE_LIMIT),
             ];
             for (dt, want_reg) in cases {
                 let state = make_state_with_device(dt).await;
@@ -12852,6 +13653,22 @@ mod tests {
                 "slot end must be written before HR96=1"
             );
             assert_ne!(writes[start_idx].value, writes[end_idx].value);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_requires_snapshot_before_queueing_writes() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (status, response) = force_charge(State(state.clone()), None).await;
+
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(response.0["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("snapshot")));
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert!(state.force_charge_revert.lock().await.is_none());
         })
         .await;
     }
@@ -13100,11 +13917,11 @@ mod tests {
     async fn await_write_outcome_returns_error_when_channel_dropped() {
         // If the poll loop is dropped (or the batch removed) before sending an
         // outcome, the receiver resolves with a closed-channel error.
-        // await_write_outcome must surface that as an Err rather than hanging
-        // or silently treating it as success.
+        // await_write_outcome_with_timeout must surface that as an Err rather
+        // than hanging or silently treating it as success.
         let (tx, rx) = tokio::sync::oneshot::channel::<WriteOutcome>();
         drop(tx);
-        let result = await_write_outcome(rx).await;
+        let result = await_write_outcome_with_timeout(rx, WRITE_COMPLETION_TIMEOUT).await;
         let msg = result.expect_err("a dropped sender must surface as an error");
         assert!(
             msg.contains("dropped"),
@@ -13158,6 +13975,54 @@ mod tests {
             "transaction timeout {timeout:?} must exceed the {mandatory_gaps:?} pacing floor"
         );
         assert_eq!(timeout, Duration::from_secs(33));
+    }
+
+    #[tokio::test]
+    async fn completion_budget_covers_writes_already_queued_ahead() {
+        // A user action queued behind a full eco slot-clear batch (20
+        // registers) plus a mode batch (3) must not spuriously time out:
+        // the returned budget has to pay each already-queued write's 1.5 s
+        // inter-write pacing on top of the batch's own size, otherwise the
+        // request 502s and rolls back while its registers are still
+        // progressing normally behind the backlog.
+        let state = test_state();
+        for count in [20usize, 3] {
+            state.pending_writes.lock().await.push(PendingWriteBatch {
+                writes: vec![
+                    RegisterWrite {
+                        address: 1,
+                        value: 0
+                    };
+                    count
+                ],
+                completion: None,
+                policy: WriteBatchPolicy::ContinueOnError,
+                owner: None,
+            });
+        }
+        let writes = vec![
+            RegisterWrite {
+                address: 94,
+                value: 1800,
+            },
+            RegisterWrite {
+                address: 95,
+                value: 1900,
+            },
+            RegisterWrite {
+                address: 242,
+                value: 100,
+            },
+        ];
+        let (_rx, budget) = queue_writes_with_completion_budget(
+            &state,
+            writes,
+            WriteBatchPolicy::FailFastTransactional,
+            Some(DischargeControlOwner::TimedExport),
+        )
+        .await;
+        // 23 writes queued ahead + this batch's 3.
+        assert_eq!(budget, batch_completion_timeout(26));
     }
 
     #[tokio::test]
@@ -13994,9 +14859,9 @@ mod tests {
                 "stop should restore battery_power_mode to eco (1)"
             );
             // 02:00 = 200 HHMM encoded.
-            let start = encode_hhmm(2, 0);
+            let start = encode_hhmm(2, 0).expect("valid test start time");
             // 04:00 = 400 HHMM encoded.
-            let end = encode_hhmm(4, 0);
+            let end = encode_hhmm(4, 0).expect("valid test end time");
             assert!(
                 writes
                     .iter()
@@ -14340,9 +15205,9 @@ mod tests {
                 "stop should restore enable_charge_target to match enable_charge"
             );
             // 17:00 = 1700 HHMM encoded.
-            let start = encode_hhmm(17, 0);
+            let start = encode_hhmm(17, 0).expect("valid test start time");
             // 19:00 = 1900 HHMM encoded.
-            let end = encode_hhmm(19, 0);
+            let end = encode_hhmm(19, 0).expect("valid test end time");
             assert!(
                 writes
                     .iter()
@@ -14753,11 +15618,20 @@ mod tests {
     #[tokio::test]
     async fn force_discharge_with_minutes_records_slot_end_for_auto_revert() {
         with_isolated_config_dir_async(|| async {
-            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
-            let before = chrono::Local::now().timestamp_millis();
+            use chrono::{LocalResult, TimeZone};
 
-            let _ =
-                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let fixed_now = match Local.with_ymd_and_hms(2024, 1, 15, 12, 34, 56) {
+                LocalResult::Single(value) => value,
+                other => panic!("fixed test time must be unambiguous: {other:?}"),
+            };
+
+            let _ = force_discharge_at(
+                state.clone(),
+                Some(Json(json!({ "minutes": 30 }))),
+                fixed_now,
+            )
+            .await;
             let _ = drain_pending_writes(&state).await;
 
             let revert = state
@@ -14770,14 +15644,8 @@ mod tests {
                 .force_discharge_slot_end_ms
                 .expect("slot end must be recorded on the minutes path");
 
-            // Slot end must be in the future (30 min from "before").
-            let expected_min = before + 30 * 60 * 1000;
-            let expected_max = before + 30 * 60 * 1000 + 5_000; // 5s slack
-            assert!(
-                slot_end >= expected_min && slot_end <= expected_max,
-                "slot end should be ~30 min from now: before={before}, slot_end={slot_end}, \
-                 expected=[{expected_min}, {expected_max}]"
-            );
+            let expected = fixed_now.timestamp_millis() + 30 * 60 * 1000;
+            assert_eq!(slot_end, expected, "slot end must use the injected clock");
         })
         .await;
     }
@@ -14802,6 +15670,66 @@ mod tests {
                 revert.force_discharge_slot_end_ms.is_none(),
                 "no-body path must not set slot end (no auto-revert)"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn calibration_rejects_devices_without_manual_calibration_support() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let (status, body) =
+                set_calibration(State(state.clone()), Json(json!({ "stage": 1 }))).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["ok"], false);
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn calibration_accepts_supported_connected_battery() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .supports_battery_calibration = true;
+
+            let (status, _) =
+                set_calibration(State(state.clone()), Json(json!({ "stage": 1 }))).await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(drain_pending_writes(&state).await.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reboot_rejects_when_inverter_is_not_connected() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (status, body) = reboot_inverter(State(state.clone())).await;
+
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["ok"], false);
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reboot_accepts_a_connected_inverter() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let (status, _) = reboot_inverter(State(state.clone())).await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(drain_pending_writes(&state).await.len(), 1);
         })
         .await;
     }
@@ -15092,7 +16020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_alerts_clamps_inverter_temperature_bounds() {
+    async fn set_alerts_clamps_inverter_temperature_upper_bound() {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
             let body = serde_json::json!({
@@ -15103,8 +16031,26 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
 
             let cfg = state.alert_config.lock().await.clone();
-            assert_eq!(cfg.inverter_temp_min, 0.0);
+            assert_eq!(cfg.inverter_temp_min, -10.0);
             assert_eq!(cfg.inverter_temp_max, 120.0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_alerts_accepts_negative_temperature_minimums() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "batt_temp_min": -10.0,
+                "inverter_temp_min": -5.0,
+            });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let cfg = state.alert_config.lock().await.clone();
+            assert_eq!(cfg.batt_temp_min, -10.0);
+            assert_eq!(cfg.inverter_temp_min, -5.0);
         })
         .await;
     }
@@ -15144,6 +16090,283 @@ mod tests {
             assert_eq!(cfg.inverter_temp_max, 60.0);
         })
         .await;
+    }
+
+    /// A failed settings save must not publish the candidate auto-winter
+    /// configuration to the live state.
+    #[tokio::test]
+    async fn set_auto_winter_rolls_back_when_settings_save_fails() {
+        with_isolated_config_dir_async(|| async {
+            use crate::settings::InjectUpdateFailures;
+
+            let state = test_state();
+            let config_before = state.auto_winter_config.lock().await.clone();
+            let settings_before = crate::settings::Settings::load();
+
+            let _injection = InjectUpdateFailures::arm(1);
+            let (status, body) = set_auto_winter(
+                State(state.clone()),
+                Json(json!({ "enabled": true, "target_soc": 55 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["ok"], false);
+            assert_eq!(InjectUpdateFailures::remaining(), 0);
+
+            assert_eq!(
+                serde_json::to_value(state.auto_winter_config.lock().await.clone()).unwrap(),
+                serde_json::to_value(config_before).unwrap(),
+                "live auto-winter config must remain unchanged"
+            );
+            assert_eq!(
+                serde_json::to_value(crate::settings::Settings::load()).unwrap(),
+                serde_json::to_value(settings_before).unwrap(),
+                "settings on disk must remain unchanged"
+            );
+        })
+        .await;
+    }
+
+    /// A failed settings save must not publish the candidate alert
+    /// configuration or clear the existing debounce state.
+    #[tokio::test]
+    async fn set_alerts_rolls_back_when_settings_save_fails() {
+        with_isolated_config_dir_async(|| async {
+            use crate::alerts::AlertType;
+            use crate::settings::InjectUpdateFailures;
+
+            let state = test_state();
+            let config_before = state.alert_config.lock().await.clone();
+            let settings_before = crate::settings::Settings::load();
+            let debounce_before = {
+                let mut debounce = state.alert_debounce.lock().await;
+                assert!(debounce.should_fire(AlertType::GridOffline, 30));
+                debounce.record_delivery(&[AlertType::GridOffline], true);
+                debounce.len()
+            };
+
+            let _injection = InjectUpdateFailures::arm(1);
+            let (status, body) = set_alerts(
+                State(state.clone()),
+                Json(json!({ "enabled": true, "cooldown_minutes": 17 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["ok"], false);
+            assert_eq!(InjectUpdateFailures::remaining(), 0);
+
+            assert_eq!(
+                serde_json::to_value(state.alert_config.lock().await.clone()).unwrap(),
+                serde_json::to_value(config_before).unwrap(),
+                "live alert config must remain unchanged"
+            );
+            assert_eq!(
+                state.alert_debounce.lock().await.len(),
+                debounce_before,
+                "alert debounce state must remain unchanged"
+            );
+            assert_eq!(
+                serde_json::to_value(crate::settings::Settings::load()).unwrap(),
+                serde_json::to_value(settings_before).unwrap(),
+                "settings on disk must remain unchanged"
+            );
+        })
+        .await;
+    }
+
+    /// A failed settings save must not publish the candidate load-limiter
+    /// configuration to the live state.
+    #[tokio::test]
+    async fn set_load_limiter_rolls_back_when_settings_save_fails() {
+        with_isolated_config_dir_async(|| async {
+            use crate::settings::InjectUpdateFailures;
+
+            let state = test_state();
+            let config_before = state.load_limiter_config.lock().await.clone();
+            let settings_before = crate::settings::Settings::load();
+
+            let _injection = InjectUpdateFailures::arm(1);
+            let (status, body) = set_load_limiter(
+                State(state.clone()),
+                Json(json!({ "enabled": true, "threshold_w": 4200 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["ok"], false);
+            assert_eq!(InjectUpdateFailures::remaining(), 0);
+
+            assert_eq!(
+                serde_json::to_value(state.load_limiter_config.lock().await.clone()).unwrap(),
+                serde_json::to_value(config_before).unwrap(),
+                "live load-limiter config must remain unchanged"
+            );
+            assert_eq!(
+                serde_json::to_value(crate::settings::Settings::load()).unwrap(),
+                serde_json::to_value(settings_before).unwrap(),
+                "settings on disk must remain unchanged"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn auto_winter_rejects_invalid_thresholds_without_partial_persistence() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let live_before = state.auto_winter_config.lock().await.clone();
+            let disk_before = crate::settings::Settings::load();
+
+            for body in [
+                json!({ "cold_threshold": 8.0, "recovery_threshold": 5.0 }),
+                json!({ "cold_threshold": null }),
+            ] {
+                let (status, response) = set_auto_winter(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(response["ok"], false);
+                assert_eq!(
+                    serde_json::to_value(state.auto_winter_config.lock().await.clone()).unwrap(),
+                    serde_json::to_value(&live_before).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(crate::settings::Settings::load()).unwrap(),
+                    serde_json::to_value(&disk_before).unwrap()
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agile_rejects_invalid_thresholds_without_partial_persistence() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let disk_before = crate::settings::Settings::load();
+
+            for body in [
+                json!({ "charge_threshold": 40.0, "discharge_threshold": 30.0 }),
+                json!({ "charge_threshold": null }),
+            ] {
+                let (status, response) = set_agile(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(response["ok"], false);
+                assert_eq!(
+                    serde_json::to_value(crate::settings::Settings::load()).unwrap(),
+                    serde_json::to_value(&disk_before).unwrap()
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn alerts_reject_inverted_thresholds_without_partial_persistence() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let live_before = state.alert_config.lock().await.clone();
+            let disk_before = crate::settings::Settings::load();
+
+            for body in [
+                json!({ "batt_temp_min": 50.0, "batt_temp_max": 40.0 }),
+                json!({ "inverter_temp_min": 100.0, "inverter_temp_max": 80.0 }),
+                json!({ "soc_min": 90, "soc_max": 80 }),
+                json!({ "batt_temp_max": null }),
+            ] {
+                let (status, response) = set_alerts(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(response["ok"], false);
+                assert_eq!(
+                    serde_json::to_value(state.alert_config.lock().await.clone()).unwrap(),
+                    serde_json::to_value(&live_before).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(crate::settings::Settings::load()).unwrap(),
+                    serde_json::to_value(&disk_before).unwrap()
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn automation_thresholds_accept_valid_boundary_pairs() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (status, _) = set_auto_winter(
+                State(state.clone()),
+                Json(json!({ "cold_threshold": 0.0, "recovery_threshold": 1.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (status, _) = set_agile(
+                State(state.clone()),
+                Json(json!({ "charge_threshold": 0.0, "discharge_threshold": 5.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (status, _) = set_alerts(
+                State(state.clone()),
+                Json(json!({
+                    "batt_temp_min": 0.0,
+                    "batt_temp_max": 80.0,
+                    "soc_min": 0,
+                    "soc_max": 100,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let auto = state.auto_winter_config.lock().await.clone();
+            assert_eq!(auto.cold_threshold, 0.0);
+            assert_eq!(auto.recovery_threshold, 1.0);
+            let settings = crate::settings::Settings::load();
+            assert_eq!(settings.agile_charge_threshold, 0.0);
+            assert_eq!(settings.agile_discharge_threshold, 5.0);
+        })
+        .await;
+    }
+
+    #[test]
+    fn automation_threshold_validation_rejects_nan_and_infinity() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                validate_finite_threshold_value(value, "threshold").is_err(),
+                "non-finite threshold {value:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn agile_threshold_validation_accepts_a_properly_ordered_pair() {
+        assert!(validate_agile_thresholds(10.0, 30.0).is_ok());
+        // Minimum allowed gap boundary: charge just below discharge.
+        assert!(validate_agile_thresholds(4.999, 5.0).is_ok());
+    }
+
+    #[test]
+    fn agile_threshold_validation_rejects_inverted_or_touching_pair() {
+        // The API-level guard the E2E suite pins: an inverted pair would
+        // make the inverter never charge, so it must never reach settings.
+        let err = validate_agile_thresholds(30.0, 10.0).unwrap_err();
+        assert!(err.contains("charge_threshold must be below discharge_threshold"));
+        assert!(validate_agile_thresholds(20.0, 20.0).is_err());
+    }
+
+    #[test]
+    fn agile_threshold_validation_rejects_out_of_range_sides() {
+        // Each side keeps its own documented band: charge [0, 50],
+        // discharge [5, 100].
+        assert!(validate_agile_thresholds(50.1, 60.0).is_err());
+        assert!(validate_agile_thresholds(-0.1, 30.0).is_err());
+        assert!(validate_agile_thresholds(4.0, 4.5).is_err());
+        assert!(validate_agile_thresholds(10.0, 100.1).is_err());
+    }
+
+    #[test]
+    fn agile_threshold_validation_rejects_non_finite_sides() {
+        assert!(validate_agile_thresholds(f64::NAN, 30.0).is_err());
+        assert!(validate_agile_thresholds(10.0, f64::INFINITY).is_err());
     }
 
     /// Regression test for review finding #1 (week of 2026-08-22):
@@ -15881,7 +17104,7 @@ mod tests {
     // ======================================================================
 
     #[tokio::test]
-    async fn get_settings_returns_api_key_and_port() {
+    async fn get_settings_returns_api_key_metadata_and_port() {
         with_isolated_config_dir_async(|| async {
             // Seed a known api_key/api_port on disk.
             let mut s = crate::settings::Settings::load();
@@ -15894,7 +17117,9 @@ mod tests {
 
             assert_eq!(status, StatusCode::OK);
             let data = &body["data"];
-            assert_eq!(data["api_key"], "test-key-456");
+            assert_eq!(data["api_key_configured"], true);
+            assert_eq!(data["api_key_last4"], "-456");
+            assert!(data.get("api_key").is_none());
             assert_eq!(data["api_port"], 9999);
         })
         .await;
@@ -15909,7 +17134,9 @@ mod tests {
 
             assert_eq!(status, StatusCode::OK);
             let data = &body["data"];
-            assert_eq!(data["api_key"], "");
+            assert_eq!(data["api_key_configured"], false);
+            assert_eq!(data["api_key_last4"], "");
+            assert!(data.get("api_key").is_none());
             assert_eq!(data["api_port"], 7338);
         })
         .await;
@@ -15932,9 +17159,11 @@ mod tests {
             assert_eq!(saved.api_key, "my-api-key");
             assert_eq!(saved.api_port, 8443);
 
-            // Verify get_settings returns them too.
+            // Verify get_settings returns metadata without the secret.
             let (_, get_body) = get_settings(State(state)).await;
-            assert_eq!(get_body["data"]["api_key"], "my-api-key");
+            assert_eq!(get_body["data"]["api_key_configured"], true);
+            assert_eq!(get_body["data"]["api_key_last4"], "-key");
+            assert!(get_body["data"].get("api_key").is_none());
             assert_eq!(get_body["data"]["api_port"], 8443);
         })
         .await;
@@ -16486,6 +17715,56 @@ mod tests {
             assert_eq!(
                 json["error"],
                 "Invalid history window: start_ms must be before end_ms"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_history_summary_rejects_an_overflowing_offset() {
+        with_isolated_config_dir_async(|| async {
+            let (status, Json(json)) = get_history_summary(
+                State(test_state()),
+                Query(HistoryQuery {
+                    range: Some("1h".to_string()),
+                    fields: None,
+                    offset: Some(i64::MAX),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(
+                json["error"].as_str().unwrap_or("").contains("offset"),
+                "got: {json}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_history_summary_rejects_an_overflowing_explicit_end() {
+        with_isolated_config_dir_async(|| async {
+            let (status, Json(json)) = get_history_summary(
+                State(test_state()),
+                Query(HistoryQuery {
+                    range: Some("1h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: Some(i64::MAX - 500),
+                    end_ms: Some(i64::MAX),
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(
+                json["error"].as_str().unwrap_or("").contains("timestamp"),
+                "got: {json}"
             );
         })
         .await;
@@ -17933,11 +19212,29 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn returns_host_and_port_from_one_settings_snapshot() {
+            let state = crate::test_util::with_isolated_config_dir(|| Arc::new(AppState::new()));
+            {
+                let mut settings = state.settings.lock().await;
+                settings.evc_host = "192.168.1.226".to_string();
+                settings.evc_port = 1502;
+            }
+
+            let (host, port) = evc_settings_snapshot(&state).await;
+            assert_eq!(host, "192.168.1.226");
+            assert_eq!(port, 1502);
+        }
+
+        #[tokio::test]
         async fn returns_reachable_true_with_snapshot_when_latest_evc_is_some() {
             // Simulate the EVC poll loop having decoded at least one
             // snapshot since startup.
             let state = crate::test_util::with_isolated_config_dir(|| Arc::new(AppState::new()));
             state.settings.lock().await.evc_host = "192.168.1.225".to_string();
+            {
+                let mut reachability = state.evc_reachability.lock().await;
+                reachability.record_success(crate::evc::current_epoch_ms());
+            }
             {
                 let mut evc = state.latest_evc.lock().await;
                 *evc = Some(crate::evc::EvcSnapshot {
@@ -17974,6 +19271,39 @@ mod tests {
                 serde_json::Value::String("GE-EVC-0001".into())
             );
             assert_eq!(snap["meter_energy_kwh"], serde_json::json!(1234.5));
+        }
+
+        #[tokio::test]
+        async fn changing_evc_host_resets_cached_reachability_and_snapshot() {
+            crate::test_util::with_isolated_config_dir_async(|| async {
+                let state = Arc::new(AppState::new());
+                {
+                    let mut settings = state.settings.lock().await;
+                    settings.evc_host = "192.168.1.20".to_string();
+                }
+                {
+                    let mut reachability = state.evc_reachability.lock().await;
+                    reachability.record_success(crate::evc::current_epoch_ms());
+                }
+                *state.latest_evc.lock().await = Some(crate::evc::EvcSnapshot::default());
+
+                let (status, _) = update_settings(
+                    State(state.clone()),
+                    Json(serde_json::json!({"evc_host": "192.168.1.21"})),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+
+                let (_status, json) = evc_status(State(state.clone())).await;
+                assert_eq!(json["reachable"], serde_json::json!(false));
+                assert_eq!(
+                    json["connection_state"],
+                    serde_json::json!("never_connected")
+                );
+                assert!(json["snapshot"].is_null());
+                assert!(json["last_success_at_epoch_ms"].is_null());
+            })
+            .await;
         }
     }
 
@@ -18014,7 +19344,7 @@ mod tests {
                         "start_minute": 0,
                         "end_hour": 2,
                         "end_minute": 0,
-                        "target_soc": 1000
+                        "target_soc": 100
                     }]
                 })),
             )
@@ -18214,6 +19544,36 @@ mod tests {
                 addresses.contains(&27),
                 "clear must restore eco mode (HR 27)"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_cosy_returns_error_when_settings_save_fails() {
+        crate::test_util::with_isolated_config_dir_async(async || {
+            use crate::settings::InjectUpdateFailures;
+
+            let mut s = crate::settings::Settings::load();
+            s.agile_scope = AgileScope::Full;
+            s.agile_enabled = true;
+            s.save().unwrap();
+
+            let state = test_state();
+            let _injection = InjectUpdateFailures::arm(1);
+            let (status, body) =
+                set_cosy(State(state.clone()), Json(json!({ "enabled": true }))).await;
+
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["ok"], false);
+            assert!(
+                state.pending_writes.lock().await.is_empty(),
+                "a failed settings save must not queue inverter writes"
+            );
+
+            let saved = crate::settings::Settings::load();
+            assert!(!saved.cosy_enabled);
+            assert_eq!(saved.agile_scope, AgileScope::Full);
+            assert!(saved.agile_enabled);
         })
         .await;
     }
@@ -18611,35 +19971,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_cosy_clamps_target_soc_to_battery_safe_band() {
+    async fn set_cosy_accepts_valid_target_soc_boundaries() {
         // `cosy_slot_register_writes` writes `slot.target_soc` directly to
-        // HR_CHARGE_TARGET_SOC / HR_CHARGE_TARGET_SOC_1, bypassing the
-        // encoder's validate_range. So the clamp at the POST /api/cosy
-        // boundary is the only guard keeping a forged value out of the
-        // register write. Each slot exercises one boundary case:
-        //   0   → 4   (decoder reads 0 as "no per-slot target"; clamp to floor)
-        //   3   → 4   (below floor)
-        //   60  → 60  (in range, untouched)
-        //   100 → 100 (ceiling, untouched)
-        //   150 → 100 (above ceiling)
-        //   1000 → 100 (must clamp on u64 BEFORE `as u8`, else truncates to 232)
-        //   absent → 100 (default)
+        // the holding registers, so the POST boundary must accept the safe
+        // inclusive range without narrowing or changing valid values.
         crate::test_util::with_isolated_config_dir_async(async || {
             let body = serde_json::json!({
                 "enabled": true,
                 "slots": [
                     { "enabled": true, "start_hour": 4, "start_minute": 0,
-                      "end_hour": 7, "end_minute": 0, "target_soc": 0 },
-                    { "enabled": true, "start_hour": 13, "start_minute": 0,
-                      "end_hour": 16, "end_minute": 0, "target_soc": 3 },
+                      "end_hour": 7, "end_minute": 0, "target_soc": 4 },
                     { "enabled": true, "start_hour": 22, "start_minute": 0,
                       "end_hour": 23, "end_minute": 0, "target_soc": 60 },
                     { "enabled": true, "start_hour": 1, "start_minute": 0,
                       "end_hour": 2, "end_minute": 0, "target_soc": 100 },
-                    { "enabled": true, "start_hour": 2, "start_minute": 0,
-                      "end_hour": 3, "end_minute": 0, "target_soc": 150 },
-                    { "enabled": true, "start_hour": 3, "start_minute": 0,
-                      "end_hour": 4, "end_minute": 0, "target_soc": 1000 },
                     { "enabled": false, "start_hour": 0, "start_minute": 0,
                       "end_hour": 0, "end_minute": 0 }
                 ]
@@ -18648,12 +19993,12 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
 
             let s = crate::settings::Settings::load();
-            assert_eq!(s.cosy_slots.len(), 7, "all posted slots must persist");
+            assert_eq!(s.cosy_slots.len(), 4, "all posted slots must persist");
             let got: Vec<u8> = s.cosy_slots.iter().map(|slot| slot.target_soc).collect();
             assert_eq!(
                 got,
-                vec![4, 4, 60, 100, 100, 100, 100],
-                "target_soc must be clamped to [4, 100] after truncation-safe coerce"
+                vec![4, 60, 100, 100],
+                "target_soc values in [4, 100] must be preserved"
             );
         })
         .await;
@@ -18859,5 +20204,127 @@ mod tests {
             parse_settings(&serde_json::json!({ "host": "192.168.1.10" })).is_ok(),
             "an omitted serial must still be accepted"
         );
+    }
+
+    #[test]
+    fn parse_settings_rejects_port_values_that_do_not_fit_u16() {
+        for value in [
+            serde_json::json!(u16::MAX as u64 + 1),
+            serde_json::json!(u64::from(u16::MAX) + 256),
+            serde_json::json!(-1),
+            serde_json::json!(8899.5),
+        ] {
+            let error = parse_settings(&serde_json::json!({
+                "host": "192.168.1.10",
+                "port": value,
+            }))
+            .expect_err("out-of-range port must be rejected before narrowing");
+            assert!(
+                error.contains("port"),
+                "error should identify port: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_reject_port_fields_that_do_not_fit_u16() {
+        with_isolated_config_dir_async(|| async {
+            for value in [
+                serde_json::json!(u16::MAX as u64 + 1),
+                serde_json::json!(-1),
+                serde_json::json!(8899.5),
+            ] {
+                for field in ["http_port", "evc_port", "api_port"] {
+                    let state = Arc::new(AppState::new());
+                    let (status, _) =
+                        update_settings(State(state), Json(serde_json::json!({ field: value })))
+                            .await;
+                    assert_eq!(
+                        status,
+                        StatusCode::BAD_REQUEST,
+                        "{field} must reject non-u16 input {value}"
+                    );
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn schedule_endpoints_reject_narrowing_time_and_soc_values() {
+        with_isolated_config_dir_async(|| async {
+            let timed_discharge = make_state_with_device(DeviceType::ACThreePhase).await;
+            let (status, _) = set_timed_discharge(
+                State(timed_discharge.clone()),
+                Json(serde_json::json!({
+                    "enabled": true,
+                    "start_hour": 256,
+                    "end_hour": 4,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(timed_discharge.pending_writes.lock().await.is_empty());
+
+            let charge = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let (status, _) = set_charge_slot(
+                State(charge.clone()),
+                Json(serde_json::json!({
+                    "slot": 1,
+                    "enabled": true,
+                    "start_hour": 256,
+                    "end_hour": 4,
+                    "target_soc": 101,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(charge.pending_writes.lock().await.is_empty());
+
+            let discharge = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            let (status, _) = set_discharge_slot(
+                State(discharge.clone()),
+                Json(serde_json::json!({
+                    "slot": 1,
+                    "enabled": true,
+                    "start_hour": 16,
+                    "end_hour": 19,
+                    "end_minute": 256,
+                    "target_soc": 101,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(discharge.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cosy_rejects_narrowing_slot_values_without_persisting() {
+        with_isolated_config_dir_async(|| async {
+            let baseline = crate::settings::Settings::load();
+            let (status, _) = set_cosy(
+                State(Arc::new(AppState::new())),
+                Json(serde_json::json!({
+                    "enabled": true,
+                    "slots": [{
+                        "enabled": true,
+                        "start_hour": 256,
+                        "start_minute": 0,
+                        "end_hour": 4,
+                        "end_minute": 0,
+                        "target_soc": 101,
+                    }],
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                serde_json::to_value(crate::settings::Settings::load().cosy_slots).unwrap(),
+                serde_json::to_value(baseline.cosy_slots).unwrap()
+            );
+        })
+        .await;
     }
 }

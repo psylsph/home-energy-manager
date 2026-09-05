@@ -62,13 +62,13 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
     // IR(182)/IR(183) are alternative *daily* battery discharge/charge totals
     // that are authoritative for Gen1 Hybrid inverters on firmware where the
     // primary IR(36)/IR(37) registers read 0. The decoder routes by device type
-    // (see `decode_input_180_181` in `decoder.rs`). Reading 4 registers costs
+    // (see `decode_input_180_183` in `decoder.rs`). Reading 4 registers costs
     // one extra Modbus frame per single-phase poll cycle.
     RegisterBlock {
         start: 180,
         count: 4,
         register_type: RegisterType::Input,
-        name: "input_180_181",
+        name: "input_180_183",
     },
 ];
 
@@ -76,7 +76,7 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
 ///
 /// Three-phase inverters read all real-time telemetry (PV, grid, battery,
 /// daily/lifetime energy totals) from the IR(1000-1414) range, which
-/// completely supersedes the single-phase `input_0_59` and `input_180_181`
+/// completely supersedes the single-phase `input_0_59` and `input_180_183`
 /// blocks. Reading those two blocks on every cycle wastes ~300 ms of
 /// inter-request delay and adds two opportunities for a timeout to kill the
 /// entire poll.
@@ -492,17 +492,17 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     // Battery heater controls (givenergy-modbus #167, confirmed via GE Android app)
     104, // ENABLE_BATTERY_SELF_HEATING — hardware/batch-gated
     172, // ENABLE_MANUAL_BATTERY_HEATER — likely hardware-gated like 104
-    // Charge slot 2 — Gen3 extended (HR 243-244, mirrors classic HR 31-32)
-    243, 244, // Charge slots 3-10 (Gen3 extended)
+    243, 244, // Charge slot 2 — Gen3 extended (mirrors classic HR 31-32)
     246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264,
-    265, 266, 267, 268, 269, // Discharge slots 3-10 (Gen3 extended)
+    265, 266, 267, 268, 269, // Charge slots 3-10 (Gen3 extended)
     276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294,
-    295, 296, 297, 298, 299, // Per-slot charge targets (Gen3)
-    242, 245, // Per-slot discharge targets (Gen3)
-    272, 275, // AC-coupled features
-    311, 313, 314, 317, // Pause mode/slot
-    318, 319, 320, // Three-phase controls
-    1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1118, 1119, 1120, 1121, 1122, 1123,
+    295, 296, 297, 298, 299, // Discharge slots 3-10 (Gen3 extended)
+    242, 245, // Per-slot charge targets (Gen3)
+    272, 275, // Per-slot discharge targets (Gen3)
+    311, 313, 314, 317, // AC-coupled features
+    318, 319, 320, // Pause mode/slot
+    1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1118, 1119, 1120, 1121, 1122,
+    1123, // Three-phase controls
     1005, // REAL_TIME_CONTROL (three-phase mirror of HR166)
     1078, // BATTERY_POWER_CUTOFF (three-phase battery power derating %)
     // EMS plant-level control / plant_status + discharge slots
@@ -513,10 +513,10 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     // App-confirmed writable registers (givenergy-modbus #167)
     199, // ENABLE_INVERTER_PARALLEL_MODE
     331, // FORCE_OFF_GRID — non-damaging, but sustained islanding state
-    // Export limit — three-phase plant-level (1063, deci-W) and EMS/Gateway plant (2071, W)
-    1063, 2071, // Smart Load slots 1-10 (app-confirmed, bounded HHMM values)
+    1063,
+    2071, // Export limit — three-phase plant-level (1063, deci-W) and EMS/Gateway plant (2071, W)
     554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572,
-    573,
+    573, // Smart Load slots 1-10 (app-confirmed, bounded HHMM values)
     // Other app-confirmed registers
     5010, // RESTART_HARDWARE — same class as HR163 REBOOT
     5014, // ENABLE_CALCULATED_LOAD
@@ -812,7 +812,8 @@ pub const EMS_PLANT_HOLDING_BLOCK: RegisterBlock = RegisterBlock {
 /// Returns None if the value represents an empty/disabled slot.
 ///
 /// The reference library uses 60 as the disabled sentinel (the minute
-/// component would be 60 which is invalid). All other values are valid:
+/// component would be 60 which is invalid). Values with hours in 0-23 and
+/// minutes in 0-59 are valid:
 ///   0   = 00:00 (midnight)
 ///   30  = 00:30
 ///   100 = 01:00
@@ -824,16 +825,22 @@ pub fn decode_hhmm(val: u16) -> Option<(u8, u8)> {
     }
     let hour = (val / 100) as u8;
     let minute = (val % 100) as u8;
-    // Guard against minute > 59 (shouldn't happen except 60 sentinel above)
-    if minute > 59 {
+    if hour > 23 || minute > 59 {
         return None;
     }
-    Some((hour.min(23), minute))
+    Some((hour, minute))
 }
 
 /// Encode (hour, minute) into a packed HHMM value.
-pub fn encode_hhmm(hour: u8, minute: u8) -> u16 {
-    (hour as u16) * 100 + (minute as u16)
+///
+/// Returns `None` when either component is outside the inverter's wall-clock
+/// range. Keeping the result checked prevents corrupt settings or snapshots
+/// from becoming plausible-looking schedule writes.
+pub fn encode_hhmm(hour: u8, minute: u8) -> Option<u16> {
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some((hour as u16) * 100 + (minute as u16))
 }
 
 // ===========================================================================
@@ -856,12 +863,12 @@ mod tests {
         // Holding 60-119 covers charge_slot_1 (94-95), soc_reserve (110), limits (111-112)
         assert_eq!(STANDARD_POLL_BLOCKS[2].start, 60);
         assert_eq!(STANDARD_POLL_BLOCKS[2].count, 60);
-        // Input 180-181/183 covers alternative battery lifetime totals
-        // (IR 180-181) plus the Gen1-authoritative alternative daily totals
+        // Input 180-183 covers alternative battery lifetime and daily totals
+        // (IR 180-183) with the Gen1-authoritative alternative daily totals
         // (IR 182-183). A full 60-register window is not needed.
         assert_eq!(STANDARD_POLL_BLOCKS[3].start, 180);
         assert_eq!(STANDARD_POLL_BLOCKS[3].count, 4);
-        assert_eq!(STANDARD_POLL_BLOCKS[3].name, "input_180_181");
+        assert_eq!(STANDARD_POLL_BLOCKS[3].name, "input_180_183");
         assert_eq!(STANDARD_POLL_BLOCKS[3].register_type, RegisterType::Input);
     }
 
@@ -912,12 +919,25 @@ mod tests {
     }
 
     #[test]
+    fn decode_hhmm_rejects_invalid_hours() {
+        assert_eq!(decode_hhmm(2400), None);
+        assert_eq!(decode_hhmm(9960), None);
+    }
+
+    #[test]
     fn encode_hhmm_roundtrip() {
         for (h, m) in [(0, 0), (0, 1), (6, 30), (16, 0), (23, 59)] {
-            let encoded = encode_hhmm(h, m);
+            let encoded = encode_hhmm(h, m).expect("valid HHMM components");
             let decoded = decode_hhmm(encoded);
             assert_eq!(decoded, Some((h, m)));
         }
+    }
+
+    #[test]
+    fn encode_hhmm_rejects_invalid_components() {
+        assert_eq!(encode_hhmm(24, 0), None);
+        assert_eq!(encode_hhmm(23, 60), None);
+        assert_eq!(encode_hhmm(u8::MAX, u8::MAX), None);
     }
 
     #[test]

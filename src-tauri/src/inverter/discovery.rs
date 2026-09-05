@@ -83,9 +83,14 @@ pub async fn scan_subnet_on_port(subnet_base: &str, port: u16) -> Vec<Discovered
     found
 }
 
-/// Scan multiple subnets concurrently and return all discovered inverters.
+/// Scan multiple subnets and return all discovered inverters.
 pub async fn scan_multiple_subnets(subnets: &[String]) -> Vec<DiscoveredInverter> {
-    scan_multiple_subnets_on_port(subnets, MODBUS_PORT).await
+    let scans = subnets.iter().map(|subnet| scan_subnet(subnet));
+    futures_util::future::join_all(scans)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Like [`scan_multiple_subnets`] but probes a caller-chosen port (see
@@ -230,17 +235,6 @@ fn collect_physical_subnets(interfaces: &[(String, IpAddr)]) -> Vec<String> {
     subnets
 }
 
-/// Given a gateway like "192.168.1.1", return "192.168.1".
-#[cfg(test)]
-fn infer_subnet_base(gateway: &str) -> String {
-    let parts: Vec<&str> = gateway.split('.').collect();
-    if parts.len() == 4 {
-        format!("{}.{}.{}", parts[0], parts[1], parts[2])
-    } else {
-        "192.168.1".to_string()
-    }
-}
-
 /// Detect the local machine's LAN IP address.
 ///
 /// Returns the first IP address on a physical interface in the 10.x.x.x or
@@ -285,18 +279,6 @@ pub fn detect_lan_ip() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn infer_subnet_from_gateway() {
-        assert_eq!(infer_subnet_base("192.168.1.1"), "192.168.1");
-        assert_eq!(infer_subnet_base("10.0.0.1"), "10.0.0");
-        assert_eq!(infer_subnet_base("172.16.0.254"), "172.16.0");
-    }
-
-    #[test]
-    fn infer_subnet_short_input() {
-        assert_eq!(infer_subnet_base("not-an-ip"), "192.168.1");
-    }
 
     #[test]
     fn detect_lan_subnets_returns_something() {
@@ -450,6 +432,32 @@ mod tests {
         // function should aggregate (i.e. union) empty results.
         let result = scan_multiple_subnets_on_port(&["127.0.0".to_string()], port).await;
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_host_accepts_a_givenergy_magic_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 128];
+            let bytes_read = stream.read(&mut request).await.unwrap();
+            assert!(bytes_read > 0, "probe should send a Modbus request");
+
+            let response =
+                crate::modbus::framer::encode_frame("TEST123456", 0x32, 0x04, &[0, 1, 0, 1, 0, 0]);
+            stream.write_all(&response).await.unwrap();
+        });
+
+        let result = probe_host(String::from("127.0.0.1"), port).await;
+
+        assert_eq!(
+            result.map(|inverter| (inverter.ip, inverter.port)),
+            Some((String::from("127.0.0.1"), port))
+        );
+        server.await.unwrap();
     }
 
     #[test]

@@ -44,11 +44,13 @@ export default function ColdBatteryWarning() {
 
   if (!forceShow) {
     // Notifications "Alert if below" threshold; 0 = disabled.
-    if (threshold <= 0) return null;
+    if (threshold === 0) return null;
     // Auto Winter already warming the cells — no need to nag.
     if (autoWinter?.enabled) return null;
-    // Don't show on startup before real data arrives (temp would be 0).
-    if (snapshot.battery_temperature < 0.1) return null;
+    // Don't show on startup before real data arrives (the default is exactly
+    // 0°C). Negative values are valid sensor readings and must remain
+    // eligible for a negative threshold.
+    if (snapshot.battery_temperature === 0) return null;
     // Only warn when actually below the configured alert threshold.
     if (snapshot.battery_temperature >= threshold) return null;
   }

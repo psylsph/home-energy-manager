@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 
 use super::framer::{self, DecodedFrame, RegisterType};
 use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH};
@@ -180,13 +180,16 @@ fn model_specific_blocks_in_poll_order(
     blocks
 }
 
-/// Standard block set the runtime will use for the next poll given a confirmed
-/// (or prefilled) device type. Mirrors the selection logic inside
-/// [`ModbusClient::read_all_with_extras`] so the startup log can name the
-/// blocks a model-aware poll will read instead of just listing
-/// `extra_poll_blocks()` (which is empty for the Gateway — its IR 1600+ bank
-/// is added separately, and that omission was the source of confusing
-/// `extra_blocks=[]` log lines for Gateway users).
+/// Return the standard block set selected by the next model-aware poll.
+///
+/// This mirrors the standard-block selection inside
+/// [`ModbusClient::read_all_with_extras`], including the optional prefilled
+/// device type used before the first successful decode. It returns only the
+/// standard blocks; model-specific blocks are added separately by the runtime
+/// and can be inspected with [`preview_model_specific_blocks`]. Keeping this
+/// helper aligned with the runtime lets startup diagnostics describe the
+/// actual standard set instead of listing only `extra_poll_blocks()` (which is
+/// empty for the Gateway because its IR 1600+ bank is added separately).
 pub fn preview_standard_blocks(
     device_type: Option<&crate::inverter::model::DeviceType>,
     prefilled_device_type: Option<&crate::inverter::model::DeviceType>,
@@ -225,12 +228,12 @@ pub fn preview_model_specific_blocks(
 // Client
 // ---------------------------------------------------------------------------
 
-/// Manages a single TCP connection to a GivEnergy inverter dongle.
-/// Content-based key for matching Modbus responses to pending requests.
+/// Content-based key for matching normal Modbus responses to pending requests.
 ///
-/// Mirrors givenergy-modbus's `shape_hash()` — both requests and responses
-/// produce the same key from (slave, function, base_register, count), so the
-/// consumer task can route each incoming frame to the correct waiting caller.
+/// Mirrors givenergy-modbus's `shape_hash()` for the request shape: a normal
+/// response includes the same (slave, function, base_register, count) data and
+/// can be routed exactly. Exception responses omit the base register and
+/// count, so the consumer routes those by slave and masked function instead.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub(crate) struct ResponseKey {
     pub(crate) slave: u8,
@@ -240,6 +243,7 @@ pub(crate) struct ResponseKey {
 }
 
 impl ResponseKey {
+    /// Build the key used when registering a request waiter.
     pub(crate) fn from_request(slave: u8, function: u8, start: u16, count: u16) -> Self {
         Self {
             slave,
@@ -249,6 +253,8 @@ impl ResponseKey {
         }
     }
 
+    /// Reconstruct a key from a normal response, if its payload has the
+    /// base-register and count fields required for exact matching.
     pub(crate) fn from_response(frame: &DecodedFrame) -> Option<Self> {
         // Read response payload: serial(10) + base_register(2) + count(2) + data(...)
         if frame.payload.len() < 14 {
@@ -305,6 +311,8 @@ pub struct ModbusClient {
     writer: Option<Arc<Mutex<OwnedWriteHalf>>>,
     /// Timeout for individual read/write operations.
     timeout: Duration,
+    /// Publishes timeout changes to the already-running consumer task.
+    timeout_update: watch::Sender<Duration>,
     /// Inter-request delay between consecutive Modbus reads.
     inter_request_delay: Duration,
     /// Pending response futures, keyed by content hash (slave+func+base+count).
@@ -345,6 +353,7 @@ impl ModbusClient {
     /// auto-discover the serial — the caller provisions it (typically from
     /// persisted settings, or via the network scan in `discovery.rs`).
     pub fn new(host: &str, port: u16, serial: &str) -> Self {
+        let (timeout_update, _) = watch::channel(Self::IO_TIMEOUT);
         Self {
             host: host.to_string(),
             port,
@@ -352,6 +361,7 @@ impl ModbusClient {
             slave: 0x11, // canonical GivEnergy inverter address for detection
             writer: None,
             timeout: Self::IO_TIMEOUT,
+            timeout_update,
             inter_request_delay: Self::INTER_REQUEST_DELAY_DEFAULT,
             pending: Arc::new(Mutex::new(HashMap::new())),
             connected: Arc::new(AtomicBool::new(false)),
@@ -376,8 +386,12 @@ impl ModbusClient {
     }
 
     /// Set the I/O timeout for individual read/write operations.
+    ///
+    /// The new value is also sent to the connected consumer task, so a
+    /// post-connect change takes effect on its next read attempt.
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+        let _ = self.timeout_update.send(timeout);
     }
 
     /// Set the inter-request delay between consecutive Modbus reads.
@@ -551,9 +565,9 @@ impl ModbusClient {
         let pending = self.pending.clone();
         let connected = self.connected.clone();
         let last_rx = self.last_rx_instant.clone();
-        let timeout = self.timeout;
+        let timeout_update = self.timeout_update.subscribe();
         self.consumer_handle = Some(tokio::spawn(async move {
-            Self::consumer_task(reader, writer, pending, connected, last_rx, timeout).await;
+            Self::consumer_task(reader, writer, pending, connected, last_rx, timeout_update).await;
         }));
 
         Ok(())
@@ -577,6 +591,11 @@ impl ModbusClient {
         // Drop our writer clone — the last Arc reference now that the consumer
         // has finished, so the write half closes the TCP connection.
         self.writer = None;
+
+        // Wake and discard callers that were waiting for responses on the
+        // closed session. A subsequent connection must be able to reuse the
+        // same content keys without colliding with stale requests.
+        self.pending.lock().await.clear();
     }
 
     /// Check if the client is currently connected.
@@ -603,18 +622,6 @@ impl ModbusClient {
     // Core I/O helpers
     // -----------------------------------------------------------------------
 
-    /// Send a raw frame to the dongle via the TCP writer.
-    #[allow(dead_code)]
-    async fn send_raw(&mut self, frame: &[u8]) -> Result<(), ClientError> {
-        let writer = self.writer.as_ref().ok_or(ClientError::NotConnected)?;
-        let mut writer = writer.lock().await;
-        tokio::time::timeout(self.timeout, writer.write_all(frame))
-            .await
-            .map_err(|_| ClientError::Timeout)?
-            .map_err(|e| ClientError::SendFailed(e.to_string()))?;
-        Ok(())
-    }
-
     /// Background task: reads ALL incoming frames from the TCP stream and
     /// routes them to the correct pending future by content key
     /// (slave + function + base_register + count).
@@ -628,7 +635,7 @@ impl ModbusClient {
         pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
         connected: Arc<AtomicBool>,
         last_rx: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
-        timeout: Duration,
+        timeout_update: watch::Receiver<Duration>,
     ) {
         // Read buffer that persists across frames so a stray byte or
         // mis-sized frame doesn't permanently desync the stream.
@@ -639,6 +646,7 @@ impl ModbusClient {
                 break;
             }
 
+            let timeout = *timeout_update.borrow();
             let frame = match Self::read_one_frame(&mut reader, &mut read_buf, timeout).await {
                 Ok(f) => f,
                 Err(ClientError::Timeout) => {
@@ -694,16 +702,21 @@ impl ModbusClient {
                             let _ = tx.send(decoded);
                         }
                         // No matching future -> stale frame, silently dropped.
-                    } else if decoded.function >= 0x80 && decoded.payload.len() >= 11 {
-                        // Exception frame — scan pending futures for a match
-                        // on the masked function code.
+                    } else if (decoded.function >= 0x80 && decoded.payload.len() >= 11)
+                        || (decoded.function < 0x80 && decoded.payload.len() < 14)
+                    {
+                        // Exception frames omit base/count metadata, and a
+                        // malformed normal response may be too short to
+                        // contain it. Scan pending futures for a same-slave,
+                        // same-function match so the request handler can
+                        // reject the malformed response instead of timing
+                        // out after the consumer silently drops it.
                         //
-                        // Exception frames cannot be routed by the full
-                        // ResponseKey because the GivEnergy protocol omits
-                        // `base_register` and `count` from the exception
-                        // payload (it carries only the 10-byte serial and
-                        // the 1-byte exception code), so `from_response`
-                        // returns `None` and we fall back to a partial-key
+                        // These frames cannot be routed by the full
+                        // ResponseKey: exception payloads carry only the
+                        // serial and error code, while short normal payloads
+                        // do not carry a complete base/count header. We
+                        // therefore fall back to a partial-key
                         // (slave, function) match.
                         //
                         // The pending map is expected to contain at most
@@ -754,6 +767,18 @@ impl ModbusClient {
             }
         }
 
+        Self::finish_consumer(pending, connected).await;
+    }
+
+    /// Wake every request waiter when the reader can no longer receive
+    /// responses. Dropping each sender makes its corresponding oneshot
+    /// receiver resolve immediately, while draining the map also prevents
+    /// stale content keys from affecting the next connection.
+    async fn finish_consumer(
+        pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
+        connected: Arc<AtomicBool>,
+    ) {
+        pending.lock().await.clear();
         connected.store(false, Ordering::SeqCst);
     }
 
@@ -772,9 +797,6 @@ impl ModbusClient {
     ) -> Result<Vec<u8>, ClientError> {
         /// Start-of-frame marker: bytes 0-3 of every GivEnergy frame.
         const HEADER_START: [u8; 4] = [0x59, 0x59, 0x00, 0x01];
-        /// Minimum plausible frame size (heartbeat: 6-byte header + 2-byte body).
-        const MIN_FRAME_LEN: usize = 8;
-
         loop {
             // --- Scan buffer for the start marker ---
             if let Some(pos) = buf.windows(4).position(|w| w == HEADER_START) {
@@ -847,7 +869,7 @@ impl ModbusClient {
             // corrupt. Skip forward to the next marker.
             if let Some(next) = buf[1..].windows(4).position(|w| w == HEADER_START) {
                 let next_offset = next + 1;
-                if next_offset < total_frame_len && next_offset < MIN_FRAME_LEN.max(18) {
+                if next_offset < total_frame_len && next_offset < 18 {
                     tracing::warn!(
                         "Next frame marker only {} bytes in — current frame likely corrupt, skipping ahead",
                         next_offset
@@ -949,6 +971,14 @@ impl ModbusClient {
         frame: Vec<u8>,
         key: ResponseKey,
     ) -> Result<DecodedFrame, ClientError> {
+        // Check the writer before registering a pending future. Otherwise a
+        // disconnected call leaves a stale key behind and blocks the same
+        // request after the client reconnects.
+        let writer = self
+            .writer
+            .as_ref()
+            .cloned()
+            .ok_or(ClientError::NotConnected)?;
         let (tx, rx) = oneshot::channel();
 
         // Register the pending future under our content key. Use `entry()`
@@ -984,7 +1014,6 @@ impl ModbusClient {
         }
 
         // Send the frame via the TCP writer.
-        let writer = self.writer.as_ref().ok_or(ClientError::NotConnected)?;
         let mut writer = writer.lock().await;
         let send_result = tokio::time::timeout(self.timeout, writer.write_all(&frame)).await;
         if let Err(e) = send_result
@@ -1053,7 +1082,9 @@ impl ModbusClient {
     /// Read a block of registers (input or holding).
     ///
     /// If `count` exceeds [`MAX_REGISTERS_PER_READ`], the read is split into
-    /// multiple sub-requests and the results are concatenated.
+    /// multiple sub-requests and the results are concatenated. Every response
+    /// must contain the complete requested chunk; missing registers are a
+    /// protocol error rather than values that can safely be invented.
     pub async fn read_registers(
         &mut self,
         register_type: RegisterType,
@@ -1077,19 +1108,6 @@ impl ModbusClient {
                 .read_registers_raw(register_type, chunk_start, chunk_size)
                 .await?;
             all_values.extend_from_slice(&chunk_values);
-
-            // If the dongle returned fewer registers than requested, pad with zeros
-            let returned = chunk_values.len() as u16;
-            if returned < chunk_size {
-                tracing::debug!(
-                    "Partial read at {}+{}: got {}/{} registers, padding with zeros",
-                    start,
-                    offset,
-                    returned,
-                    chunk_size
-                );
-                all_values.resize(all_values.len() + (chunk_size - returned) as usize, 0);
-            }
 
             offset += chunk_size;
         }
@@ -1160,9 +1178,6 @@ impl ModbusClient {
 
     /// Internal: read a single chunk of registers (no splitting).
     ///
-    /// Tolerates the dongle returning fewer registers than requested — common
-    /// on GivEnergy WiFi/Ethernet dongles with limited frame buffers.
-    ///
     /// Also tolerates stale responses from the dongle — if the function code
     /// doesn't match, the response is from a previous request that arrived
     /// late. In that case we discard it and retry.
@@ -1195,9 +1210,22 @@ impl ModbusClient {
             }
 
             match self.send_and_await_response(request, key).await {
-                Ok(decoded) => {
-                    return Self::parse_register_response(&decoded, count);
-                }
+                Ok(decoded) => match Self::parse_register_response(&decoded, count) {
+                    Ok(values) => return Ok(values),
+                    Err(ClientError::InvalidResponse(message))
+                        if attempt < Self::MAX_STALE_RETRIES =>
+                    {
+                        tracing::debug!(
+                            attempt = attempt + 1,
+                            max_attempts = Self::MAX_STALE_RETRIES + 1,
+                            error = %message,
+                            "Short or malformed register response, retrying"
+                        );
+                        tokio::time::sleep(Self::RETRY_DELAY).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                },
                 Err(ClientError::Timeout) => {
                     // A pure timeout (no bytes at all within the generous
                     // per-request window). Distinguish two cases:
@@ -1274,20 +1302,35 @@ impl ModbusClient {
         count: u16,
     ) -> Result<Vec<u16>, ClientError> {
         let payload = &decoded.payload;
-        let (_, resp_register_count) = Self::response_register_metadata(decoded)?;
+        let (base_register, resp_register_count) = Self::response_register_metadata(decoded)?;
 
         let inner = &payload[framer::SERIAL_LEN..];
         let resp_register_count = resp_register_count as usize;
 
         let reg_data = &inner[4..];
-        let max_values = count as usize;
-        let actual_count = resp_register_count.min(max_values).min(reg_data.len() / 2);
+        let expected_count = count as usize;
+        let available_count = reg_data.len() / 2;
+        let actual_count = resp_register_count.min(available_count);
 
-        let mut values = Vec::with_capacity(actual_count);
+        if actual_count < expected_count {
+            tracing::debug!(
+                base_register,
+                actual_count,
+                expected_count,
+                advertised_count = resp_register_count,
+                payload_bytes = reg_data.len(),
+                "Short register response"
+            );
+            return Err(ClientError::InvalidResponse(format!(
+                "short register response at {base_register}: got {actual_count}/{expected_count} registers"
+            )));
+        }
+
+        let mut values = Vec::with_capacity(expected_count);
         // as_chunks requires a length that is a multiple of N; truncating to
         // the exact byte range we need sidesteps the panic on odd lengths
         // (chunks_exact previously just dropped the trailing byte).
-        for chunk in reg_data[..actual_count * 2].as_chunks::<2>().0 {
+        for chunk in reg_data[..expected_count * 2].as_chunks::<2>().0 {
             values.push(u16::from_be_bytes(*chunk));
         }
 
@@ -1551,7 +1594,7 @@ impl ModbusClient {
         gateway_scope: GatewayPollScope,
     ) -> Result<Vec<BlockRead>, ClientError> {
         // Three-phase models read all real-time telemetry from the
-        // IR(1000-1414) range, making input_0_59 and input_180_181
+        // IR(1000-1414) range, making input_0_59 and input_180_183
         // redundant. The Gateway likewise reads all telemetry from its own
         // IR(1600-1859) aggregation bank. Both use the lean HR-only standard
         // set to save ~300 ms per cycle and reduce timeout exposure.
@@ -1649,7 +1692,6 @@ impl ModbusClient {
 #[cfg(test)]
 pub(crate) mod tests {
     #![allow(dead_code)]
-    use super::super::framer::HEADER_SIZE;
     use super::*;
 
     /// `RETRY_DELAY` is the single knob for every transient-failure retry
@@ -1754,6 +1796,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn response_register_metadata_rejects_short_inner_header() {
+        let decoded = DecodedFrame {
+            slave: 0x11,
+            function: 0x04,
+            payload: vec![0; framer::SERIAL_LEN + 3],
+        };
+
+        let result = ModbusClient::response_register_metadata(&decoded);
+
+        assert!(
+            matches!(&result, Err(ClientError::InvalidResponse(message)) if message.contains("too short")),
+            "a response without the complete base/count header must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
     fn write_register_request_has_single_transparent_crc() {
         let frame = ModbusClient::build_write_register_request("WG2301G167", 0x11, 27, 1);
 
@@ -1774,10 +1832,35 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn parse_register_response_uses_returned_count() {
+    fn parse_register_response_rejects_short_advertised_count() {
         let decoded = decoded_read_response(0x32, 0x03, 80, 2);
-        let values = ModbusClient::parse_register_response(&decoded, 20).unwrap();
-        assert_eq!(values, vec![80, 81]);
+        let result = ModbusClient::parse_register_response(&decoded, 20);
+        assert!(
+            matches!(&result, Err(ClientError::InvalidResponse(message)) if message.contains("short")),
+            "a short response must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn parse_register_response_rejects_short_payload() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"INV1234567");
+        payload.extend_from_slice(&80u16.to_be_bytes());
+        payload.extend_from_slice(&60u16.to_be_bytes());
+        for value in 80u16..120 {
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        let decoded = DecodedFrame {
+            slave: 0x32,
+            function: 0x03,
+            payload,
+        };
+
+        let result = ModbusClient::parse_register_response(&decoded, 60);
+        assert!(
+            matches!(&result, Err(ClientError::InvalidResponse(message)) if message.contains("short")),
+            "a payload shorter than its advertised count must be rejected, got {result:?}"
+        );
     }
 
     #[test]
@@ -1929,8 +2012,11 @@ pub(crate) mod tests {
     fn set_timeout_changes_duration() {
         let mut client = ModbusClient::new("10.0.0.1", 8899, "SN0001");
         let new_timeout = Duration::from_secs(10);
+        let mut consumer_timeout = client.timeout_update.subscribe();
         client.set_timeout(new_timeout);
         assert_eq!(client.timeout, new_timeout);
+        assert!(consumer_timeout.has_changed().unwrap());
+        assert_eq!(*consumer_timeout.borrow_and_update(), new_timeout);
     }
 
     // -----------------------------------------------------------------------
@@ -2378,27 +2464,6 @@ pub(crate) mod tests {
         crate::modbus::framer::encode_frame("TEST123456", slave, function_with_error, &payload)
     }
 
-    /// Parse an incoming GivEnergy frame to extract the inner request details.
-    /// Returns (slave, function, payload) where payload for a read request
-    /// is the start register (2 bytes) + count (2 bytes).
-    fn parse_request(data: &[u8]) -> Option<(u8, u8, Vec<u8>)> {
-        if data.len() < HEADER_SIZE + 4 {
-            return None;
-        }
-        // Skip 26-byte header: txn(2)+proto(2)+len(2)+unit(1)+func(1)+serial(10)+padding(8)
-        let inner_start = HEADER_SIZE;
-        let inner = &data[inner_start..];
-        if inner.len() < 4 {
-            return None;
-        }
-        let slave = inner[0];
-        let function = inner[1];
-        // Inner payload starts after slave(1)+func(1), before CRC (last 2 bytes)
-        let payload_end = inner.len() - 2; // exclude CRC
-        let payload = inner[2..payload_end].to_vec();
-        Some((slave, function, payload))
-    }
-
     /// Read and discard one complete GivEnergy request frame (6-byte MBAP
     /// header + length-prefixed body) from the mock stream. Used by the
     /// liveness-probe retry tests to simulate a dongle that receives but
@@ -2464,114 +2529,6 @@ pub(crate) mod tests {
                 break;
             }
         }
-    }
-
-    // =======================================================================
-    // Producer/consumer client
-    // =======================================================================
-    //
-    // The tests below exercise a producer/consumer-style client that matches
-    // responses by content (slave + function + register range) rather than
-    // sequential position. This mirrors how givenergy-modbus works.
-    //
-    // Infrastructure:
-    //
-    //   ResponseKey = (slave, function, base_register, count)
-    //   pending: HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>
-    //
-    //   Consumer task: reads all incoming frames, routes by key
-    //   Producer task: dequeues from tx_queue, writes with jitter
-    //
-    // The production implementation will be in ModbusClient. These tests
-    // validate the pattern before the refactor.
-
-    /// Content-based response key for matching responses to pending requests.
-    ///
-    /// Mirrors givenergy-modbus's `shape_hash()` concept — a response matches
-    /// a request when slave, function code, and register range all agree.
-    #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-    struct ResponseKey {
-        slave: u8,
-        function: u8,
-        base_register: u16,
-        count: u16,
-    }
-
-    impl ResponseKey {
-        fn from_read_request(slave: u8, function: u8, start: u16, count: u16) -> Self {
-            Self {
-                slave,
-                function,
-                base_register: start,
-                count,
-            }
-        }
-
-        fn from_decoded_frame(frame: &DecodedFrame, payload: &[u8]) -> Option<Self> {
-            // Read response payload: byte_count(1) + data(byte_count)
-            // Extract base register and count from the original request context
-            // is not available here. Instead, we derive from the data array
-            // location — for a read response, the payload contains register
-            // values starting at some base.
-            //
-            // Since we can't know the base_register from the response alone,
-            // this is a best-effort match. In the real implementation, the
-            // pending map is keyed by the request, not derived from the response.
-            if payload.len() < 3 {
-                return None;
-            }
-            let byte_count = payload[0] as usize;
-            if payload.len() < 1 + byte_count {
-                return None;
-            }
-            let register_count = (byte_count / 2) as u16;
-            Some(Self {
-                slave: frame.slave,
-                function: frame.function,
-                base_register: 0, // unknown from response alone
-                count: register_count,
-            })
-        }
-    }
-
-    /// Extract the expected response key from an outgoing read request frame.
-    /// Returns None for non-read frames (writes, etc.).
-    fn read_request_key(frame: &[u8]) -> Option<ResponseKey> {
-        let (slave, function, payload) = parse_request(frame)?;
-        if function != 0x03 && function != 0x04 {
-            return None;
-        }
-        if payload.len() < 4 {
-            return None;
-        }
-        let start = u16::from_be_bytes([payload[0], payload[1]]);
-        let count = u16::from_be_bytes([payload[2], payload[3]]);
-        Some(ResponseKey::from_read_request(
-            slave, function, start, count,
-        ))
-    }
-
-    /// Extract the key from a decoded response frame for matching.
-    fn response_frame_key(frame: &DecodedFrame) -> Option<ResponseKey> {
-        // For a read response (function 0x03/0x04): payload = byte_count + data
-        if frame.function != 0x03 && frame.function != 0x04 {
-            return None;
-        }
-        if frame.payload.is_empty() {
-            return None;
-        }
-        let byte_count = frame.payload[0] as usize;
-        let register_count = (byte_count / 2) as u16;
-        Some(ResponseKey {
-            slave: frame.slave,
-            function: frame.function,
-            base_register: 0, // unknown — matched by slave+func+count in practice
-            count: register_count,
-        })
-    }
-
-    fn dummy_register_values(start: u16, count: u16) -> Vec<u16> {
-        (start..start + count).collect()
     }
 
     // =======================================================================
@@ -3071,6 +3028,39 @@ pub(crate) mod tests {
         client.disconnect().await;
     }
 
+    #[tokio::test]
+    async fn finish_consumer_drops_pending_responders_immediately() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let connected = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = oneshot::channel();
+        let key =
+            super::ResponseKey::from_request(0x11, RegisterType::Input.function_code(), 0, 20);
+        pending.lock().await.insert(key, tx);
+
+        ModbusClient::finish_consumer(pending.clone(), connected.clone()).await;
+        assert!(
+            rx.await.is_err(),
+            "consumer must wake pending callers on exit"
+        );
+        assert!(pending.lock().await.is_empty());
+        assert!(!connected.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn disconnected_request_does_not_leave_pending_key() {
+        let mut client = ModbusClient::new("127.0.0.1", 8899, "TEST123456");
+        let key =
+            super::ResponseKey::from_request(0x11, RegisterType::Input.function_code(), 0, 20);
+
+        let result = client.send_and_await_response(Vec::new(), key).await;
+
+        assert!(matches!(result, Err(ClientError::NotConnected)));
+        assert!(
+            client.pending.lock().await.is_empty(),
+            "a rejected disconnected request must not poison its response key"
+        );
+    }
+
     /// Regression test for the duplicate-in-flight-request guard added to
     /// `send_and_await_response`. The guard uses `HashMap::entry()` to
     /// reject a second `insert` under an already-occupied key, rather than
@@ -3400,6 +3390,28 @@ pub(crate) mod tests {
         let result = client.write_register(27, 1).await;
         assert!(result.is_ok(), "Write register failed: {:?}", result);
 
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_register_rejects_short_ack_payload() {
+        // A write response must echo both the register and value. A truncated
+        // echo must be rejected before either field is indexed.
+        let mut payload = Vec::with_capacity(13);
+        payload.extend_from_slice(b"TEST123456");
+        payload.extend_from_slice(&[0x00u8, 0x1B]); // register 27
+        payload.push(0x00); // missing the low byte of the echoed value
+        let response = crate::modbus::framer::encode_frame("TEST123456", 0x11, 0x06, &payload);
+
+        let responses = vec![MockResponse::Raw(response)];
+        let (_port, server, mut client) = setup_client_with_server(responses).await;
+
+        let result = client.write_register(27, 1).await;
+
+        assert!(
+            matches!(&result, Err(ClientError::InvalidResponse(message)) if message.contains("too short")),
+            "a truncated write ack must be rejected, got {result:?}"
+        );
         server.await.unwrap();
     }
 

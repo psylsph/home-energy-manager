@@ -271,5 +271,13 @@ describe('<PowerPage/> — spike removal, cost overlay, PDF export', () => {
       // multiple matches — the header is the right-aligned one.
       expect(screen.getAllByText('Waiting for data').length).toBeGreaterThan(0);
     });
+
+    it('uses a placeholder instead of rendering an invalid snapshot timestamp', async () => {
+      useInverterStore.setState({ snapshot: makeSnapshot({ timestamp: Number.MAX_SAFE_INTEGER }) });
+      render(<PowerPage />);
+
+      expect(screen.getByText('—')).toBeDefined();
+      expect(screen.queryByText('Invalid Date')).toBeNull();
+    });
   });
 });

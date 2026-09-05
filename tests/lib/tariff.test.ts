@@ -182,6 +182,17 @@ describe('addTariffSlot', () => {
     expect(after.slots[0]!.rate).toBe(0.25);
     expect(after.slots[1]!.rate).toBe(0.99);
   });
+
+  test('does not append a zero-width slot when the final window reaches 23:59', () => {
+    const cfg: TariffConfig = {
+      slots: [{ start: '23:00', end: '23:59', rate: 0.25 }],
+    };
+
+    const after = addTariffSlot(cfg, 0.99);
+
+    expect(after).toBe(cfg);
+    expect(after.slots).toHaveLength(1);
+  });
 });
 
 describe('updateTariffSlot cascades end-change to next slot start', () => {

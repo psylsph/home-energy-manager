@@ -8,10 +8,12 @@
 //! plus a p25–p75 band.
 //!
 //! Delta guardrails mirror the sanitiser's instincts: a delta is only
-//! valid when the two counter samples are ≤ 2 h apart, share the same
-//! local day (no midnight-reset artefacts), and are non-decreasing.
+//! valid when the two counter samples are ≤ 2 h apart and non-decreasing.
+//! Positive deltas crossing local midnight are split at the boundary so
+//! they do not bias either day's hourly bucket; midnight resets remain
+//! rejected as negative deltas.
 
-use chrono::{Datelike, Timelike};
+use chrono::{Datelike, TimeZone, Timelike};
 
 /// Minimum distinct days of consumption history before the profile is
 /// reported as sufficient. A week captures at least one of every weekday.
@@ -139,6 +141,23 @@ fn percentile_sorted(sorted: &[f64], pct: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * frac
 }
 
+fn add_delta_at_midpoint(
+    hour_sums: &mut std::collections::BTreeMap<(chrono::NaiveDate, u8), f64>,
+    days: &mut std::collections::BTreeSet<chrono::NaiveDate>,
+    start_ts: i64,
+    end_ts: i64,
+    delta: f64,
+) {
+    let mid_ts = start_ts + (end_ts - start_ts) / 2;
+    let Some(dt) = chrono::DateTime::from_timestamp(mid_ts, 0) else {
+        return;
+    };
+    let local = dt.with_timezone(&chrono::Local);
+    let key = (local.date_naive(), local.hour() as u8);
+    *hour_sums.entry(key).or_insert(0.0) += delta;
+    days.insert(key.0);
+}
+
 /// Build the hour-of-day profile from counter samples (any ordering; the
 /// samples are sorted by timestamp internally).
 pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionProfile {
@@ -170,11 +189,6 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         };
         let a_local = a_dt.with_timezone(&chrono::Local);
         let b_local = b_dt.with_timezone(&chrono::Local);
-        // A midnight counter reset shows up as a day change; a mid-day
-        // reset as a negative delta. Neither is real consumption.
-        if a_local.date_naive() != b_local.date_naive() {
-            continue;
-        }
         let (Some(a_kwh), Some(b_kwh)) = (a.kwh, b.kwh) else {
             continue;
         };
@@ -182,19 +196,45 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         if delta < 0.0 {
             continue;
         }
-        // Attribute to the hour containing the interval midpoint — an
-        // interval never spans midnight (same-day check above), so this
-        // keeps every delta inside its own hour or an adjacent one.
-        let mid_ts = a.timestamp + gap / 2;
-        let (day, hour) = match chrono::DateTime::from_timestamp(mid_ts, 0) {
-            Some(dt) => {
-                let local = dt.with_timezone(&chrono::Local);
-                (local.date_naive(), local.hour() as u8)
-            }
-            None => continue,
+
+        if a_local.date_naive() == b_local.date_naive() {
+            // Attribute same-day intervals to the hour containing their
+            // midpoint.
+            add_delta_at_midpoint(&mut hour_sums, &mut days, a.timestamp, b.timestamp, delta);
+            continue;
+        }
+
+        // A positive interval may straddle local midnight without being a
+        // counter reset. Split it by elapsed time at the local boundary so
+        // each side contributes only to its own day.
+        let Some(midnight) = b_local.date_naive().and_hms_opt(0, 0, 0).and_then(|naive| {
+            chrono::Local
+                .from_local_datetime(&naive)
+                .earliest()
+                .or_else(|| chrono::Local.from_local_datetime(&naive).latest())
+        }) else {
+            continue;
         };
-        *hour_sums.entry((day, hour)).or_insert(0.0) += delta;
-        days.insert(day);
+        let midnight_ts = midnight.timestamp();
+        if !(a.timestamp < midnight_ts && midnight_ts < b.timestamp) {
+            continue;
+        }
+        let before_secs = midnight_ts - a.timestamp;
+        let after_secs = b.timestamp - midnight_ts;
+        add_delta_at_midpoint(
+            &mut hour_sums,
+            &mut days,
+            a.timestamp,
+            midnight_ts,
+            delta * before_secs as f64 / gap as f64,
+        );
+        add_delta_at_midpoint(
+            &mut hour_sums,
+            &mut days,
+            midnight_ts,
+            b.timestamp,
+            delta * after_secs as f64 / gap as f64,
+        );
     }
 
     // Per-hour-of-day statistics across all days, and separately across
@@ -406,6 +446,22 @@ mod tests {
         assert!((profile.hours[0].unwrap().median - 0.5).abs() < 1e-9);
         // The reset pair contributed nothing to hour 23.
         assert!(profile.hours[23].is_none());
+    }
+
+    #[test]
+    fn splits_positive_counter_delta_at_midnight() {
+        // A cumulative counter can legitimately continue rising across
+        // midnight when the samples straddle the reset boundary. Attribute
+        // each half of the interval to the corresponding local day/hour.
+        let rows = vec![
+            row(local_ts(2025, 6, 10, 23, 30), 9.0),
+            row(local_ts(2025, 6, 11, 0, 30), 10.0),
+        ];
+        let profile = build_consumption_profile(&rows);
+
+        assert!((profile.hours[23].unwrap().median - 0.5).abs() < 1e-9);
+        assert!((profile.hours[0].unwrap().median - 0.5).abs() < 1e-9);
+        assert_eq!(profile.days_observed, 2);
     }
 
     #[test]

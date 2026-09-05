@@ -36,6 +36,8 @@ export const FORECAST_HORIZON_HOURS = 72;
 
 export type ForecastData = {
   generated_at: number;
+  forecast_fetched_at: number | null;
+  forecast_age_seconds: number | null;
   status: string[];
   performance_ratio: number | null;
   performance_ratio_days: number | null;
@@ -65,6 +67,10 @@ export function forecastStatusMessages(status: string[]): string[] {
         return 'No location configured — set a postcode or coordinates in Settings.';
       case 'no_forecast_data':
         return 'No forecast data yet — the fetcher runs every three hours once weather is enabled.';
+      case 'forecast_stale':
+        return 'Solar forecast data is stale — refresh it before using a battery charge recommendation.';
+      case 'forecast_data_future':
+        return 'Solar forecast data has a future fetch time — refresh it before using a battery charge recommendation.';
       case 'calibrating':
         return 'Solar model is still calibrating against your generation history; numbers are preliminary.';
       case 'insufficient_consumption_history':
@@ -73,6 +79,8 @@ export function forecastStatusMessages(status: string[]): string[] {
         return 'No inverter connection yet — the battery projection needs a live snapshot.';
       case 'no_battery_capacity':
         return 'Battery capacity unknown — connect to the inverter so it can be read.';
+      case 'invalid_battery_configuration':
+        return 'Battery projection unavailable — check the battery capacity and forecast efficiency settings.';
       default:
         return code;
     }

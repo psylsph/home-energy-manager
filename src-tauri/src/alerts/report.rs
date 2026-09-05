@@ -64,16 +64,21 @@ fn median_interval_ms(rows: &[ReadingRow]) -> Option<f64> {
     if rows.len() < 2 {
         return None;
     }
-    let mut intervals: Vec<f64> = rows
+    let mut timestamps: Vec<i64> = rows.iter().map(|row| row.timestamp).collect();
+    timestamps.sort_unstable();
+    let mut intervals: Vec<f64> = timestamps
         .windows(2)
-        .map(|w| (w[1].timestamp - w[0].timestamp) as f64 * 1000.0)
+        .map(|w| w[1].saturating_sub(w[0]) as f64 * 1000.0)
         .filter(|dt| *dt > 0.0)
         .collect();
+    if intervals.is_empty() {
+        return None;
+    }
     intervals.sort_by(|a, b| a.partial_cmp(b).unwrap());
     Some(intervals[intervals.len() / 2])
 }
 
-fn escape_html(s: &str) -> String {
+pub(crate) fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -121,9 +126,29 @@ pub struct DailyTotals {
     /// Per-hour buckets: `hour_start_unix_ts -> (import_kwh, export_kwh)`,
     /// used to split import cost between peak and off-peak windows.
     pub hourly_import_export: BTreeMap<i64, (f64, f64)>,
+    /// Original import intervals retained so time-of-use costs can be split
+    /// at tariff boundaries instead of pricing an entire hour at its start
+    /// rate.
+    import_intervals: Vec<ImportInterval>,
     pub soc_min: Option<f32>,
     pub soc_max: Option<f32>,
     pub row_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ImportInterval {
+    start_ts: i64,
+    end_ts: i64,
+    start_grid_power: Option<i32>,
+    end_grid_power: Option<i32>,
+}
+
+struct DailyIntegration<'a> {
+    valid_rows: Vec<&'a ReadingRow>,
+    totals: DailyTotals,
+    buckets: BTreeMap<i64, Bucket>,
+    peak_home_w: f64,
+    peak_grid_import_w: f64,
 }
 
 /// Integrate a day's worth of power samples into kWh totals.
@@ -131,6 +156,10 @@ pub struct DailyTotals {
 /// Returns `None` if there's insufficient data (fewer than 2 valid readings,
 /// or no detectable sample interval).
 pub fn compute_daily_totals(rows: &[ReadingRow]) -> Option<DailyTotals> {
+    integrate_daily_rows(rows).map(|data| data.totals)
+}
+
+fn integrate_daily_rows(rows: &[ReadingRow]) -> Option<DailyIntegration<'_>> {
     let valid: Vec<&ReadingRow> = rows
         .iter()
         .filter(|r| {
@@ -151,6 +180,17 @@ pub fn compute_daily_totals(rows: &[ReadingRow]) -> Option<DailyTotals> {
     let mut totals = DailyTotals::default();
     let mut soc_values: Vec<f32> = Vec::new();
     let mut hourly: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+    let mut buckets: BTreeMap<i64, Bucket> = BTreeMap::new();
+    let mut peak_home_w = 0.0_f64;
+    let mut peak_grid_import_w = 0.0_f64;
+
+    // Peaks describe observed accepted readings, not just readings that also
+    // happen to be the left endpoint of an integrable interval. In
+    // particular, include the final reading in the day's peak values.
+    for row in &valid {
+        peak_home_w = peak_home_w.max(positive_part(row.home_power));
+        peak_grid_import_w = peak_grid_import_w.max(negative_magnitude(row.grid_power));
+    }
 
     for i in 0..valid.len() - 1 {
         let a = valid[i];
@@ -174,15 +214,56 @@ pub fn compute_daily_totals(rows: &[ReadingRow]) -> Option<DailyTotals> {
         totals.battery_discharge_kwh +=
             integrate_pair(a.battery_power, b.battery_power, hours, positive_part);
 
+        let import_kwh = integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        totals.import_intervals.push(ImportInterval {
+            start_ts: a.timestamp,
+            end_ts: b.timestamp,
+            start_grid_power: a.grid_power,
+            end_grid_power: b.grid_power,
+        });
+
         let hour_start = (a.timestamp / 3600) * 3600;
         let e = hourly.entry(hour_start).or_insert((0.0, 0.0));
-        e.0 += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
+        e.0 += import_kwh;
         e.1 += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
+
+        let bucket = buckets.entry(hour_start).or_insert_with(|| Bucket {
+            hour_label: {
+                let local = chrono::DateTime::from_timestamp(a.timestamp, 0)
+                    .map(|dt| dt.with_timezone(&chrono::Local))
+                    .unwrap();
+                format!("{}:00", local.format("%H"))
+            },
+            ..Default::default()
+        });
+        bucket.solar_kwh += integrate_pair(a.solar_power, b.solar_power, hours, positive_part);
+        bucket.home_kwh += integrate_pair(a.home_power, b.home_power, hours, positive_part);
+        bucket.import_kwh += import_kwh;
+        bucket.export_kwh += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
+        bucket.battery_charge_kwh +=
+            integrate_pair(a.battery_power, b.battery_power, hours, negative_magnitude);
+        bucket.battery_discharge_kwh +=
+            integrate_pair(a.battery_power, b.battery_power, hours, positive_part);
     }
 
     for row in &valid {
         if let Some(soc) = row.soc {
             soc_values.push(soc);
+
+            let hour_start = (row.timestamp / 3600) * 3600;
+            let bucket = buckets.entry(hour_start).or_insert_with(|| Bucket {
+                hour_label: {
+                    let local = chrono::DateTime::from_timestamp(row.timestamp, 0)
+                        .map(|dt| dt.with_timezone(&chrono::Local))
+                        .unwrap();
+                    format!("{}:00", local.format("%H"))
+                },
+                ..Default::default()
+            });
+            bucket.soc_min = Some(bucket.soc_min.map_or(soc, |m| m.min(soc)));
+            bucket.soc_max = Some(bucket.soc_max.map_or(soc, |m| m.max(soc)));
+            bucket.soc_sum += soc;
+            bucket.soc_count += 1;
         }
     }
     if soc_values.is_empty() {
@@ -194,7 +275,13 @@ pub fn compute_daily_totals(rows: &[ReadingRow]) -> Option<DailyTotals> {
     }
     totals.hourly_import_export = hourly;
     totals.row_count = valid.len();
-    Some(totals)
+    Some(DailyIntegration {
+        valid_rows: valid,
+        totals,
+        buckets,
+        peak_home_w,
+        peak_grid_import_w,
+    })
 }
 
 /// Parse a `"HH:MM"` time into minutes-since-midnight.
@@ -245,6 +332,46 @@ fn minutes_to_hhmm(minutes: u16) -> String {
     format!("{h:02}:{m:02}")
 }
 
+fn interpolate_power_w(start: Option<i32>, end: Option<i32>, fraction: f64) -> f64 {
+    match (start, end) {
+        (None, None) => 0.0,
+        (Some(value), None) | (None, Some(value)) => value as f64,
+        (Some(start), Some(end)) => start as f64 + (end - start) as f64 * fraction,
+    }
+}
+
+fn integrate_import_segment(
+    interval: &ImportInterval,
+    segment_start: i64,
+    segment_end: i64,
+) -> f64 {
+    let interval_seconds = (interval.end_ts - interval.start_ts) as f64;
+    let segment_seconds = (segment_end - segment_start) as f64;
+    if interval_seconds <= 0.0 || segment_seconds <= 0.0 {
+        return 0.0;
+    }
+
+    let start_fraction = (segment_start - interval.start_ts) as f64 / interval_seconds;
+    let end_fraction = (segment_end - interval.start_ts) as f64 / interval_seconds;
+    let start_import = (-interpolate_power_w(
+        interval.start_grid_power,
+        interval.end_grid_power,
+        start_fraction,
+    ))
+    .max(0.0);
+    let end_import = (-interpolate_power_w(
+        interval.start_grid_power,
+        interval.end_grid_power,
+        end_fraction,
+    ))
+    .max(0.0);
+    (start_import + end_import) / 2.0 * segment_seconds / 3_600_000.0
+}
+
+fn next_minute_boundary(ts: i64) -> i64 {
+    ts.div_euclid(60).saturating_add(1).saturating_mul(60)
+}
+
 /// Build a concise plain-text daily summary for Telegram, including a
 /// per-window cost split derived from the configured tariffs.
 ///
@@ -277,29 +404,46 @@ pub fn generate_daily_summary_text(
     let mut import_cost = 0.0_f64;
     // (start_min, end_min, rate, kwh) — grouped by unique rate+band.
     let mut window_kwh: Vec<(u16, u16, f64, f64)> = Vec::new();
-    for (ts, (imp_kwh, _)) in &t.hourly_import_export {
-        let rate = if use_flat_import {
-            flat_import
-        } else {
-            // Convert timestamp to minutes-of-day in local timezone.
-            let mins = timestamp_to_local_minutes(*ts);
-            imp_cfg.rate_for_minutes(mins).unwrap_or(flat_import)
-        };
-        import_cost += imp_kwh * rate;
+    if use_flat_import {
+        import_cost = t.import_kwh * flat_import;
+        for (ts, (imp_kwh, _)) in &t.hourly_import_export {
+            let bucket_start_min = timestamp_to_local_minutes(*ts);
+            let (ws, we) = find_window_bounds(&imp_cfg, bucket_start_min);
+            if let Some(entry) = window_kwh
+                .iter_mut()
+                .find(|(s, e, r, _)| *s == ws && *e == we && (*r - flat_import).abs() < 1e-12)
+            {
+                entry.3 += imp_kwh;
+            } else {
+                window_kwh.push((ws, we, flat_import, *imp_kwh));
+            }
+        }
+    } else {
+        for interval in &t.import_intervals {
+            let mut segment_start = interval.start_ts;
+            while segment_start < interval.end_ts {
+                let segment_end = next_minute_boundary(segment_start).min(interval.end_ts);
+                if segment_end <= segment_start {
+                    break;
+                }
+                let segment_kwh = integrate_import_segment(interval, segment_start, segment_end);
+                let mins = timestamp_to_local_minutes(segment_start);
+                let rate = imp_cfg.rate_for_minutes(mins).unwrap_or(flat_import);
+                import_cost += segment_kwh * rate;
 
-        // Find or create the per-window accumulator.
-        // We approximate the window boundary by the hour bucket — each
-        // hourly bucket maps to the slot that covers its start minute.
-        let bucket_start_min = timestamp_to_local_minutes(*ts);
-        // Find the actual slot boundaries for display.
-        let (ws, we) = find_window_bounds(&imp_cfg, bucket_start_min);
-        if let Some(entry) = window_kwh
-            .iter_mut()
-            .find(|(s, e, r, _)| *s == ws && *e == we && (*r - rate).abs() < 1e-12)
-        {
-            entry.3 += imp_kwh;
-        } else {
-            window_kwh.push((ws, we, rate, *imp_kwh));
+                if segment_kwh > 0.0 {
+                    let (ws, we) = find_window_bounds(&imp_cfg, mins);
+                    if let Some(entry) = window_kwh
+                        .iter_mut()
+                        .find(|(s, e, r, _)| *s == ws && *e == we && (*r - rate).abs() < 1e-12)
+                    {
+                        entry.3 += segment_kwh;
+                    } else {
+                        window_kwh.push((ws, we, rate, segment_kwh));
+                    }
+                }
+                segment_start = segment_end;
+            }
         }
     }
     let export_income = t.export_kwh * export_rate;
@@ -372,135 +516,18 @@ pub fn generate_daily_summary_text(
 ///
 /// Returns `None` if there's insufficient data (fewer than 2 readings).
 pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option<String> {
-    if rows.len() < 2 {
-        return None;
-    }
+    let integrated = integrate_daily_rows(rows)?;
+    let sorted = integrated.valid_rows;
+    let t = integrated.totals;
+    let bucket_list: Vec<&Bucket> = integrated.buckets.values().collect();
 
-    // Filter out rows with null data for the main computation
-    let valid: Vec<&ReadingRow> = rows
-        .iter()
-        .filter(|r| {
-            r.solar_power.is_some()
-                || r.battery_power.is_some()
-                || r.grid_power.is_some()
-                || r.home_power.is_some()
-        })
-        .collect();
-
-    if valid.len() < 2 {
-        return None;
-    }
-
-    let sorted = valid;
-    let median_ms = median_interval_ms(rows)?;
-    let max_gap_ms = median_ms * 3.5;
-
-    // Integerate over successive pairs
-    let mut solar_kwh = 0.0_f64;
-    let mut home_kwh = 0.0_f64;
-    let mut import_kwh = 0.0_f64;
-    let mut export_kwh = 0.0_f64;
-    let mut battery_charge_kwh = 0.0_f64;
-    let mut battery_discharge_kwh = 0.0_f64;
-
-    // Peak tracking
-    let mut peak_solar_w = 0.0_f64;
-    let mut peak_home_w = 0.0_f64;
-    let mut peak_grid_import_w = 0.0_f64;
-    let mut peak_grid_export_w = 0.0_f64;
-    let mut peak_battery_charge_w = 0.0_f64;
-    let mut peak_battery_discharge_w = 0.0_f64;
-
-    // SOC tracking
-    let mut soc_values: Vec<f32> = Vec::new();
-
-    // Hourly buckets
-    let mut buckets: BTreeMap<i64, Bucket> = BTreeMap::new();
-
-    for i in 0..sorted.len() - 1 {
-        let a = sorted[i];
-        let b = sorted[i + 1];
-
-        let raw_dt_ms = (b.timestamp - a.timestamp) as f64 * 1000.0;
-        if raw_dt_ms <= 0.0 || raw_dt_ms > max_gap_ms {
-            continue;
-        }
-        let hours = raw_dt_ms / 3_600_000.0;
-        if hours <= 0.0 {
-            continue;
-        }
-
-        let s = integrate_pair(a.solar_power, b.solar_power, hours, positive_part);
-        let h = integrate_pair(a.home_power, b.home_power, hours, positive_part);
-        // App-wide grid convention: negative = importing, positive = exporting.
-        let gi = integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
-        let ge = integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
-        let bc = integrate_pair(a.battery_power, b.battery_power, hours, negative_magnitude);
-        let bd = integrate_pair(a.battery_power, b.battery_power, hours, positive_part);
-
-        solar_kwh += s;
-        home_kwh += h;
-        import_kwh += gi;
-        export_kwh += ge;
-        battery_charge_kwh += bc;
-        battery_discharge_kwh += bd;
-
-        // Update peaks
-        peak_solar_w = peak_solar_w.max(positive_part(a.solar_power));
-        peak_home_w = peak_home_w.max(positive_part(a.home_power));
-        peak_grid_import_w = peak_grid_import_w.max(negative_magnitude(a.grid_power));
-        peak_grid_export_w = peak_grid_export_w.max(positive_part(a.grid_power));
-        peak_battery_charge_w = peak_battery_charge_w.max(negative_magnitude(a.battery_power));
-        peak_battery_discharge_w = peak_battery_discharge_w.max(positive_part(a.battery_power));
-
-        // Hour bucket
-        let hour_start = (a.timestamp / 3600) * 3600;
-        let bucket = buckets.entry(hour_start).or_insert_with(|| Bucket {
-            hour_label: {
-                let local = chrono::DateTime::from_timestamp(a.timestamp, 0)
-                    .map(|dt| dt.with_timezone(&chrono::Local))
-                    .unwrap();
-                format!("{}:00", local.format("%H"))
-            },
-            ..Default::default()
-        });
-        bucket.solar_kwh += s;
-        bucket.home_kwh += h;
-        bucket.import_kwh += gi;
-        bucket.export_kwh += ge;
-        bucket.battery_charge_kwh += bc;
-        bucket.battery_discharge_kwh += bd;
-    }
-
-    // SOC tracking across all rows
-    for row in &sorted {
-        if let Some(soc) = row.soc {
-            soc_values.push(soc);
-            let hour_start = (row.timestamp / 3600) * 3600;
-            let bucket = buckets.entry(hour_start).or_insert_with(|| Bucket {
-                hour_label: {
-                    let local = chrono::DateTime::from_timestamp(row.timestamp, 0)
-                        .map(|dt| dt.with_timezone(&chrono::Local))
-                        .unwrap();
-                    format!("{}:00", local.format("%H"))
-                },
-                ..Default::default()
-            });
-            bucket.soc_min = Some(bucket.soc_min.map_or(soc, |m| m.min(soc)));
-            bucket.soc_max = Some(bucket.soc_max.map_or(soc, |m| m.max(soc)));
-            bucket.soc_sum += soc;
-            bucket.soc_count += 1;
-        }
-    }
-
+    let solar_kwh = t.solar_kwh;
+    let home_kwh = t.home_kwh;
+    let import_kwh = t.import_kwh;
+    let export_kwh = t.export_kwh;
+    let battery_charge_kwh = t.battery_charge_kwh;
+    let battery_discharge_kwh = t.battery_discharge_kwh;
     let net_grid_kwh = import_kwh - export_kwh;
-    let soc_min = soc_values.iter().cloned().fold(f32::MAX, f32::min);
-    let soc_max = soc_values.iter().cloned().fold(f32::MIN, f32::max);
-    let _soc_avg = if soc_values.is_empty() {
-        None
-    } else {
-        Some(soc_values.iter().sum::<f32>() / soc_values.len() as f32)
-    };
     let solar_coverage = if home_kwh > 0.0 {
         Some(solar_kwh / home_kwh * 100.0)
     } else {
@@ -511,19 +538,8 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
     } else {
         None
     };
-    // Clamp min/max to valid range
-    let soc_min_val = if soc_values.is_empty() {
-        None
-    } else {
-        Some(soc_min)
-    };
-    let soc_max_val = if soc_values.is_empty() {
-        None
-    } else {
-        Some(soc_max)
-    };
-
-    let bucket_list: Vec<&Bucket> = buckets.values().collect();
+    let soc_min_val = t.soc_min;
+    let soc_max_val = t.soc_max;
 
     // Derived estimates
     let solar_to_home_est = f64::max(0.0, solar_kwh - export_kwh - battery_charge_kwh);
@@ -531,6 +547,9 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
         battery_discharge_kwh,
         f64::max(0.0, home_kwh - import_kwh - solar_to_home_est),
     );
+
+    let peak_home_w = integrated.peak_home_w;
+    let peak_grid_import_w = integrated.peak_grid_import_w;
 
     // ---- Generate HTML ----
     let mut html = format!(
@@ -1084,6 +1103,40 @@ mod tests {
     }
 
     #[test]
+    fn median_interval_handles_duplicate_and_unsorted_timestamps() {
+        assert_eq!(median_interval_ms(&[]), None);
+        assert_eq!(
+            median_interval_ms(&[dummy_reading(0, 0, 0, 0, 0, 50.0)]),
+            None
+        );
+        assert_eq!(
+            median_interval_ms(&[
+                dummy_reading(0, 0, 0, 0, 0, 50.0),
+                dummy_reading(0, 0, 0, 0, 0, 50.0),
+            ]),
+            None
+        );
+        assert_eq!(
+            median_interval_ms(&[
+                dummy_reading(0, 0, 0, 0, 0, 50.0),
+                dummy_reading(0, 0, 0, 0, 0, 50.0),
+                dummy_reading(3_600, 0, 0, 0, 0, 50.0),
+                dummy_reading(3_600, 0, 0, 0, 0, 50.0),
+                dummy_reading(7_200, 0, 0, 0, 0, 50.0),
+            ]),
+            Some(3_600_000.0)
+        );
+        assert_eq!(
+            median_interval_ms(&[
+                dummy_reading(7_200, 0, 0, 0, 0, 50.0),
+                dummy_reading(0, 0, 0, 0, 0, 50.0),
+                dummy_reading(3_600, 0, 0, 0, 0, 50.0),
+            ]),
+            Some(3_600_000.0)
+        );
+    }
+
+    #[test]
     fn test_generates_html_with_two_readings() {
         let rows = vec![
             dummy_reading(0, 1000, 200, -500, 800, 50.0),
@@ -1163,6 +1216,21 @@ mod tests {
     }
 
     #[test]
+    fn shared_daily_integration_provides_totals_and_render_metrics() {
+        let rows = vec![
+            dummy_reading(0, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(3600, 2000, -500, -1000, 2500, 60.0),
+        ];
+
+        let data = integrate_daily_rows(&rows).expect("should integrate two readings");
+
+        assert!((data.totals.solar_kwh - 1.0).abs() < 0.001);
+        assert!((data.totals.import_kwh - 1.0).abs() < 0.001);
+        assert_eq!(data.peak_grid_import_w, 1000.0);
+        assert_eq!(data.buckets.len(), 2);
+    }
+
+    #[test]
     fn test_compute_daily_totals_uses_app_grid_sign_convention() {
         // The app-wide convention is negative grid power = import and positive
         // grid power = export. A one-hour constant -1 kW interval must therefore
@@ -1183,6 +1251,18 @@ mod tests {
         let exported = compute_daily_totals(&export_rows).expect("should integrate export");
         assert!(exported.import_kwh.abs() < 0.001);
         assert!((exported.export_kwh - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn daily_peaks_include_the_final_accepted_reading() {
+        let rows = vec![
+            dummy_reading(0, 0, 100, -200, 100, 50.0),
+            dummy_reading(3600, 0, 100, -6000, 5000, 50.0),
+        ];
+
+        let integrated = integrate_daily_rows(&rows).expect("should integrate two readings");
+        assert_eq!(integrated.peak_home_w, 5000.0);
+        assert_eq!(integrated.peak_grid_import_w, 6000.0);
     }
 
     #[test]
@@ -1402,6 +1482,49 @@ mod tests {
         assert!(
             msg.contains("@ 23.456p"),
             "per-window rate must render to 3dp; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn daily_summary_splits_import_cost_at_subhourly_tariff_boundary() {
+        let mut start = 1_700_000_000_i64;
+        for _ in 0..24 {
+            let local_minutes = timestamp_to_local_minutes(start);
+            if local_minutes.is_multiple_of(60) && local_minutes < 22 * 60 {
+                break;
+            }
+            start += 60;
+        }
+        let boundary = minutes_to_hhmm(timestamp_to_local_minutes(start) + 30);
+        let rows = vec![
+            dummy_reading(start, 0, 0, -1000, 1000, 50.0),
+            dummy_reading(start + 3600, 0, 0, -1000, 1000, 50.0),
+        ];
+        let settings = crate::settings::Settings {
+            import_tariff: 0.10,
+            import_tariff_config: Some(crate::settings::TariffConfig {
+                slots: vec![
+                    crate::settings::TariffSlot {
+                        start: "00:00".to_string(),
+                        end: boundary.clone(),
+                        rate: 0.10,
+                    },
+                    crate::settings::TariffSlot {
+                        start: boundary,
+                        end: "23:59".to_string(),
+                        rate: 0.30,
+                    },
+                ],
+            }),
+            ..crate::settings::Settings::default()
+        };
+
+        let summary = generate_daily_summary_text(&rows, "2026-06-27", &settings)
+            .expect("one complete interval is enough");
+
+        assert!(
+            summary.contains("Import: <b>1.0 kWh</b> — £0.20"),
+            "the hour must use both half-hour rates; got: {summary}"
         );
     }
 }

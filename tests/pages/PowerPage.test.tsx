@@ -105,6 +105,7 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     cleanup();
   });
@@ -266,6 +267,22 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
         newerBtn = screen.getByRole('button', { name: /Newer/i });
         expect(newerBtn.hasAttribute('disabled')).toBe(true);
       });
+    });
+
+    it('compares date selections with the picker value after paging', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-15T12:00:00'));
+      useInverterStore.setState({ chartRange: 'today' });
+      render(<PowerPage />);
+
+      const picker = screen.getByLabelText('Select period date') as HTMLInputElement;
+      const blurSpy = vi.spyOn(picker, 'blur');
+      fireEvent.click(screen.getByRole('button', { name: /Older/i }));
+      expect(picker.value).toBe('2026-01-14');
+
+      fireEvent.change(picker, { target: { value: '2025-12-15' } });
+
+      expect(blurSpy).toHaveBeenCalledTimes(1);
     });
   });
 

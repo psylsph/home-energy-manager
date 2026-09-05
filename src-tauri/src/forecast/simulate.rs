@@ -69,7 +69,14 @@ pub fn simulate_battery(hours: &[SimHourInput], params: &SimulationParams) -> Si
     // Guards: no capacity / unknown max rates / out-of-range start SOC
     // mean we cannot project — the API reports `no_battery_capacity` /
     // empty output instead of guessing.
-    if params.capacity_kwh <= 0.0
+    if !params.capacity_kwh.is_finite()
+        || !params.start_soc_pct.is_finite()
+        || !params.reserve_soc_pct.is_finite()
+        || !params.max_charge_kw.is_finite()
+        || !params.max_discharge_kw.is_finite()
+        || !params.charge_efficiency.is_finite()
+        || !params.discharge_efficiency.is_finite()
+        || params.capacity_kwh <= 0.0
         || params.max_charge_kw <= 0.0
         || params.max_discharge_kw <= 0.0
         || !(0.0..=100.0).contains(&params.start_soc_pct)
@@ -132,6 +139,30 @@ pub fn simulate_battery(hours: &[SimHourInput], params: &SimulationParams) -> Si
     }
 
     out
+}
+
+/// Simulate one real-time segment of an hourly input. The input energy must
+/// already be scaled to the segment's fraction of an hour; this helper scales
+/// the power limits, allowing a timed window to be composed with ordinary Eco
+/// behaviour without dropping the part of the bucket outside that window.
+pub(crate) fn simulate_battery_segment(
+    hour: SimHourInput,
+    params: &SimulationParams,
+    fraction: f64,
+) -> Option<SimHourResult> {
+    if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
+        return None;
+    }
+    let segment_params = SimulationParams {
+        start_soc_pct: params.start_soc_pct,
+        max_charge_kw: params.max_charge_kw * fraction,
+        max_discharge_kw: params.max_discharge_kw * fraction,
+        ..*params
+    };
+    simulate_battery(&[hour], &segment_params)
+        .hours
+        .into_iter()
+        .next()
 }
 
 #[cfg(test)]
@@ -271,6 +302,29 @@ mod tests {
         let mut over = p;
         over.start_soc_pct = 101.0;
         assert!(simulate_battery(&[hour(0, 1.0, 1.0)], &over)
+            .hours
+            .is_empty());
+    }
+
+    #[test]
+    fn non_finite_capacity_or_efficiency_yields_empty_output() {
+        let input = [hour(0, 1.0, 1.0)];
+
+        let mut non_finite_capacity = params(10.0, 50.0, 10.0);
+        non_finite_capacity.capacity_kwh = f64::NAN;
+        assert!(simulate_battery(&input, &non_finite_capacity)
+            .hours
+            .is_empty());
+
+        let mut non_finite_charge_efficiency = params(10.0, 50.0, 10.0);
+        non_finite_charge_efficiency.charge_efficiency = f64::NAN;
+        assert!(simulate_battery(&input, &non_finite_charge_efficiency)
+            .hours
+            .is_empty());
+
+        let mut non_finite_discharge_efficiency = params(10.0, 50.0, 10.0);
+        non_finite_discharge_efficiency.discharge_efficiency = f64::NAN;
+        assert!(simulate_battery(&input, &non_finite_discharge_efficiency)
             .hours
             .is_empty());
     }

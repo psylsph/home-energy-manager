@@ -15,12 +15,16 @@
  * Gen3 default register snapshot and clears captured writes), so we reset it
  * to defaults before each backend starts.
  */
-import { type ChildProcess, spawn, execSync } from 'child_process';
+import { type ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 import { backendExecutableName } from './binary-path.js';
+import { attachErrorHandler } from './process-errors.js';
+import { requireOkJson } from './admin-responses.js';
+import { stopChildProcess } from './process-lifecycle.js';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,97 +46,10 @@ const BINARY_PATH = path.resolve(
 let backendProcess: ChildProcess | null = null;
 let settingsFixture: TestSettingsFixture | null = null;
 
-function killPort(port: number): void {
-  // Best-effort safety net for a lost backend process handle. Avoids a hard
-  // dependency on psmisc (`fuser`): prefer `lsof` (present on virtually every
-  // Linux/macOS base install), then fall back to a self-contained /proc scan
-  // so the suite runs even on minimal containers with neither installed.
-  try {
-    execSync(`lsof -ti tcp:${port} 2>/dev/null | xargs -r kill 2>/dev/null || true`, {
-      stdio: 'ignore',
-    });
-    return;
-  } catch {
-    /* lsof missing or no match — try /proc fallback */
-  }
-  try {
-    const pids = pidsListeningOn(port);
-    for (const pid of pids) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }
-  } catch {
-    /* ignore — best effort */
-  }
-}
-
-/** Find PIDs listening on `port` by scanning /proc (Linux only, no deps). */
-function pidsListeningOn(port: number): number[] {
-  const pids: number[] = [];
-  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
-  const netDirs = ['/proc/net/tcp', '/proc/net/tcp6'];
-  for (const netFile of netDirs) {
-    let content: string;
-    try {
-      content = fs.readFileSync(netFile, 'utf8');
-    } catch {
-      continue;
-    }
-    const inodes = new Set<string>();
-    for (const line of content.split('\n').slice(1)) {
-      const fields = line.trim().split(/\s+/);
-      if (fields.length < 10) continue;
-      const localAddr = fields[1];
-      const inode = fields[9];
-      if (localAddr.endsWith(`:${hexPort}`)) inodes.add(inode);
-    }
-    if (inodes.size === 0) continue;
-    for (const entry of fs.readdirSync('/proc')) {
-      if (!/^\d+$/.test(entry)) continue;
-      const fdDir = `/proc/${entry}/fd`;
-      let fds: string[];
-      try {
-        fds = fs.readdirSync(fdDir);
-      } catch {
-        continue;
-      }
-      for (const fd of fds) {
-        let link: string;
-        try {
-          link = fs.readlinkSync(`${fdDir}/${fd}`);
-        } catch {
-          continue;
-        }
-        // A listening socket's fd symlink is `socket:[<inode>]`; the inode
-        // column in /proc/net/tcp is the bare number.
-        const match = /^socket:\[(\d+)\]$/.exec(link);
-        if (match && inodes.has(match[1])) {
-          pids.push(Number(entry));
-          break;
-        }
-      }
-    }
-  }
-  return [...new Set(pids)];
-}
-
 async function stopBackendProcess(): Promise<void> {
   if (backendProcess) {
     console.log('[backend] Stopping...');
-    backendProcess.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        backendProcess?.kill('SIGKILL');
-        resolve();
-      }, 5000);
-      backendProcess?.on('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
+    await stopChildProcess(backendProcess, 'backend', 5000);
     backendProcess = null;
   }
   // Safety net in case the process handle was lost.
@@ -141,11 +58,8 @@ async function stopBackendProcess(): Promise<void> {
 
 /** Restore the mock Modbus server to its Gen3 default snapshot + clear writes. */
 async function resetMock(): Promise<void> {
-  try {
-    await fetch(`http://127.0.0.1:${ADMIN_PORT}/reset`, { method: 'POST' });
-  } catch {
-    /* mock not up yet — global-setup starts it before any spec file runs */
-  }
+  const response = await fetch(`http://127.0.0.1:${ADMIN_PORT}/reset`, { method: 'POST' });
+  await requireOkJson(response, 'POST /reset');
 }
 
 /** Resolve when `probe` returns true, or reject after `timeoutMs`. */
@@ -212,6 +126,7 @@ async function launchBackendProcess(): Promise<void> {
       },
     },
   );
+  attachErrorHandler(backendProcess, 'mock-E2E backend');
 
   const logLine = (prefix: string, data: Buffer): void => {
     for (const line of data.toString().trim().split('\n')) {

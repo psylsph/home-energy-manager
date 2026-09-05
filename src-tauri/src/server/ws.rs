@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::ConnectInfo;
@@ -14,6 +15,24 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::inverter::poll::{AppState, PollMessage};
+
+/// Timing knobs for the WebSocket idle probe. Production uses the defaults;
+/// tests can shorten both windows and advance Tokio's clock without waiting
+/// in real time.
+#[derive(Debug, Clone, Copy)]
+pub struct KeepaliveConfig {
+    pub interval: Duration,
+    pub probe_grace: Duration,
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(30),
+            probe_grace: Duration::from_secs(10),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Connected clients tracker
@@ -89,7 +108,8 @@ pub async fn ws_handler(
             .into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_ws(socket, state, peer))
+    let keepalive = *state.ws_keepalive.lock().await;
+    ws.on_upgrade(move |socket| handle_ws(socket, state, peer, keepalive))
         .into_response()
 }
 
@@ -99,8 +119,11 @@ pub async fn ws_handler(
 /// within the grace window), `false` when it stayed silent — half-open,
 /// safe to disconnect. A failed Ping *send* means the socket is already
 /// broken, so it also returns `false`.
-async fn probe_alive(socket: &mut WebSocket, peer: std::net::SocketAddr) -> bool {
-    const PROBE_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+async fn probe_alive(
+    socket: &mut WebSocket,
+    peer: std::net::SocketAddr,
+    probe_grace: Duration,
+) -> bool {
     tracing::debug!("WebSocket client {peer} quiet for keepalive — probing with Ping");
     if socket.send(Message::Ping(vec![].into())).await.is_err() {
         tracing::debug!("WebSocket client {peer} probe send failed — disconnecting");
@@ -119,7 +142,7 @@ async fn probe_alive(socket: &mut WebSocket, peer: std::net::SocketAddr) -> bool
                 }
             }
         }
-        _ = tokio::time::sleep(PROBE_GRACE) => {
+        _ = tokio::time::sleep(probe_grace) => {
             tracing::debug!(
                 "WebSocket client {peer} timed out — no response to probe — disconnecting"
             );
@@ -129,7 +152,12 @@ async fn probe_alive(socket: &mut WebSocket, peer: std::net::SocketAddr) -> bool
 }
 
 /// Inner WebSocket loop — runs for the lifetime of a single connection.
-async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::SocketAddr) {
+async fn handle_ws(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    peer: std::net::SocketAddr,
+    keepalive: KeepaliveConfig,
+) {
     // Register this client
     let client_id = state.connected_clients.lock().add(peer);
     tracing::debug!("WebSocket client connected: {}", peer);
@@ -166,13 +194,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::
     }
 
     // Detect half-open connections: if the client hasn't sent any message
-    // (or pong) for 30 seconds, consider the connection dead. Tokio's
+    // (or pong) for the configured interval, consider the connection dead. Tokio's
     // broadcast recv has no timeout, so we use select! to race it against
     // a sleep or incoming WebSocket frame. Receiving any frame (including
     // Pong from the client's WebSocket stack) proves the connection is
     // still alive. If the client disconnects, `recv().await` returns None.
-    let keepalive = tokio::time::Duration::from_secs(30);
-
     loop {
         tokio::select! {
             // Incoming WebSocket message from client (close, pong, or error).
@@ -226,8 +252,8 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::
             // grace window for ANY frame. A live client's stack replies
             // even if the page is idle (issue #274); a half-open
             // connection stays silent and is disconnected here.
-            _ = tokio::time::sleep(keepalive) => {
-                if !probe_alive(&mut socket, peer).await {
+            _ = tokio::time::sleep(keepalive.interval) => {
+                if !probe_alive(&mut socket, peer, keepalive.probe_grace).await {
                     break;
                 }
             }

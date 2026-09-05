@@ -38,6 +38,10 @@ function chartTitle(scale: 'today' | '24h'): string {
   return scale === '24h' ? 'Solar Power — Last 24h' : 'Solar Power Today';
 }
 
+function emptyStateMessage(scale: 'today' | '24h'): string {
+  return scale === '24h' ? 'No solar history in the last 24h' : 'No solar history yet today';
+}
+
 interface PvRow {
   t: number;
   pv1_power: number | null;
@@ -142,6 +146,17 @@ export default function SolarPowerChart() {
     [solarArrays],
   );
 
+  // A data-driven lock is shared across panel charts, but updating the store
+  // during render makes the chart mutate state before its current render has
+  // committed. Synchronize only when a newly observed ceiling is larger than
+  // the shared value; the guard also prevents the resulting store update from
+  // looping.
+  useEffect(() => {
+    if (nameplateCeilingW != null || !yLock || rows.length === 0) return;
+    const ceiling = computeYMax(rows, hasPv2);
+    if (ceiling > yLockMax) setYLockMax(ceiling);
+  }, [hasPv2, nameplateCeilingW, rows, setYLockMax, yLock, yLockMax]);
+
   // Y-axis domain: nameplate ceiling first (issue #192), else the shared
   // data-driven Y-Lock ceiling when the user has it enabled.
   let yDomain: [number, number] | undefined;
@@ -150,7 +165,6 @@ export default function SolarPowerChart() {
   } else if (yLock && rows.length > 0) {
     const ceiling = computeYMax(rows, hasPv2);
     const shared = Math.max(yLockMax, ceiling);
-    if (shared > yLockMax) setYLockMax(shared);
     yDomain = [0, shared];
   }
 
@@ -169,7 +183,7 @@ export default function SolarPowerChart() {
         </div>
       ) : !hasData ? (
         <div className="flex flex-col items-center justify-center h-[180px] gap-1">
-          <p className="text-text-secondary text-sm font-sans">No solar history yet today</p>
+          <p className="text-text-secondary text-sm font-sans">{emptyStateMessage(scale)}</p>
           <p className="text-text-secondary/50 text-xs font-sans">
             History is recorded while the app is running and connected
           </p>

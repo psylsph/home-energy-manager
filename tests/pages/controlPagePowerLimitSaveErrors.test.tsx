@@ -284,6 +284,23 @@ describe('<ControlPage/> — power-control save failures surface and reconcile',
     expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 15 });
   });
 
+  it('does not render absent charge limits as a 100% slider value', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        charge_rate: undefined as unknown as number,
+        discharge_rate: undefined as unknown as number,
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const sliders = powerSliders();
+    expect(sliders[2]).toHaveValue('0');
+    expect(sliders[3]).toHaveValue('0');
+    expect(screen.getAllByText('—')).toHaveLength(2);
+  });
+
   it('clears the error banner after a successful save', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot(),

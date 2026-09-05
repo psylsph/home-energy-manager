@@ -4,6 +4,7 @@
  */
 
 import { test as base } from '@playwright/test';
+import { requireOkJson } from './admin-responses.js';
 
 // ---------------------------------------------------------------------------
 // Configuration — must match global-setup.ts and mock-modbus.ts
@@ -12,6 +13,7 @@ import { test as base } from '@playwright/test';
 const HTTP_PORT = 17337;
 const ADMIN_PORT = 18900;
 const ADMIN_BASE = `http://127.0.0.1:${ADMIN_PORT}`;
+const HARNESS_RESET_TIMEOUT_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,7 +30,7 @@ export interface RegisterWrite {
 
 async function adminGet(path: string): Promise<any> {
   const resp = await fetch(`${ADMIN_BASE}${path}`);
-  return resp.json();
+  return requireOkJson(resp, `GET ${path}`);
 }
 
 async function adminPost(path: string, body?: unknown): Promise<any> {
@@ -37,7 +39,7 @@ async function adminPost(path: string, body?: unknown): Promise<any> {
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return resp.json();
+  return requireOkJson(resp, `POST ${path}`);
 }
 
 /**
@@ -100,7 +102,7 @@ export async function resetHarness(baseUrl: string): Promise<void> {
   // clear) before its next read; the usual warm-backend case returns after
   // one poll.
   const resetAt = Date.now();
-  const deadline = Date.now() + 60_000;
+  const deadline = Date.now() + HARNESS_RESET_TIMEOUT_MS;
   for (;;) {
     let fresh = false;
     try {
@@ -180,9 +182,33 @@ export const test = base.extend<ModbusFixtures>({
   // leakage). Tests that want the stronger registered guarantee mid-test
   // can call `resetHarness(baseUrl)` again.
   harnessReset: [
-    async ({ baseUrl }, use) => {
+    async ({ baseUrl }, use, testInfo) => {
+      // The reset deadline is intentionally longer than Playwright's default
+      // 30-second test timeout because a previous test may leave a large
+      // write queue to drain. Reserve that time before the fixture starts so
+      // a stalled reset reports its own error instead of aborting the test
+      // and skipping the fixture's cleanup checks.
+      testInfo.setTimeout(testInfo.timeout + HARNESS_RESET_TIMEOUT_MS);
       await resetHarness(baseUrl);
-      await use();
+      let testFailed = false;
+      let testError: unknown;
+      try {
+        await use();
+      } catch (error) {
+        testFailed = true;
+        testError = error;
+      }
+
+      const protocolErrors = await adminGet('/protocol-errors');
+      if (testFailed) {
+        throw testError;
+      }
+      if (protocolErrors?.ok !== true || !Array.isArray(protocolErrors.errors)) {
+        throw new Error(`harness protocol-error endpoint returned an invalid response: ${JSON.stringify(protocolErrors)}`);
+      }
+      if (protocolErrors.errors.length > 0) {
+        throw new Error(`mock Modbus protocol violation: ${protocolErrors.errors.join('; ')}`);
+      }
     },
     { auto: true },
   ],

@@ -286,6 +286,22 @@ impl DeviceType {
         }
     }
 
+    /// Maximum EPS output power in watts for this device family.
+    ///
+    /// The EPS measurement is an AC output and cannot exceed the inverter's
+    /// rated AC output. Prefer the rating decoded from the full DTC when it
+    /// is available, falling back to the coarse family rating otherwise.
+    /// Batteryless plant controllers and PV-only inverters have no EPS output
+    /// source, so a non-zero read from them is treated as invalid.
+    pub fn max_eps_power_w(&self, rated_ac_power_w: u32) -> u32 {
+        match self {
+            Self::Gateway | Self::Ems | Self::EmsCommercial | Self::PvInverter => 0,
+            Self::Unknown(_) => rated_ac_power_w.max(10_000),
+            _ if rated_ac_power_w > 0 => rated_ac_power_w,
+            _ => self.max_ac_power_w(),
+        }
+    }
+
     /// Maximum battery charge/discharge power in watts from DTC + ARM firmware.
     pub fn max_battery_power_for_dtc(raw_dtc: u16, arm_fw: u16, fallback: u32) -> u32 {
         if raw_dtc >> 8 == 0x20 {
@@ -496,12 +512,14 @@ impl DeviceType {
     /// probe (0xA0/0x70/0x50), which serve nothing meaningful on these models
     /// and only burn poll-cycle time. The Gateway aggregates battery data from
     /// its child AIO(s) in its own register bank; EMS/PvInverter simply have no
-    /// battery. `Unknown` is intentionally excluded so an unidentified device
-    /// still gets the standard LV probe during detection.
+    /// battery. Gen4 Hybrid (0x83xx) is also batteryless and uses the extended
+    /// inverter register map without an LV pack at 0x32. `Unknown` is
+    /// intentionally excluded so an unidentified device still gets the
+    /// standard LV probe during detection.
     pub fn is_batteryless(&self) -> bool {
         matches!(
             self,
-            Self::Gateway | Self::Ems | Self::EmsCommercial | Self::PvInverter
+            Self::Gateway | Self::Ems | Self::EmsCommercial | Self::PvInverter | Self::Gen4Hybrid
         )
     }
 
@@ -512,6 +530,18 @@ impl DeviceType {
     /// Hybrid HV Gen3 exposes the read-back `backup_enable` field at HR 1105,
     /// but neither reference implementation includes HR 1105 in its safe-write
     /// set, so it remains excluded from user control until writing is confirmed.
+    pub fn supports_eps(&self) -> bool {
+        matches!(
+            self,
+            Self::ACCoupled
+                | Self::ACCoupledMk2
+                | Self::ACThreePhase
+                | Self::AllInOne6kW
+                | Self::AllInOne3_6kW
+                | Self::AllInOne5kW
+        )
+    }
+
     /// Whether the charge/discharge power-limit registers are a direct
     /// 1–100% percentage (AC-coupled and the three-phase-limit banks)
     /// rather than the 0–50 DC-hybrid half scale the UI doubles.
@@ -531,18 +561,6 @@ impl DeviceType {
                 | Self::Gateway
                 | Self::HybridHvGen3
                 | Self::AllInOneHybrid
-        )
-    }
-
-    pub fn supports_eps(&self) -> bool {
-        matches!(
-            self,
-            Self::ACCoupled
-                | Self::ACCoupledMk2
-                | Self::ACThreePhase
-                | Self::AllInOne6kW
-                | Self::AllInOne3_6kW
-                | Self::AllInOne5kW
         )
     }
 
@@ -840,7 +858,8 @@ pub struct SolarArraySummary {
 }
 
 /// Complete snapshot of inverter state.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct InverterSnapshot {
     /// Unix timestamp of this reading.
     pub timestamp: i64,
@@ -864,7 +883,7 @@ pub struct InverterSnapshot {
     /// GivTCP (`p_eps_backup`) both treat the register as uint16, so we
     /// also store it as a non-negative value: 0 when EPS is idle or
     /// grid-connected, >0 when feeding the backup loads during an outage.
-    /// Sanitized against a 10 kW residential ceiling; values exceeding the
+    /// Sanitized against the model's rated AC output; values exceeding the
     /// int16 saturation fingerprint (≥32767) are treated as dongle
     /// corruption and replaced with the previous reading.
     #[serde(default)]
@@ -1224,6 +1243,134 @@ pub struct InverterSnapshot {
     pub pv2_pct: Option<f64>,
 }
 
+impl InverterSnapshot {
+    /// Construct a snapshot that is safe to use before the first complete
+    /// inverter read. Eco mode, an enabled-safe raw mode bit, and the 4% SOC
+    /// floors avoid treating missing registers as permission to export or
+    /// discharge a battery.
+    pub(crate) fn safe_default() -> Self {
+        Self {
+            timestamp: 0,
+            solar_power: 0,
+            pv1_power: 0,
+            pv2_power: 0,
+            battery_power: 0,
+            grid_power: 0,
+            home_power: 0,
+            eps_power_w: 0,
+            pv1_voltage: 0.0,
+            pv2_voltage: 0.0,
+            pv1_current: 0.0,
+            pv2_current: 0.0,
+            soc: 0,
+            battery_voltage: 0.0,
+            battery_current: 0.0,
+            battery_temperature: 0.0,
+            battery_state: BatteryState::Idle,
+            battery_capacity_kwh: 0.0,
+            battery_modules: Vec::new(),
+            grid_voltage: 0.0,
+            grid_frequency: 0.0,
+            grid_online: default_grid_online(),
+            grid_loss: default_grid_loss(),
+            inverter_trip: default_inverter_trip(),
+            battery_over_temp: default_battery_over_temp(),
+            inverter_temperature: 0.0,
+            inverter_time: String::new(),
+            today_solar_kwh: 0.0,
+            today_pv1_kwh: 0.0,
+            today_pv2_kwh: 0.0,
+            today_import_kwh: 0.0,
+            today_export_kwh: 0.0,
+            today_charge_kwh: 0.0,
+            today_discharge_kwh: 0.0,
+            today_consumption_kwh: 0.0,
+            home_energy_today_kwh: 0.0,
+            total_import_kwh: 0.0,
+            total_export_kwh: 0.0,
+            total_solar_kwh: 0.0,
+            total_charge_kwh: 0.0,
+            total_discharge_kwh: 0.0,
+            total_throughput_kwh: 0.0,
+            operating_hours: 0,
+            today_ac_charge_kwh: 0.0,
+            battery_mode: BatteryMode::Eco,
+            device_type: DeviceType::Unknown(0),
+            device_type_code: String::new(),
+            device_type_display: String::new(),
+            battery_reserve: default_soc_reserve(),
+            charge_rate: 0,
+            discharge_rate: 0,
+            active_power_rate: 0,
+            max_battery_power_w: 0,
+            max_ac_power_w: 0,
+            export_limit_w: 0,
+            target_soc: default_target_soc(),
+            battery_power_mode: default_eco_mode(),
+            enable_charge: false,
+            enable_charge_target: false,
+            enable_discharge: false,
+            auto_winter_active: false,
+            charging_mode: crate::settings::ChargingMode::default(),
+            adaptive_charge_enabled: false,
+            adaptive_charge_state: String::new(),
+            adaptive_charge_period: None,
+            adaptive_charge_desired_rate_percent: None,
+            cosy_active: false,
+            cosy_enabled: false,
+            agile_active: false,
+            agile_state: String::new(),
+            agile_enabled: false,
+            agile_scope: crate::settings::AgileScope::default(),
+            forecast_plan_auto_refresh: false,
+            forecast_plan_auto_apply_enabled: false,
+            battery_calibration_stage: 0,
+            load_limiter_active: false,
+            temperature_limiter_active: false,
+            supports_battery_calibration: false,
+            inverter_serial: String::new(),
+            firmware_version: String::new(),
+            dsp_firmware_version: String::new(),
+            dc_dsp_firmware_version: String::new(),
+            charge_slots: std::array::from_fn(|_| ScheduleSlot::default()),
+            discharge_slots: std::array::from_fn(|_| ScheduleSlot::default()),
+            max_charge_slots: default_max_slots(),
+            max_discharge_slots: default_max_slots(),
+            ac_export_priority: 0,
+            ac_eps_enabled: false,
+            battery_pause_mode: 0,
+            battery_pause_slot: ScheduleSlot::default(),
+            enable_ammeter: false,
+            enable_reversed_ct_clamp: false,
+            meter_type: 0,
+            meters: Vec::new(),
+            parallel_aio_count: 0,
+            parallel_aio_online: 0,
+            per_aio_soc: [0; 3],
+            per_aio_power: [0; 3],
+            per_aio_charge_today_kwh: [0.0; 3],
+            per_aio_discharge_today_kwh: [0.0; 3],
+            per_aio_serial: std::array::from_fn(|_| String::new()),
+            gateway_software_version: String::new(),
+            gateway_is_v2: false,
+            gateway_work_mode: 0,
+            gateway_fault_codes: Vec::new(),
+            first_inverter_serial: String::new(),
+            battery_power_cutoff: 0,
+            battery_maintenance_mode: 0,
+            solar_arrays: Vec::new(),
+            pv1_pct: None,
+            pv2_pct: None,
+        }
+    }
+}
+
+impl Default for InverterSnapshot {
+    fn default() -> Self {
+        Self::safe_default()
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1452,6 +1599,22 @@ mod tests {
         assert_eq!(snap.solar_power, 0);
         assert_eq!(snap.charge_slots.len(), 10);
         assert_eq!(snap.discharge_slots.len(), 10);
+        assert_eq!(snap.battery_mode, BatteryMode::Eco);
+        assert_eq!(snap.battery_power_mode, 1);
+        assert_eq!(snap.battery_reserve, 4);
+        assert_eq!(snap.target_soc, 4);
+        assert_eq!(snap.max_charge_slots, 2);
+        assert_eq!(snap.max_discharge_slots, 2);
+    }
+
+    #[test]
+    fn snapshot_serde_missing_fields_uses_safe_defaults() {
+        let snap: InverterSnapshot = serde_json::from_str("{}").unwrap();
+
+        assert_eq!(snap.battery_mode, BatteryMode::Eco);
+        assert_eq!(snap.battery_power_mode, 1);
+        assert_eq!(snap.battery_reserve, 4);
+        assert_eq!(snap.target_soc, 4);
     }
 
     // -- DeviceType: known DTC families from references ---------------------
@@ -1566,6 +1729,15 @@ mod tests {
         assert_eq!(DeviceType::max_battery_power_for_dtc(0x8101, 0, 6000), 6000);
         assert_eq!(DeviceType::max_battery_power_for_dtc(0x8102, 0, 0), 8000);
         assert_eq!(DeviceType::max_battery_power_for_dtc(0x8103, 0, 0), 10000);
+    }
+
+    #[test]
+    fn max_eps_power_w_uses_model_rating_and_rejects_missing_sources() {
+        assert_eq!(DeviceType::ACCoupled.max_eps_power_w(0), 3000);
+        assert_eq!(DeviceType::AllInOne3_6kW.max_eps_power_w(0), 3600);
+        assert_eq!(DeviceType::ThreePhase.max_eps_power_w(8000), 8000);
+        assert_eq!(DeviceType::Gateway.max_eps_power_w(12000), 0);
+        assert_eq!(DeviceType::Unknown(0x9999).max_eps_power_w(0), 10000);
     }
 
     #[test]
@@ -1820,6 +1992,7 @@ mod tests {
         assert!(DeviceType::Ems.is_batteryless());
         assert!(DeviceType::EmsCommercial.is_batteryless());
         assert!(DeviceType::PvInverter.is_batteryless());
+        assert!(DeviceType::Gen4Hybrid.is_batteryless());
 
         // Devices with attached batteries must NOT be flagged batteryless.
         assert!(!DeviceType::Gen3Hybrid.is_batteryless());

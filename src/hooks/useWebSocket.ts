@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { getWsUrl, apiGet } from '../lib/api';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, ConnectionState } from '../lib/types';
+import type { EvcConnectionState } from '../store/useInverterStore';
 
 /**
  * The inverter normally sends one snapshot per configured poll interval. Keep
@@ -32,7 +33,7 @@ export function useWebSocket() {
   const reconnectTimeout = useRef<number>(0);
   const lastSnapshotReceivedAt = useRef<number | null>(null);
   const connectRef = useRef<() => void>(() => {});
-  const { setSnapshot, clearSnapshot, setConnection, setEvcData } = useInverterStore();
+  const { setSnapshot, clearSnapshot, setConnection, setEvcData, setEvcStatus } = useInverterStore();
 
   const markBrowserDisconnected = useCallback(() => {
     lastSnapshotReceivedAt.current = null;
@@ -74,6 +75,10 @@ export function useWebSocket() {
         evc_host: string;
         evc_port: number;
         reachable: boolean;
+        stale: boolean;
+        connection_state: EvcConnectionState;
+        last_success_at_epoch_ms: number | null;
+        age_seconds: number | null;
         snapshot: {
           charging_state: string;
           connection_status: string;
@@ -102,7 +107,25 @@ export function useWebSocket() {
         const cableConnected = snap.connection_status === 'Connected';
         // Carry the raw charging_state string through so the diagram can
         // render the EVC's own "Idle" label when state=1 (issue #139).
-        setEvcData(snap.active_power, charging, true, snap.charging_state, cableConnected, snap.session_energy_kwh);
+        setEvcData(
+          snap.active_power,
+          charging,
+          true,
+          snap.charging_state,
+          cableConnected,
+          snap.session_energy_kwh,
+          res.last_success_at_epoch_ms,
+          res.stale,
+          res.age_seconds,
+        );
+      } else if (res.stale || res.connection_state !== 'never_connected') {
+        setEvcStatus(
+          res.reachable,
+          res.stale,
+          res.connection_state,
+          res.last_success_at_epoch_ms,
+          res.age_seconds,
+        );
       } else if (res.evc_host) {
         // EVC is configured but the backend has never seen a snapshot
         // since startup. Latch `evcEverConnected` based on the live WS
@@ -112,7 +135,7 @@ export function useWebSocket() {
     } catch {
       // Backend not reachable — leave defaults
     }
-  }, [setEvcData]);
+  }, [setEvcData, setEvcStatus]);
 
   // Export the fetch functions so the StatusPage can trigger re-fetches.
   useEffect(() => {
@@ -170,7 +193,17 @@ export function useWebSocket() {
           // Carry the raw charging_state string through so the diagram
           // can render the EVC's own "Idle" label when state=1
           // (issue #139).
-          setEvcData(evc.active_power, charging, true, evc.charging_state, cableConnected, evc.session_energy_kwh);
+          setEvcData(
+            evc.active_power,
+            charging,
+            true,
+            evc.charging_state,
+            cableConnected,
+            evc.session_energy_kwh,
+            Date.now(),
+            false,
+            0,
+          );
         } else if (data.type === 'evc_connected') {
           // Backend just established the TCP/Modbus connection to the
           // configured EVC host (issue #138). Latch `evcEverConnected`
@@ -182,7 +215,28 @@ export function useWebSocket() {
           // the flag if the first read fails.
           useInverterStore.getState().markEvcConnectedReached();
         } else if (data.type === 'evc_disconnected') {
-          setEvcData(0, false, false);
+          const current = useInverterStore.getState();
+          if (current.evcLastSuccessAtEpochMs == null) {
+            setEvcData(0, false, false);
+          } else {
+            // The following EvcStatus frame decides whether this is a
+            // temporary degraded connection or an expired cache. Preserve
+            // the data during the grace period so one failed poll does not
+            // flash the diagram to zero.
+            useInverterStore.setState({
+              evcConnected: false,
+              evcStale: true,
+              evcConnectionState: 'degraded',
+            });
+          }
+        } else if (data.type === 'evc_status') {
+          setEvcStatus(
+            Boolean(data.reachable),
+            Boolean(data.stale),
+            data.connection_state as EvcConnectionState,
+            data.last_success_at_epoch_ms ?? null,
+            data.age_seconds ?? null,
+          );
         }
       } catch (e) {
         console.error('WebSocket parse error:', e);
@@ -209,7 +263,7 @@ export function useWebSocket() {
       markBrowserDisconnected();
       ws.close();
     };
-  }, [setSnapshot, clearSnapshot, setConnection, setEvcData, markBrowserDisconnected]);
+  }, [setSnapshot, clearSnapshot, setConnection, setEvcData, setEvcStatus, markBrowserDisconnected]);
 
   // Keep ref in sync so the reconnect closure always calls the latest connect
   useEffect(() => {

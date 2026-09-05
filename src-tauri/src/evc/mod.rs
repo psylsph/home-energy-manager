@@ -20,6 +20,7 @@
 //!   HR 109 Voltage_L1           (÷10 V)
 
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::time::{sleep, Duration};
 use tokio_modbus::prelude::*;
 
@@ -83,6 +84,100 @@ impl Default for EvcSnapshot {
     }
 }
 
+/// Keep a recently successful EVC snapshot during a short outage so one
+/// failed poll does not make the UI flap between connected and disconnected.
+/// After this deadline the cached data is no longer considered reachable.
+pub const EVC_CACHE_GRACE_MS: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvcConnectionState {
+    #[default]
+    NeverConnected,
+    Connected,
+    Degraded,
+    Disconnected,
+}
+
+/// Reachability metadata returned by the API and sent alongside EVC events.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EvcReachabilityStatus {
+    pub connection_state: EvcConnectionState,
+    pub reachable: bool,
+    pub stale: bool,
+    pub last_success_at_epoch_ms: Option<u64>,
+    pub age_seconds: Option<u64>,
+}
+
+/// Backend-owned EVC connection state. The clock is supplied by callers so
+/// the grace and expiry rules remain deterministic in tests.
+#[derive(Debug, Clone, Default)]
+pub struct EvcReachability {
+    connection_state: EvcConnectionState,
+    last_success_at_epoch_ms: Option<u64>,
+}
+
+impl EvcReachability {
+    pub fn record_success(&mut self, now_ms: u64) {
+        self.connection_state = EvcConnectionState::Connected;
+        self.last_success_at_epoch_ms = Some(now_ms);
+    }
+
+    pub fn record_failure(&mut self, now_ms: u64) {
+        let within_grace = self
+            .last_success_at_epoch_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) <= EVC_CACHE_GRACE_MS);
+        self.connection_state = if within_grace {
+            EvcConnectionState::Degraded
+        } else if self.last_success_at_epoch_ms.is_some() {
+            EvcConnectionState::Disconnected
+        } else {
+            EvcConnectionState::NeverConnected
+        };
+    }
+
+    pub fn reset(&mut self) {
+        self.connection_state = EvcConnectionState::NeverConnected;
+        self.last_success_at_epoch_ms = None;
+    }
+
+    pub fn status_at(&self, now_ms: u64) -> EvcReachabilityStatus {
+        let age_ms = self
+            .last_success_at_epoch_ms
+            .map(|last| now_ms.saturating_sub(last));
+        let within_grace = age_ms.is_some_and(|age| age <= EVC_CACHE_GRACE_MS);
+        let reachable = within_grace
+            && matches!(
+                self.connection_state,
+                EvcConnectionState::Connected | EvcConnectionState::Degraded
+            );
+        let connection_state = if reachable {
+            self.connection_state
+        } else if self.last_success_at_epoch_ms.is_some() {
+            EvcConnectionState::Disconnected
+        } else {
+            EvcConnectionState::NeverConnected
+        };
+
+        EvcReachabilityStatus {
+            connection_state,
+            reachable,
+            stale: self.last_success_at_epoch_ms.is_some()
+                && (self.connection_state != EvcConnectionState::Connected || !reachable),
+            age_seconds: age_ms.map(|age| age / 1_000),
+            last_success_at_epoch_ms: self.last_success_at_epoch_ms,
+        }
+    }
+}
+
+pub fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
 // ---------------------------------------------------------------------------
 // Enum decoders
 // ---------------------------------------------------------------------------
@@ -124,57 +219,85 @@ fn decode_connection_status(val: u16) -> String {
 // Register decoder
 // ---------------------------------------------------------------------------
 
+fn decode_serial(regs: &[u16]) -> String {
+    regs.iter()
+        .filter_map(|&w| {
+            if w == 0 {
+                None
+            } else {
+                Some(char::from_u32(w as u32).unwrap_or('?'))
+            }
+        })
+        .collect()
+}
+
+fn decode_discovery_serial(regs: &[u16]) -> Option<String> {
+    if regs.len() < 31 {
+        return None;
+    }
+    let serial_regs = &regs[..31];
+    if serial_regs
+        .iter()
+        .any(|&w| w != 0 && !(0x20..=0x7e).contains(&w))
+    {
+        return None;
+    }
+    let serial = decode_serial(serial_regs);
+    (!serial.trim().is_empty()).then_some(serial)
+}
+
+/// Decode the mandatory block 1 (HR 0–59). Block 2 contains supplementary
+/// session and voltage fields, so a valid block 1 still provides a useful
+/// charger snapshot when that optional read fails.
+fn decode_evc_block1(regs: &[u16]) -> EvcSnapshot {
+    if regs.len() < 60 {
+        return EvcSnapshot::default();
+    }
+
+    EvcSnapshot {
+        charging_state: decode_charging_state(regs[0]),
+        connection_status: decode_connection_status(regs[2]),
+        active_power: regs[13] as i32,
+        current_l1: regs[6] as f32 / 10.0,
+        current_l2: regs[8] as f32 / 10.0,
+        current_l3: regs[10] as f32 / 10.0,
+        meter_energy_kwh: regs[29] as f32 / 10.0,
+        charge_limit_a: regs[36] as f32 / 10.0,
+        serial_number: decode_serial(&regs[38..60]),
+        ..Default::default()
+    }
+}
+
 /// Decode two register blocks (60 + 55) into an `EvcSnapshot`.
 fn decode_evc(regs: &[u16]) -> EvcSnapshot {
     // regs[0..60] = block 1, regs[60..115] = block 2
-    if regs.len() < 115 {
+    if regs.len() < 60 {
         tracing::warn!(
-            "EVC: short register read ({} regs, expected 115)",
+            "EVC: short block-1 register read ({} regs, expected 60)",
             regs.len()
         );
         return EvcSnapshot::default();
     }
 
-    let charging_state = decode_charging_state(regs[0]);
-    let connection_status = decode_connection_status(regs[2]);
-    let current_l1 = regs[6] as f32 / 10.0;
-    let current_l2 = regs[8] as f32 / 10.0;
-    let current_l3 = regs[10] as f32 / 10.0;
-    let active_power = regs[13] as i32;
-    let meter_energy_kwh = regs[29] as f32 / 10.0;
-    let charge_limit_a = regs[36] as f32 / 10.0;
-
-    // Serial number: HR 38–68 → regs[38..69], ASCII chars, skip nulls
-    let mut serial = String::new();
-    for &w in &regs[38..69] {
-        if w != 0 {
-            serial.push(char::from_u32(w as u32).unwrap_or('?'));
-        }
+    let mut snapshot = decode_evc_block1(regs);
+    if regs.len() < 115 {
+        tracing::warn!(
+            "EVC: short optional block-2 register read ({} regs, expected 115)",
+            regs.len()
+        );
+        return snapshot;
     }
 
-    let session_energy_kwh = regs[72] as f32 / 10.0;
-    let session_duration_secs = regs[79] as u32;
-
-    let voltage_l1 = regs[109] as f32 / 10.0;
-    let voltage_l2 = regs[111] as f32 / 10.0;
-    let voltage_l3 = regs[113] as f32 / 10.0;
-
-    EvcSnapshot {
-        charging_state,
-        connection_status,
-        active_power,
-        current_l1,
-        current_l2,
-        current_l3,
-        voltage_l1,
-        voltage_l2,
-        voltage_l3,
-        meter_energy_kwh,
-        session_energy_kwh,
-        session_duration_secs,
-        charge_limit_a,
-        serial_number: serial,
-    }
+    // The serial spans the end of block 1 and the start of block 2.
+    snapshot
+        .serial_number
+        .push_str(&decode_serial(&regs[60..69]));
+    snapshot.session_energy_kwh = regs[72] as f32 / 10.0;
+    snapshot.session_duration_secs = regs[79] as u32;
+    snapshot.voltage_l1 = regs[109] as f32 / 10.0;
+    snapshot.voltage_l2 = regs[111] as f32 / 10.0;
+    snapshot.voltage_l3 = regs[113] as f32 / 10.0;
+    snapshot
 }
 
 // ---------------------------------------------------------------------------
@@ -195,8 +318,8 @@ pub struct DiscoveredEvc {
 
 /// Scan a /24 subnet for devices responding to standard Modbus TCP on port 502.
 ///
-/// Each host is probed by connecting and attempting to read HR 0 (Charging_State).
-/// If the response is a valid Modbus frame, the device is reported.
+/// Each host is probed by reading the EVC serial identity at HR 38–68. Only a
+/// valid FC3 response with printable serial data is reported.
 pub async fn scan_evc_subnet(subnet_base: &str) -> Vec<DiscoveredEvc> {
     tracing::info!("EVC scan: {}.x:{}", subnet_base, EVC_MODBUS_PORT);
 
@@ -231,11 +354,11 @@ pub async fn scan_evc_multiple_subnets(subnets: &[String]) -> Vec<DiscoveredEvc>
     all
 }
 
-/// Probe a single IP for a standard Modbus TCP device on port 502.
+/// Probe a single IP for a GivEVC on standard Modbus TCP port 502.
 ///
-/// Connects, sends FC3 read for HR 0–14, and checks we get a valid
-/// Modbus response. If successful, also extracts the serial number
-/// from HR 38–68.
+/// Connects, reads the EVC serial identity from HR 38–68, and only reports
+/// a device when the response is a valid FC3 frame containing printable
+/// serial data. This avoids treating an arbitrary FC3 responder as a charger.
 async fn probe_evc_host(ip: String) -> Option<DiscoveredEvc> {
     let addr = format!("{}:{}", ip, EVC_MODBUS_PORT);
     let ip_clone = ip.clone();
@@ -252,40 +375,47 @@ async fn probe_evc_host(ip: String) -> Option<DiscoveredEvc> {
             .set_write_timeout(Some(Duration::from_secs(2)))
             .ok()?;
 
-        // Step 2: Build a standard Modbus TCP FC3 (Read Holding Registers) request.
-        // Transaction ID: 0x0001, Protocol: 0x0000, Length: 6, Unit: 1,
-        // FC: 3 (Read Holding Registers), Start: 0, Count: 14
+        // Read the 31-register serial field (HR 38–68), which spans the end
+        // of the normal EVC blocks and provides the discovery identity.
         let request: [u8; 12] = [
             0x00, 0x01, // Transaction ID
             0x00, 0x00, // Protocol (Modbus)
             0x00, 0x06, // Length
             0x01, // Unit ID (slave address)
             0x03, // Function code: Read Holding Registers
-            0x00, 0x00, // Start address: 0
-            0x00, 0x0E, // Quantity: 14 registers
+            0x00, 0x26, // Start address: 38
+            0x00, 0x1F, // Quantity: 31 registers
         ];
         stream.write_all(&request).ok()?;
 
-        // Step 3: Read response. A valid FC3 response starts with the same
-        // transaction ID and has function code 0x03.
-        let mut buf = [0u8; 256];
-        let n = stream.read(&mut buf).ok()?;
-        if n < 9 {
+        // Read and validate the complete MBAP + FC3 response before decoding
+        // the serial registers.
+        let mut header = [0u8; 7];
+        stream.read_exact(&mut header).ok()?;
+        let txn = u16::from_be_bytes([header[0], header[1]]);
+        let proto = u16::from_be_bytes([header[2], header[3]]);
+        let length = u16::from_be_bytes([header[4], header[5]]);
+        let unit = header[6];
+        // MBAP length includes unit id; the remaining PDU is FC + byte count
+        // + 31 register values = 64 bytes.
+        if txn != 0x0001 || proto != 0x0000 || unit != 1 || length != 65 {
             return None;
         }
-        // Check: transaction ID = 0x0001, protocol = 0x0000, FC = 0x03
-        let txn = u16::from_be_bytes([buf[0], buf[1]]);
-        let proto = u16::from_be_bytes([buf[2], buf[3]]);
-        let fc = buf[7];
-        if txn != 0x0001 || proto != 0x0000 || fc != 0x03 {
+        let mut pdu = [0u8; 64];
+        stream.read_exact(&mut pdu).ok()?;
+        if pdu[0] != 0x03 || pdu[1] != 62 {
             return None;
         }
 
-        Some(())
+        let regs: Vec<u16> = pdu[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        decode_discovery_serial(&regs)
     })
     .await;
 
-    if matches!(result, Ok(Some(()))) {
+    if let Ok(Some(serial)) = result {
         tracing::debug!(
             "EVC: found Modbus device at {}:{}",
             ip_clone,
@@ -294,7 +424,7 @@ async fn probe_evc_host(ip: String) -> Option<DiscoveredEvc> {
         Some(DiscoveredEvc {
             ip: ip_clone,
             port: EVC_MODBUS_PORT,
-            serial: None,
+            serial: Some(serial),
         })
     } else {
         None
@@ -343,6 +473,14 @@ pub struct SessionLatch {
     /// The last non-zero session energy seen, in kWh. Cleared on the
     /// "No Cable" → "Cable In" transition.
     latched_kwh: Option<f32>,
+    /// Whether a raw duration value has been observed for the current cable
+    /// session. HR 79 is a 16-bit seconds counter, so it wraps after 65,535.
+    duration_raw_secs: Option<u32>,
+    /// Number of complete 16-bit counter cycles preceding the raw value.
+    duration_offset_secs: u64,
+    /// Last unwrapped duration, held while the cable is unplugged or the
+    /// charger briefly reports zero after a session ends.
+    duration_secs: u64,
 }
 
 impl SessionLatch {
@@ -354,6 +492,13 @@ impl SessionLatch {
     /// the broadcast, the `latest_evc` cache, and `GET /api/evc/status` all
     /// carry the display value.
     pub fn observe(&mut self, snapshot: &EvcSnapshot) -> f32 {
+        self.observe_with_duration(snapshot).0
+    }
+
+    /// Apply the energy latch and unwrap the 16-bit session-duration counter
+    /// in one state transition. The pair is used by the publisher so both
+    /// values are derived from the same cable/session observation.
+    pub fn observe_with_duration(&mut self, snapshot: &EvcSnapshot) -> (f32, u32) {
         let curr_cable = snapshot.connection_status == "Connected";
         let curr_kwh = snapshot.session_energy_kwh;
         let charging = matches!(snapshot.charging_state.as_str(), "Charging" | "Starting");
@@ -363,6 +508,9 @@ impl SessionLatch {
         // at startup doesn't clobber a latch captured from a prior session.
         if matches!(self.prev_cable, Some(false)) && curr_cable {
             self.latched_kwh = None;
+            self.duration_raw_secs = None;
+            self.duration_offset_secs = 0;
+            self.duration_secs = 0;
         }
 
         // Any non-zero reading refreshes the latch (covers the live ramp-up
@@ -372,9 +520,31 @@ impl SessionLatch {
             self.latched_kwh = Some(curr_kwh);
         }
 
+        // HR 79 is a u16 seconds counter. Ignore the post-session zero while
+        // idle, but unwrap a genuine large backwards jump while connected.
+        if curr_cable && (charging || snapshot.session_duration_secs > 0) {
+            if let Some(previous) = self.duration_raw_secs {
+                if snapshot.session_duration_secs < previous {
+                    if previous - snapshot.session_duration_secs > u32::from(u16::MAX) / 2 {
+                        self.duration_offset_secs = self
+                            .duration_offset_secs
+                            .saturating_add(u64::from(u16::MAX) + 1);
+                    } else {
+                        // A small backwards jump is a new/reset session on a
+                        // cable that stayed connected, not a counter wrap.
+                        self.duration_offset_secs = 0;
+                    }
+                }
+            }
+            self.duration_raw_secs = Some(snapshot.session_duration_secs);
+            self.duration_secs = self
+                .duration_offset_secs
+                .saturating_add(u64::from(snapshot.session_duration_secs));
+        }
+
         self.prev_cable = Some(curr_cable);
 
-        if charging {
+        let effective_kwh = if charging {
             // Trust the live register while charging — even a 0 read (dongle
             // jitter, or the very first sub-0.05 kWh poll that rounds to 0).
             curr_kwh
@@ -382,7 +552,11 @@ impl SessionLatch {
             // Session over (or never started): hold the peak, or 0.0 if no
             // energy has been delivered since the last cable plug-in.
             self.latched_kwh.unwrap_or(0.0)
-        }
+        };
+        (
+            effective_kwh,
+            self.duration_secs.min(u64::from(u32::MAX)) as u32,
+        )
     }
 }
 
@@ -403,6 +577,67 @@ const EVC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// as [`EVC_CONNECT_TIMEOUT`] — a charger that accepts and then goes silent
 /// must drop the connection, not freeze the poll loop inside one read.
 const EVC_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub(crate) async fn record_evc_success(state: &Arc<AppState>) {
+    let status = {
+        let now_ms = current_epoch_ms();
+        let mut reachability = state.evc_reachability.lock().await;
+        reachability.record_success(now_ms);
+        reachability.status_at(now_ms)
+    };
+    let _ = state.tx.send(PollMessage::EvcStatus(Box::new(status)));
+}
+
+pub(crate) async fn record_evc_failure(state: &Arc<AppState>) {
+    let status = {
+        let now_ms = current_epoch_ms();
+        let mut reachability = state.evc_reachability.lock().await;
+        reachability.record_failure(now_ms);
+        reachability.status_at(now_ms)
+    };
+    if !status.reachable {
+        let mut evc = state.latest_evc.lock().await;
+        *evc = None;
+    }
+    let _ = state.tx.send(PollMessage::EvcDisconnected);
+    let _ = state.tx.send(PollMessage::EvcStatus(Box::new(status)));
+}
+
+async fn publish_evc_snapshot(state: &Arc<AppState>, mut snapshot: EvcSnapshot) {
+    // Apply the session-energy latch (issue #189). `observe` reads the raw
+    // HR 72 value; overwrite the snapshot field so the broadcast, cache and
+    // API all carry the same display value.
+    let (effective_kwh, effective_duration_secs) = {
+        let mut latch = state.evc_session_latch.lock().await;
+        latch.observe_with_duration(&snapshot)
+    };
+    snapshot.session_energy_kwh = effective_kwh;
+    snapshot.session_duration_secs = effective_duration_secs;
+
+    {
+        let mut evc = state.latest_evc.lock().await;
+        *evc = Some(snapshot.clone());
+    }
+    let _ = state.tx.send(PollMessage::Evc(Box::new(snapshot)));
+    record_evc_success(state).await;
+}
+
+pub(crate) async fn reset_evc_state(state: &Arc<AppState>) {
+    {
+        let mut reachability = state.evc_reachability.lock().await;
+        reachability.reset();
+    }
+    {
+        let mut evc = state.latest_evc.lock().await;
+        *evc = None;
+    }
+    let status = {
+        let reachability = state.evc_reachability.lock().await;
+        reachability.status_at(current_epoch_ms())
+    };
+    let _ = state.tx.send(PollMessage::EvcDisconnected);
+    let _ = state.tx.send(PollMessage::EvcStatus(Box::new(status)));
+}
 
 /// Background poll loop for the EV charger. Reads settings from the shared
 /// `AppState` to determine the EVC host/port. When configured, polls via
@@ -451,11 +686,7 @@ pub(crate) async fn run_evc_poll_loop_with_timeouts(
                 // bad hosts, but this also covers hand-edited settings.json
                 // and old clients that pre-date the validator.
                 tracing::warn!("EVC: invalid address '{socket_addr}': {e}");
-                {
-                    let mut evc = state.latest_evc.lock().await;
-                    *evc = None;
-                }
-                let _ = state.tx.send(PollMessage::EvcDisconnected);
+                record_evc_failure(&state).await;
                 sleep(backoff).await;
                 continue;
             }
@@ -481,22 +712,14 @@ pub(crate) async fn run_evc_poll_loop_with_timeouts(
                 tracing::warn!(
                     "EVC: connect timed out after {connect_timeout:?} — host unreachable or blackholed"
                 );
-                {
-                    let mut evc = state.latest_evc.lock().await;
-                    *evc = None;
-                }
-                let _ = state.tx.send(PollMessage::EvcDisconnected);
+                record_evc_failure(&state).await;
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(120));
                 continue;
             }
             Ok(Err(e)) => {
                 tracing::warn!("EVC: connect failed: {e}");
-                {
-                    let mut evc = state.latest_evc.lock().await;
-                    *evc = None;
-                }
-                let _ = state.tx.send(PollMessage::EvcDisconnected);
+                record_evc_failure(&state).await;
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(120));
                 continue;
@@ -565,37 +788,51 @@ pub(crate) async fn run_evc_poll_loop_with_timeouts(
                 Ok(Ok(Ok(r))) => r,
                 Ok(Ok(Err(e))) => {
                     tracing::warn!("EVC: Modbus exception reading HR 60–114: {e:?}");
-                    ctx.take();
-                    break;
+                    Vec::new()
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("EVC: read error HR 60–114: {e}");
-                    ctx.take();
-                    break;
+                    Vec::new()
                 }
                 Err(_) => {
                     tracing::warn!("EVC: read timed out after {read_timeout:?} on HR 60–114");
-                    ctx.take();
-                    break;
+                    Vec::new()
                 }
             };
+
+            if regs2.is_empty() {
+                // Block 1 is the mandatory live-state block. Keep its valid
+                // snapshot visible when supplementary block 2 is unavailable
+                // and retry the optional read on the next poll.
+                let mut snapshot = decode_evc_block1(&regs1);
+                // Preserve supplementary values while the optional block is
+                // temporarily unavailable; otherwise a charging session
+                // flashes back to zero for one poll.
+                if let Some(previous) = state.latest_evc.lock().await.clone() {
+                    snapshot.session_energy_kwh = previous.session_energy_kwh;
+                    snapshot.session_duration_secs = previous.session_duration_secs;
+                    snapshot.voltage_l1 = previous.voltage_l1;
+                    snapshot.voltage_l2 = previous.voltage_l2;
+                    snapshot.voltage_l3 = previous.voltage_l3;
+                    if snapshot.serial_number.len() < previous.serial_number.len() {
+                        snapshot.serial_number = previous.serial_number;
+                    }
+                }
+                tracing::debug!(
+                    power = snapshot.active_power,
+                    state = %snapshot.charging_state,
+                    "EVC: retaining valid block-1 snapshot after block-2 failure"
+                );
+                publish_evc_snapshot(&state, snapshot).await;
+                sleep(poll_interval).await;
+                continue;
+            }
 
             // Combine and decode
             let mut regs = regs1;
             regs.extend_from_slice(&regs2);
 
-            let mut snapshot = decode_evc(&regs);
-
-            // Apply the session-energy latch (issue #189). `observe` reads
-            // the raw HR 72 value; we overwrite the snapshot field with the
-            // effective (live or latched) value so the broadcast, the
-            // `latest_evc` cache, and `GET /api/evc/status` all agree on
-            // what the frontend should display.
-            let effective_kwh = {
-                let mut latch = state.evc_session_latch.lock().await;
-                latch.observe(&snapshot)
-            };
-            snapshot.session_energy_kwh = effective_kwh;
+            let snapshot = decode_evc(&regs);
 
             tracing::debug!(
                 power = snapshot.active_power,
@@ -608,23 +845,14 @@ pub(crate) async fn run_evc_poll_loop_with_timeouts(
                 "EVC: polled"
             );
 
-            // Store and broadcast
-            {
-                let mut evc = state.latest_evc.lock().await;
-                *evc = Some(snapshot.clone());
-            }
-            let _ = state.tx.send(PollMessage::Evc(Box::new(snapshot)));
+            publish_evc_snapshot(&state, snapshot).await;
 
             sleep(poll_interval).await;
         }
 
         // Context dropped — reconnect after backoff
         tracing::warn!("EVC: connection lost, reconnecting in {:?}", backoff);
-        {
-            let mut evc = state.latest_evc.lock().await;
-            *evc = None;
-        }
-        let _ = state.tx.send(PollMessage::EvcDisconnected);
+        record_evc_failure(&state).await;
         sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(120));
     }
@@ -741,8 +969,8 @@ mod tests {
 
     #[test]
     fn decode_evc_short_register_buffer_returns_default() {
-        // Anything < 115 must NOT panic; it must return a default snapshot
-        // (with charging_state="Unknown" since regs[0]==0).
+        // Anything shorter than block 1 must NOT panic; a complete block 1
+        // is useful on its own and leaves optional block-2 fields at default.
         let snapshot = decode_evc(&[]);
         assert_eq!(snapshot.charging_state, "Unknown");
         assert_eq!(snapshot.connection_status, "Unknown");
@@ -750,10 +978,11 @@ mod tests {
 
         let snapshot = decode_evc(&[0u16; 60]);
         assert_eq!(snapshot.charging_state, "Unknown");
-        assert_eq!(snapshot.connection_status, "Unknown");
+        assert_eq!(snapshot.connection_status, "Not Connected");
 
         let snapshot = decode_evc(&[0u16; 114]);
         assert_eq!(snapshot.charging_state, "Unknown");
+        assert_eq!(snapshot.connection_status, "Not Connected");
         // Last valid index is 114, so voltages at 109/111/113 should be 0.
         assert_eq!(snapshot.voltage_l1, 0.0);
     }
@@ -766,6 +995,39 @@ mod tests {
         let s = decode_evc(&regs);
         assert_eq!(s.charging_state, "Charging");
         assert_eq!(s.connection_status, "Connected");
+    }
+
+    #[test]
+    fn decode_evc_block1_preserves_snapshot_without_optional_block2() {
+        let mut regs = vec![0u16; 60];
+        regs[0] = 4; // Charging
+        regs[2] = 1; // Connected
+        regs[6] = 160; // 16.0 A
+        regs[13] = 7400; // 7400 W
+        regs[29] = 12345; // 1234.5 kWh meter
+        regs[36] = 32; // 3.2 A
+        regs[38..45].copy_from_slice(&[
+            b'G' as u16,
+            b'E' as u16,
+            b'V' as u16,
+            b'C' as u16,
+            b'1' as u16,
+            b'2' as u16,
+            b'3' as u16,
+        ]);
+
+        let snapshot = decode_evc_block1(&regs);
+
+        assert_eq!(snapshot.charging_state, "Charging");
+        assert_eq!(snapshot.connection_status, "Connected");
+        assert_eq!(snapshot.active_power, 7400);
+        assert!((snapshot.current_l1 - 16.0).abs() < 0.01);
+        assert!((snapshot.meter_energy_kwh - 1234.5).abs() < 0.01);
+        assert!((snapshot.charge_limit_a - 3.2).abs() < 0.01);
+        assert_eq!(snapshot.serial_number, "GEVC123");
+        // Block 2 was unavailable, so its fields remain safe defaults.
+        assert_eq!(snapshot.session_energy_kwh, 0.0);
+        assert_eq!(snapshot.voltage_l1, 0.0);
     }
 
     #[test]
@@ -847,6 +1109,26 @@ mod tests {
         regs[38] = 0xD800; // surrogate — invalid as a scalar value
         let s = decode_evc(&regs);
         assert_eq!(s.serial_number, "?");
+    }
+
+    #[test]
+    fn discovery_requires_a_printable_evc_serial() {
+        let mut regs = vec![0u16; 31];
+        regs[..7].copy_from_slice(&[
+            b'G' as u16,
+            b'E' as u16,
+            b'V' as u16,
+            b'C' as u16,
+            b'1' as u16,
+            b'2' as u16,
+            b'3' as u16,
+        ]);
+        assert_eq!(decode_discovery_serial(&regs), Some("GEVC123".to_string()));
+        assert_eq!(decode_discovery_serial(&[0; 31]), None);
+
+        regs[0] = 0x01;
+        assert_eq!(decode_discovery_serial(&regs), None);
+        assert_eq!(decode_discovery_serial(&regs[..30]), None);
     }
 
     // -----------------------------------------------------------------
@@ -995,6 +1277,20 @@ mod tests {
         assert!((eff - 0.0).abs() < f32::EPSILON);
     }
 
+    #[test]
+    fn latch_unwraps_duration_counter_past_u16_limit() {
+        let mut latch = SessionLatch::default();
+        let mut before_wrap = snap("Charging", "Connected", 0.0);
+        before_wrap.session_duration_secs = 65_530;
+        let (_, duration_before_wrap) = latch.observe_with_duration(&before_wrap);
+        assert_eq!(duration_before_wrap, 65_530);
+
+        let mut after_wrap = snap("Charging", "Connected", 0.0);
+        after_wrap.session_duration_secs = 3;
+        let (_, duration_after_wrap) = latch.observe_with_duration(&after_wrap);
+        assert_eq!(duration_after_wrap, 65_539);
+    }
+
     // -----------------------------------------------------------------
     // Scan: empty subnet returns empty list
     //
@@ -1122,5 +1418,49 @@ mod tests {
             handle.abort();
         })
         .await;
+    }
+
+    #[test]
+    fn reachability_has_a_pinned_grace_period_and_resets_for_a_new_host() {
+        let mut reachability = EvcReachability::default();
+        assert_eq!(
+            reachability.status_at(1_000).connection_state,
+            EvcConnectionState::NeverConnected
+        );
+        assert!(!reachability.status_at(1_000).reachable);
+
+        reachability.record_success(1_000);
+        let connected = reachability.status_at(1_000);
+        assert_eq!(connected.connection_state, EvcConnectionState::Connected);
+        assert!(connected.reachable);
+        assert!(!connected.stale);
+        assert_eq!(connected.age_seconds, Some(0));
+
+        reachability.record_failure(1_001);
+        let degraded = reachability.status_at(1_001);
+        assert_eq!(degraded.connection_state, EvcConnectionState::Degraded);
+        assert!(degraded.reachable, "a transient failure stays within grace");
+        assert!(degraded.stale, "the cached snapshot is no longer fresh");
+
+        let expired_at = 1_000 + EVC_CACHE_GRACE_MS + 1;
+        let expired = reachability.status_at(expired_at);
+        assert_eq!(expired.connection_state, EvcConnectionState::Disconnected);
+        assert!(!expired.reachable);
+        assert!(expired.stale);
+        assert_eq!(expired.age_seconds, Some((EVC_CACHE_GRACE_MS + 1) / 1_000));
+
+        reachability.record_success(expired_at + 1);
+        let reconnected = reachability.status_at(expired_at + 1);
+        assert_eq!(reconnected.connection_state, EvcConnectionState::Connected);
+        assert!(reconnected.reachable);
+        assert!(!reconnected.stale);
+        assert_eq!(reconnected.age_seconds, Some(0));
+
+        reachability.reset();
+        let reset = reachability.status_at(expired_at + 2);
+        assert_eq!(reset.connection_state, EvcConnectionState::NeverConnected);
+        assert!(!reset.reachable);
+        assert!(!reset.stale);
+        assert_eq!(reset.last_success_at_epoch_ms, None);
     }
 }

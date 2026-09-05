@@ -126,5 +126,11 @@ try {
 beforeEach(() => {
   localStorageShim.clear();
   sessionStorageShim.clear();
+  // Recharts' ResponsiveContainer uses ResizeObserver. Keep a baseline stub
+  // available even when an individual test deliberately unstubs globals.
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
 });
-

@@ -27,6 +27,11 @@ use chrono::{DateTime, Local, NaiveDate, Timelike};
 /// handful of register writes.
 pub const PLAN_REFRESH_LEAD_MINUTES: u16 = 30;
 
+/// How long after a cheap period starts a sleeping/resumed poll loop may
+/// still perform the missed refresh. The bound prevents a late wake from
+/// rewriting a slot long after the period began.
+pub const PLAN_REFRESH_CATCH_UP_MINUTES: u16 = 60;
+
 /// The charge-slot target SOC the auto-refresh writes. Always 100 by
 /// design (planner v2): the slot's DURATION is the control variable, and
 /// the target stays at 100 so the inverter never stops early at an SOC
@@ -55,8 +60,10 @@ pub enum PlanRefreshAction {
 
 /// Cheap gate run every poll: true when the auto-refresh is enabled, has
 /// not fired yet today, and the tariff's cheapest window starts within the
-/// lead window. Only tariff arithmetic — the expensive plan computation
-/// runs after this returns true.
+/// lead window. A bounded grace period after the window starts handles a
+/// machine waking from sleep without allowing a refresh for the rest of the
+/// day. Only tariff arithmetic — the expensive plan computation runs after
+/// this returns true.
 pub fn plan_refresh_due(
     now: DateTime<Local>,
     last_refresh_date: Option<NaiveDate>,
@@ -69,12 +76,31 @@ pub fn plan_refresh_due(
         return false;
     };
     let now_min = now.hour() as u16 * 60 + now.minute() as u16;
-    let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30) else {
+    if let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30) {
+        // Minutes until the selected occurrence starts, wrapping at midnight.
+        let until_start = (window.start_min + 1440 - now_min) % 1440;
+        if until_start <= PLAN_REFRESH_LEAD_MINUTES {
+            return true;
+        }
+    }
+
+    // The normal lookup intentionally skips a window already in progress.
+    // Look back by the bounded catch-up interval to recover that occurrence
+    // after a sleep/resume, then require that the selected window is still
+    // active and has not been running for too long.
+    let catch_up_lookup_min = (now_min + 1440 - PLAN_REFRESH_CATCH_UP_MINUTES) % 1440;
+    let Some(window) =
+        crate::forecast::planner::cheapest_import_window(tariff, catch_up_lookup_min, 30)
+    else {
         return false;
     };
-    // Minutes until the selected occurrence starts, wrapping at midnight.
-    let until_start = (window.start_min + 1440 - now_min) % 1440;
-    until_start <= PLAN_REFRESH_LEAD_MINUTES
+    let elapsed = (now_min + 1440 - window.start_min) % 1440;
+    let active = if window.start_min <= window.end_min {
+        now_min >= window.start_min && now_min < window.end_min
+    } else {
+        now_min >= window.start_min || now_min < window.end_min
+    };
+    active && elapsed <= PLAN_REFRESH_CATCH_UP_MINUTES
 }
 
 /// The poll loop's full gate: the refresh fires only when the plan is due
@@ -298,6 +324,21 @@ mod tests {
         // Mid-afternoon, hours away from the window: no.
         let day = local_dt(2026, 8, 31, 15, 0);
         assert!(!plan_refresh_due(day, None, Some(&flux)));
+    }
+
+    #[test]
+    fn refresh_allows_bounded_catch_up_after_window_start() {
+        let flux = flux_tariff();
+
+        // A machine waking shortly after the lead window must still refresh
+        // the slot for the cheap period already underway.
+        let shortly_after_start = local_dt(2026, 8, 31, 2, 15);
+        assert!(plan_refresh_due(shortly_after_start, None, Some(&flux)));
+
+        // Catch-up is deliberately bounded; a late poll must not rewrite a
+        // slot for a period that has been running for too long.
+        let too_late = local_dt(2026, 8, 31, 3, 1);
+        assert!(!plan_refresh_due(too_late, None, Some(&flux)));
     }
 
     #[test]

@@ -12,6 +12,7 @@ import {
   usesDirectChargeLimit,
 } from '../lib/deviceCapabilities';
 import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
+import { fillScheduleSlots } from '../lib/scheduleSlots';
 import {
   DEFAULT_ADAPTIVE_PERIOD,
   adaptiveSocFieldCaption,
@@ -135,15 +136,6 @@ function unwrapTimedExportSchedule(res: { ok: boolean; data: unknown } | null | 
     ...schedule,
     machine_state: schedule.machine_state ?? schedule.state,
   };
-}
-
-function hasConfiguredDischargeSlot(slots: ReadonlyArray<ScheduleSlot> | undefined): boolean {
-  return (slots ?? []).some((slot) => slot.enabled && (
-    slot.start_hour !== 0
-      || slot.start_minute !== 0
-      || slot.end_hour !== 0
-      || slot.end_minute !== 0
-  ));
 }
 
 const RESERVE_SOC_MIN = 4;
@@ -300,24 +292,24 @@ function waitForChargeSlotReadback(
   index: number,
   desired: ScheduleSlot,
   snapshotBeforeSave: InverterSnapshot | null,
-): Promise<void> {
+): Promise<boolean> {
   return new Promise((resolve) => {
     let unsubscribe = () => {};
     let settled = false;
-    const finish = () => {
+    const finish = (confirmed: boolean) => {
       if (settled) return;
       settled = true;
       window.clearTimeout(timeout);
       unsubscribe();
-      resolve();
+      resolve(confirmed);
     };
     const check = () => {
       const current = useInverterStore.getState().snapshot;
       if (current !== snapshotBeforeSave && chargeSlotMatchesReadback(current, index, desired)) {
-        finish();
+        finish(true);
       }
     };
-    const timeout = window.setTimeout(finish, CHARGE_SLOT_CONFIRM_TIMEOUT_MS);
+    const timeout = window.setTimeout(() => finish(false), CHARGE_SLOT_CONFIRM_TIMEOUT_MS);
     unsubscribe = useInverterStore.subscribe(check);
     check();
   });
@@ -350,24 +342,24 @@ function timedDischargeMatchesReadback(
 function waitForTimedDischargeReadback(
   desired: ScheduleSlot,
   snapshotBeforeSave: InverterSnapshot | null,
-): Promise<void> {
+): Promise<boolean> {
   return new Promise((resolve) => {
     let unsubscribe = () => {};
     let settled = false;
-    const finish = () => {
+    const finish = (confirmed: boolean) => {
       if (settled) return;
       settled = true;
       window.clearTimeout(timeout);
       unsubscribe();
-      resolve();
+      resolve(confirmed);
     };
     const check = () => {
       const current = useInverterStore.getState().snapshot;
       if (current !== snapshotBeforeSave && timedDischargeMatchesReadback(current, desired)) {
-        finish();
+        finish(true);
       }
     };
-    const timeout = window.setTimeout(finish, TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS);
+    const timeout = window.setTimeout(() => finish(false), TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS);
     unsubscribe = useInverterStore.subscribe(check);
     check();
   });
@@ -981,7 +973,19 @@ function AdaptiveChargeSection() {
 }
 
 /** Charging mode section — select between Standard, Cosy, Agile, or Adaptive charging. */
-function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeMode; cosyActive: boolean; onModeChange: (m: ChargeMode) => void }) {
+function CosyChargingSection({
+  mode,
+  cosyActive,
+  onModeChange,
+  onAuthoritativeModeChange,
+  onModeChangeFailed,
+}: {
+  mode: ChargeMode;
+  cosyActive: boolean;
+  onModeChange: (m: ChargeMode) => void;
+  onAuthoritativeModeChange: (m: ChargeMode) => void;
+  onModeChangeFailed: () => void;
+}) {
   const [slots, setSlots] = useState<
     { enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[]
   >([]);
@@ -998,9 +1002,9 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
         const res = await apiGet<{ ok: boolean; enabled: boolean; slots: typeof slots }>('/api/cosy');
         if (!res.ok) throw new Error('Charging Mode settings request failed');
         if (res.enabled !== (mode === 'cosy')) {
-          onModeChange(res.enabled ? 'cosy' : 'standard');
+          onAuthoritativeModeChange(res.enabled ? 'cosy' : 'standard');
         }
-        const initial = res.slots.length === 3
+        const initial = res.slots.length > 0
           ? res.slots
           : Array.from({ length: 3 }, () => ({
               enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100,
@@ -1043,7 +1047,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: ChargeM
       // still the user's latest selection — a newer choice has since replaced
       // it and must not be clobbered by the stale pre-change mode.
       if (lastRequestedModeRef.current === newMode && revertTargetRef.current !== null) {
-        onModeChange(revertTargetRef.current);
+        onModeChangeFailed();
       }
       setSaveFeedback('error');
     }
@@ -1580,13 +1584,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
     const MIN_GAP = 5;
     let safeDischarge = dischargeThreshold;
     if (safeDischarge - chargeThreshold < MIN_GAP) {
-      if (chargeThreshold > dischargeThreshold) {
-        // User dragged the charge slider above discharge: bump discharge up.
-        safeDischarge = chargeThreshold + MIN_GAP;
-      } else {
-        // User dragged discharge down too close: bump discharge up.
-        safeDischarge = chargeThreshold + MIN_GAP;
-      }
+      safeDischarge = chargeThreshold + MIN_GAP;
       setDischargeThreshold(safeDischarge);
     }
     setSaving(true);
@@ -2482,6 +2480,33 @@ export default function ControlPage() {
     machine_state?: unknown;
     device_rearm_confirmed?: boolean;
   } | null>(null);
+  const timedExportRequestGenerationRef = useRef(0);
+  const timedExportMutationGenerationRef = useRef(0);
+  const timedExportAbortControllerRef = useRef<AbortController | null>(null);
+
+  const loadTimedExportSchedule = useCallback(async (mutationGeneration: number) => {
+    const requestGeneration = ++timedExportRequestGenerationRef.current;
+    timedExportAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    timedExportAbortControllerRef.current = controller;
+    try {
+      const res = await apiGet<{ ok: boolean; data: unknown }>('/api/timed-export', controller.signal);
+      const schedule = unwrapTimedExportSchedule(res);
+      if (
+        schedule
+        && requestGeneration === timedExportRequestGenerationRef.current
+        && mutationGeneration === timedExportMutationGenerationRef.current
+      ) {
+        setTimedExportSchedule(schedule);
+        return schedule;
+      }
+      return null;
+    } finally {
+      if (timedExportAbortControllerRef.current === controller) {
+        timedExportAbortControllerRef.current = null;
+      }
+    }
+  }, []);
 
   // `timedExportArmFailed` (and its setter) come from the store: the last
   // Timed Export arm/toggle request failed, and the control must surface an
@@ -2490,18 +2515,18 @@ export default function ControlPage() {
   // becomes enabled drives the variant from the machine state instead.
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiGet<{ ok: boolean; data: unknown }>('/api/timed-export');
-        const schedule = unwrapTimedExportSchedule(res);
-        if (!cancelled && schedule) {
-          setTimedExportSchedule(schedule);
-        }
-      } catch { /* schedule endpoint unavailable — fall back to registers */ }
-    })();
-    return () => { cancelled = true; };
-  }, [snapshot]);
+    const mutationGeneration = timedExportMutationGenerationRef.current;
+    void loadTimedExportSchedule(mutationGeneration).catch(() => {
+      /* schedule endpoint unavailable — fall back to registers */
+    });
+    return () => {
+      // Invalidate the response before aborting: a test double or an older
+      // proxy may still resolve an aborted request.
+      timedExportRequestGenerationRef.current += 1;
+      timedExportAbortControllerRef.current?.abort();
+      timedExportAbortControllerRef.current = null;
+    };
+  }, [loadTimedExportSchedule, snapshot]);
 
   // ---- Connection gate ----
   // When the inverter isn't currently connected, controls would be a lie:
@@ -2534,6 +2559,8 @@ export default function ControlPage() {
   const snapshotAdaptiveEnabled = snapshot?.adaptive_charge_enabled ?? false;
   const snapshotAgileScope = snapshot?.agile_scope ?? 'off';
   const [localChargeOverride, setLocalChargeOverride] = useState<ChargeMode | null>(null);
+  const localChargeBaseModeRef = useRef<ChargeMode | null>(null);
+  const localChargeRequestGenerationRef = useRef(0);
   const snapshotEpsEnabled = snapshot?.ac_eps_enabled ?? false;
   const [epsPending, setEpsPending] = useState<boolean | null>(null);
   const [epsError, setEpsError] = useState<string | null>(null);
@@ -2543,7 +2570,7 @@ export default function ControlPage() {
   // backend snapshot. Cosy wins if both are enabled (the two modes are
   // mutually exclusive in practice but this gives a deterministic
   // display order).
-  const chargeMode: ChargeMode = localChargeOverride ?? (
+  const authoritativeChargeMode: ChargeMode = (
     snapshotAdaptiveEnabled
       ? 'adaptive'
       : snapshotCosyEnabled
@@ -2556,12 +2583,54 @@ export default function ControlPage() {
             ? 'agile'
             : 'standard'
   );
+  const chargeMode: ChargeMode = localChargeOverride ?? authoritativeChargeMode;
   const cosyEnabled = chargeMode === 'cosy';
   const adaptiveOwnsChargeRate = chargeMode === 'adaptive'
     || snapshot?.adaptive_charge_state === 'restoring';
   const setChargeMode = (m: ChargeMode) => {
+    if (localChargeBaseModeRef.current === null) {
+      localChargeBaseModeRef.current = authoritativeChargeMode;
+    }
+    localChargeRequestGenerationRef.current += 1;
     setLocalChargeOverride(m);
   };
+
+  const clearChargeModeOverride = (authoritativeMode?: ChargeMode) => {
+    localChargeRequestGenerationRef.current += 1;
+    if (authoritativeMode) {
+      // The endpoint response is authoritative even when the initial WS
+      // snapshot is stale; show it immediately while waiting for the next
+      // snapshot to confirm it.
+      localChargeBaseModeRef.current = authoritativeChargeMode;
+      setLocalChargeOverride(authoritativeMode);
+    } else {
+      localChargeBaseModeRef.current = null;
+      setLocalChargeOverride(null);
+    }
+  };
+
+  // The dropdown is optimistic while a mode request is in flight. Once a
+  // poll snapshot confirms that mode, or reports a different mode selected
+  // by another backend actor, stop masking the authoritative state.
+  // Defer the state write so reconciliation does not synchronously cascade a
+  // render from inside this effect.
+  useEffect(() => {
+    if (localChargeOverride === null) return;
+    const requestGeneration = localChargeRequestGenerationRef.current;
+    const baseMode = localChargeBaseModeRef.current;
+    const confirmed = authoritativeChargeMode === localChargeOverride;
+    const superseded = baseMode !== null
+      && authoritativeChargeMode !== baseMode
+      && authoritativeChargeMode !== localChargeOverride;
+    if (!confirmed && !superseded) return;
+
+    const clear = window.setTimeout(() => {
+      if (requestGeneration !== localChargeRequestGenerationRef.current) return;
+      localChargeBaseModeRef.current = null;
+      setLocalChargeOverride(null);
+    }, 0);
+    return () => window.clearTimeout(clear);
+  }, [authoritativeChargeMode, localChargeOverride]);
 
   useEffect(() => {
     if (epsPending == null) return;
@@ -2637,7 +2706,7 @@ export default function ControlPage() {
   const timedExportEnabled = scheduleStateEnabled != null
     ? scheduleStateEnabled
     : (snapshot?.enable_discharge ?? false) && (snapshot?.battery_power_mode == null || snapshot.battery_power_mode === 0);
-  const hasConfiguredTimedExportSlot = hasConfiguredDischargeSlot(snapshot?.discharge_slots)
+  const hasConfiguredTimedExportSlot = hasConfiguredSlot(snapshot?.discharge_slots)
     || hasConfiguredSlot(timedExportSchedule?.slots);
   const snapshotTimedDischargeEnabled = snapshot?.battery_pause_mode === 2;
   const timedDischargeEnabled = timedDischargeOverride ?? snapshotTimedDischargeEnabled;
@@ -2881,7 +2950,6 @@ export default function ControlPage() {
   const isThreePhaseLimitModelDevice = isThreePhaseLimitModel(snapshot?.device_type_code);
   // Three-phase-bank models use HR1113-1121 for charge/discharge schedules;
   // the backend now selects that register map automatically.
-  const schedulesUnsupported = false;
   const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModelDevice;
   // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%.
   // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%, so display directly.
@@ -2929,7 +2997,7 @@ export default function ControlPage() {
   // action. On three-phase, enable_charge maps to HR 1123 (the dedicated
   // force-charge flag); on single-phase/AC it maps to HR 96.
   const inChargeWindow = (snapshot?.charge_slots ?? []).some(slot => {
-    if (!slot.enabled) return false;
+    if (!isSlotConfigured(slot)) return false;
     const curMin = currentInverterMinute;
     const startMin = slot.start_hour * 60 + slot.start_minute;
     const endMin = slot.end_hour * 60 + slot.end_minute;
@@ -3078,12 +3146,11 @@ export default function ControlPage() {
   const maxChargeSlots = snapshot?.max_charge_slots ?? 2;
   const maxDischargeSlots = snapshot?.max_discharge_slots ?? 2;
 
-  const chargeSlots: ScheduleSlot[] =
-    snapshot?.charge_slots?.length != null && snapshot.charge_slots.length >= maxChargeSlots
-      ? snapshot.charge_slots.slice(0, maxChargeSlots)
-      : Array.from({ length: maxChargeSlots }, () => ({
-        enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100,
-      } as ScheduleSlot));
+  const chargeSlots: ScheduleSlot[] = fillScheduleSlots(
+    snapshot?.charge_slots,
+    maxChargeSlots,
+    { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
+  );
 
   // Issue #289 / code-review finding: the discharge editors must surface
   // the persisted HEM schedule even while the physical registers are
@@ -3104,14 +3171,11 @@ export default function ControlPage() {
             }),
           )
         )
-      : snapshot?.discharge_slots?.length != null && snapshot.discharge_slots.length >= maxDischargeSlots
-        ? snapshot.discharge_slots.slice(0, maxDischargeSlots)
-        : Array.from(
-            { length: maxDischargeSlots },
-            (): ScheduleSlot => ({
-              enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4,
-            }),
-          );
+      : fillScheduleSlots(
+          snapshot?.discharge_slots,
+          maxDischargeSlots,
+          { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 4 },
+        );
 
   const dischargeSlots: ScheduleSlot[] = baseDischargeSlots;
 
@@ -3171,6 +3235,7 @@ export default function ControlPage() {
   const handleTimedExportToggle = async () => {
     if (batteryModeApplying) return;
     const enabled = !timedExportEnabled;
+    const mutationGeneration = ++timedExportMutationGenerationRef.current;
     setTimedExportArmFailed(false);
     setBatteryModePending({ kind: 'timed_export', enabled });
     setBatteryModeError(null);
@@ -3179,13 +3244,9 @@ export default function ControlPage() {
       // Issue #289: refresh the HEM-managed schedule so the toggle state
       // reflects the persisted schedule_enabled immediately (a future
       // window intentionally leaves HR27/HR59 in Eco until the boundary).
-      try {
-        const res = await apiGet<{ ok: boolean; data: unknown }>('/api/timed-export');
-        const schedule = unwrapTimedExportSchedule(res);
-        if (schedule) {
-          setTimedExportSchedule(schedule);
-        }
-      } catch { /* schedule refresh is best-effort */ }
+      await loadTimedExportSchedule(mutationGeneration).catch(() => {
+        /* schedule refresh is best-effort */
+      });
     } catch (error) {
       setBatteryModePending(null);
       setBatteryModeError(error instanceof Error ? error.message : 'Timed Export toggle failed.');
@@ -3227,7 +3288,10 @@ export default function ControlPage() {
         end_hour: slot.end_hour,
         end_minute: slot.end_minute,
       });
-      await waitForTimedDischargeReadback(slot, snapshotBeforeSave);
+      const confirmed = await waitForTimedDischargeReadback(slot, snapshotBeforeSave);
+      if (!confirmed) {
+        throw new Error('Timed Discharge did not confirm the change. Please try again.');
+      }
       return;
     }
 
@@ -3238,6 +3302,9 @@ export default function ControlPage() {
     // enable, so waiting for a follow-up /api/timed-export fetch was
     // racy.
     const snapshotBeforeSave = useInverterStore.getState().snapshot;
+    const mutationGeneration = path === '/api/control/discharge-slot'
+      ? ++timedExportMutationGenerationRef.current
+      : timedExportMutationGenerationRef.current;
     const res = await apiPost<{
       ok: boolean;
       schedule?: { schedule_enabled: boolean; slots: ScheduleSlot[] };
@@ -3255,7 +3322,10 @@ export default function ControlPage() {
       },
     );
     if (path === '/api/control/charge-slot') {
-      await waitForChargeSlotReadback(index, slot, snapshotBeforeSave);
+      const confirmed = await waitForChargeSlotReadback(index, slot, snapshotBeforeSave);
+      if (!confirmed) {
+        throw new Error('Charge slot did not confirm the change. Please try again.');
+      }
     }
     // `apiPost` returns the backend envelope unchanged. The schedule is a
     // top-level field on this endpoint; accept the nested shape too for
@@ -3284,8 +3354,7 @@ export default function ControlPage() {
       // the echoed schedule above remains the source of truth if this request
       // races with a stale response.
       try {
-        const schedRes = await apiGet<{ ok: boolean; data: unknown }>('/api/timed-export');
-        const schedule = unwrapTimedExportSchedule(schedRes);
+        const schedule = await loadTimedExportSchedule(mutationGeneration);
         if (schedule) {
           setTimedExportSchedule({
             ...schedule,
@@ -3643,7 +3712,13 @@ export default function ControlPage() {
       </section>
 
       {/* Section 3: Charging Mode */}
-      <CosyChargingSection mode={chargeMode} cosyActive={cosyActive} onModeChange={setChargeMode} />
+      <CosyChargingSection
+        mode={chargeMode}
+        cosyActive={cosyActive}
+        onModeChange={setChargeMode}
+        onAuthoritativeModeChange={clearChargeModeOverride}
+        onModeChangeFailed={clearChargeModeOverride}
+      />
 
       {/*
         Visibility matrix for the three schedule sections below. The
@@ -3675,19 +3750,7 @@ export default function ControlPage() {
         return (
           <>
       {/* Section 4: Charge Schedule */}
-      {!cosyEnabled && !agileOwnsCharge && schedulesUnsupported && (
-        <section className="space-y-3">
-          <h2 className="text-text-primary font-semibold">Charge/Discharge Schedules</h2>
-          <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-text-primary">
-            <div className="font-semibold mb-1">Schedules are hidden for this inverter model</div>
-            This three-phase/HV inverter uses a different schedule register map.
-            Reading real-time data is supported,GivEnergy Cloud
-            editing is disabled until those registers are implemented safely.
-          </div>
-        </section>
-      )}
-
-      {!cosyEnabled && !agileOwnsCharge && !schedulesUnsupported && <section className="space-y-3">
+      {!cosyEnabled && !agileOwnsCharge && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
         <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
         <div className="space-y-3">
@@ -3767,7 +3830,7 @@ export default function ControlPage() {
           block (DC hybrids, three-phase, Gateway, EMS, PV inverter)
           since the pause registers don't exist there — see
           supportsTimedDischarge / lib/deviceCapabilities.ts. */}
-      {!agileOwnsDischarge && !schedulesUnsupported && supportsTimedDischarge && (
+      {!agileOwnsDischarge && supportsTimedDischarge && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Timed Discharge</h2>
           <p className="text-text-secondary/60 text-xs">
@@ -3793,7 +3856,7 @@ export default function ControlPage() {
           Agile — Discharge Only because those modes drive discharge from
           prices. Visible in Agile — Charge Only because charge-only
           doesn't touch the discharge side. */}
-      {!agileOwnsDischarge && !schedulesUnsupported && (
+      {!agileOwnsDischarge && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Timed Export</h2>
           <p className="text-text-secondary/60 text-xs">
@@ -4003,7 +4066,7 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
-              <span className="font-mono text-text-primary text-sm">{chargeRate ?? '—'}%{chargeWatts != null && chargeWatts > 0 ? ` (${(chargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
+              <span className="font-mono text-text-primary text-sm">{chargeRate != null ? `${chargeRate}%` : '—'}{chargeWatts != null && chargeWatts > 0 ? ` (${(chargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
@@ -4011,7 +4074,7 @@ export default function ControlPage() {
                 min={rateDisplayMin}
                 max={100}
                 step={1}
-                value={chargeRate ?? 100}
+                value={chargeRate ?? rateDisplayMin}
                 onChange={(e) => setDraftCharge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
                 disabled={adaptiveOwnsChargeRate}
                 className="flex-1 disabled:opacity-50"
@@ -4037,7 +4100,7 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
-              <span className="font-mono text-text-primary text-sm">{dischargeRate ?? '—'}%{dischargeWatts != null && dischargeWatts > 0 ? ` (${(dischargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
+              <span className="font-mono text-text-primary text-sm">{dischargeRate != null ? `${dischargeRate}%` : '—'}{dischargeWatts != null && dischargeWatts > 0 ? ` (${(dischargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
@@ -4045,7 +4108,7 @@ export default function ControlPage() {
                 min={rateDisplayMin}
                 max={100}
                 step={1}
-                value={dischargeRate ?? 100}
+                value={dischargeRate ?? rateDisplayMin}
                 onChange={(e) => setDraftDischarge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
                 className="flex-1"
               />

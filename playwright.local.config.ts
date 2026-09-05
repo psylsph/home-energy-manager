@@ -27,7 +27,10 @@ export default defineConfig({
   retries: 0,
   reporter: 'list',
   globalSetup: './e2e/local-global-setup.ts',
-  globalTimeout: 900_000,
+  // Timed Export / Eco round-trips now await real write confirmation, so a
+  // full-schedule restore legitimately holds its request for 45-60 s; the
+  // whole suite needs more than the old 15-minute ceiling.
+  globalTimeout: 2_700_000,
   use: {
     headless: true,
     browserName: 'chromium',

@@ -126,6 +126,7 @@ fi
 if [ -n "$INSTALLED_VERSION" ]; then
   printf 'Stopping Home Energy Manager and backing up persistent data...\n'
   systemctl stop "$SERVICE_NAME"
+  trap 'status=$?; trap - ERR; systemctl enable --now "$SERVICE_NAME" || true; exit "$status"' ERR
   BACKUP_DIR="$(root_path /var/backups/home-energy-manager)"
   install -d -m 0700 "$BACKUP_DIR"
   if [ -d "$(root_path "$DATA_DIR")" ]; then
@@ -136,12 +137,64 @@ if [ -n "$INSTALLED_VERSION" ]; then
       rm -- "${BACKUPS[@]:3}"
     fi
   fi
+  trap - ERR
 fi
 
 check_health() {
   curl --fail --silent --show-error \
     --retry 15 --retry-connrefused --retry-delay 1 --max-time 5 \
     "http://127.0.0.1:${PORT}/api/status" >/dev/null
+}
+
+restore_data_backup() {
+  local backup_path="$1"
+  local data_path="$(root_path "$DATA_DIR")"
+  local data_parent="$(dirname "$data_path")"
+  local restore_parent
+  local restored_data
+  local displaced_data=''
+
+  install -d -m 0700 "$data_parent"
+  restore_parent="$(mktemp -d "$data_parent/.hem-restore.XXXXXX")" || return 1
+  restored_data="$restore_parent/$(basename "$DATA_DIR")"
+
+  if ! tar -tzf "$backup_path" >/dev/null; then
+    rm -rf "$restore_parent"
+    return 1
+  fi
+  if ! tar -C "$restore_parent" -xzf "$backup_path"; then
+    rm -rf "$restore_parent"
+    return 1
+  fi
+  if [ ! -d "$restored_data" ] || [ ! -f "$restored_data/settings.json" ]; then
+    rm -rf "$restore_parent"
+    return 1
+  fi
+
+  if [ -e "$data_path" ]; then
+    displaced_data="$(mktemp -d "$data_parent/.hem-failed.XXXXXX")" || {
+      rm -rf "$restore_parent"
+      return 1
+    }
+    rmdir "$displaced_data"
+    if ! mv "$data_path" "$displaced_data"; then
+      rm -rf "$restore_parent"
+      return 1
+    fi
+  fi
+
+  if ! mv "$restored_data" "$data_path"; then
+    if [ -n "$displaced_data" ]; then
+      mv "$displaced_data" "$data_path" || true
+    fi
+    rm -rf "$restore_parent"
+    return 1
+  fi
+
+  rm -rf "$restore_parent"
+  if [ -n "$displaced_data" ]; then
+    rm -rf "$displaced_data"
+  fi
 }
 
 rollback_update() {
@@ -152,8 +205,11 @@ rollback_update() {
     fail "update and package rollback both failed; data backup remains at ${BACKUP_PATH:-<not-created>}"
   fi
   if [ -n "${BACKUP_PATH:-}" ] && [ -f "$BACKUP_PATH" ]; then
-    rm -rf "$(root_path "$DATA_DIR")"
-    tar -C "$(dirname "$(root_path "$DATA_DIR")")" -xzf "$BACKUP_PATH"
+    if ! restore_data_backup "$BACKUP_PATH"; then
+      systemctl daemon-reload
+      systemctl enable --now "$SERVICE_NAME" || true
+      fail "update rollback backup validation failed; live data remains untouched at $(root_path "$DATA_DIR")"
+    fi
   fi
   systemctl daemon-reload
   systemctl enable --now "$SERVICE_NAME"

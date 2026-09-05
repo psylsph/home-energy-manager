@@ -84,6 +84,16 @@ beforeEach(() => {
 });
 
 describe('EnergyOrbitDiagram', () => {
+  it('renders every required base node while keeping the EV node optional', () => {
+    const { container } = render(<EnergyOrbitDiagram snapshot={makeSnapshot()} />);
+
+    for (const id of ['solar', 'grid', 'home', 'battery']) {
+      expect(container.querySelector(`[data-node-body="${id}"]`), `${id} node`).not.toBeNull();
+    }
+    expect(container.querySelector('[data-testid="inverter-mini-card"]')).not.toBeNull();
+    expect(container.querySelector('[data-node-body="ev"]')).toBeNull();
+  });
+
   it('exposes a plain-English flow description via the SVG accessible label', () => {
     // The visible overview sentence was removed (commit 22fe1b8), but the
     // diagram still describes the live flow for screen readers through the

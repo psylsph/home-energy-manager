@@ -336,6 +336,32 @@ describe('<ControlPage/> — Agile scope UI', () => {
     expect(optionValues).toContain('agile_discharge');
   });
 
+  it('preserves a returned Cosy schedule when it has fewer than three slots', async () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ cosy_enabled: true }) });
+    const defaultApiGet = vi.mocked(apiGet).getMockImplementation();
+    vi.mocked(apiGet).mockImplementation(async (path: string) => {
+      if (path === '/api/cosy') {
+        return {
+          ok: true,
+          enabled: true,
+          slots: [{
+            enabled: true,
+            start_hour: 1,
+            start_minute: 0,
+            end_hour: 2,
+            end_minute: 0,
+            target_soc: 77,
+          }],
+        };
+      }
+      return await defaultApiGet!(path);
+    });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    expect(await screen.findByText('77%')).toBeDefined();
+  });
+
   it('shows the discharge-schedule Minimum SOC control only in developer mode and saves it', async () => {
     useInverterStore.setState({ snapshot: makeSnapshot(), developerMode: true });
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
@@ -502,6 +528,32 @@ describe('<ControlPage/> — Agile scope UI', () => {
       );
       expect(select.value).toBe('adaptive');
     });
+  });
+
+  it('reconciles an optimistic mode after a newer backend mode arrives', async () => {
+    useInverterStore.setState({ snapshot: makeSnapshot() });
+    const { default: ControlPage } = await import('../../src/pages/ControlPage');
+    render(<ControlPage />);
+
+    const select = (await screen.findAllByRole('combobox'))[0] as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('standard'));
+
+    fireEvent.change(select, { target: { value: 'cosy' } });
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/charging-mode',
+        expect.objectContaining({ mode: 'cosy' }),
+      );
+      expect(select.value).toBe('cosy');
+    });
+
+    // A newer authoritative poll says another automation has taken over.
+    // The optimistic Cosy selection must not continue masking it.
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ agile_scope: 'full', agile_enabled: true }),
+    });
+    await waitFor(() => expect(select.value).toBe('agile'));
+    expect(screen.queryByText('Charge Schedule')).toBeNull();
   });
 
   it('keeps charging mode disabled until its persisted configuration has loaded', async () => {

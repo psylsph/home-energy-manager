@@ -72,6 +72,7 @@ function resetStore() {
     connectionState: 'disconnected',
     connectedHost: null,
     connectedSince: null,
+    lastConnectedDurationSec: null,
     connectFailures: 0,
     evcHost: '',
     evcPower: 0,
@@ -81,6 +82,10 @@ function resetStore() {
     evcCableConnected: false,
     evcSessionEnergyKwh: 0,
     evcEverConnected: false,
+    evcConnectionState: 'never_connected',
+    evcStale: false,
+    evcLastSuccessAtEpochMs: null,
+    evcAgeSeconds: null,
   });
 }
 

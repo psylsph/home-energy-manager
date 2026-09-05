@@ -28,7 +28,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-autostart = "2"
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }

@@ -23,6 +23,9 @@ import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 import { simulatorBinaryPath } from './binary-path.js';
+import { attachErrorHandler } from './process-errors.js';
+import { stopChildProcess } from './process-lifecycle.js';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,12 +51,9 @@ async function startInfrastructure(
   let settingsFixture: TestSettingsFixture | null = null;
 
   // Kill any leftover processes on our ports
-  try {
-    const { execSync } = await import('child_process');
-    execSync(`fuser -k ${modbusPort}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    execSync(`fuser -k ${httpPort}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    await new Promise((r) => setTimeout(r, 500));
-  } catch { /* ignore */ }
+  killPort(modbusPort);
+  killPort(httpPort);
+  await new Promise((r) => setTimeout(r, 500));
 
   // Verify build artifacts
   if (!SIMULATOR_PATH || !fs.existsSync(SIMULATOR_PATH)) {
@@ -92,6 +92,7 @@ async function startInfrastructure(
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
+  attachErrorHandler(simulator, `simulator:${misbehaviour}`);
 
   simulator.stdout?.on('data', (d: Buffer) => {
     for (const line of d.toString().trim().split('\n')) {
@@ -115,6 +116,7 @@ async function startInfrastructure(
     port: modbusPort,
     httpPort,
     pollInterval: 2,
+      writePacingMs: 25,
   });
 
   // Start the headless backend
@@ -130,6 +132,7 @@ async function startInfrastructure(
       },
     },
   );
+  attachErrorHandler(backend, `backend:${misbehaviour}`);
 
   backend.stdout?.on('data', (d: Buffer) => {
     for (const line of d.toString().trim().split('\n')) {
@@ -174,18 +177,10 @@ async function startInfrastructure(
 
   const cleanup = async () => {
     console.log(`[cleanup] Stopping backend (misbehaviour=${misbehaviour})...`);
-    backend.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => { backend.kill('SIGKILL'); resolve(); }, 3000);
-      backend.on('exit', () => { clearTimeout(timeout); resolve(); });
-    });
+    await stopChildProcess(backend, `backend:${misbehaviour}`, 3000);
 
     console.log(`[cleanup] Stopping simulator (misbehaviour=${misbehaviour})...`);
-    simulator.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => { simulator.kill('SIGKILL'); resolve(); }, 3000);
-      simulator.on('exit', () => { clearTimeout(timeout); resolve(); });
-    });
+    await stopChildProcess(simulator, `simulator:${misbehaviour}`, 3000);
 
     await new Promise((r) => setTimeout(r, 500));
     if (settingsFixture) {

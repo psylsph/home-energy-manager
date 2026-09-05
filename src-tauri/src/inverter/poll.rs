@@ -74,11 +74,11 @@ use crate::inverter::sanitizer::{
 use crate::inverter::solar_position::calculate_solar_position;
 use crate::inverter::state_machines::{
     build_force_discharge_auto_revert_writes, build_timed_export_disable_writes,
-    check_adaptive_charge, check_auto_winter, check_discharge_floor,
-    check_load_limiter_with_other_pause, check_temperature_limiter_after_automation,
-    clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
-    should_repair_timed_export, write_registers_to_inverter, AgileSlotAction,
-    DischargeControlArbiter, DischargeControlOwner,
+    check_adaptive_charge, check_auto_winter_with_outcome, check_discharge_floor,
+    check_load_limiter_at, check_temperature_limiter_after_automation, clear_cosy_slot_registers,
+    cosy_slot_register_writes, persist_cosy_active, should_repair_timed_export,
+    write_registers_to_inverter, AgileSlotAction, AutoWinterWriteOutcome, DischargeControlArbiter,
+    DischargeControlOwner,
 };
 pub use crate::inverter::state_machines::{
     AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, DischargeFloorConfig,
@@ -137,6 +137,8 @@ pub enum PollMessage {
     EvcConnected,
     /// EV charger is disconnected.
     EvcDisconnected,
+    /// Reachability metadata for the cached EV charger snapshot.
+    EvcStatus(Box<crate::evc::EvcReachabilityStatus>),
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +170,9 @@ pub struct PollSettings {
     pub evc_port: u16,
     /// When true, skip auto-discovery of the dongle on persistent connection failure.
     pub disable_auto_discovery: bool,
+    /// Milliseconds between consecutive queued register writes (synced from
+    /// the persisted [`crate::settings::Settings::write_pacing_ms`]).
+    pub write_pacing_ms: u64,
 }
 
 impl Default for PollSettings {
@@ -181,6 +186,7 @@ impl Default for PollSettings {
             evc_host: String::new(),
             evc_port: 502,
             disable_auto_discovery: true,
+            write_pacing_ms: 1500,
         }
     }
 }
@@ -361,6 +367,9 @@ pub struct AppState {
     /// Broadcast sender - every poll cycle sends a [`PollMessage::Snapshot`]
     /// and connection-state changes send [`PollMessage::Connection`].
     pub tx: broadcast::Sender<PollMessage>,
+    /// WebSocket keepalive timings. Production uses the defaults; integration
+    /// tests replace these with short windows while Tokio time is paused.
+    pub ws_keepalive: Arc<Mutex<crate::server::ws::KeepaliveConfig>>,
     /// Runtime configuration (host, serial, interval, etc.).
     pub settings: Arc<Mutex<PollSettings>>,
     /// Pending register writes queued by the control API.
@@ -459,6 +468,8 @@ pub struct AppState {
     pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
     /// Most recently decoded EV charger snapshot.
     pub latest_evc: Arc<Mutex<Option<crate::evc::EvcSnapshot>>>,
+    /// Reachability and freshness state for the EVC snapshot cache.
+    pub evc_reachability: Arc<Mutex<crate::evc::EvcReachability>>,
     /// EV charger session-energy latch (issue #189). Holds the last
     /// non-zero `Charge_Session_Energy` so the completed session's kWh
     /// stays visible on the diagram after HR 72 zeroes, and resets on the
@@ -492,6 +503,9 @@ pub struct AppState {
     /// layer doesn't have to special-case "weather not yet initialised".
     /// Mirror of `Settings::weather_config` lives inside the struct.
     pub weather: Arc<Mutex<crate::weather::WeatherState>>,
+    /// Ensures the daily weather backfill and a manually requested backfill
+    /// cannot run at the same time.
+    pub weather_backfill_lock: Arc<Mutex<()>>,
     /// Octopus customer-consumption synchronization status.
     pub octopus: Arc<Mutex<crate::octopus::OctopusState>>,
     /// "New version available" cache. Populated by the background
@@ -525,107 +539,7 @@ impl AppState {
     /// The broadcast channel is sized for 32 lagging consumers. Receivers
     /// can be obtained with `state.tx.subscribe()`.
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(32);
-        Self {
-            latest_snapshot: Arc::new(Mutex::new(None)),
-            connection_state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
-            tx,
-            settings: Arc::new(Mutex::new(PollSettings::default())),
-            pending_writes: Arc::new(Mutex::new(Vec::new())),
-            write_notify: Arc::new(Notify::new()),
-            force_charge_revert: Arc::new(Mutex::new(None)),
-            force_discharge_revert: Arc::new(Mutex::new(None)),
-            force_action_lock: Arc::new(Mutex::new(())),
-            timed_export_action_lock: Arc::new(Mutex::new(())),
-            history: Arc::new(Mutex::new(None)),
-            log_ring: Arc::new(crate::server::logs::LogRing::new(2000)),
-            connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
-            auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
-            auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
-            auto_winter_saved: Arc::new(Mutex::new(None)),
-            adaptive_charge_state: Arc::new(Mutex::new(AdaptiveChargeState::default())),
-            adaptive_charge_saved: Arc::new(Mutex::new(
-                crate::settings::Settings::load().adaptive_charge_saved_limit,
-            )),
-            load_limiter_config: Arc::new(Mutex::new(LoadLimiterConfig::default())),
-            load_limiter_state: Arc::new(Mutex::new(LoadLimiterState::default())),
-            load_limiter_saved: Arc::new(Mutex::new(None)),
-            temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
-            temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
-            discharge_floor_config: Arc::new(Mutex::new({
-                let s = crate::settings::Settings::load();
-                DischargeFloorConfig {
-                    enabled: s.discharge_floor_enabled,
-                    floor_soc: s.discharge_floor_soc,
-                }
-            })),
-            discharge_floor_state: Arc::new(Mutex::new(
-                crate::settings::Settings::load()
-                    .discharge_floor_saved_reserve
-                    .map(|saved_reserve| DischargeFloorState::HeldFromRestart { saved_reserve })
-                    .unwrap_or_default(),
-            )),
-            timed_export_state: Arc::new(Mutex::new({
-                let settings = crate::settings::Settings::load();
-                if settings.timed_export_stop_pending {
-                    // CODE_REVIEW.md BLOCKER: a Stop/Eco-family route
-                    // disabled the schedule but the process exited before the
-                    // disarm was confirmed by readback. Resume the exit
-                    // (`Exiting`) instead of booting `Off`, where the still-
-                    // populated physical slots would be misread as another
-                    // controller's schedule and the armed registers would
-                    // never be repaired.
-                    tracing::warn!(
-                        "Timed Export: restart with a stop/exit still pending — resuming the disarm"
-                    );
-                    crate::inverter::state_machines::TimedExportState::Exiting {
-                        polls_waiting: 0,
-                        retries: 0,
-                    }
-                } else {
-                    crate::inverter::state_machines::TimedExportState::default()
-                }
-            })),
-            timed_export_rearm: Arc::new(Mutex::new(
-                crate::inverter::state_machines::TimedExportRearmDetector::default(),
-            )),
-            timed_export_rearm_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timed_export_config: Arc::new(Mutex::new({
-                let settings = crate::settings::Settings::load();
-                crate::inverter::state_machines::TimedExportConfig {
-                    schedule_enabled: settings.timed_export_schedule_enabled,
-                    slots: settings.timed_export_slots,
-                    device_rearm_confirmed: settings.timed_export_slots_require_clear,
-                    stop_pending: settings.timed_export_stop_pending,
-                }
-            })),
-            timed_export_stop_pending: Arc::new(std::sync::atomic::AtomicBool::new(
-                crate::settings::Settings::load().timed_export_stop_pending,
-            )),
-            cosy_active: Arc::new(Mutex::new(
-                crate::settings::Settings::load().cosy_active_persisted,
-            )),
-            cached_agile_prices: Arc::new(Mutex::new(Vec::new())),
-            alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
-            alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
-            last_report_date: Arc::new(Mutex::new(None)),
-            forecast_plan_refresh_date: Arc::new(Mutex::new(None)),
-            forecast_plan_refresh_warned: Arc::new(Mutex::new(None)),
-            forecast_plan_apply_date: Arc::new(Mutex::new(None)),
-            forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
-            latest_evc: Arc::new(Mutex::new(None)),
-            evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
-            connected_since: Arc::new(std::sync::Mutex::new(None)),
-            connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            e2e_admin: std::sync::atomic::AtomicBool::new(false),
-            weather: Arc::new(Mutex::new(crate::weather::WeatherState {
-                config: crate::settings::Settings::load().weather_config,
-                ..Default::default()
-            })),
-            octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
-            update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
-        }
+        Self::with_log_ring(Arc::new(crate::server::logs::LogRing::new(2000)))
     }
 }
 
@@ -645,6 +559,7 @@ impl AppState {
             latest_snapshot: Arc::new(Mutex::new(None)),
             connection_state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
             tx,
+            ws_keepalive: Arc::new(Mutex::new(crate::server::ws::KeepaliveConfig::default())),
             settings: Arc::new(Mutex::new(PollSettings::default())),
             pending_writes: Arc::new(Mutex::new(Vec::new())),
             write_notify: Arc::new(Notify::new()),
@@ -729,6 +644,7 @@ impl AppState {
             forecast_plan_apply_date: Arc::new(Mutex::new(None)),
             forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
+            evc_reachability: Arc::new(Mutex::new(crate::evc::EvcReachability::default())),
             evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -738,6 +654,7 @@ impl AppState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
             })),
+            weather_backfill_lock: Arc::new(Mutex::new(())),
             octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
             update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
         }
@@ -747,6 +664,11 @@ impl AppState {
 // ---------------------------------------------------------------------------
 // Poll-cycle decision helpers
 // ---------------------------------------------------------------------------
+
+fn valid_lv_battery_response(data: &[u16]) -> bool {
+    let soc = data.get(100 - 60).copied().unwrap_or(0);
+    (1..=100).contains(&soc) && validate_battery_bms(data)
+}
 
 /// Feed one battery BMS-read outcome into the alert debounce and fire the
 /// connection-lost / connection-restored notifications at the right
@@ -889,6 +811,38 @@ fn should_probe_external_meters(
     false
 }
 
+fn merge_external_meters(
+    decoded_meters: Vec<crate::inverter::model::MeterData>,
+    detected_addresses: &[u8],
+    cached_external_meters: &std::collections::BTreeMap<u8, crate::inverter::model::MeterData>,
+) -> Vec<crate::inverter::model::MeterData> {
+    let mut merged = Vec::with_capacity(decoded_meters.len() + detected_addresses.len());
+    let mut seen_addresses = std::collections::BTreeSet::new();
+
+    // Keep all decoder-produced meters, except an address that is also known
+    // to be an external meter. The cached external value is authoritative for
+    // that address and is added below, whether this cycle's read succeeded or
+    // was carried forward after a transient failure.
+    for meter in decoded_meters {
+        if detected_addresses.contains(&meter.address) {
+            continue;
+        }
+        if seen_addresses.insert(meter.address) {
+            merged.push(meter);
+        }
+    }
+
+    for &address in detected_addresses {
+        if let Some(meter) = cached_external_meters.get(&address) {
+            if seen_addresses.insert(address) {
+                merged.push(meter.clone());
+            }
+        }
+    }
+
+    merged
+}
+
 /// Maximum number of meter discovery retries after the initial scan fails
 /// to find any meters despite the inverter being configured for an external
 /// ammeter.
@@ -903,6 +857,25 @@ const METER_RETRY_INTERVAL: u8 = 5;
 /// 0x32 instead. The probe runs once after model detection, then the per-cycle
 /// BCU cluster reads take over.
 const HV_PROBE_RETRY_INTERVAL_CYCLES: u8 = 5;
+
+/// BCU device addresses are defined as 0x70–0x8F by the reference protocol.
+/// Never let a corrupt BMS count make us probe outside that supported range.
+const HV_MAX_BCU_COUNT: u16 = 0x8F - 0x70 + 1;
+
+/// Physical BCU addresses are contiguous from 0x70. A short run of absent
+/// stacks therefore ends discovery early when a corrupt count overstates the
+/// number of stacks, while still allowing normal multi-stack systems through.
+const HV_MAX_CONSECUTIVE_MISSING_BCU_PROBES: u8 = 3;
+
+fn hv_bcu_probe_offsets(raw_count: u16) -> Vec<u8> {
+    (0..raw_count.min(HV_MAX_BCU_COUNT))
+        .map(|offset| offset as u8)
+        .collect()
+}
+
+fn hv_bcu_probe_should_stop(consecutive_missing: u8) -> bool {
+    consecutive_missing >= HV_MAX_CONSECUTIVE_MISSING_BCU_PROBES
+}
 
 fn should_probe_hv_stacks(
     known_device_type: Option<DeviceType>,
@@ -1010,6 +983,24 @@ fn next_gateway_detail_countdown(current: u8) -> u8 {
 /// still making net progress (untaken batches drain on subsequent cycles).
 pub const MAX_WRITE_BATCHES_PER_CYCLE: usize = 8;
 
+/// Per-cycle drain cap for a given inter-write gap. Real dongles pace each
+/// write at ~1.5 s, so the cap bounds how long the snapshot/broadcast cycle
+/// is frozen while a backlog drains. The E2E simulator answers writes in
+/// microseconds (write_pacing_ms below [`FAST_DRAIN_PACING_MS`]), so there
+/// is nothing to protect: lifting the cap lets the whole queue drain inside
+/// one cycle instead of metering it out one 5 s poll interval at a time.
+pub(crate) fn drain_cap_for(inter_write_gap: Duration) -> usize {
+    if inter_write_gap < Duration::from_millis(FAST_DRAIN_PACING_MS) {
+        usize::MAX
+    } else {
+        MAX_WRITE_BATCHES_PER_CYCLE
+    }
+}
+
+/// Inter-write gap below which the connected device is treated as a fast
+/// responder (the local simulator) rather than a paced dongle.
+pub(crate) const FAST_DRAIN_PACING_MS: u64 = 500;
+
 /// Take at most `cap` batches (the oldest first) out of the pending-writes
 /// queue, leaving the rest queued for subsequent poll cycles. Extracted from
 /// the poll loop so the per-cycle cap is unit-testable without a full poll
@@ -1044,13 +1035,14 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
     let cosy_active = *state.cosy_active.lock().await;
     let timed_export_config = state.timed_export_config.lock().await.clone();
     let timed_export_state = state.timed_export_state.lock().await.clone();
+    let host_minute = {
+        let now = chrono::Local::now();
+        now.hour() as u16 * 60 + now.minute() as u16
+    };
     let timed_export_minute = snapshot
         .as_ref()
-        .and_then(crate::inverter::state_machines::inverter_minute_of_day)
-        .unwrap_or_else(|| {
-            let now = chrono::Local::now();
-            now.hour() as u16 * 60 + now.minute() as u16
-        });
+        .map(|snap| crate::inverter::state_machines::authoritative_minute_of_day(snap, host_minute))
+        .unwrap_or(host_minute);
     let timed_export_active = {
         let has_slots = timed_export_config
             .slots
@@ -1202,8 +1194,12 @@ fn take_pending_writes_for_owner(
     (taken, winner)
 }
 
-async fn drain_write_batches(client: &mut ModbusClient, pending: Vec<PendingWriteBatch>) {
-    drain_write_batches_with_gap(client, pending, Duration::from_millis(1500)).await
+async fn drain_write_batches(
+    client: &mut ModbusClient,
+    pending: Vec<PendingWriteBatch>,
+    inter_write_gap: Duration,
+) {
+    drain_write_batches_with_gap(client, pending, inter_write_gap).await
 }
 
 /// Execute a direct poll-loop transition with strict ordering. The first
@@ -1259,7 +1255,7 @@ pub(crate) async fn clear_timed_export_stop_pending_if_settled(
         .timed_export_stop_pending
         .swap(false, std::sync::atomic::Ordering::AcqRel)
     {
-        let _ = crate::settings::Settings::update(|s| s.timed_export_stop_pending = false);
+        let _ = settings_update_blocking(|s| s.timed_export_stop_pending = false).await;
     }
 }
 
@@ -1469,6 +1465,18 @@ pub(crate) fn persist_discharge_floor_saved_reserve(persisted: Option<u16>) -> R
     crate::settings::Settings::update(|s| {
         s.discharge_floor_saved_reserve = persisted;
     })
+}
+
+/// Run a settings update away from the async poll worker. Settings uses
+/// synchronous filesystem I/O and its global mutex, so invoking it directly
+/// from a poll cycle can delay Modbus reads and snapshot broadcasts.
+async fn settings_update_blocking<F>(update: F) -> Result<(), String>
+where
+    F: FnOnce(&mut crate::settings::Settings) + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || crate::settings::Settings::update(update).map(|_| ()))
+        .await
+        .map_err(|error| format!("settings worker failed: {error}"))?
 }
 
 /// Store the decoded snapshot as the latest, broadcast it to WebSocket
@@ -1796,6 +1804,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // INFO on every successful read).
                 let mut known_battery_addrs: Vec<u8> = Vec::new();
                 let mut meter_probe_done = false;
+                let mut cached_external_meters: std::collections::BTreeMap<
+                    u8,
+                    crate::inverter::model::MeterData,
+                > = std::collections::BTreeMap::new();
                 // Meter discovery retry state: when enable_ammeter or EM115 is
                 // configured but the initial scan finds nothing, we retry every
                 // METER_RETRY_INTERVAL cycles up to METER_MAX_RETRIES times.
@@ -1825,6 +1837,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // failed transitions retry instead of advancing.
                 let mut last_timed_export_write_outcome =
                     crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued;
+                // Outcome of the auto-winter register batch issued on the
+                // previous poll. Pending activation/restoration stays
+                // unclaimed until a later snapshot confirms both values.
+                let mut last_auto_winter_write_outcome = AutoWinterWriteOutcome::NoneIssued;
                 // Whether we already warned that the inverter clock is
                 // unavailable (once per connection, not once per poll).
                 let mut inverter_time_fallback_logged = false;
@@ -1840,7 +1856,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // AppState::new already seeded `state.cosy_active` from
                 // `cosy_active_persisted`; here we only log what we restored.
                 {
-                    let settings = crate::settings::Settings::load();
+                    let settings = tokio::task::spawn_blocking(crate::settings::Settings::load)
+                        .await
+                        .unwrap_or_default();
                     if settings.cosy_enabled && settings.cosy_active_persisted {
                         let now = chrono::Local::now();
                         let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
@@ -1884,6 +1902,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     // NOTE: this is the INSTANTANEOUS version, not a stored
                     // baseline. The baseline check happens after the sleep.
                     let current_version = state.settings.lock().await.version;
+                    // Inter-write gap for queued batches. Real dongles need
+                    // ~1.5 s between writes; the E2E simulator answers
+                    // instantly and lowers this so long batches drain in
+                    // seconds instead of minutes.
+                    let write_gap =
+                        Duration::from_millis(state.settings.lock().await.write_pacing_ms);
 
                     // If version changed since we last connected, break immediately.
                     if current_version != settings_version_at_connect {
@@ -1910,12 +1934,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                         let mut pw = state.pending_writes.lock().await;
                         take_pending_writes_for_owner(
                             &mut pw,
-                            MAX_WRITE_BATCHES_PER_CYCLE,
+                            drain_cap_for(write_gap),
                             active_discharge_owner,
                         )
                     };
                     if !pending.is_empty() {
-                        drain_write_batches(&mut client, pending).await;
+                        drain_write_batches(&mut client, pending, write_gap).await;
                     }
 
                     // The consumer task handles stale frames - unmatched
@@ -2262,6 +2286,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                         meter.p_active_total
                                                     );
                                                     found_meters.push(addr);
+                                                    cached_external_meters.insert(addr, meter.clone());
                                                     snapshot.meters.push(meter);
                                                 } else if v1 > 0.0 {
                                                     tracing::debug!(
@@ -2397,16 +2422,26 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             .await
                                         {
                                             Ok(bms) => {
-                                                let num_bcus = *bms.get(1).unwrap_or(&0) as u8;
+                                                let raw_num_bcus = *bms.get(1).unwrap_or(&0);
+                                                let bcu_offsets = hv_bcu_probe_offsets(raw_num_bcus);
+                                                if raw_num_bcus > HV_MAX_BCU_COUNT {
+                                                    tracing::warn!(
+                                                        raw_num_bcus,
+                                                        max_supported = HV_MAX_BCU_COUNT,
+                                                        "BMS reported an invalid HV BCU count; capping probe"
+                                                    );
+                                                }
                                                 tracing::info!(
-                                                    num_bcus,
-                                                    "BMS reports {num_bcus} HV BCU stack(s)"
+                                                    num_bcus = bcu_offsets.len(),
+                                                    "BMS reports {} HV BCU stack(s) after validation",
+                                                    bcu_offsets.len()
                                                 );
-                                                for offset in 0..num_bcus {
+                                                let mut consecutive_missing = 0;
+                                                for offset in bcu_offsets {
                                                     // Each BCU's IR(64) holds its module count.
                                                     let bcu_addr = crate::modbus::registers::
                                                         HV_BCU_BASE_ADDRESS.wrapping_add(offset);
-                                                    match client
+                                                    let present = match client
                                                         .read_registers_at_slave(
                                                             bcu_addr,
                                                             crate::modbus::framer::RegisterType::Input,
@@ -2433,18 +2468,34 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                                 offset,
                                                                 cluster.number_of_modules as u8,
                                                             ));
+                                                            true
                                                         }
                                                         Ok(_) => {
                                                             tracing::debug!(
                                                                 bcu_offset = offset,
                                                                 "BCU 0x{bcu_addr:02X} probe: invalid version - no stack"
                                                             );
+                                                            false
                                                         }
                                                         Err(e) => {
                                                             tracing::debug!(
                                                                 bcu_offset = offset,
                                                                 "BCU 0x{bcu_addr:02X} probe: no response: {e}"
                                                             );
+                                                            false
+                                                        }
+                                                    };
+                                                    if present {
+                                                        consecutive_missing = 0;
+                                                    } else {
+                                                        consecutive_missing += 1;
+                                                        if hv_bcu_probe_should_stop(consecutive_missing) {
+                                                            tracing::debug!(
+                                                                bcu_offset = offset,
+                                                                consecutive_missing,
+                                                                "Stopping HV BCU probe after consecutive missing stacks"
+                                                            );
+                                                            break;
                                                         }
                                                     }
                                                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2632,26 +2683,36 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         .await
                                     {
                                         Ok(data) => {
-                                            crate::inverter::decoder::decode_battery_block_into(
-                                                &data, 0, &mut snapshot, "",
-                                            );
-                                            tracing::debug!("Battery #1 BMS read OK");
-                                            track_battery_conn(
-                                                &state, 1, 0x32, true,
-                                            ).await;
+                                            let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
+                                            if valid_lv_battery_response(&data) {
+                                                crate::inverter::decoder::decode_battery_block_into(
+                                                    &data, 0, &mut snapshot, "",
+                                                );
+                                                tracing::debug!("Battery #1 BMS read OK");
+                                                track_battery_conn(
+                                                    &state, 1, 0x32, true,
+                                                ).await;
 
-                                            // Override SOC with BMS module SOC (IR 100) only when
-                                            // When inverter IR(59) returns 0 (corrupted), calculate
-                                            // aggregate SOC from capacity-weighted average of all
-                                            // battery modules.
-                                            // Note: full aggregate is computed below after all
-                                            // additional batteries are read.
-                                            if snapshot.soc == 0 && !snapshot.battery_modules.is_empty() {
-                                                if let Some(bms) = snapshot.battery_modules.first() {
-                                                    if bms.soc > 0 && bms.soc <= 99 {
-                                                        snapshot.soc = bms.soc;
+                                                // Override SOC with BMS module SOC (IR 100) only when
+                                                // When inverter IR(59) returns 0 (corrupted), calculate
+                                                // aggregate SOC from capacity-weighted average of all
+                                                // battery modules.
+                                                // Note: full aggregate is computed below after all
+                                                // additional batteries are read.
+                                                if snapshot.soc == 0 && !snapshot.battery_modules.is_empty() {
+                                                    if let Some(bms) = snapshot.battery_modules.first() {
+                                                        if bms.soc > 0 && bms.soc <= 99 {
+                                                            snapshot.soc = bms.soc;
+                                                        }
                                                     }
                                                 }
+                                            } else {
+                                                tracing::debug!(
+                                                    "Battery #1 BMS data invalid: SOC={soc}"
+                                                );
+                                                track_battery_conn(
+                                                    &state, 1, 0x32, false,
+                                                ).await;
                                             }
                                         }
                                         Err(e) => {
@@ -2675,7 +2736,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         ).await {
                                             Ok(data) => {
                                                 let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
-                                                if soc > 0 && soc <= 100 && validate_battery_bms(&data) {
+                                                if valid_lv_battery_response(&data) {
                                                     crate::inverter::decoder::decode_battery_block_into(
                                                         &data, i + 1, &mut snapshot, "",
                                                     );
@@ -2730,8 +2791,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // --- External CT meter reads ---
                                 // Read all previously detected meters on every poll cycle.
                                 // If a meter stops responding, we skip it silently.
-                                let mut fresh_meters: Vec<crate::inverter::model::MeterData> =
-                                    Vec::with_capacity(detected_meters.len());
                                 for &addr in &detected_meters {
                                     match client.read_registers_at_slave(
                                         addr,
@@ -2740,9 +2799,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         30,
                                     ).await {
                                         Ok(data) => {
-                                            fresh_meters.push(
-                                                crate::inverter::decoder::decode_meter_data(&data, addr)
-                                            );
+                                            let meter =
+                                                crate::inverter::decoder::decode_meter_data(&data, addr);
+                                            cached_external_meters.insert(addr, meter);
                                         }
                                         Err(e) => {
                                             tracing::debug!(
@@ -2752,9 +2811,11 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                     tokio::time::sleep(Duration::from_millis(100)).await;
                                 }
-                                if !fresh_meters.is_empty() {
-                                    snapshot.meters = fresh_meters;
-                                }
+                                snapshot.meters = merge_external_meters(
+                                    std::mem::take(&mut snapshot.meters),
+                                    &detected_meters,
+                                    &cached_external_meters,
+                                );
 
                                 // If inverter IR(59) was 0, recalculate SOC from
                                 // capacity-weighted average of ALL battery modules
@@ -2895,13 +2956,39 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         "First poll read after connect - data is flowing"
                                     );
                                 }
+                                // All time-driven automations use the same
+                                // validated inverter-local minute. A host
+                                // local-time fallback is used only when the
+                                // inverter clock registers are unavailable.
+                                let host_now = chrono::Local::now();
+                                let host_minute = host_now.hour() as u16 * 60 + host_now.minute() as u16;
+                                let inverter_minute =
+                                    crate::inverter::state_machines::authoritative_minute_of_day(
+                                        &snapshot,
+                                        host_minute,
+                                    );
+                                if crate::inverter::state_machines::inverter_minute_of_day(
+                                    &snapshot,
+                                )
+                                .is_none()
+                                    && !inverter_time_fallback_logged
+                                {
+                                    tracing::warn!(
+                                        "Automation: inverter clock unavailable — falling back to host local time"
+                                    );
+                                    inverter_time_fallback_logged = true;
+                                }
                                 // ---- Auto winter mode ----
                                 {
                                     let config = state.auto_winter_config.lock().await;
                                     let mut aw_state = state.auto_winter_state.lock().await;
                                     let mut saved = state.auto_winter_saved.lock().await;
-                                    let writes = check_auto_winter(
-                                        &snapshot, &config, &mut aw_state, &mut saved,
+                                    let writes = check_auto_winter_with_outcome(
+                                        &snapshot,
+                                        &config,
+                                        &mut aw_state,
+                                        &mut saved,
+                                        last_auto_winter_write_outcome,
                                     );
 
                                     // Tag the snapshot so the frontend knows
@@ -2953,27 +3040,26 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     })
                                     .await;
 
-                                    if let Some(writes) = writes {
-                                        for w in &writes {
-                                            match client.write_register(w.address, w.value).await {
-                                                Ok(()) => tracing::info!(
-                                                    "Auto winter: wrote reg {} = {}",
-                                                    w.address, w.value
-                                                ),
-                                                Err(e) => tracing::error!(
-                                                    "Auto winter: write reg {} failed: {e}",
-                                                    w.address
-                                                ),
+                                    last_auto_winter_write_outcome =
+                                        if let Some(writes) = writes {
+                                            if write_registers_to_inverter(
+                                                &mut client,
+                                                &writes,
+                                                "Auto winter",
+                                            )
+                                            .await
+                                            {
+                                                AutoWinterWriteOutcome::Succeeded
+                                            } else {
+                                                AutoWinterWriteOutcome::Failed
                                             }
-                                            tokio::time::sleep(Duration::from_millis(1500)).await;
-                                        }
-                                    }
+                                        } else {
+                                            AutoWinterWriteOutcome::NoneIssued
+                                        };
                                 }
 
                                 // ---- Adaptive Charge mode (issue #234) ----
                                 {
-                                    let now = chrono::Local::now();
-                                    let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
                                     let mut adaptive_state =
                                         state.adaptive_charge_state.lock().await;
                                     let mut adaptive_saved =
@@ -2985,7 +3071,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         poll_settings.adaptive_charge_enabled,
                                         &mut adaptive_state,
                                         &mut adaptive_saved,
-                                        now_minutes,
+                                        inverter_minute,
                                     );
 
                                     snapshot.charging_mode =
@@ -3007,9 +3093,11 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         // Persist the adaptive baseline atomically so a
                                         // concurrent mode/config save cannot be overwritten
                                         // by this poll's older settings snapshot.
-                                        if let Err(e) = crate::settings::Settings::update(|s| {
-                                            s.adaptive_charge_saved_limit = saved_after.clone();
-                                        }) {
+                                        if let Err(e) = settings_update_blocking(move |s| {
+                                            s.adaptive_charge_saved_limit = saved_after;
+                                        })
+                                        .await
+                                        {
                                             tracing::warn!(
                                                 "Failed to persist Adaptive Charge baseline: {e}"
                                             );
@@ -3033,7 +3121,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 "Adaptive Charge write failed: {e}"
                                             ),
                                         }
-                                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                                        tokio::time::sleep(write_gap).await;
                                     }
                                 }
 
@@ -3494,7 +3582,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     if reseeded || solar_baselines
                                         != poll_settings.solar_meter_baselines
                                     {
-                                        if let Err(e) = persist_solar_meter_baselines(solar_baselines) {
+                                        let persistence = tokio::task::spawn_blocking(move || {
+                                            persist_solar_meter_baselines(solar_baselines)
+                                        })
+                                        .await
+                                        .map_err(|error| format!("settings worker failed: {error}"))
+                                        .and_then(|result| result);
+                                        if let Err(e) = persistence {
                                             tracing::warn!(
                                                 "Failed to persist solar meter baselines: {e}"
                                             );
@@ -3511,14 +3605,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 if let Some(owner) = pending_discharge_owner {
                                     discharge_arbiter.request(owner);
                                 }
-
-                                let inverter_minute = crate::inverter::state_machines::inverter_minute_of_day(
-                                    &snapshot,
-                                )
-                                .unwrap_or_else(|| {
-                                    let now = chrono::Local::now();
-                                    now.hour() as u16 * 60 + now.minute() as u16
-                                });
 
                                 let safety_demand = {
                                     let load_config =
@@ -3541,12 +3627,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             false,
                                             false,
                                         );
-                                    let load_writes = check_load_limiter_with_other_pause(
+                                    let load_writes = check_load_limiter_at(
                                         &snapshot,
                                         &load_config,
                                         &mut preview_load_state,
                                         poll_settings.poll_interval,
                                         &mut preview_saved,
+                                        inverter_minute,
                                         preview_temperature_state.is_actively_pausing(),
                                     );
                                     load_state.is_actively_pausing()
@@ -3694,7 +3781,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                             w.address
                                                         ),
                                                     }
-                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                    tokio::time::sleep(write_gap).await;
                                                 }
                                             }
                                         }
@@ -3734,31 +3821,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // (Cosy exit's Eco restore, Agile) defer to it.
                                 let mut timed_export_owns_discharge = false;
                                 {
-                                    // Window boundaries are evaluated on the
-                                    // inverter's own wall clock (issue #289): HEM
-                                    // may run in a UTC container while the
-                                    // inverter (and the user) are on local time.
-                                    // Fall back to host time when the clock
-                                    // registers are absent or malformed.
-                                    let minute_of_day =
-                                        match crate::inverter::state_machines::inverter_minute_of_day(
-                                            &snapshot,
-                                        ) {
-                                            Some(minute) => minute,
-                                            None => {
-                                                if !inverter_time_fallback_logged {
-                                                    tracing::warn!(
-                                                        "Timed Export: inverter clock unavailable — \
-                                                         falling back to host local time for window \
-                                                         evaluation"
-                                                    );
-                                                    inverter_time_fallback_logged = true;
-                                                }
-                                                use chrono::Timelike as _;
-                                                let now = chrono::Local::now();
-                                                now.hour() as u16 * 60 + now.minute() as u16
-                                            }
-                                        };
+                                    // All automation boundaries share the
+                                    // validated inverter-local minute computed
+                                    // above, including Timed Export.
+                                    let minute_of_day = inverter_minute;
 
                                     // Skip Timed Export management whenever a
                                     // higher-priority owner won this cycle.
@@ -3848,7 +3914,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 &mut client,
                                                 &decision.writes,
                                                 "Timed Export transition",
-                                                Duration::from_millis(1500),
+                                                write_gap,
                                             )
                                             .await;
                                             write_outcome = if ok {
@@ -3893,9 +3959,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 // survives restarts. Settings::update
                                                 // is sync I/O but cheap (one small
                                                 // JSON file).
-                                                let _ = crate::settings::Settings::update(|s| {
+                                                let _ = settings_update_blocking(|s| {
                                                     s.timed_export_slots_require_clear = true;
-                                                });
+                                                })
+                                                .await;
                                                 // Classification alone leaves the
                                                 // re-armed state unresolved: run the
                                                 // fallback exit sequence immediately
@@ -3919,7 +3986,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                             &mut client,
                                                             &fallback.writes,
                                                             "Timed Export fallback repair",
-                                                            Duration::from_millis(1500),
+                                                            write_gap,
                                                         )
                                                         .await;
                                                     last_timed_export_write_outcome = if succeeded {
@@ -4027,7 +4094,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                         write.address
                                                     ),
                                                 }
-                                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                tokio::time::sleep(write_gap).await;
                                             }
                                         }
                                     }
@@ -4051,8 +4118,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     .can_request(DischargeControlOwner::TimedCharge)
                                 {
                                     let settings = &poll_settings;
-                                    let now = chrono::Local::now();
-                                    let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+                                    let now_minutes = inverter_minute;
 
                                     // Check if we're inside any enabled cosy slot. When cosy mode is
                                     // disabled, treat as "not in slot" so any lingering cosy_active
@@ -4351,7 +4417,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 let results = json["results"]
                                                     .as_array()
                                                     .ok_or_else(|| "missing results".to_string())?;
-                                                let slots: Vec<PriceSlot> = results
+                                                let mut slots: Vec<PriceSlot> = results
                                                     .iter()
                                                     .filter_map(|r| {
                                                         let pence = r["value_inc_vat"].as_f64()?;
@@ -4362,6 +4428,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                         Some(PriceSlot { pence, valid_from: from_ts, valid_to: to_ts })
                                                     })
                                                     .collect();
+                                                crate::inverter::state_machines::sort_price_slots_newest_first(
+                                                    &mut slots,
+                                                );
                                                 Ok(slots)
                                             }).await;
 
@@ -4541,7 +4610,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                     );
                                                     all_ok = false;
                                                 }
-                                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                tokio::time::sleep(write_gap).await;
                                             }
                                             if !all_ok {
                                                 tracing::warn!(
@@ -4588,12 +4657,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         );
                                     let temperature_active =
                                         temperature_state.is_actively_pausing();
-                                    let load_writes = check_load_limiter_with_other_pause(
+                                    let load_writes = check_load_limiter_at(
                                         &snapshot,
                                         &load_config,
                                         &mut load_state,
                                         poll_settings.poll_interval,
                                         &mut shared_saved,
+                                        inverter_minute,
                                         temperature_active,
                                     );
 
@@ -4611,21 +4681,23 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
                                     let persisted_reserve =
                                         persist_saved.as_ref().map(|value| value.reserve);
-                                    let persistence_changed = crate::settings::Settings::update(|s| {
+                                    let load_limiter_active = snapshot.load_limiter_active;
+                                    let temperature_limiter_active =
+                                        snapshot.temperature_limiter_active;
+                                    let persistence_changed = settings_update_blocking(move |s| {
                                         let changed = s.load_limiter_saved_reserve
                                             != persisted_reserve
-                                            || s.load_limiter_active_persisted
-                                                != snapshot.load_limiter_active
+                                            || s.load_limiter_active_persisted != load_limiter_active
                                             || s.temperature_limiter_active_persisted
-                                                != snapshot.temperature_limiter_active;
+                                                != temperature_limiter_active;
                                         if changed {
                                             s.load_limiter_saved_reserve = persisted_reserve;
-                                            s.load_limiter_active_persisted =
-                                                snapshot.load_limiter_active;
+                                            s.load_limiter_active_persisted = load_limiter_active;
                                             s.temperature_limiter_active_persisted =
-                                                snapshot.temperature_limiter_active;
+                                                temperature_limiter_active;
                                         }
-                                    });
+                                    })
+                                    .await;
                                     if let Err(e) = persistence_changed {
                                         tracing::warn!(
                                             "Failed to persist discharge limiter state: {e}"
@@ -4658,7 +4730,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                         write.address
                                                     ),
                                                 }
-                                                tokio::time::sleep(Duration::from_millis(1500))
+                                                tokio::time::sleep(write_gap)
                                                     .await;
                                             }
                                             }
@@ -4676,14 +4748,11 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 {
                                     let df_config = state.discharge_floor_config.lock().await;
                                     let mut df_state = state.discharge_floor_state.lock().await;
-                                    let now = chrono::Local::now();
-                                    let now_minutes =
-                                        now.hour() as u16 * 60 + now.minute() as u16;
                                     if let Some(writes) = check_discharge_floor(
                                         &snapshot,
                                         &df_config,
                                         &mut df_state,
-                                        now_minutes,
+                                        inverter_minute,
                                     ) {
                                         let persisted = match &*df_state {
                                             DischargeFloorState::FloorHeld { saved_reserve }
@@ -4695,7 +4764,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         drop(df_config);
                                         drop(df_state);
 
-                                        if let Err(e) = persist_discharge_floor_saved_reserve(persisted) {
+                                        let persistence = tokio::task::spawn_blocking(move || {
+                                            persist_discharge_floor_saved_reserve(persisted)
+                                        })
+                                        .await
+                                        .map_err(|error| format!("settings worker failed: {error}"))
+                                        .and_then(|result| result);
+                                        if let Err(e) = persistence {
                                             tracing::warn!(
                                                 "Failed to persist discharge floor state: {e}"
                                             );
@@ -4719,7 +4794,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                         write.address
                                                     ),
                                                 }
-                                                tokio::time::sleep(Duration::from_millis(1500))
+                                                tokio::time::sleep(write_gap)
                                                     .await;
                                             }
                                         }
@@ -4851,7 +4926,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         // Detect alerts that were previously active but have
                                         // now returned to normal.
                                         let cleared = debounce.extract_cleared(&triggered);
-                                        let _cooldown = config.cooldown_minutes;
                                         drop(debounce);
 
                                         // Send "problem cleared" notifications
@@ -4929,65 +5003,18 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             let text = crate::alerts::build_alert_message(
                                                 &snapshot, &to_send,
                                             );
-                                            let token = config.telegram_bot_token.clone();
-                                            let chat_id = config.telegram_chat_id.clone();
-                                            let ntfy_text = text.clone();
-                                            let pushover_text = text.clone();
-
-                                            if !token.is_empty() && !chat_id.is_empty() {
-                                                tokio::task::spawn_blocking(move || {
-                                                    match crate::alerts::send_telegram_message(
-                                                        &token,
-                                                        &chat_id,
-                                                        &text,
-                                                    ) {
-                                                        Ok(()) => tracing::warn!(
-                                                            "Alert sent: {:?}",
-                                                            to_send
-                                                        ),
-                                                        Err(e) => tracing::warn!(
-                                                            "Failed to send alert: {e}"
-                                                        ),
-                                                    }
-                                                });
-                                            }
-
-                                            // Also send via ntfy if topic configured
-                                            let ntfy_topic = config.ntfy_topic.clone();
-                                            let ntfy_server = config.ntfy_server.clone();
-                                            tokio::task::spawn_blocking(move || {
-                                                if ntfy_topic.is_empty() {
-                                                    return;
-                                                }
-                                                match crate::alerts::send_ntfy_message(
-                                                    &ntfy_topic,
-                                                    &ntfy_server,
-                                                    &ntfy_text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!("ntfy alert sent"),
-                                                    Err(e) => tracing::warn!("ntfy alert failed: {e}"),
-                                                }
-                                            });
-
-                                            // Also send via Pushover if both credentials configured
-                                            let pushover_token = config.pushover_app_token.clone();
-                                            let pushover_user = config.pushover_user_key.clone();
-                                            tokio::task::spawn_blocking(move || {
-                                                if pushover_token.is_empty()
-                                                    || pushover_user.is_empty()
-                                                {
-                                                    return;
-                                                }
-                                                match crate::alerts::send_pushover_message(
-                                                    &pushover_token,
-                                                    &pushover_user,
-                                                    &pushover_text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!("Pushover alert sent"),
-                                                    Err(e) => tracing::warn!(
-                                                        "Pushover alert failed: {e}"
-                                                    ),
-                                                }
+                                            let alert_types = to_send.clone();
+                                            let alert_config = config.clone();
+                                            let debounce = state.alert_debounce.clone();
+                                            tokio::spawn(async move {
+                                                let delivered = crate::alerts::dispatch_alert_text(
+                                                    &alert_config,
+                                                    &text,
+                                                    "alert",
+                                                )
+                                                .await;
+                                                let mut debounce = debounce.lock().await;
+                                                debounce.record_delivery(&alert_types, delivered);
                                             });
                                         }
                                     }
@@ -5043,50 +5070,57 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         // Don't send on startup - last_sent starts as None.
                                         if let Some(sent_date) = *last_sent {
                                             if sent_date < today {
-                                            let now = chrono::Local::now();
-                                            let minutes_since_midnight =
-                                                now.hour() * 60 + now.minute();
-                                            let send_minutes = config.daily_report_hour as u32 * 60
-                                                + config.daily_report_minute as u32;
+                                                let now = chrono::Local::now();
+                                                let minutes_since_midnight =
+                                                    now.hour() * 60 + now.minute();
+                                                let send_minutes = config.daily_report_hour as u32 * 60
+                                                    + config.daily_report_minute as u32;
 
-                                            if minutes_since_midnight >= send_minutes {
-                                                let yesterday = today
-                                                    .checked_sub_signed(
-                                                        chrono::Duration::days(1),
-                                                    )
-                                                    .unwrap_or(today);
-                                                let db_guard = state.history.lock().await;
-                                                let db = db_guard.clone();
-                                                drop(db_guard);
+                                                if minutes_since_midnight >= send_minutes {
+                                                    let yesterday = today
+                                                        .checked_sub_signed(
+                                                            chrono::Duration::days(1),
+                                                        )
+                                                        .unwrap_or(today);
+                                                    let db_guard = state.history.lock().await;
+                                                    let db = db_guard.clone();
+                                                    drop(db_guard);
 
-                                                if let Some(ref db) = db {
-                                                    match db.get_readings_for_date(yesterday) {
-                                                        Ok(rows) => {
+                                                    if let Some(db) = db {
+                                                        let report = tokio::task::spawn_blocking(move || {
+                                                            let rows = db.get_readings_for_date(yesterday)?;
                                                             let date_str = yesterday
                                                                 .format("%A %d %B %Y")
                                                                 .to_string();
-                                                            let html = crate::alerts::report::
-                                                                generate_daily_report_html(
-                                                                    &rows, &date_str,
-                                                                );
-                                                            if let Some(ref report_body) = html {
-                                                                let caption = crate::alerts::report::
-                                                                    generate_daily_summary_text(
-                                                                        &rows,
-                                                                        &yesterday
-                                                                            .format("%A %d %B %Y")
-                                                                            .to_string(),
-                                                                        &crate::settings::Settings::load(),
-                                                                    )
-                                                                    .unwrap_or_default();
+                                                            let Some(body) = crate::alerts::report::
+                                                                generate_daily_report_html(&rows, &date_str)
+                                                            else {
+                                                                return Ok(None);
+                                                            };
+                                                            let settings = crate::settings::Settings::load();
+                                                            let caption = crate::alerts::report::
+                                                                generate_daily_summary_text(
+                                                                    &rows,
+                                                                    &date_str,
+                                                                    &settings,
+                                                                )
+                                                                .unwrap_or_default();
+                                                            Ok(Some((
+                                                                caption,
+                                                                format!("hem-report-{yesterday}.html"),
+                                                                body,
+                                                            )))
+                                                        })
+                                                        .await
+                                                        .map_err(|error| {
+                                                            format!("daily report worker failed: {error}")
+                                                        })
+                                                        .and_then(|result| result);
 
+                                                        match report {
+                                                            Ok(Some((caption, filename, body))) => {
                                                                 let token = config.telegram_bot_token.clone();
                                                                 let chat_id = config.telegram_chat_id.clone();
-                                                                let filename = format!(
-                                                                    "hem-report-{}.html",
-                                                                    yesterday
-                                                                );
-                                                                let body = report_body.clone();
                                                                 tokio::task::spawn_blocking(move || {
                                                                     // Caption uses intentional <b>/<i> tags from
                                                                     // generate_daily_summary_text, so we keep HTML
@@ -5100,30 +5134,28 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                                         body.as_bytes(),
                                                                         Some("HTML"),
                                                                     ) {
-                                                                        Ok(()) => tracing::warn!(
-                                                                            "Daily report sent"
-                                                                        ),
+                                                                        Ok(()) => tracing::warn!("Daily report sent"),
                                                                         Err(e) => tracing::warn!(
                                                                             "Failed to send daily report: {e}"
                                                                         ),
                                                                     }
                                                                 });
                                                                 *last_sent = Some(today);
-                                                            } else {
+                                                            }
+                                                            Ok(None) => {
                                                                 tracing::debug!(
                                                                     "Daily report: insufficient data for {yesterday}",
                                                                 );
                                                                 *last_sent = Some(today);
                                                             }
-                                                        }
-                                                        Err(e) => {
-                                                            tracing::warn!(
-                                                                "Failed to query history for daily report: {e}"
-                                                            );
+                                                            Err(e) => {
+                                                                tracing::warn!(
+                                                                    "Failed to query history for daily report: {e}"
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }
-                                            }
                                             }
                                         }
                                     }
@@ -5412,10 +5444,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                             );
 
                             // Persist the new host to disk so it survives restart.
-                            if let Err(e) = crate::settings::Settings::update(|s| {
-                                s.host = new.ip.clone();
-                                s.port = new.port;
-                            }) {
+                            let new_host = new.ip.clone();
+                            let new_port = new.port;
+                            if let Err(e) = settings_update_blocking(move |s| {
+                                s.host = new_host;
+                                s.port = new_port;
+                            })
+                            .await
+                            {
                                 tracing::warn!("Auto-discovery: failed to persist new host: {e}");
                             }
 
@@ -5545,7 +5581,28 @@ pub(crate) fn stamp_solar_array_fields(
     snapshot: &mut InverterSnapshot,
     settings: &crate::settings::Settings,
 ) {
+    // CT daily energy is derived earlier in the poll cycle by
+    // `apply_ct_solar_authority`. Rebuilding the settings-derived array list
+    // must not erase that value; retain it by meter address while refreshing
+    // the configuration-dependent fields.
+    let ct_today_by_meter: std::collections::BTreeMap<u8, f64> = snapshot
+        .solar_arrays
+        .iter()
+        .filter_map(|array| {
+            (array.source == SolarArraySource::Meter)
+                .then_some(array.meter_address)
+                .flatten()
+                .zip(array.today_kwh)
+        })
+        .collect();
     snapshot.solar_arrays = compute_solar_arrays(snapshot, settings);
+    for array in &mut snapshot.solar_arrays {
+        if array.source == SolarArraySource::Meter {
+            if let Some(meter_address) = array.meter_address {
+                array.today_kwh = ct_today_by_meter.get(&meter_address).copied();
+            }
+        }
+    }
     snapshot.pv1_pct = if settings.pv1_rated_kw > 0.0 {
         Some((snapshot.pv1_power.max(0) as f64 * 100.0) / (settings.pv1_rated_kw * 1000.0))
     } else {
@@ -6026,6 +6083,37 @@ mod tests {
         Settings, SolarArrayConfig, SolarMeterBaseline, TariffConfig, TariffSlot,
     };
     use crate::test_util::with_isolated_config_dir_async;
+
+    fn valid_lv_battery_data() -> Vec<u16> {
+        let mut data = vec![0u16; 60];
+        data[22] = 0;
+        data[23] = 50_000; // IR(82-83): 50.0 V
+        data[24] = 0;
+        data[25] = 16_000; // IR(84-85): 160 Ah
+        data[40] = 50; // IR(100): 50% SOC
+        for (index, bytes) in b"BG1234G567".chunks_exact(2).enumerate() {
+            data[50 + index] = u16::from_be_bytes([bytes[0], bytes[1]]);
+        }
+        data[43] = 250; // IR(103): 25.0 °C
+        data
+    }
+
+    #[test]
+    fn lv_battery_poll_gate_admits_only_valid_present_modules() {
+        let valid = valid_lv_battery_data();
+        assert!(valid_lv_battery_response(&valid));
+
+        let mut zero_soc = valid.clone();
+        zero_soc[40] = 0;
+        assert!(!valid_lv_battery_response(&zero_soc));
+
+        let mut absent = valid.clone();
+        absent[43] = 0xF556;
+        assert!(!valid_lv_battery_response(&absent));
+
+        assert!(!valid_lv_battery_response(&[0; 60]));
+        assert!(!valid_lv_battery_response(&[0; 20]));
+    }
 
     /// CODE_REVIEW.md BLOCKER: the durable stop-pending marker drives
     /// poll-loop exit repairs — but never while an API mutation holds the
@@ -7614,8 +7702,71 @@ mod tests {
     }
 
     #[test]
+    fn hv_bcu_probe_caps_corrupt_bms_count_to_supported_address_range() {
+        let offsets = hv_bcu_probe_offsets(u16::MAX);
+
+        assert_eq!(offsets.len(), HV_MAX_BCU_COUNT as usize);
+        assert_eq!(offsets.first(), Some(&0));
+        assert_eq!(offsets.last(), Some(&(HV_MAX_BCU_COUNT as u8 - 1)));
+    }
+
+    #[test]
+    fn hv_bcu_probe_stops_after_three_missing_stacks() {
+        assert!(!hv_bcu_probe_should_stop(2));
+        assert!(hv_bcu_probe_should_stop(3));
+    }
+
+    #[test]
     fn external_meter_probe_skips_unknown_device() {
         assert!(!should_probe_external_meters(None, false, false, 0, 0, 0,));
+    }
+
+    #[test]
+    fn external_meter_merge_preserves_decoder_meters_and_failed_reads() {
+        let decoded = vec![meter(0, -1200), meter(9, 300)];
+        let mut cached_external = std::collections::BTreeMap::new();
+        cached_external.insert(1, meter(1, 4200));
+
+        let first = merge_external_meters(decoded.clone(), &[1], &cached_external);
+        assert_eq!(
+            first.iter().map(|meter| meter.address).collect::<Vec<_>>(),
+            vec![0, 9, 1]
+        );
+        assert_eq!(
+            first
+                .iter()
+                .find(|meter| meter.address == 1)
+                .unwrap()
+                .p_active_total,
+            4200
+        );
+
+        // The next poll's external read failed, so it has no fresh value. The
+        // cached external meter must still be merged without dropping the
+        // decoder-produced entries or duplicating address 1.
+        let after_failed_read = merge_external_meters(decoded, &[1], &cached_external);
+        assert_eq!(
+            after_failed_read
+                .iter()
+                .map(|meter| meter.address)
+                .collect::<Vec<_>>(),
+            vec![0, 9, 1]
+        );
+        assert_eq!(
+            after_failed_read
+                .iter()
+                .filter(|meter| meter.address == 1)
+                .count(),
+            1
+        );
+        assert_eq!(
+            after_failed_read
+                .iter()
+                .find(|meter| meter.address == 1)
+                .unwrap()
+                .p_active_total,
+            4200
+        );
     }
 
     #[test]
@@ -8007,6 +8158,91 @@ mod tests {
             assert_eq!(taken.len(), n, "queue of {n} batches should drain fully");
             assert!(queue.is_empty());
         }
+    }
+
+    #[test]
+    fn drain_cap_lifts_only_for_fast_responders() {
+        // Real dongles keep the starvation-bounding per-cycle cap; the E2E
+        // simulator (pacing below FAST_DRAIN_PACING_MS) drains its whole
+        // queue in one cycle instead of metering it across poll intervals.
+        assert_eq!(
+            super::drain_cap_for(Duration::from_millis(1500)),
+            MAX_WRITE_BATCHES_PER_CYCLE
+        );
+        assert_eq!(
+            super::drain_cap_for(Duration::from_millis(500)),
+            MAX_WRITE_BATCHES_PER_CYCLE
+        );
+        assert_eq!(super::drain_cap_for(Duration::from_millis(25)), usize::MAX);
+    }
+
+    #[test]
+    fn take_pending_writes_for_owner_applies_cap_after_ownership_filter() {
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        let make = |address, owner| PendingWriteBatch {
+            writes: vec![RegisterWrite { address, value: 1 }],
+            completion: None,
+            policy: Default::default(),
+            owner,
+        };
+
+        // The active Timed Export owner must keep the Agile batches queued,
+        // while unowned work and Timed Export work remain eligible. The cap
+        // applies to those eligible batches, not to the raw queue positions;
+        // otherwise the lower-priority batch at address 1 would consume a
+        // slot and delay address 3 unnecessarily.
+        let mut queue = vec![
+            make(1, Some(DischargeControlOwner::Agile)),
+            make(2, None),
+            make(3, Some(DischargeControlOwner::TimedExport)),
+            make(4, None),
+            make(5, Some(DischargeControlOwner::TimedExport)),
+            make(6, Some(DischargeControlOwner::Agile)),
+        ];
+
+        let (taken, winner) =
+            take_pending_writes_for_owner(&mut queue, 2, Some(DischargeControlOwner::TimedExport));
+
+        assert_eq!(winner, Some(DischargeControlOwner::TimedExport));
+        assert_eq!(
+            taken
+                .iter()
+                .map(|batch| batch.writes[0].address)
+                .collect::<Vec<_>>(),
+            vec![2, 3],
+            "eligible batches should be taken oldest-first up to the cap"
+        );
+        assert_eq!(
+            queue
+                .iter()
+                .map(|batch| batch.writes[0].address)
+                .collect::<Vec<_>>(),
+            vec![1, 4, 5, 6],
+            "lower-priority batches and eligible overflow must remain queued"
+        );
+
+        // A later cycle can drain the remaining eligible work once the cap is
+        // applied again, without releasing the deferred Agile batches.
+        let (taken, winner) =
+            take_pending_writes_for_owner(&mut queue, 2, Some(DischargeControlOwner::TimedExport));
+        assert_eq!(winner, Some(DischargeControlOwner::TimedExport));
+        assert_eq!(
+            taken
+                .iter()
+                .map(|batch| batch.writes[0].address)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert_eq!(
+            queue
+                .iter()
+                .map(|batch| batch.writes[0].address)
+                .collect::<Vec<_>>(),
+            vec![1, 6]
+        );
     }
 
     #[test]
@@ -9483,6 +9719,49 @@ mod tests {
                 Some(66.42),
                 "no settings save mid-cycle → publish must not disturb the cycle's stamps"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn publish_preserves_ct_solar_array_today_kwh() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            Settings::update(|settings| {
+                settings.solar_arrays = vec![SolarArrayConfig {
+                    meter_address: 1,
+                    name: "Roof".to_string(),
+                    rated_kw: 5.0,
+                }];
+            })
+            .expect("seed solar CT settings");
+
+            let mut snapshot = pv_snapshot();
+            snapshot.meters = vec![meter(1, 3_200)];
+            snapshot.solar_arrays = vec![SolarArraySummary {
+                source: SolarArraySource::Meter,
+                name: "Roof".to_string(),
+                power_w: 3_200,
+                rated_kw: 5.0,
+                today_kwh: Some(12.75),
+                meter_address: Some(1),
+            }];
+
+            let state = Arc::new(AppState::new());
+            let mut rx = state.tx.subscribe();
+            publish_snapshot(&state, snapshot).await;
+
+            let latest = state
+                .latest_snapshot
+                .lock()
+                .await
+                .clone()
+                .expect("published");
+            assert_eq!(latest.solar_arrays[0].today_kwh, Some(12.75));
+            let broadcast = match rx.try_recv().expect("broadcast frame") {
+                PollMessage::Snapshot(snapshot) => snapshot,
+                _ => panic!("expected snapshot frame"),
+            };
+            assert_eq!(broadcast.solar_arrays[0].today_kwh, Some(12.75));
         })
         .await;
     }

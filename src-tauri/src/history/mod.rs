@@ -4,6 +4,7 @@
 //! for the history chart API.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use chrono::{Datelike, TimeZone, Timelike};
@@ -514,6 +515,29 @@ fn local_midnight_steps_after<TZ: chrono::TimeZone>(
     out
 }
 
+/// Resolve a local calendar date's midnight without assuming that every
+/// timezone maps it to exactly one instant. An ambiguous midnight uses the
+/// earlier instant; a skipped midnight is rejected so callers can return a
+/// validation error instead of panicking.
+pub(crate) fn local_midnight_timestamp_in<TZ: chrono::TimeZone>(
+    date: chrono::NaiveDate,
+    tz: &TZ,
+) -> Result<i64, String> {
+    let naive = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| format!("Invalid local date: {date}"))?;
+    match tz.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(value) => Ok(value.timestamp()),
+        chrono::LocalResult::Ambiguous(earliest, _) => Ok(earliest.timestamp()),
+        chrono::LocalResult::None => Err(format!("Local timezone has no midnight for date {date}")),
+    }
+}
+
+/// Resolve a local calendar date's midnight using the host timezone.
+pub(crate) fn local_midnight_timestamp(date: chrono::NaiveDate) -> Result<i64, String> {
+    local_midnight_timestamp_in(date, &chrono::Local)
+}
+
 /// Time-window specification for a history query.
 ///
 /// Both the aggregated-field path ([`HistoryDb::query_history`]) and the cost
@@ -536,39 +560,81 @@ pub struct HistoryWindow {
     pub explicit_window: Option<(i64, i64)>,
 }
 
+/// Prevent an offset supplied by an API client from creating an unbounded
+/// history query or overflowing the timestamp arithmetic below.
+pub(crate) const MAX_HISTORY_OFFSET: i64 = 10_000;
+
+/// Reject a zero or negative aggregation size before it reaches SQL bucketing
+/// arithmetic. Every history query entry point uses this guard because a
+/// caller can bypass the HTTP range table in tests or future integrations.
+pub(crate) fn validate_bucket_secs(bucket_secs: i64) -> Result<(), String> {
+    if bucket_secs <= 0 {
+        Err("Invalid history bucket: bucket_secs must be positive".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 impl HistoryWindow {
     /// Resolve to concrete UTC-second `(start, end)` bounds, applying the
     /// range/alignment rules shared by both history query paths.
-    pub(crate) fn resolve(&self) -> (i64, i64) {
+    pub(crate) fn resolve(&self) -> Result<(i64, i64), String> {
+        if !(0..=MAX_HISTORY_OFFSET).contains(&self.offset) {
+            return Err(format!(
+                "Invalid history offset: must be between 0 and {MAX_HISTORY_OFFSET}"
+            ));
+        }
+
         match self.explicit_window {
-            Some((s, e)) => (s, e),
+            Some((s, e)) => {
+                if s >= e {
+                    return Err("Invalid history window: start must be before end".to_string());
+                }
+                if chrono::DateTime::from_timestamp(s, 0).is_none()
+                    || chrono::DateTime::from_timestamp(e, 0).is_none()
+                {
+                    return Err("Invalid history window: timestamp is out of range".to_string());
+                }
+                Ok((s, e))
+            }
             None => {
+                if self.range_secs <= 0 {
+                    return Err("Invalid history range: range must be positive".to_string());
+                }
                 let now = chrono::Utc::now().timestamp();
-                let raw_end = now - (self.offset * self.range_secs);
+                let offset_secs = self
+                    .offset
+                    .checked_mul(self.range_secs)
+                    .ok_or_else(|| "Invalid history window: offset is too large".to_string())?;
+                let raw_end = now
+                    .checked_sub(offset_secs)
+                    .ok_or_else(|| "Invalid history window: offset is too large".to_string())?;
                 let aligned_end = match self.range_secs {
-                    3600 => ((raw_end / 3600) * 3600) + 3600,
-                    21600 => ((raw_end / 21600) * 21600) + 21600,
+                    3600 => raw_end.div_euclid(3600) * 3600 + 3600,
+                    21600 => raw_end.div_euclid(21600) * 21600 + 21600,
                     _ => {
                         // Align to local midnight so day-based ranges start at
                         // 00:00 local time instead of 00:00 UTC.
                         let raw_local = chrono::DateTime::from_timestamp(raw_end, 0)
-                            .unwrap()
+                            .ok_or_else(|| {
+                                "Invalid history window: timestamp is out of range".to_string()
+                            })?
                             .with_timezone(&chrono::Local);
                         let secs_today = raw_local.time().num_seconds_from_midnight();
                         if secs_today == 0 {
                             raw_end
                         } else {
-                            let tomorrow = raw_local.date_naive() + chrono::Duration::days(1);
-                            let next_midnight_naive = tomorrow.and_hms_opt(0, 0, 0).unwrap();
-                            let next_midnight_local = chrono::Local
-                                .from_local_datetime(&next_midnight_naive)
-                                .earliest()
-                                .unwrap();
-                            next_midnight_local.timestamp()
+                            let tomorrow = raw_local.date_naive().succ_opt().ok_or_else(|| {
+                                "Invalid history window: local date is out of range".to_string()
+                            })?;
+                            local_midnight_timestamp(tomorrow)?
                         }
                     }
                 };
-                (aligned_end - self.range_secs, aligned_end)
+                let start = aligned_end.checked_sub(self.range_secs).ok_or_else(|| {
+                    "Invalid history window: timestamp is out of range".to_string()
+                })?;
+                Ok((start, aligned_end))
             }
         }
     }
@@ -917,6 +983,75 @@ pub struct HistoryDb {
     conn: Mutex<Connection>,
 }
 
+static REPAIR_NONCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_repair_nonce() -> u64 {
+    REPAIR_NONCE.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Create a verified, WAL-aware backup without replacing the previous backup
+/// until the new file is complete. `VACUUM INTO` copies the logical database,
+/// including pages that are currently in the WAL, whereas copying the main
+/// file alone can silently omit those pages.
+fn backup_history_database(conn: &Connection, path: &Path) -> Result<(), String> {
+    let backup_path = path.with_extension("db.bak");
+    let temporary_path = path.with_extension(format!("db.bak.tmp-{}", next_repair_nonce()));
+    let escaped_path = temporary_path.to_string_lossy().replace('\'', "''");
+    // A crash can leave VACUUM INTO's output behind. The nonce is process-local,
+    // so remove a stale path before retrying the repair.
+    let _ = std::fs::remove_file(&temporary_path);
+
+    conn.execute_batch("PRAGMA wal_checkpoint(FULL);")
+        .map_err(|e| format!("failed to checkpoint WAL: {e}"))?;
+    conn.execute(&format!("VACUUM INTO '{escaped_path}'"), [])
+        .map_err(|e| format!("failed to create backup: {e}"))?;
+
+    let verification = Connection::open(&temporary_path)
+        .map_err(|e| format!("failed to open backup for verification: {e}"))?;
+    let integrity: String = verification
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|e| format!("failed to verify backup: {e}"))?;
+    if integrity != "ok" {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(format!("backup integrity check returned {integrity}"));
+    }
+    drop(verification);
+
+    // Windows rename does not replace an existing destination.
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(&backup_path);
+    if let Err(error) = std::fs::rename(&temporary_path, &backup_path) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(format!("failed to install verified backup: {error}"));
+    }
+    Ok(())
+}
+
+fn readings_has_column(conn: &Connection, column: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT 1 FROM pragma_table_info('readings') WHERE name = ?1 LIMIT 1",
+        [column],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|value| value.is_some())
+    .map_err(|e| format!("failed to inspect readings columns: {e}"))
+}
+
+fn add_readings_column_if_missing(
+    conn: &Connection,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    if readings_has_column(conn, column)? {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "ALTER TABLE readings ADD COLUMN {column} {definition}"
+    ))
+    .map_err(|e| format!("failed to add readings column {column}: {e}"))
+}
+
 impl HistoryDb {
     /// Open (or create) the SQLite database at the given path.
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -924,7 +1059,8 @@ impl HistoryDb {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create history db dir: {e}"))?;
         }
-        let conn = Connection::open(path).map_err(|e| format!("Failed to open history db: {e}"))?;
+        let mut conn =
+            Connection::open(path).map_err(|e| format!("Failed to open history db: {e}"))?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
             .map_err(|e| format!("Failed to set pragmas: {e}"))?;
@@ -979,22 +1115,22 @@ impl HistoryDb {
         .map_err(|e| format!("Failed to index Octopus tariff prices: {e}"))?;
 
         // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
-        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
+        add_readings_column_if_missing(&conn, "today_ac_charge_kwh", "REAL")?;
 
         // Migration: add home_energy_today_kwh column if missing (integrated
         // cumulative consumption, replaces the misleading today_consumption_kwh
         // formula value for display).
-        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN home_energy_today_kwh REAL");
+        add_readings_column_if_missing(&conn, "home_energy_today_kwh", "REAL")?;
 
         // Migration: add today_pv1_kwh / today_pv2_kwh columns if missing
         // (issue #108 — per-string PV daily totals).
-        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_pv1_kwh REAL");
-        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_pv2_kwh REAL");
+        add_readings_column_if_missing(&conn, "today_pv1_kwh", "REAL")?;
+        add_readings_column_if_missing(&conn, "today_pv2_kwh", "REAL")?;
 
         // Migration: add pv1_pct / pv2_pct columns if missing (issue #110 —
         // PV output as % of rated peak, stored for history charting).
-        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN pv1_pct REAL");
-        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN pv2_pct REAL");
+        add_readings_column_if_missing(&conn, "pv1_pct", "REAL")?;
+        add_readings_column_if_missing(&conn, "pv2_pct", "REAL")?;
 
         // One-time backfill: populate home_energy_today_kwh for historic rows
         // recorded before this column existed. Commit 5e1da32 renamed the
@@ -1055,19 +1191,15 @@ impl HistoryDb {
 
         if !repair_done {
             // ---- Backup before repair ----
-            // Copy the database before any destructive write, so the user can
-            // restore the original if the repair introduces new issues.
-            {
-                let backup_path = path.with_extension("db.bak");
-                if let Err(e) = std::fs::copy(path, &backup_path) {
-                    tracing::warn!(
-                        "Failed to backup history DB to {}: {e}",
-                        backup_path.display()
-                    );
-                } else {
-                    tracing::info!("History DB backed up to {}", backup_path.display());
-                }
-            }
+            // Back up the logical database before any destructive write, so
+            // WAL pages are included and the previous verified backup is
+            // retained until the new one is complete.
+            backup_history_database(&conn, path)
+                .map_err(|e| format!("Failed to backup history DB before repair: {e}"))?;
+            tracing::info!(
+                "History DB backed up to {}",
+                path.with_extension("db.bak").display()
+            );
 
             let energy_cols = [
                 "today_solar_kwh",
@@ -1078,7 +1210,14 @@ impl HistoryDb {
                 "today_consumption_kwh",
                 "today_ac_charge_kwh",
             ];
+            let repair_nonce = next_repair_nonce();
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("Failed to begin repair_v2 transaction: {e}"))?;
             for col in &energy_cols {
+                if !readings_has_column(&tx, col)? {
+                    continue;
+                }
                 // Build a repaired set using a window: for each row, fix
                 // corrupted values including:
                 //   - Small spurious DECREASES (counter dips without midnight reset)
@@ -1093,28 +1232,23 @@ impl HistoryDb {
                 //   - The poll.rs sanitizer prevents register corruption
                 //   - Legitimate increases can be arbitrarily large (e.g. after
                 //     a long gap in data the counter could jump by > 2 kWh)
+                let repair_table = format!("_repair_v2_{repair_nonce}_{col}");
                 let repair_sql = format!(
-                "CREATE TABLE IF NOT EXISTS _repair_{col} AS \
+                "CREATE TEMP TABLE {repair_table} AS \
                  SELECT timestamp, {col} AS orig, \
                         CASE \
                           WHEN LAG({col}) OVER (ORDER BY timestamp) IS NULL THEN {col} \
-                          -- Midnight rollover: counter reset to near-zero \
                           WHEN {col} < 1.0 \
                                AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
                             THEN {col} \
-                          -- Zero clamp artifact: prev was 0 (old sanitizer bug) and \
-                          -- current jumped by > 5 kWh (implausible for one interval). \
-                          -- Replace with the value BEFORE the 0 to avoid cost spikes. \
                           WHEN LAG({col}) OVER (ORDER BY timestamp) = 0.0 \
                                AND {col} > 5.0 \
                                AND LAG({col}, 2, 0) OVER (ORDER BY timestamp) > 0.0 \
                             THEN LAG({col}, 2, {col}) OVER (ORDER BY timestamp) \
-                          -- Zero clamp artifact: current value IS the 0, replace with prev \
                           WHEN {col} = 0.0 \
                                AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
                                AND LEAD({col}, 1, {col}) OVER (ORDER BY timestamp) > LAG({col}) OVER (ORDER BY timestamp) \
                             THEN LAG({col}) OVER (ORDER BY timestamp) \
-                          -- Small decrease (glitch): replace with previous \
                           WHEN {col} < LAG({col}) OVER (ORDER BY timestamp) \
                             THEN LAG({col}) OVER (ORDER BY timestamp) \
                           ELSE {col} \
@@ -1123,56 +1257,54 @@ impl HistoryDb {
                  WHERE {col} IS NOT NULL \
                  ORDER BY timestamp"
             );
-                let _ = conn.execute_batch(&repair_sql);
+                tx.execute_batch(&repair_sql)
+                    .map_err(|e| format!("Failed to build repair_v2 table for {col}: {e}"))?;
 
                 // Count how many rows were changed
-                let count: i64 = conn
+                let count: i64 = tx
                     .query_row(
-                        &format!("SELECT COUNT(*) FROM _repair_{col} WHERE orig != repaired"),
+                        &format!("SELECT COUNT(*) FROM {repair_table} WHERE orig != repaired"),
                         [],
                         |row| row.get(0),
                     )
-                    .unwrap_or(0);
+                    .map_err(|e| format!("Failed to count repair_v2 changes for {col}: {e}"))?;
 
                 if count > 0 {
                     tracing::info!("Repairing {count} corrupted {col} values in history DB");
                     // Apply repairs back to the readings table
                     let apply_sql = format!(
                         "UPDATE readings SET {col} = (\
-                      SELECT repaired FROM _repair_{col} \
-                      WHERE _repair_{col}.timestamp = readings.timestamp\
+                      SELECT repaired FROM {repair_table} \
+                      WHERE {repair_table}.timestamp = readings.timestamp\
                     ) WHERE timestamp IN (\
-                      SELECT timestamp FROM _repair_{col} WHERE orig != repaired\
+                      SELECT timestamp FROM {repair_table} WHERE orig != repaired\
                     )"
                     );
-                    if let Err(e) = conn.execute_batch(&apply_sql) {
-                        tracing::warn!("Failed to repair {col}: {e}");
-                    }
+                    tx.execute_batch(&apply_sql)
+                        .map_err(|e| format!("Failed to apply repair_v2 for {col}: {e}"))?;
                 }
 
                 // Clean up temp table
-                let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_{col}"));
+                tx.execute_batch(&format!("DROP TABLE {repair_table}"))
+                    .map_err(|e| format!("Failed to drop repair_v2 table for {col}: {e}"))?;
             }
 
             // ---- Reconstruct today_solar_kwh ----
             // Use the inverter's values directly, only recalculating when stuck.
-            let solar_repaired = Self::reconstruct_solar_kwh(&conn);
-            match &solar_repaired {
-                Ok(count) if *count > 0 => {
-                    tracing::info!(
-                        "Reconstructed {count} today_solar_kwh values from solar_power integration"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("Solar reconstruction failed: {e}");
-                }
-                _ => {}
+            let solar_repaired = Self::reconstruct_solar_kwh(&tx)?;
+            if solar_repaired > 0 {
+                tracing::info!(
+                    "Reconstructed {solar_repaired} today_solar_kwh values from solar_power integration"
+                );
             }
 
             // Mark the repair as complete so it doesn't run on every launch.
-            let _ = conn.execute_batch(
+            tx.execute_batch(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v2_done', '1')",
-            );
+            )
+            .map_err(|e| format!("Failed to mark repair_v2 complete: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Failed to commit repair_v2 transaction: {e}"))?;
         } // end if !repair_done
 
         // ---- repair_v3: undo v2's incorrect midnight-rollover threshold ----
@@ -1197,16 +1329,19 @@ impl HistoryDb {
                     "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'repair_v2_done' AND value = '1')",
                     [],
                     |row| row.get(0),
-                )
-                .unwrap_or(false);
+            )
+            .unwrap_or(false);
 
+            let repair_nonce = next_repair_nonce();
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("Failed to begin repair_v3 transaction: {e}"))?;
             if v2_ran {
                 let backup_path = path.with_extension("db.bak");
                 if backup_path.exists() {
                     tracing::info!("repair_v3: restoring original data from backup");
                     let bak_str = backup_path.to_string_lossy().replace('\'', "''");
-                    if let Err(e) =
-                        conn.execute(&format!("ATTACH DATABASE '{}' AS bak", bak_str), [])
+                    if let Err(e) = tx.execute(&format!("ATTACH DATABASE '{}' AS bak", bak_str), [])
                     {
                         tracing::warn!("repair_v3: failed to attach backup: {e}");
                     } else {
@@ -1232,11 +1367,11 @@ impl HistoryDb {
                                   WHERE {col} IS NOT NULL\
                                 )"
                             );
-                            if let Err(e) = conn.execute(&sql, []) {
+                            if let Err(e) = tx.execute(&sql, []) {
                                 tracing::debug!("repair_v3: could not restore {col}: {e}");
                             }
                         }
-                        if let Err(e) = conn.execute_batch("DETACH bak") {
+                        if let Err(e) = tx.execute_batch("DETACH bak") {
                             tracing::warn!("repair_v3: failed to detach backup: {e}");
                         }
                     }
@@ -1262,28 +1397,26 @@ impl HistoryDb {
                 "today_ac_charge_kwh",
             ];
             for col in &v3_energy_cols {
+                if !readings_has_column(&tx, col)? {
+                    continue;
+                }
+                let repair_table = format!("_repair_v3_{repair_nonce}_{col}");
                 let repair_sql_v3 = format!(
-                    "CREATE TABLE IF NOT EXISTS _repair_v3_{col} AS \
+                    "CREATE TEMP TABLE {repair_table} AS \
                      SELECT timestamp, {col} AS orig, \
                             CASE \
                               WHEN LAG({col}) OVER (ORDER BY timestamp) IS NULL THEN {col} \
-                              -- Midnight rollover: counter reset to near-zero \
                               WHEN {col} < 1.0 \
                                    AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
                                 THEN {col} \
-                              -- Zero clamp artifact: prev was 0 (old sanitizer bug) and \
-                              -- current jumped by > 5 kWh (implausible for one interval). \
-                              -- Replace with the value BEFORE the 0 to avoid cost spikes. \
                               WHEN LAG({col}) OVER (ORDER BY timestamp) = 0.0 \
                                    AND {col} > 5.0 \
                                    AND LAG({col}, 2, 0) OVER (ORDER BY timestamp) > 0.0 \
                                 THEN LAG({col}, 2, {col}) OVER (ORDER BY timestamp) \
-                              -- Zero clamp artifact: current value IS the 0, replace with prev \
                               WHEN {col} = 0.0 \
                                    AND LAG({col}) OVER (ORDER BY timestamp) > 1.0 \
                                    AND LEAD({col}, 1, {col}) OVER (ORDER BY timestamp) > LAG({col}) OVER (ORDER BY timestamp) \
                                 THEN LAG({col}) OVER (ORDER BY timestamp) \
-                              -- Small decrease (glitch): replace with previous \
                               WHEN {col} < LAG({col}) OVER (ORDER BY timestamp) \
                                 THEN LAG({col}) OVER (ORDER BY timestamp) \
                               ELSE {col} \
@@ -1292,37 +1425,41 @@ impl HistoryDb {
                      WHERE {col} IS NOT NULL \
                      ORDER BY timestamp"
                 );
-                let _ = conn.execute_batch(&repair_sql_v3);
+                tx.execute_batch(&repair_sql_v3)
+                    .map_err(|e| format!("Failed to build repair_v3 table for {col}: {e}"))?;
 
-                let count: i64 = conn
+                let count: i64 = tx
                     .query_row(
-                        &format!("SELECT COUNT(*) FROM _repair_v3_{col} WHERE orig != repaired"),
+                        &format!("SELECT COUNT(*) FROM {repair_table} WHERE orig != repaired"),
                         [],
                         |row| row.get(0),
                     )
-                    .unwrap_or(0);
+                    .map_err(|e| format!("Failed to count repair_v3 changes for {col}: {e}"))?;
 
                 if count > 0 {
                     tracing::info!("repair_v3: repairing {count} {col} values");
                     let apply_sql = format!(
                         "UPDATE readings SET {col} = (\
-                          SELECT repaired FROM _repair_v3_{col} \
-                          WHERE _repair_v3_{col}.timestamp = readings.timestamp\
+                          SELECT repaired FROM {repair_table} \
+                          WHERE {repair_table}.timestamp = readings.timestamp\
                         ) WHERE timestamp IN (\
-                          SELECT timestamp FROM _repair_v3_{col} WHERE orig != repaired\
+                          SELECT timestamp FROM {repair_table} WHERE orig != repaired\
                         )"
                     );
-                    if let Err(e) = conn.execute_batch(&apply_sql) {
-                        tracing::warn!("repair_v3: failed to repair {col}: {e}");
-                    }
+                    tx.execute_batch(&apply_sql)
+                        .map_err(|e| format!("Failed to apply repair_v3 for {col}: {e}"))?;
                 }
 
-                let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_v3_{col}"));
+                tx.execute_batch(&format!("DROP TABLE {repair_table}"))
+                    .map_err(|e| format!("Failed to drop repair_v3 table for {col}: {e}"))?;
             }
 
-            let _ = conn.execute_batch(
+            tx.execute_batch(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v3_done', '1')",
-            );
+            )
+            .map_err(|e| format!("Failed to mark repair_v3 complete: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Failed to commit repair_v3 transaction: {e}"))?;
         }
 
         tracing::info!("History database opened at {}", path.display());
@@ -1337,18 +1474,26 @@ impl HistoryDb {
     /// This replaces the old approach that cleared all values and reintegrated from
     /// scratch (which over-calculated due to gap interpolation).
     fn reconstruct_solar_kwh(conn: &Connection) -> Result<i64, String> {
-        // Step 1: delete old slot-filler rows (solar_power=0/NULL with today_solar_kwh > 0)
-        let deleted = conn
-            .execute(
-                "DELETE FROM readings WHERE (solar_power = 0 OR solar_power IS NULL) AND today_solar_kwh > 0",
-                [],
-            )
-            .map_err(|e| format!("Failed to delete old slot-filler rows: {e}"))?;
-        if deleted > 0 {
-            tracing::warn!("Solar reconstruction: deleted {deleted} old slot-filler rows");
-        }
+        Self::reconstruct_solar_kwh_with_timezone(conn, &chrono::Local)
+    }
 
-        // Step 2: Read all rows with solar_power readings - use inverter's values
+    /// Timezone-injectable implementation of [`Self::reconstruct_solar_kwh`].
+    /// Production follows the host's local timezone because the inverter's
+    /// daily counters reset at local midnight. Tests can pass a fixed zone so
+    /// their calendar-day grouping is independent of the machine running them.
+    fn reconstruct_solar_kwh_with_timezone<TZ: chrono::TimeZone>(
+        conn: &Connection,
+        timezone: &TZ,
+    ) -> Result<i64, String> {
+        if !readings_has_column(conn, "solar_power")?
+            || !readings_has_column(conn, "today_solar_kwh")?
+        {
+            return Ok(0);
+        }
+        // Read only rows with solar_power readings. Rows without generation
+        // are still source history (for example, post-sunset readings whose
+        // daily counter remains non-zero), so reconstruction must never
+        // delete them.
         let mut stmt = conn
             .prepare(
                 "SELECT timestamp, solar_power, today_solar_kwh \
@@ -1373,7 +1518,7 @@ impl HistoryDb {
             return Ok(0);
         }
 
-        // Step 3: Process each day, using inverter's value unless stuck
+        // Process each day, using inverter's value unless stuck.
         let mut updates: Vec<(i64, f64)> = Vec::new();
         let mut current_local_date: Option<chrono::NaiveDate> = None;
         let mut prev_ts: Option<i64> = None;
@@ -1381,7 +1526,7 @@ impl HistoryDb {
 
         for (ts, solar_power, stored_value) in &rows {
             // Detect day boundary
-            let local_date = chrono::Local
+            let local_date = timezone
                 .timestamp_opt(*ts, 0)
                 .earliest()
                 .map(|dt| dt.date_naive());
@@ -1418,18 +1563,14 @@ impl HistoryDb {
             prev_value = new_value;
         }
 
-        // Step 4: write back computed values
+        // Write back only the derived daily-energy field.
         let count = updates.len() as i64;
         for (ts, new_val) in &updates {
-            if conn
-                .execute(
-                    "UPDATE readings SET today_solar_kwh = ?1 WHERE timestamp = ?2",
-                    rusqlite::params![*new_val, *ts],
-                )
-                .is_err()
-            {
-                tracing::warn!("Failed to update today_solar_kwh at ts={ts}");
-            }
+            conn.execute(
+                "UPDATE readings SET today_solar_kwh = ?1 WHERE timestamp = ?2",
+                rusqlite::params![*new_val, *ts],
+            )
+            .map_err(|e| format!("Failed to update today_solar_kwh at ts={ts}: {e}"))?;
         }
 
         tracing::warn!("Solar reconstruction: updated {count} rows");
@@ -1516,7 +1657,7 @@ impl HistoryDb {
             .conn
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
-        let (start_ts, end_ts) = window.resolve();
+        let (start_ts, end_ts) = window.resolve()?;
         if start_ts >= end_ts {
             return Ok(EnergySummary::default());
         }
@@ -1682,6 +1823,7 @@ impl HistoryDb {
         fields: &[String],
         explicit_window: Option<(i64, i64)>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        validate_bucket_secs(bucket_secs)?;
         let conn = self
             .conn
             .lock()
@@ -1692,7 +1834,7 @@ impl HistoryDb {
             offset,
             explicit_window,
         }
-        .resolve();
+        .resolve()?;
 
         let mut result = serde_json::Map::new();
 
@@ -1796,6 +1938,7 @@ impl HistoryDb {
         flat_fallback: f64,
         standing_charge_p_per_day: f64,
     ) -> Result<Vec<TimePoint>, String> {
+        validate_bucket_secs(bucket_secs)?;
         Ok(self
             .query_cost_breakdown(
                 window,
@@ -1860,6 +2003,7 @@ impl HistoryDb {
         flat_fallback: f64,
         standing_charge_p_per_day: f64,
     ) -> Result<Vec<CostComponentPoint>, String> {
+        validate_bucket_secs(bucket_secs)?;
         // Guard the SQL identifier - only the two daily counters drive cost.
         if counter_field != "today_import_kwh" && counter_field != "today_export_kwh" {
             return Err(format!("Unsupported cost counter field: {counter_field}"));
@@ -1870,7 +2014,7 @@ impl HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let (start_ts, end_ts) = window.resolve();
+        let (start_ts, end_ts) = window.resolve()?;
 
         // Negative Standing Charge clamped to 0 — it would invert the cost
         // series, which doesn't match any real UK tariff. Issue #131.
@@ -2269,6 +2413,28 @@ impl HistoryDb {
             .collect::<SqlResult<Vec<_>>>()
             .map_err(|e| format!("Failed to read forecast series row: {e}"))?;
         Ok(points)
+    }
+
+    /// Return the newest fetch timestamp for a stored forecast series in the
+    /// requested forecast-time range.
+    pub fn latest_forecast_fetched_at(
+        &self,
+        variable: &str,
+        source: &str,
+        since_ts: i64,
+        until_ts: i64,
+    ) -> Result<Option<i64>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.query_row(
+            "SELECT MAX(fetched_at) FROM forecast_values \
+             WHERE variable = ?1 AND source = ?2 AND timestamp >= ?3 AND timestamp < ?4",
+            params![variable, source, since_ts, until_ts],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Forecast fetch timestamp query failed: {e}"))
     }
 
     /// Raw cumulative home-consumption counter samples since `since_ts`
@@ -2999,6 +3165,71 @@ impl HistoryDb {
         Ok(())
     }
 
+    /// Return the newest supplier interval end for one Octopus stream.
+    /// Used to seed forward-sync cursors for databases created before those
+    /// cursors were introduced.
+    pub fn latest_octopus_interval_end(
+        &self,
+        meter_kind: &str,
+        meter_point: &str,
+        meter_serial: &str,
+    ) -> Option<i64> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT MAX(interval_end)
+             FROM octopus_consumption
+             WHERE meter_kind=?1 AND meter_point=?2 AND meter_serial=?3",
+            params![meter_kind, meter_point, meter_serial],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    /// Advance through locally stored supplier intervals from a known
+    /// contiguous end, stopping at the first gap. The returned value is the
+    /// furthest end that remains contiguous with `start_ts`.
+    pub fn octopus_contiguous_interval_end(
+        &self,
+        meter_kind: &str,
+        meter_point: &str,
+        meter_serial: &str,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Option<i64> {
+        if start_ts >= end_ts {
+            return Some(start_ts);
+        }
+        let conn = self.conn.lock().ok()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT interval_start, interval_end
+                 FROM octopus_consumption
+                 WHERE meter_kind=?1 AND meter_point=?2 AND meter_serial=?3
+                   AND interval_end > ?4 AND interval_start < ?5
+                 ORDER BY interval_start, interval_end",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map(
+                params![meter_kind, meter_point, meter_serial, start_ts, end_ts],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .ok()?;
+        let mut cursor = start_ts;
+        let mut advanced = false;
+        for row in rows.flatten() {
+            let (interval_start, interval_end) = row;
+            if interval_start > cursor {
+                break;
+            }
+            if interval_end > cursor {
+                cursor = interval_end.min(end_ts);
+                advanced = true;
+            }
+        }
+        advanced.then_some(cursor)
+    }
+
     /// Sum supplier intervals into fixed display buckets. Values are kept in
     /// the units reported by Octopus; gas may therefore be kWh or m³.
     pub fn query_octopus_consumption(
@@ -3007,7 +3238,8 @@ impl HistoryDb {
         end_ts: i64,
         bucket_secs: i64,
     ) -> Result<std::collections::HashMap<String, Vec<TimePoint>>, String> {
-        if bucket_secs <= 0 || start_ts >= end_ts {
+        validate_bucket_secs(bucket_secs)?;
+        if start_ts >= end_ts {
             return Err("invalid Octopus history window".to_string());
         }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -3148,6 +3380,53 @@ mod tests {
         HistoryDb::open(&path).unwrap()
     }
 
+    #[test]
+    fn adding_a_missing_readings_column_propagates_non_duplicate_errors() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE readings (timestamp INTEGER NOT NULL);
+             INSERT INTO readings (timestamp) VALUES (1);",
+        )
+        .unwrap();
+
+        let error = add_readings_column_if_missing(&conn, "migration_probe", "TEXT NOT NULL")
+            .expect_err("a failing ALTER TABLE must not be swallowed");
+        assert!(
+            error.contains("migration_probe"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn history_query_boundaries_reject_non_positive_buckets() {
+        let db = test_db();
+        let fields = vec!["soc".to_string()];
+        let error = db
+            .query_history(3600, 0, 0, &fields, Some((1000, 2000)))
+            .expect_err("zero bucket must be rejected");
+        assert!(error.contains("bucket_secs must be positive"));
+
+        let window = HistoryWindow {
+            range_secs: 0,
+            offset: 0,
+            explicit_window: Some((1000, 2000)),
+        };
+        let tariff = crate::settings::TariffConfig::flat(0.25);
+        let error = db
+            .query_cost_series(&window, -1, "today_import_kwh", &tariff, 0.25, 0.0)
+            .expect_err("negative bucket must be rejected");
+        assert!(error.contains("bucket_secs must be positive"));
+        let error = db
+            .query_cost_breakdown(&window, 0, "today_import_kwh", &tariff, 0.25, 0.0)
+            .expect_err("zero cost bucket must be rejected");
+        assert!(error.contains("bucket_secs must be positive"));
+
+        let error = db
+            .query_octopus_consumption(1000, 2000, 0)
+            .expect_err("zero Octopus bucket must be rejected");
+        assert!(error.contains("bucket_secs must be positive"));
+    }
+
     /// Local-midnight unix seconds for a `YYYY-MM-DD` local date, so tests
     /// can build calendar-aligned windows without hardcoding offsets.
     fn local_midnight_of(date: chrono::NaiveDate) -> i64 {
@@ -3156,6 +3435,14 @@ mod tests {
             .earliest()
             .unwrap()
             .timestamp()
+    }
+
+    #[test]
+    fn local_midnight_skipped_by_timezone_returns_an_error() {
+        let skipped = chrono::NaiveDate::from_ymd_opt(2011, 12, 30).unwrap();
+        let error = local_midnight_timestamp_in(skipped, &chrono_tz::Pacific::Apia)
+            .expect_err("Apia skipped this local date");
+        assert!(error.contains("no midnight"), "got: {error}");
     }
 
     #[test]
@@ -5231,7 +5518,7 @@ mod tests {
     fn reconstruct_solar_kwh_fixes_stuck_baseline() {
         let db = test_db();
 
-        // Fixed UTC day in seconds (2026-06-19)
+        // Fixed UTC day in seconds (2024-03-13).
         let midnight: i64 = 1710288000;
 
         // Insert readings from 06:00 to 18:00 at 5-minute intervals
@@ -5275,7 +5562,7 @@ mod tests {
 
         // Run reconstruction directly
         let conn = db.conn.lock().unwrap();
-        let count = HistoryDb::reconstruct_solar_kwh(&conn).unwrap();
+        let count = HistoryDb::reconstruct_solar_kwh_with_timezone(&conn, &chrono::Utc).unwrap();
         drop(conn);
 
         // All 144 rows should be processed (one per row with solar_power > 0).
@@ -5408,6 +5695,41 @@ mod tests {
             "second row should be ~1.6 kWh (recalculated from power), got {}",
             val2
         );
+    }
+
+    #[test]
+    fn reconstruct_solar_kwh_preserves_night_rows_across_retries() {
+        let db = test_db();
+        let day = 1_750_000_000i64;
+        let day_row = make_snapshot(day, 50, 500);
+        let mut night_row = make_snapshot(day + 8 * 3600, 50, 0);
+        night_row.today_solar_kwh = 4.2;
+        db.insert_reading(&day_row);
+        db.insert_reading(&night_row);
+
+        let expected_timestamps = vec![day, day + 8 * 3600];
+        for _ in 0..2 {
+            let conn = db.conn.lock().unwrap();
+            HistoryDb::reconstruct_solar_kwh(&conn).expect("solar reconstruction");
+        }
+
+        let conn = db.conn.lock().unwrap();
+        let actual_timestamps: Vec<i64> = conn
+            .prepare("SELECT timestamp FROM readings ORDER BY timestamp")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(actual_timestamps, expected_timestamps);
+        let night_kwh: f64 = conn
+            .query_row(
+                "SELECT today_solar_kwh FROM readings WHERE timestamp = ?1",
+                [day + 8 * 3600],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((night_kwh - 4.2).abs() < 1e-5);
     }
 
     /// Reproduce the user's exact production data to verify the new
@@ -6149,6 +6471,85 @@ mod tests {
         drop(conn);
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_migration_ignores_stale_partial_repair_table() {
+        let dir = unique_test_dir("givenergy-repair-stale");
+        let path = dir.join("history.db");
+
+        // Create the current schema and complete the normal migrations once.
+        drop(HistoryDb::open(&path).unwrap());
+
+        // Simulate a process dying after creating a repair table but before
+        // applying its result. The stale table deliberately contains a bad
+        // replacement value for the live row.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM meta WHERE key = 'repair_v2_done';
+                 INSERT OR REPLACE INTO meta (key, value) VALUES ('repair_v3_done', '1');
+                 INSERT INTO readings (timestamp, today_import_kwh) VALUES (1000, 2.0);
+                 CREATE TABLE _repair_today_import_kwh (
+                     timestamp INTEGER PRIMARY KEY,
+                     orig REAL,
+                     repaired REAL
+                 );
+                 INSERT INTO _repair_today_import_kwh (timestamp, orig, repaired)
+                 VALUES (1000, 2.0, 99.0);",
+            )
+            .unwrap();
+        }
+
+        let db = HistoryDb::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let value: f64 = conn
+            .query_row(
+                "SELECT today_import_kwh FROM readings WHERE timestamp = 1000",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (value - 2.0).abs() < 1e-9,
+            "stale repair leaked into data: {value}"
+        );
+    }
+
+    #[test]
+    fn repair_backup_includes_uncheckpointed_wal_data() {
+        let dir = unique_test_dir("givenergy-repair-wal");
+        let path = dir.join("history.db");
+        drop(HistoryDb::open(&path).unwrap());
+
+        // Keep the writer connection open while HistoryDb::open creates the
+        // repair backup. The inserted row therefore remains in WAL at the
+        // point a raw file copy would be taken.
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 DELETE FROM meta WHERE key = 'repair_v2_done';
+                 INSERT INTO readings (timestamp, today_import_kwh) VALUES (2000, 7.5);",
+            )
+            .unwrap();
+
+        drop(HistoryDb::open(&path).unwrap());
+        drop(writer);
+
+        let backup_path = path.with_extension("db.bak");
+        let backup = Connection::open(&backup_path).unwrap();
+        let value: f64 = backup
+            .query_row(
+                "SELECT today_import_kwh FROM readings WHERE timestamp = 2000",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (value - 7.5).abs() < 1e-9,
+            "WAL row missing from backup: {value}"
+        );
     }
 
     // ==================================================================

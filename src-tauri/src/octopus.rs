@@ -27,6 +27,17 @@ const RECENT_REFRESH_DAYS: i64 = 7;
 const BACKFILL_CHUNK_DAYS: i64 = 90;
 const SYNC_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_OCTOPUS_PAGES: usize = 1000;
+
+async fn history_db_blocking<T, F>(db: Arc<HistoryDb>, operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&HistoryDb) -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || operation(&db))
+        .await
+        .map_err(|error| format!("history database worker failed: {error}"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OctopusState {
@@ -244,6 +255,27 @@ fn validated_next_url(
     }
 }
 
+fn validated_next_page(
+    next: Option<String>,
+    allowed_prefix: &str,
+    current_url: &str,
+    pages_fetched: usize,
+    seen_urls: &std::collections::HashSet<String>,
+) -> Result<Option<String>, String> {
+    let Some(next) = validated_next_url(next, allowed_prefix)? else {
+        return Ok(None);
+    };
+    if pages_fetched >= MAX_OCTOPUS_PAGES {
+        return Err(format!(
+            "Octopus pagination exceeded the maximum of {MAX_OCTOPUS_PAGES} pages"
+        ));
+    }
+    if next == current_url || seen_urls.contains(&next) {
+        return Err("Octopus pagination contains a cycle".to_string());
+    }
+    Ok(Some(next))
+}
+
 fn http_get_json(url: String, api_key: String) -> Result<Value, String> {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(HTTP_TIMEOUT))
@@ -296,9 +328,20 @@ async fn fetch_window(
         encode(&to.to_rfc3339())
     );
     let mut rows = Vec::new();
+    let mut pages_fetched = 0;
+    let mut seen_urls = std::collections::HashSet::new();
     loop {
+        if pages_fetched >= MAX_OCTOPUS_PAGES {
+            return Err(format!(
+                "Octopus pagination exceeded the maximum of {MAX_OCTOPUS_PAGES} pages"
+            ));
+        }
+        if !seen_urls.insert(url.clone()) {
+            return Err("Octopus pagination contains a cycle".to_string());
+        }
+        pages_fetched += 1;
         let page: ConsumptionPage =
-            serde_json::from_value(get_json(url, settings.octopus_api_key.clone()).await?)
+            serde_json::from_value(get_json(url.clone(), settings.octopus_api_key.clone()).await?)
                 .map_err(|e| format!("invalid Octopus consumption response: {e}"))?;
         for item in page.results {
             if !item.consumption.is_finite() || item.consumption < 0.0 {
@@ -313,7 +356,13 @@ async fn fetch_window(
                 consumption: item.consumption,
             });
         }
-        match validated_next_url(page.next, &allowed_page_prefix)? {
+        match validated_next_page(
+            page.next,
+            &allowed_page_prefix,
+            &url,
+            pages_fetched,
+            &seen_urls,
+        )? {
             Some(next) => url = next,
             None => break,
         }
@@ -405,12 +454,29 @@ async fn fetch_tariff_prices(
         encode(&to.to_rfc3339()),
     );
     let mut all_prices: Vec<PriceResult> = Vec::new();
+    let mut pages_fetched = 0;
+    let mut seen_urls = std::collections::HashSet::new();
     loop {
+        if pages_fetched >= MAX_OCTOPUS_PAGES {
+            return Err(format!(
+                "Octopus pagination exceeded the maximum of {MAX_OCTOPUS_PAGES} pages"
+            ));
+        }
+        if !seen_urls.insert(url.clone()) {
+            return Err("Octopus pagination contains a cycle".to_string());
+        }
+        pages_fetched += 1;
         let page: PricePage =
-            serde_json::from_value(get_json(url, settings.octopus_api_key.clone()).await?)
+            serde_json::from_value(get_json(url.clone(), settings.octopus_api_key.clone()).await?)
                 .map_err(|e| format!("invalid Octopus tariff response: {e}"))?;
         all_prices.extend(page.results);
-        match validated_next_url(page.next, &allowed_page_prefix)? {
+        match validated_next_page(
+            page.next,
+            &allowed_page_prefix,
+            &url,
+            pages_fetched,
+            &seen_urls,
+        )? {
             Some(next) => url = next,
             None => break,
         }
@@ -488,7 +554,7 @@ fn select_tariff_rows(
 
 async fn sync_tariffs(
     settings: &Settings,
-    db: &HistoryDb,
+    db: Arc<HistoryDb>,
     streams: &[Stream],
     now: i64,
 ) -> (usize, Option<String>) {
@@ -505,20 +571,48 @@ async fn sync_tariffs(
                 continue;
             }
             for rate_type in tariff_rate_types(&agreement.tariff_code) {
-                let already_imported = db.has_octopus_tariff_prices(
-                    &stream.kind,
-                    &stream.meter_point,
-                    &agreement.tariff_code,
-                    rate_type,
-                );
-                let refresh_from = already_imported.then_some(now - RECENT_REFRESH_DAYS * 86400);
-                match fetch_tariff_prices(settings, stream, agreement, rate_type, now, refresh_from)
-                    .await
+                let meter_kind = stream.kind.clone();
+                let meter_point = stream.meter_point.clone();
+                let tariff_code = agreement.tariff_code.clone();
+                let rate_type = rate_type.to_string();
+                let lookup_rate_type = rate_type.clone();
+                let already_imported = match history_db_blocking(db.clone(), move |db| {
+                    db.has_octopus_tariff_prices(
+                        &meter_kind,
+                        &meter_point,
+                        &tariff_code,
+                        &lookup_rate_type,
+                    )
+                })
+                .await
                 {
-                    Ok(rows) => match db.upsert_octopus_tariff_prices(&rows) {
-                        Ok(count) => stored += count,
-                        Err(error) => errors.push(error),
-                    },
+                    Ok(already_imported) => already_imported,
+                    Err(error) => {
+                        errors.push(error);
+                        continue;
+                    }
+                };
+                let refresh_from = already_imported.then_some(now - RECENT_REFRESH_DAYS * 86400);
+                match fetch_tariff_prices(
+                    settings,
+                    stream,
+                    agreement,
+                    &rate_type,
+                    now,
+                    refresh_from,
+                )
+                .await
+                {
+                    Ok(rows) => {
+                        let result = history_db_blocking(db.clone(), move |db| {
+                            db.upsert_octopus_tariff_prices(&rows)
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(count)) => stored += count,
+                            Ok(Err(error)) | Err(error) => errors.push(error),
+                        }
+                    }
                     Err(error) => errors.push(format!("{}: {error}", agreement.tariff_code)),
                 }
             }
@@ -540,49 +634,162 @@ async fn sync_tariffs(
 
 async fn sync_recent(
     settings: &Settings,
-    db: &HistoryDb,
+    db: Arc<HistoryDb>,
     stream: &Stream,
     now: i64,
 ) -> Result<u64, String> {
-    let cursor = db.octopus_sync_cursor(&stream.key());
-    let days = if cursor.is_some() {
+    let sync_cursor_key = format!("octopus_forward_after:{}", stream.key());
+    let stream_key = stream.key();
+    let backfill_cursor = history_db_blocking(db.clone(), {
+        let stream_key = stream_key.clone();
+        move |db| db.octopus_sync_cursor(&stream_key)
+    })
+    .await?;
+    let days = if backfill_cursor.is_some() {
         RECENT_REFRESH_DAYS
     } else {
         RECENT_INITIAL_DAYS
     };
     let recent_start = (now - days * 86400).max(stream.earliest);
-    let rows = fetch_window(settings, stream, recent_start, now).await?;
-    let imported = db.upsert_octopus_consumption(&rows, Utc::now().timestamp())? as u64;
-    if cursor.is_none() {
-        db.set_octopus_sync_cursor(&stream.key(), recent_start, recent_start <= stream.earliest)?;
+    // The seven-day refresh window is an optimisation, not a completeness
+    // boundary. Resume from the latest known contiguous interval whenever a
+    // long outage put the supplier data further behind it.
+    let forward_cursor = history_db_blocking(db.clone(), {
+        let sync_cursor_key = sync_cursor_key.clone();
+        move |db| db.get_meta_value(&sync_cursor_key)
+    })
+    .await?
+    .and_then(|value| value.parse::<i64>().ok());
+    let forward_cursor = match forward_cursor {
+        Some(cursor) => Some(cursor),
+        None => {
+            // Databases created before forward-cursor metadata have no stored
+            // resume point. Seed from the latest stored interval end so the
+            // forward sync fills the hole between the completed backfill and
+            // the rolling refresh window; refetching from the stream's lower
+            // bound instead would re-pull the whole history (and can exceed
+            // the pagination cap). Legacy interior gaps are the backfill's
+            // job: the backfill cursor only reports complete once it has
+            // walked to the stream's lower bound.
+            history_db_blocking(db.clone(), {
+                let kind = stream.kind.clone();
+                let meter_point = stream.meter_point.clone();
+                let serial = stream.serial.clone();
+                move |db| db.latest_octopus_interval_end(&kind, &meter_point, &serial)
+            })
+            .await?
+        }
+    };
+    let fetch_start = forward_cursor
+        .map(|cursor| cursor.min(recent_start))
+        .unwrap_or(recent_start);
+    let rows = fetch_window(settings, stream, fetch_start, now).await?;
+    let imported = history_db_blocking(db.clone(), move |db| {
+        db.upsert_octopus_consumption(&rows, Utc::now().timestamp())
+    })
+    .await?? as u64;
+    if backfill_cursor.is_none() {
+        let stream_key = stream_key.clone();
+        let stream_earliest = stream.earliest;
+        history_db_blocking(db.clone(), move |db| {
+            db.set_octopus_sync_cursor(&stream_key, recent_start, recent_start <= stream_earliest)
+        })
+        .await??;
     }
+
+    let next_cursor = match forward_cursor {
+        Some(cursor) => history_db_blocking(db.clone(), {
+            let kind = stream.kind.clone();
+            let meter_point = stream.meter_point.clone();
+            let serial = stream.serial.clone();
+            move |db| db.octopus_contiguous_interval_end(&kind, &meter_point, &serial, cursor, now)
+        })
+        .await?
+        .unwrap_or(cursor),
+        None => {
+            let kind = stream.kind.clone();
+            let meter_point = stream.meter_point.clone();
+            let serial = stream.serial.clone();
+            history_db_blocking(db.clone(), move |db| {
+                db.latest_octopus_interval_end(&kind, &meter_point, &serial)
+            })
+            .await?
+            .unwrap_or(fetch_start)
+        }
+    };
+    history_db_blocking(db, move |db| {
+        db.set_meta_value(&sync_cursor_key, &next_cursor.to_string())
+    })
+    .await??;
     Ok(imported)
 }
 
 async fn backfill_stream(
     settings: &Settings,
-    db: &HistoryDb,
+    db: Arc<HistoryDb>,
     stream: &Stream,
 ) -> Result<(u64, bool), String> {
     let key = stream.key();
-    let Some((mut before, mut complete)) = db.octopus_sync_cursor(&key) else {
+    let cursor = history_db_blocking(db.clone(), {
+        let key = key.clone();
+        move |db| db.octopus_sync_cursor(&key)
+    })
+    .await?;
+    let Some((mut before, mut complete)) = cursor else {
         return Err(format!("missing sync cursor for {key}"));
     };
     let mut imported = 0u64;
     while !complete && before > stream.earliest {
         let start = (before - BACKFILL_CHUNK_DAYS * 86400).max(stream.earliest);
         let rows = fetch_window(settings, stream, start, before).await?;
-        imported += db.upsert_octopus_consumption(&rows, Utc::now().timestamp())? as u64;
+        imported += history_db_blocking(db.clone(), move |db| {
+            db.upsert_octopus_consumption(&rows, Utc::now().timestamp())
+        })
+        .await?? as u64;
         before = start;
         complete = before <= stream.earliest;
-        db.set_octopus_sync_cursor(&key, before, complete)?;
+        let key_for_update = key.clone();
+        history_db_blocking(db.clone(), move |db| {
+            db.set_octopus_sync_cursor(&key_for_update, before, complete)
+        })
+        .await??;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
     Ok((imported, complete))
 }
 
+async fn sync_recent_streams(
+    settings: &Settings,
+    db: Arc<HistoryDb>,
+    streams: &[Stream],
+    now: i64,
+) -> (u64, Vec<String>) {
+    let mut imported = 0u64;
+    let mut errors = Vec::new();
+    for stream in streams {
+        match sync_recent(settings, db.clone(), stream, now).await {
+            Ok(count) => imported += count,
+            Err(error) => errors.push(format!("{} recent sync: {error}", stream.key())),
+        }
+    }
+    (imported, errors)
+}
+
+fn summarize_sync_errors(errors: Vec<String>) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+    let total = errors.len();
+    let preview = errors.into_iter().take(3).collect::<Vec<_>>().join("; ");
+    Some(if total > 3 {
+        format!("{preview}; and {} more sync error(s)", total - 3)
+    } else {
+        preview
+    })
+}
+
 async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
-    let settings = Settings::load();
+    let settings = Settings::load_async().await;
     if !configured(&settings) {
         return Err("Octopus integration is not fully configured".to_string());
     }
@@ -608,18 +815,31 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
             return Err("Octopus account has no active electricity or gas meters".to_string());
         }
         let mut imported = 0u64;
+        let mut sync_errors = Vec::new();
         // Fetch the recent window for every stream first. Users therefore see
         // import, export and gas graphs quickly even when a multi-year
         // backfill takes much longer to finish.
-        for stream in &streams {
-            imported += sync_recent(&settings, &db, stream, now).await?;
+        let (recent_imported, recent_errors) =
+            sync_recent_streams(&settings, db.clone(), &streams, now).await;
+        imported += recent_imported;
+        sync_errors.extend(recent_errors);
+        let (tariff_prices, tariff_error) =
+            sync_tariffs(&settings, db.clone(), &streams, now).await;
+        if let Some(error) = &tariff_error {
+            sync_errors.push(format!("tariff sync: {error}"));
         }
-        let (tariff_prices, tariff_error) = sync_tariffs(&settings, &db, &streams, now).await;
         let mut all_complete = true;
         for stream in &streams {
-            let (count, complete) = backfill_stream(&settings, &db, stream).await?;
-            imported += count;
-            all_complete &= complete;
+            match backfill_stream(&settings, db.clone(), stream).await {
+                Ok((count, complete)) => {
+                    imported += count;
+                    all_complete &= complete;
+                }
+                Err(error) => {
+                    all_complete = false;
+                    sync_errors.push(format!("{} backfill: {error}", stream.key()));
+                }
+            }
         }
         Ok::<_, String>((
             streams.len(),
@@ -627,6 +847,7 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
             all_complete,
             tariff_prices,
             tariff_error,
+            summarize_sync_errors(sync_errors),
         ))
     }
     .await;
@@ -634,15 +855,18 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
     let mut status = state.octopus.lock().await;
     status.syncing = false;
     match result {
-        Ok((streams, imported, complete, tariff_prices, tariff_error)) => {
+        Ok((streams, imported, complete, tariff_prices, tariff_error, sync_error)) => {
             status.last_sync_at = Some(Utc::now());
-            status.last_error = None;
+            status.last_error = sync_error.clone();
             status.discovered_streams = streams;
             status.imported_intervals = status.imported_intervals.saturating_add(imported);
             status.backfill_complete = complete;
             status.tariff_prices = tariff_prices;
             status.last_tariff_error = tariff_error;
-            Ok(())
+            match sync_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
         }
         Err(error) => {
             status.last_error = Some(error.clone());
@@ -657,7 +881,7 @@ pub async fn run_octopus_loop(state: Arc<AppState>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        if configured(&Settings::load()) {
+        if configured(&Settings::load_async().await) {
             if let Err(error) = run_sync(state.clone()).await {
                 tracing::warn!("Octopus sync failed: {error}");
             }
@@ -666,14 +890,14 @@ pub async fn run_octopus_loop(state: Arc<AppState>) {
 }
 
 pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let settings = Settings::load();
+    let settings = Settings::load_async().await;
     let status = state.octopus.lock().await.clone();
-    let bounds = state
-        .history
-        .lock()
-        .await
-        .clone()
-        .and_then(|db| db.octopus_bounds());
+    let bounds = match state.history.lock().await.clone() {
+        Some(db) => history_db_blocking(db, |db| db.octopus_bounds())
+            .await
+            .unwrap_or(None),
+        None => None,
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -687,7 +911,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
 }
 
 pub async fn start_sync(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    if !configured(&Settings::load()) {
+    if !configured(&Settings::load_async().await) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"ok": false, "error": "Octopus integration is not fully configured"})),
@@ -720,7 +944,7 @@ pub async fn get_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
 ) -> (StatusCode, Json<Value>) {
-    if !configured(&Settings::load()) {
+    if !configured(&Settings::load_async().await) {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"ok": false, "error": "Octopus integration is not configured"})),
@@ -734,12 +958,12 @@ pub async fn get_history(
         "6m" => (180 * 86400, 86400),
         "1y" => (365 * 86400, 86400),
         "all" => {
-            let bounds = state
-                .history
-                .lock()
-                .await
-                .clone()
-                .and_then(|db| db.octopus_bounds());
+            let bounds = match state.history.lock().await.clone() {
+                Some(db) => history_db_blocking(db, |db| db.octopus_bounds())
+                    .await
+                    .unwrap_or(None),
+                None => None,
+            };
             let start = bounds.map(|b| b.0).unwrap_or(now - 365 * 86400);
             (now - start, 30 * 86400)
         }
@@ -778,7 +1002,7 @@ pub async fn get_comparison(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
 ) -> (StatusCode, Json<Value>) {
-    if !configured(&Settings::load()) {
+    if !configured(&Settings::load_async().await) {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"ok": false, "error": "Octopus integration is not configured"})),
@@ -786,12 +1010,12 @@ pub async fn get_comparison(
     }
     let now = Utc::now().timestamp();
     let offset = query.offset.unwrap_or(0).max(0);
-    let bounds = state
-        .history
-        .lock()
-        .await
-        .clone()
-        .and_then(|db| db.octopus_bounds());
+    let bounds = match state.history.lock().await.clone() {
+        Some(db) => history_db_blocking(db, |db| db.octopus_bounds())
+            .await
+            .unwrap_or(None),
+        None => None,
+    };
     let span = match query.range.as_deref().unwrap_or("30d") {
         "7d" => 7 * 86400,
         "30d" => 30 * 86400,
@@ -831,7 +1055,7 @@ pub async fn get_summary(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
 ) -> (StatusCode, Json<Value>) {
-    let settings = Settings::load();
+    let settings = Settings::load_async().await;
     if !configured(&settings) {
         return (
             StatusCode::NOT_FOUND,
@@ -840,12 +1064,12 @@ pub async fn get_summary(
     }
     let now = Utc::now().timestamp();
     let offset = query.offset.unwrap_or(0).max(0);
-    let bounds = state
-        .history
-        .lock()
-        .await
-        .clone()
-        .and_then(|db| db.octopus_bounds());
+    let bounds = match state.history.lock().await.clone() {
+        Some(db) => history_db_blocking(db, |db| db.octopus_bounds())
+            .await
+            .unwrap_or(None),
+        None => None,
+    };
     let span = match query.range.as_deref().unwrap_or("30d") {
         "7d" => 7 * 86400,
         "30d" => 30 * 86400,
@@ -985,6 +1209,10 @@ mod tests {
     fn direct_debit_price_has_priority_over_other_payment_methods() {
         assert!(payment_priority(Some("DIRECT_DEBIT")) > payment_priority(None));
         assert!(payment_priority(None) > payment_priority(Some("NON_DIRECT_DEBIT")));
+        assert_eq!(
+            payment_priority(Some("NON_DIRECT_DEBIT")),
+            payment_priority(Some("PREPAYMENT"))
+        );
     }
 
     #[tokio::test]
@@ -1040,6 +1268,29 @@ mod tests {
             .unwrap(),
             Some("https://api.octopus.energy/v1/next".to_string())
         );
+    }
+
+    #[test]
+    fn pagination_rejects_cycles_and_unbounded_page_chains() {
+        let prefix = "https://api.octopus.energy/";
+        let first = "https://api.octopus.energy/v1/page=1";
+        let mut seen = std::collections::HashSet::from([first.to_string()]);
+
+        let cycle =
+            validated_next_page(Some(first.to_string()), prefix, first, 1, &seen).unwrap_err();
+        assert!(cycle.contains("cycle"), "got: {cycle}");
+
+        let last_allowed = "https://api.octopus.energy/v1/page=1000";
+        seen.insert(last_allowed.to_string());
+        let too_many = validated_next_page(
+            Some("https://api.octopus.energy/v1/page=1001".to_string()),
+            prefix,
+            last_allowed,
+            MAX_OCTOPUS_PAGES,
+            &seen,
+        )
+        .unwrap_err();
+        assert!(too_many.contains("maximum"), "got: {too_many}");
     }
 
     #[test]
@@ -1389,6 +1640,7 @@ mod tests {
     /// never collide, and torn down via graceful shutdown on drop.
     struct MockOctopus {
         base_url: String,
+        requests: Arc<std::sync::Mutex<Vec<String>>>,
         _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
@@ -1399,9 +1651,14 @@ mod tests {
                 .expect("bind ephemeral port");
             let addr = listener.local_addr().expect("local addr");
             let routes = Arc::new(routes);
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen_requests = requests.clone();
             let app = Router::new().fallback(move |req: Request| {
                 let routes = routes.clone();
+                let seen_requests = seen_requests.clone();
                 async move {
+                    let uri = req.uri().to_string();
+                    seen_requests.lock().unwrap().push(uri.clone());
                     let path = req.uri().path();
                     for (needle, body) in routes.iter() {
                         if path.contains(needle) {
@@ -1421,8 +1678,13 @@ mod tests {
             });
             Self {
                 base_url: format!("http://{addr}"),
+                requests,
                 _shutdown: Some(shutdown_tx),
             }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
         }
     }
 
@@ -1525,7 +1787,7 @@ mod tests {
         }]);
 
         let now = 1_704_067_200_i64; // 2024-01-01T00:00:00Z
-        let (stored, error) = sync_tariffs(&settings, &db, &[stream], now).await;
+        let (stored, error) = sync_tariffs(&settings, db.clone(), &[stream], now).await;
         assert!(error.is_none(), "unexpected tariff sync error: {error:?}");
         assert!(
             stored >= 2,
@@ -1557,13 +1819,98 @@ mod tests {
         let stream = electricity_stream(vec![]);
 
         let now = 1_717_200_000_i64; // ~2024-06-01
-        let imported = sync_recent(&settings, &db, &stream, now).await.unwrap();
+        let imported = sync_recent(&settings, db.clone(), &stream, now)
+            .await
+            .unwrap();
         assert_eq!(imported, 1, "expected the one valid consumption row");
         // Fresh sync (no prior cursor): seeds cursor at recent_start and flags
         // completion relative to stream.earliest (0 here → not yet complete).
         let (cursor_before, complete) = db.octopus_sync_cursor(&stream.key()).unwrap();
         assert_eq!(cursor_before, now - RECENT_INITIAL_DAYS * 86400);
         assert!(!complete);
+    }
+
+    #[tokio::test]
+    async fn sync_recent_fetches_a_gap_older_than_the_recent_window() {
+        let page = r#"{"results":[
+            {"consumption":0.5,"interval_start":"2024-05-13T00:30:00Z","interval_end":"2024-05-13T01:00:00Z"}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![("consumption", page)]).await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let stream = electricity_stream(vec![]);
+        let now = 1_715_616_000_i64; // 2024-05-13T16:00:00Z
+        let missing_from = now - 7 * 86400 - 13 * 86400;
+        let prior_end = missing_from;
+        db.upsert_octopus_consumption(
+            &[OctopusConsumptionRow {
+                meter_kind: stream.kind.clone(),
+                meter_point: stream.meter_point.clone(),
+                meter_serial: stream.serial.clone(),
+                interval_start: prior_end - 1800,
+                interval_end: prior_end,
+                consumption: 0.25,
+            }],
+            now,
+        )
+        .unwrap();
+        // The older backfill is complete, but the latest contiguous forward
+        // interval is still before the seven-day refresh window.
+        db.set_octopus_sync_cursor(&stream.key(), stream.earliest, true)
+            .unwrap();
+
+        sync_recent(&settings, db.clone(), &stream, now)
+            .await
+            .unwrap();
+
+        let expected_from = DateTime::<Utc>::from_timestamp(prior_end, 0)
+            .unwrap()
+            .to_rfc3339();
+        let expected_from = encode(&expected_from);
+        let request = mock
+            .requests()
+            .into_iter()
+            .find(|uri| uri.contains("/consumption/"))
+            .expect("consumption request");
+        assert!(
+            request.contains(&format!("period_from={expected_from}")),
+            "expected sync to resume at {prior_end}, got {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_stream_sync_continues_after_one_stream_fails() {
+        let page = r#"{"results":[
+            {"consumption":0.5,"interval_start":"2024-06-01T00:00:00Z","interval_end":"2024-06-01T00:30:00Z"}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![("1200000012345", page)]).await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let mut failed_stream = electricity_stream(vec![]);
+        failed_stream.meter_point = "missing-stream".to_string();
+        let successful_stream = electricity_stream(vec![]);
+
+        let (imported, errors) = sync_recent_streams(
+            &settings,
+            db.clone(),
+            &[failed_stream, successful_stream.clone()],
+            1_717_200_000,
+        )
+        .await;
+
+        assert_eq!(imported, 1, "the later stream should still be imported");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("missing-stream"), "got: {:?}", errors);
+        assert_eq!(
+            db.latest_octopus_interval_end(
+                &successful_stream.kind,
+                &successful_stream.meter_point,
+                &successful_stream.serial,
+            ),
+            Some(1_717_201_800)
+        );
     }
 
     #[tokio::test]

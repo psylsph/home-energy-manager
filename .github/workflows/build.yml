@@ -189,14 +189,20 @@ jobs:
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
         run: |
           $version = (Get-Content "${{ github.workspace }}\package.json" | ConvertFrom-Json).version
-          python "${{ github.workspace }}\scripts\prepare-msix.py" `
+          $msixOutputLines = python "${{ github.workspace }}\scripts\prepare-msix.py" `
             --target "${{ matrix.target }}" `
             --version $version `
             --repo-root "${{ github.workspace }}"
+          $msixOutputLine = $msixOutputLines |
+            Where-Object { $_ -like "MSIX_OUTPUT=*" } |
+            Select-Object -First 1
+          if (-not $msixOutputLine) {
+            throw "prepare-msix.py did not report an output path"
+          }
 
           $bundleDir = "${{ github.workspace }}\src-tauri\target\${{ matrix.target }}\release\bundle\msix"
           $stageDir = Join-Path $bundleDir "stage"
-          $output = Join-Path $bundleDir "HomeEnergyManager_${version}.0_x64.msix"
+          $output = $msixOutputLine.Substring("MSIX_OUTPUT=".Length)
           winapp pack $stageDir `
             --manifest (Join-Path $stageDir "Package.appxmanifest") `
             --executable "givenergy-local.exe" `

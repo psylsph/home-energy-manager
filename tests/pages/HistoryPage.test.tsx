@@ -55,6 +55,8 @@ globalThis.ResizeObserver = class {
 };
 
 import HistoryPage from '../../src/pages/HistoryPage';
+import { computeTempDifferential, computeBatteryExternalDifferential } from '../../src/lib/temperatureChart';
+import { buildHistoryCsv } from '../../src/lib/historyCsv';
 import { useInverterStore } from '../../src/store/useInverterStore';
 
 function silenceConsoleError() {
@@ -85,6 +87,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     cleanup();
   });
@@ -234,6 +237,22 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
       // Disabled at 0 — clicking does nothing.
       expect(newerBtn.hasAttribute('disabled')).toBe(true);
     });
+
+    it('compares date selections with the picker value after paging', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-15T12:00:00'));
+      useInverterStore.setState({ chartRange: 'today' });
+      render(<HistoryPage />);
+
+      const picker = screen.getByLabelText('Select period date') as HTMLInputElement;
+      const blurSpy = vi.spyOn(picker, 'blur');
+      fireEvent.click(screen.getByRole('button', { name: /Older/i }));
+      expect(picker.value).toBe('2026-01-14');
+
+      fireEvent.change(picker, { target: { value: '2025-12-15' } });
+
+      expect(blurSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   // Issue #199 follow-up: on phones the nav row's two export buttons would
@@ -322,6 +341,37 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
   });
 
   describe('CSV export', () => {
+    it('keeps every derived column when multiple preprocessors are required', () => {
+      const timestamp = 1_700_000_000_000;
+      const charts = [
+        {
+          key: 'temperature-difference',
+          fields: [{ field: '_temp_diff', color: '#A78BFA' }],
+          unit: '°C',
+          requires: ['battery_temperature', 'inverter_temperature'],
+          preprocess: computeTempDifferential,
+        },
+        {
+          key: 'battery-outdoor-difference',
+          fields: [{ field: '_batt_ext_diff', color: '#F472B6' }],
+          unit: '°C',
+          requires: ['battery_temperature', 'external_temperature'],
+          preprocess: computeBatteryExternalDifferential,
+        },
+      ];
+      const csv = buildHistoryCsv(charts, {
+        battery_temperature: [{ t: timestamp, v: 25 }],
+        inverter_temperature: [{ t: timestamp, v: 40 }],
+        external_temperature: [{ t: timestamp, v: 10 }],
+      });
+
+      const [header, row] = csv.split('\n');
+      expect(header).toContain('_temp_diff');
+      expect(header).toContain('_batt_ext_diff');
+      expect(row).toContain('-15');
+      expect(row).toContain('15');
+    });
+
     it('CSV button is disabled when there is no data', async () => {
       render(<HistoryPage />);
       await waitFor(() => {

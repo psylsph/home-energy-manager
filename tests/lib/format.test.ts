@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp, finiteAbs, formatCurrent, formatPower, formatSessionEnergy } from '../../src/lib/format';
+import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp, finiteAbs, formatCurrent, formatPower, formatSessionEnergy, formatPercent } from '../../src/lib/format';
 
 /**
  * Tests for `formatOperatingHours` — the helper that turns a raw
@@ -289,6 +289,10 @@ describe('formatTimestamp', () => {
     expect(formatTimestamp(Infinity)).toBe('—');
   });
 
+  it('returns em-dash for a finite timestamp outside Date range', () => {
+    expect(formatTimestamp(Number.MAX_SAFE_INTEGER)).toBe('—');
+  });
+
   it('formats negative epoch ms as a valid time string (just before 1970)', () => {
     // -1000 ms = 1969-12-31T23:59:59.000Z — still a valid time
     const result = formatTimestamp(-1000);
@@ -359,6 +363,14 @@ describe('finiteAbs', () => {
       // Same trap for battery_power if it ever arrives null.
       expect(formatPower(finiteAbs(null))).toBe('—');
     });
+  });
+});
+
+describe('formatPercent', () => {
+  it('renders an em dash for non-finite values', () => {
+    expect(formatPercent(NaN)).toBe('—');
+    expect(formatPercent(Infinity)).toBe('—');
+    expect(formatPercent(-Infinity)).toBe('—');
   });
 });
 

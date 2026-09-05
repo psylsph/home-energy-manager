@@ -26,6 +26,8 @@ vi.mock('../../src/lib/api', () => ({
 const { fullPayload, planPayload } = vi.hoisted(() => {
   const fullPayload = () => ({
     generated_at: 1_700_000_000,
+    forecast_fetched_at: 1_699_996_400,
+    forecast_age_seconds: 3_600,
     status: [],
     performance_ratio: 0.8,
     performance_ratio_days: 12,
@@ -599,6 +601,73 @@ describe('ForecastPage plan card', () => {
     expect(apply).not.toBeDisabled();
   });
 
+  it('clears the forecast slot when timed charge enabling fails after slot write', async () => {
+    useInverterStore.setState({ snapshot: null } as never);
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    apiPostMocked
+      .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValueOnce(new Error('timed charge rejected'));
+
+    render(<ForecastPage />);
+    const apply = await screen.findByTestId('forecast-plan-apply');
+    fireEvent.click(apply);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('timed charge rejected');
+    await waitFor(() => {
+      const rollback = apiPostMocked.mock.calls.find(
+        (call) => call[0] === '/api/control/charge-slot'
+          && (call[1] as { enabled?: boolean }).enabled === false,
+      );
+      expect(rollback).toBeTruthy();
+    });
+  });
+
+  it('re-enables Apply for a new plan but keeps an unchanged plan protected', async () => {
+    useInverterStore.setState({ snapshot: null } as never);
+    const planA = planPayload('charge');
+    const planB = planPayload('charge');
+    const planBRecommendation = (planB.data as {
+      recommendation: { window: { start: string } };
+    }).recommendation;
+    planBRecommendation.window.start = '04:00';
+
+    let planRequest = 0;
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') {
+        const response = [planA, planB, planA][planRequest] ?? planA;
+        planRequest += 1;
+        return response;
+      }
+      return { ok: true, data: {} };
+    });
+
+    render(<ForecastPage />);
+    const apply = await screen.findByTestId('forecast-plan-apply');
+    fireEvent.click(apply);
+    await waitFor(() => expect(apply).toHaveTextContent('Applied ✓'));
+    expect(apply).toBeDisabled();
+
+    // A changed battery snapshot causes the page to fetch a materially new
+    // recommendation, which must be independently applicable.
+    useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 5000 } } as never);
+    await waitFor(() => expect(screen.getByTestId('forecast-plan').textContent).toMatch(/04:00/));
+    expect(apply).not.toBeDisabled();
+    expect(apply).toHaveTextContent('Apply — schedule charge slot');
+
+    // When the original recommendation comes back unchanged, its successful
+    // application is still remembered and duplicate writes stay blocked.
+    useInverterStore.setState({ snapshot: { soc: 52, max_battery_power_w: 5000 } } as never);
+    await waitFor(() => expect(planRequest).toBeGreaterThanOrEqual(3));
+    await waitFor(() => expect(screen.getByTestId('forecast-plan').textContent).toMatch(/02:00/));
+    expect(apply).toBeDisabled();
+    expect(apply).toHaveTextContent('Applied ✓');
+  });
+
   it('draws a dashed with-charge line on the Battery projection chart when the plan recommends a charge', async () => {
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/forecast') return { ok: true, data: fullPayload() };
@@ -1099,6 +1168,28 @@ describe('ForecastPage min SOC input', () => {
       expect(post?.[1]).toEqual({ forecast_min_soc_pct: 40 });
     });
   });
+
+  it('rejects a blank minimum SOC without posting or changing the floor', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_charge_needed');
+      if (path === '/api/settings') return { ok: true, data: { forecast_min_soc_pct: 20 } };
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const input = await screen.findByTestId('forecast-min-soc-input') as HTMLInputElement;
+    apiPostMocked.mockClear();
+
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-min-soc-error')).toHaveTextContent(/required/i);
+    });
+    expect(apiPostMocked).not.toHaveBeenCalled();
+    expect(input.value).toBe('20');
+    expect(document.activeElement).toBe(input);
+  });
 });
 
 describe('ForecastPage plan settings edits survive background refetches', () => {
@@ -1588,11 +1679,11 @@ describe('ForecastPage battery efficiencies', () => {
   // inputs hydrate as whole percents and save together on blur as 0–1
   // ratios. `backend` reflects POSTed settings so the post-save refetch
   // keeps the edited values, like the real resource.
-  const mockLoad = () => {
+  const mockLoad = (efficiencies = { charge: 0.9, discharge: 0.95 }) => {
     const backend: Record<string, unknown> = {
       forecast_min_soc_pct: 20,
-      forecast_charge_efficiency: 0.9,
-      forecast_discharge_efficiency: 0.95,
+      forecast_charge_efficiency: efficiencies.charge,
+      forecast_discharge_efficiency: efficiencies.discharge,
     };
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/forecast') return { ok: true, data: fullPayload() };
@@ -1671,6 +1762,28 @@ describe('ForecastPage battery efficiencies', () => {
     fireEvent.focus(charge);
     fireEvent.blur(charge);
     // Let any (wrong) save attempt flush before asserting none happened.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),
+    ).toBe(false);
+  });
+
+  it('does not re-save non-default hydrated efficiencies when blurred without edits', async () => {
+    mockLoad({ charge: 0.85, discharge: 0.92 });
+    render(<ForecastPage />);
+    const charge = (await screen.findByTestId(
+      'forecast-charge-eff-input',
+    )) as HTMLInputElement;
+    const discharge = screen.getByTestId('forecast-discharge-eff-input') as HTMLInputElement;
+    await waitFor(() => {
+      expect(charge.value).toBe('85');
+      expect(discharge.value).toBe('92');
+    });
+    apiPostMocked.mockClear();
+
+    fireEvent.focus(charge);
+    fireEvent.blur(charge);
+
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(
       apiPostMocked.mock.calls.some((c) => c[0] === '/api/settings'),

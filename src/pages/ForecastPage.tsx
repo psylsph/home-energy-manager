@@ -180,6 +180,13 @@ function ForecastApplyProgress() {
 type ForecastChargeSlot = NonNullable<PlanResponse['apply']>['charge_slot'];
 const FORECAST_CHARGE_CONFIRM_TIMEOUT_MS = 15_000;
 
+function forecastPlanIdentity(plan: PlanResponse): string {
+  // The recommendation is included alongside the write payload because the
+  // planner can materially change its advice even when a legacy backend has
+  // not changed every apply field yet.
+  return JSON.stringify({ recommendation: plan.recommendation, apply: plan.apply });
+}
+
 /** The Forecast page's three chart tabs, in tab-strip (and keyboard) order. */
 const CHART_TABS = [
   ['battery', 'Battery'],
@@ -283,6 +290,7 @@ export default function ForecastPage() {
   const [data, setData] = useState<ForecastData | null>(null);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [applyState, setApplyState] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
+  const [appliedPlanIdentity, setAppliedPlanIdentity] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -387,16 +395,16 @@ export default function ForecastPage() {
         if (settingsRes.data.forecast_min_soc_pct != null) {
           setMinSocPctInput(String(Math.round(settingsRes.data.forecast_min_soc_pct)));
         }
-        setChargeEffInput(
-          settingsRes.data.forecast_charge_efficiency != null
-            ? String(Math.round(settingsRes.data.forecast_charge_efficiency * 100))
-            : '90',
-        );
-        setDischargeEffInput(
-          settingsRes.data.forecast_discharge_efficiency != null
-            ? String(Math.round(settingsRes.data.forecast_discharge_efficiency * 100))
-            : '95',
-        );
+        const chargeEfficiencyPct = settingsRes.data.forecast_charge_efficiency != null
+          ? Math.round(settingsRes.data.forecast_charge_efficiency * 100)
+          : 90;
+        const dischargeEfficiencyPct = settingsRes.data.forecast_discharge_efficiency != null
+          ? Math.round(settingsRes.data.forecast_discharge_efficiency * 100)
+          : 95;
+        setChargeEffInput(String(chargeEfficiencyPct));
+        setChargeEffPct(chargeEfficiencyPct);
+        setDischargeEffInput(String(dischargeEfficiencyPct));
+        setDischargeEffPct(dischargeEfficiencyPct);
         setPlanAutoApplyLeadInput(
           String(settingsRes.data.forecast_plan_auto_apply_lead_minutes ?? 30),
         );
@@ -448,6 +456,12 @@ export default function ForecastPage() {
   }, [snapshot]);
 
   const saveMinSoc = async () => {
+    if (minSocPctInput.trim() === '') {
+      setMinSocPctInput(String(minSocPct));
+      setMinSocError('Min SOC is required');
+      window.setTimeout(() => document.getElementById('forecast-min-soc-input')?.focus(), 0);
+      return;
+    }
     const next = Number(minSocPctInput);
     if (!Number.isFinite(next)) {
       setMinSocError('Min SOC must be a number');
@@ -541,19 +555,51 @@ export default function ForecastPage() {
 
   const handleApply = async () => {
     if (!plan || !plan.apply) return;
+    const identity = forecastPlanIdentity(plan);
     const snapshotBeforeApply = useInverterStore.getState().snapshot;
     setApplyState('sending');
     setApplyError(null);
+    let chargeSlotWritten = false;
     try {
       await apiPost('/api/control/charge-slot', plan.apply.charge_slot);
+      chargeSlotWritten = true;
       await apiPost('/api/control/timed-charge', plan.apply.timed_charge);
       if (snapshotBeforeApply) {
         await waitForForecastChargeReadback(plan.apply.charge_slot, snapshotBeforeApply);
       }
+      setAppliedPlanIdentity(identity);
       setApplyState('done');
     } catch (e) {
+      const applyError = e instanceof Error ? e.message : 'Apply failed';
+      if (chargeSlotWritten) {
+        // The slot endpoint enables scheduled charging on single-phase
+        // models before the separate Timed Charge request. If that second
+        // request fails, undo the partial apply so a forecast failure cannot
+        // leave a charge window armed unexpectedly. Restore the previous
+        // state when a snapshot is available; a fresh page has no prior slot
+        // to restore, so clear the slot instead.
+        const previousSlot = snapshotBeforeApply?.charge_slots?.[plan.apply.charge_slot.slot - 1];
+        const rollbackSlot = previousSlot
+          ? { slot: plan.apply.charge_slot.slot, ...previousSlot }
+          : { ...plan.apply.charge_slot, enabled: false };
+        try {
+          await apiPost('/api/control/charge-slot', rollbackSlot);
+          if (snapshotBeforeApply) {
+            await apiPost('/api/control/timed-charge', {
+              enabled: snapshotBeforeApply.enable_charge,
+            });
+          }
+        } catch (rollbackError) {
+          const rollbackMessage = rollbackError instanceof Error
+            ? rollbackError.message
+            : 'unknown rollback error';
+          setApplyError(`${applyError} (rollback failed: ${rollbackMessage})`);
+          setApplyState('error');
+          return;
+        }
+      }
       setApplyState('error');
-      setApplyError(e instanceof Error ? e.message : 'Apply failed');
+      setApplyError(applyError);
     }
   };
 
@@ -570,6 +616,9 @@ export default function ForecastPage() {
   }
 
   const statusMessages = forecastStatusMessages(data.status);
+  const currentPlanIdentity = plan ? forecastPlanIdentity(plan) : null;
+  const currentPlanWasApplied = currentPlanIdentity !== null
+    && appliedPlanIdentity === currentPlanIdentity;
   const summary = tomorrowSummary(data);
   const solarChart = toSolarChartData(data.solar);
   // Charge window markers come first: the start marker's instant is also
@@ -875,13 +924,14 @@ export default function ForecastPage() {
                 type="button"
                 data-testid="forecast-plan-apply"
                 aria-busy={applyState === 'sending'}
-                disabled={applyState === 'sending' || applyState === 'done'}
+                disabled={applyState === 'sending' || currentPlanWasApplied}
                 onClick={() => void handleApply()}
                 className="px-3 py-1.5 rounded-md bg-accent text-accent-on text-sm font-medium hover:opacity-90 disabled:opacity-50"
               >
                 {applyState === 'idle' && 'Apply — schedule charge slot'}
                 {applyState === 'sending' && 'Applying…'}
-                {applyState === 'done' && 'Applied ✓'}
+                {applyState === 'done' && currentPlanWasApplied && 'Applied ✓'}
+                {applyState === 'done' && !currentPlanWasApplied && 'Apply — schedule charge slot'}
                 {applyState === 'error' && 'Retry Apply'}
               </button>
               {applyError && (

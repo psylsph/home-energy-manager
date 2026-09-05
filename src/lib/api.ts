@@ -15,15 +15,27 @@ function getServerPort(): string {
   return '7337';
 }
 
+function getBrowserOrigin(): string {
+  const protocol = window.location.protocol || 'http:';
+  const host = window.location.host || window.location.hostname;
+  return `${protocol}//${host}`;
+}
+
 export function getApiBase(): string {
   const port = getServerPort();
   if (isTauri) return `http://127.0.0.1:${port}`;
+  if (!window.location.port) return getBrowserOrigin();
   return `http://${window.location.hostname}:${port}`;
 }
 
 export function getWsUrl(): string {
   const port = getServerPort();
   if (isTauri) return `ws://127.0.0.1:${port}/ws`;
+  if (!window.location.port) {
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const host = window.location.host || window.location.hostname;
+    return `${protocol}://${host}/ws`;
+  }
   return `ws://${window.location.hostname}:${port}/ws`;
 }
 
@@ -63,8 +75,8 @@ async function parseApiResponse<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${getApiBase()}${path}`);
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(`${getApiBase()}${path}`, signal ? { signal } : undefined);
   return parseApiResponse<T>(res);
 }
 

@@ -28,6 +28,7 @@ describe('useInverterStore — under-tested actions', () => {
       evcHost: '',
       pendingDischargeSlots: {},
       connectedSince: null,
+      lastConnectedDurationSec: null,
       connectFailures: 0,
     });
     localStorage.clear();
@@ -245,6 +246,7 @@ describe('useInverterStore — setConnection edge cases', () => {
       connectionState: 'disconnected',
       connectedHost: null,
       connectedSince: null,
+      lastConnectedDurationSec: null,
       connectFailures: 0,
     });
     vi.useFakeTimers();

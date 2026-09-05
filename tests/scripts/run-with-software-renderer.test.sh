@@ -137,6 +137,23 @@ assert_eq "first argv"                       "--headless" "$(grep -F 'argv=--hea
 assert_eq "second argv"                      "--help"     "$(grep -F 'argv=--help' "$STAGE/record.out" | head -n1 | sed 's/^argv=//')"
 rm -rf "$STAGE"
 
+# Test 3b: the documented `--` separates wrapper options from binary options;
+# it must not be forwarded to givenergy-local.
+echo
+echo "3b. consumes the documented argument separator"
+STAGE="$(stage_fake_binary)"
+(
+  unset GDK_BACKEND XDG_SESSION_TYPE WEBKIT_DISABLE_DMABUF_RENDERER WEBKIT_DISABLE_COMPOSITING_MODE
+  PATH="$STAGE:$BIN_DIR" \
+    XDG_SESSION_TYPE=x11 \
+    GIVENERGY_LOCAL_RECORD="$STAGE/record.out" \
+    bash "$WRAPPER" -- --port 8080 >/dev/null 2>&1
+)
+assert_eq "separator is consumed" "2" "$(field "$STAGE/record.out" argv-count)"
+assert_eq "first argument after separator" "--port" "$(grep -F 'argv=--port' "$STAGE/record.out" | head -n1 | sed 's/^argv=//')"
+assert_eq "second argument after separator" "8080" "$(grep -F 'argv=8080' "$STAGE/record.out" | head -n1 | sed 's/^argv=//')"
+rm -rf "$STAGE"
+
 # Test 4: user override via the env flows through unchanged. The wrapper
 # uses ${VAR:-1}, which substitutes the default whenever the var is
 # unset OR empty. So to test pass-through we need an explicit non-empty

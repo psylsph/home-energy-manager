@@ -17,6 +17,7 @@ pub mod planner;
 pub mod refresh;
 pub mod simulate;
 pub mod solar;
+pub(crate) mod time_windows;
 
 use chrono::{DateTime, Datelike, Local, Timelike};
 
@@ -34,6 +35,10 @@ use crate::settings::Settings;
 /// horizon while staying far inside the free tier's fair-use envelope.
 pub const SOLAR_FORECAST_FETCH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(3 * 60 * 60);
+
+/// A forecast is allowed to survive one missed three-hour refresh, but an
+/// older projection must not be used to recommend a battery-control action.
+pub const SOLAR_FORECAST_MAX_AGE_SECS: i64 = 6 * 60 * 60;
 
 /// How far back the consumption profile fit reads counter samples for.
 const CONSUMPTION_WINDOW_DAYS: i64 = 28;
@@ -117,6 +122,11 @@ pub struct ForecastBattery {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ForecastPayload {
     pub generated_at: i64,
+    /// Fetch time of the newest stored solar forecast sample.
+    pub forecast_fetched_at: Option<i64>,
+    /// Signed age of the newest forecast fetch relative to `generated_at`;
+    /// negative values indicate a clock-skewed future timestamp.
+    pub forecast_age_seconds: Option<i64>,
     pub status: Vec<String>,
     pub performance_ratio: Option<f64>,
     pub performance_ratio_days: Option<u32>,
@@ -147,6 +157,13 @@ pub struct ForecastInputs<'a> {
     pub weather_enabled: bool,
     pub weather_coords: Option<(f64, f64)>,
     pub now: DateTime<Local>,
+}
+
+fn current_local_hour_start_ts(now: DateTime<Local>) -> i64 {
+    (now - chrono::Duration::minutes(i64::from(now.minute()))
+        - chrono::Duration::seconds(i64::from(now.second()))
+        - chrono::Duration::nanoseconds(i64::from(now.nanosecond())))
+    .timestamp()
 }
 
 /// Assemble the forecast payload from local state: stored forward
@@ -188,12 +205,27 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
     let mut solar: Vec<ForecastSolarHour> = Vec::new();
     let mut solar_today_remaining_kwh = 0.0;
     let mut solar_tomorrow_kwh = 0.0;
+    // Forecast samples are hourly interval starts. Include the current
+    // interval in the remaining-energy total so it can be prorated, while
+    // keeping `solar` itself strictly forward-looking.
+    let forecast_start_ts = current_local_hour_start_ts(now);
+    let forecast_fetched_at = inputs.db.and_then(|db| {
+        db.latest_forecast_fetched_at(
+            "shortwave_radiation",
+            crate::forecast::solar::OpenMeteoSolarProvider::SOURCE,
+            forecast_start_ts,
+            now_ts + 72 * 3600,
+        )
+        .ok()
+        .flatten()
+    });
+    let forecast_age_seconds = forecast_fetched_at.map(|fetched_at| now_ts - fetched_at);
     if let Some(db) = inputs.db {
         let series = db
             .query_forecast_series(
                 "shortwave_radiation",
                 crate::forecast::solar::OpenMeteoSolarProvider::SOURCE,
-                now_ts,
+                forecast_start_ts,
                 now_ts + 72 * 3600,
             )
             .unwrap_or_default();
@@ -203,21 +235,37 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
             };
             let local = utc.with_timezone(&chrono::Local);
             let kwh = p.value / 1000.0 * kwp * pr;
+            let remaining_fraction = if p.timestamp < now_ts {
+                p.timestamp
+                    .saturating_add(3600)
+                    .saturating_sub(now_ts)
+                    .clamp(0, 3600) as f64
+                    / 3600.0
+            } else {
+                1.0
+            };
             match local.date_naive() {
-                d if d == today => solar_today_remaining_kwh += kwh,
+                d if d == today => solar_today_remaining_kwh += kwh * remaining_fraction,
                 d if d == tomorrow => solar_tomorrow_kwh += kwh,
                 _ => {}
             }
-            solar.push(ForecastSolarHour {
-                timestamp: p.timestamp,
-                kwh,
-                band_low: kwh * (1.0 - SOLAR_BAND_FACTOR),
-                band_high: kwh * (1.0 + SOLAR_BAND_FACTOR),
-            });
+            if p.timestamp >= now_ts {
+                solar.push(ForecastSolarHour {
+                    timestamp: p.timestamp,
+                    kwh,
+                    band_low: kwh * (1.0 - SOLAR_BAND_FACTOR),
+                    band_high: kwh * (1.0 + SOLAR_BAND_FACTOR),
+                });
+            }
         }
     }
     if solar.is_empty() {
         status.push("no_forecast_data".to_string());
+    }
+    match forecast_age_seconds {
+        Some(age) if age < 0 => status.push("forecast_data_future".to_string()),
+        Some(age) if age > SOLAR_FORECAST_MAX_AGE_SECS => status.push("forecast_stale".to_string()),
+        _ => {}
     }
 
     // --- consumption profile ----------------------------------------------
@@ -249,7 +297,12 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         None => status.push("no_snapshot".to_string()),
         Some(snap) => {
             let (charge_kw, discharge_kw) = battery_rate_limits_kw(snap);
-            if snap.battery_capacity_kwh <= 0.0 || charge_kw <= 0.0 || discharge_kw <= 0.0 {
+            if !snap.battery_capacity_kwh.is_finite()
+                || !inputs.settings.forecast_charge_efficiency.is_finite()
+                || !inputs.settings.forecast_discharge_efficiency.is_finite()
+            {
+                status.push("invalid_battery_configuration".to_string());
+            } else if snap.battery_capacity_kwh <= 0.0 || charge_kw <= 0.0 || discharge_kw <= 0.0 {
                 status.push("no_battery_capacity".to_string());
             } else {
                 let sim_hours: Vec<SimHourInput> = solar
@@ -315,6 +368,8 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
 
     ForecastPayload {
         generated_at: now_ts,
+        forecast_fetched_at,
+        forecast_age_seconds,
         status,
         performance_ratio: pr_stored,
         performance_ratio_days: pr_days,
@@ -470,6 +525,16 @@ pub(crate) fn effective_solar_kwp(settings: &crate::settings::Settings) -> f64 {
 /// enable flag and coordinates; failures log a warning and retry on the
 /// next tick.
 pub async fn run_solar_forecast_fetch(state: std::sync::Arc<crate::inverter::poll::AppState>) {
+    run_solar_forecast_fetch_at(state, Local::now()).await;
+}
+
+/// Testable implementation of [`run_solar_forecast_fetch`]. The fetch time is
+/// supplied by the caller so tests can pin the split between past calibration
+/// samples and forward rows without depending on the wall clock.
+async fn run_solar_forecast_fetch_at(
+    state: std::sync::Arc<crate::inverter::poll::AppState>,
+    now: DateTime<Local>,
+) {
     let (config, history_db) = {
         let ws = state.weather.lock().await;
         let history_db = state.history.lock().await.clone();
@@ -485,28 +550,33 @@ pub async fn run_solar_forecast_fetch(state: std::sync::Arc<crate::inverter::pol
         return;
     };
 
-    let rated_kw = effective_solar_kwp(&crate::settings::Settings::load());
+    let settings = crate::settings::Settings::load_async().await;
+    let rated_kw = effective_solar_kwp(&settings);
     let provider = OpenMeteoSolarProvider::new(&config.open_meteo_base_url);
     match provider.fetch(lat, lon).await {
         Ok(forecast) => {
-            let now = Local::now();
             let sample_count = forecast.samples.len();
-            match store_and_calibrate(
-                &db,
-                rated_kw,
-                OpenMeteoSolarProvider::SOURCE,
-                now,
-                &forecast,
-            ) {
-                Some(pr) => tracing::info!(
+            let stored = tokio::task::spawn_blocking(move || {
+                store_and_calibrate(
+                    &db,
+                    rated_kw,
+                    OpenMeteoSolarProvider::SOURCE,
+                    now,
+                    &forecast,
+                )
+            })
+            .await;
+            match stored {
+                Ok(Some(pr)) => tracing::info!(
                     pr,
                     samples = sample_count,
                     "solar forecast stored and performance ratio calibrated"
                 ),
-                None => tracing::info!(
+                Ok(None) => tracing::info!(
                     samples = sample_count,
                     "solar forecast stored; not enough history to calibrate performance ratio yet"
                 ),
+                Err(error) => tracing::warn!("Solar forecast database worker failed: {error}"),
             }
         }
         Err(e) => {
@@ -520,9 +590,10 @@ mod tests {
     use super::*;
     use crate::forecast::solar::SolarForecastSample;
     use crate::inverter::model::InverterSnapshot;
-    use crate::settings::{Settings, SolarArrayConfig};
+    use crate::settings::{Settings, SolarArrayConfig, WeatherConfig};
     use chrono::TimeZone;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn test_db() -> HistoryDb {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -560,6 +631,194 @@ mod tests {
         db.query_forecast_series(variable, "open-meteo", 0, i64::MAX)
             .unwrap()
             .len()
+    }
+
+    fn forecast_response_body(samples: &[SolarForecastSample]) -> String {
+        let times: Vec<String> = samples
+            .iter()
+            .map(|sample| {
+                DateTime::<chrono::Utc>::from_timestamp(sample.timestamp, 0)
+                    .expect("fixture timestamp must be valid")
+                    .format("%Y-%m-%dT%H:%M")
+                    .to_string()
+            })
+            .collect();
+        let shortwave: Vec<f32> = samples
+            .iter()
+            .map(|sample| sample.shortwave_radiation)
+            .collect();
+        serde_json::json!({
+            "latitude": 51.5,
+            "longitude": -0.13,
+            "hourly": {
+                "time": times,
+                "shortwave_radiation": shortwave,
+            }
+        })
+        .to_string()
+    }
+
+    async fn spawn_forecast_http_server(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for body in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _request_len = stream.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn run_solar_forecast_fetch_returns_before_network_when_gated() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            use tokio::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let now = local_dt(2025, 6, 15, 12, 0);
+
+            for config in [
+                WeatherConfig {
+                    enabled: false,
+                    latitude: Some(51.5),
+                    longitude: Some(-0.13),
+                    open_meteo_base_url: base_url.clone(),
+                    ..WeatherConfig::default()
+                },
+                WeatherConfig {
+                    enabled: true,
+                    latitude: None,
+                    longitude: Some(-0.13),
+                    open_meteo_base_url: base_url.clone(),
+                    ..WeatherConfig::default()
+                },
+                WeatherConfig {
+                    enabled: true,
+                    latitude: Some(51.5),
+                    longitude: Some(-0.13),
+                    open_meteo_base_url: base_url.clone(),
+                    ..WeatherConfig::default()
+                },
+            ] {
+                let state = Arc::new(crate::inverter::poll::AppState::new());
+                state.weather.lock().await.config = config;
+                // The first two cases return before checking the database;
+                // the third has coordinates but no HistoryDb. None may open
+                // a network connection in any of the three cases.
+                run_solar_forecast_fetch_at(state, now).await;
+            }
+
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err(),
+                "disabled, unconfigured, and database-less cycles must not contact Open-Meteo"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn run_solar_forecast_fetch_retries_next_tick_and_uses_calibration_input() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let now = local_dt(2025, 6, 15, 12, 0);
+            let now_ts = now.timestamp();
+            let db = Arc::new(test_db());
+            let rated_kw = 5.0_f64;
+            let actual_kwh = [24.5_f32, 28.0, 31.5, 35.0, 21.0];
+
+            // Five complete days of actual counter readings provide the
+            // calibration input consumed by the successful fetch.
+            for (day_index, &kwh) in actual_kwh.iter().enumerate() {
+                let date = chrono::NaiveDate::from_ymd_opt(2025, 6, 10 + day_index as u32).unwrap();
+                for hour in 7..19u32 {
+                    let timestamp = Local
+                        .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                        .earliest()
+                        .unwrap()
+                        .timestamp();
+                    let fraction = (hour - 6) as f32 / 12.0;
+                    db.insert_reading(&InverterSnapshot {
+                        timestamp,
+                        today_solar_kwh: kwh * fraction,
+                        ..Default::default()
+                    });
+                }
+            }
+
+            let mut samples = Vec::new();
+            for day_index in 0..5u32 {
+                let date = chrono::NaiveDate::from_ymd_opt(2025, 6, 10 + day_index).unwrap();
+                for hour in 7..17u32 {
+                    let timestamp = Local
+                        .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                        .earliest()
+                        .unwrap()
+                        .timestamp();
+                    samples.push(sample(timestamp, 700.0, None, None));
+                }
+            }
+            samples.push(sample(now_ts + 3600, 400.0, None, None));
+            let successful_body = forecast_response_body(&samples);
+            let (base_url, server) = spawn_forecast_http_server(vec![
+                serde_json::json!({ "error": true, "reason": "temporary upstream failure" })
+                    .to_string(),
+                successful_body,
+            ])
+            .await;
+
+            let settings = Settings {
+                pv1_rated_kw: rated_kw,
+                ..Settings::default()
+            };
+            settings.save().unwrap();
+
+            let state = Arc::new(crate::inverter::poll::AppState::new());
+            *state.history.lock().await = Some(db.clone());
+            state.weather.lock().await.config = WeatherConfig {
+                enabled: true,
+                latitude: Some(51.5),
+                longitude: Some(-0.13),
+                open_meteo_base_url: base_url,
+                ..WeatherConfig::default()
+            };
+
+            // A failed fetch is not persisted; the next weather-loop tick
+            // retries the same provider and can succeed.
+            run_solar_forecast_fetch_at(state.clone(), now).await;
+            assert_eq!(series_len(db.as_ref(), "shortwave_radiation"), 0);
+            assert!(db.get_meta_value(META_FORECAST_PR).is_none());
+
+            run_solar_forecast_fetch_at(state, now).await;
+            assert_eq!(series_len(db.as_ref(), "shortwave_radiation"), 1);
+            assert_eq!(
+                db.get_meta_value(META_FORECAST_PR)
+                    .and_then(|value| value.parse::<f64>().ok()),
+                Some(0.8)
+            );
+            assert_eq!(
+                db.get_meta_value(META_FORECAST_PR_DAYS)
+                    .and_then(|value| value.parse::<u32>().ok()),
+                Some(5)
+            );
+
+            server.await.unwrap();
+        })
+        .await;
     }
 
     #[test]
@@ -761,6 +1020,45 @@ mod tests {
     }
 
     #[test]
+    fn rate_limits_cover_three_phase_and_hv_families() {
+        use crate::inverter::model::DeviceType;
+        let mut snap = rate_snapshot();
+
+        // Three-phase and HV control banks store a direct 1–100 percentage.
+        // Every battery-capable family must therefore turn raw 50 into half
+        // of the hardware maximum, not the DC-hybrid doubled value.
+        for device_type in [
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ] {
+            snap.device_type = device_type;
+            assert_eq!(
+                battery_rate_limits_kw(&snap),
+                (2.5, 2.5),
+                "{device_type:?} uses direct three-phase/HV limits"
+            );
+        }
+
+        // Residential AIO variants are HV batteries but remain on the
+        // single-phase HR111/112 0–50 scale.
+        for device_type in [
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+        ] {
+            snap.device_type = device_type;
+            assert_eq!(
+                battery_rate_limits_kw(&snap),
+                (5.0, 5.0),
+                "{device_type:?} uses the DC-hybrid half scale"
+            );
+        }
+    }
+
+    #[test]
     fn store_and_calibrate_persists_pr_to_meta() {
         let db = test_db();
         let now = local_dt(2025, 6, 15, 12, 0);
@@ -942,6 +1240,146 @@ mod tests {
     }
 
     #[test]
+    fn payload_prorates_the_current_solar_hour() {
+        let db = test_db();
+        let hour_start = local_dt(2025, 6, 15, 12, 0);
+        let now = hour_start + chrono::Duration::minutes(30);
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: hour_start.timestamp(),
+            variable: "shortwave_radiation".to_string(),
+            value: 1000.0,
+            source: "open-meteo".to_string(),
+            fetched_at: now.timestamp(),
+        }])
+        .unwrap();
+        db.set_meta_value(META_FORECAST_PR, "1.0").unwrap();
+
+        let settings = Settings {
+            pv1_rated_kw: 1.0,
+            ..Settings::default()
+        };
+        let payload = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
+
+        // The current forecast hour is 1 kWh in total, but only its final
+        // 30 minutes remain.
+        assert!((payload.solar_today_remaining_kwh - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn payload_reports_forecast_freshness_and_suppresses_stale_plan() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        let now_ts = now.timestamp();
+        let settings = five_kwp_settings();
+
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: now_ts + 3600,
+            variable: "shortwave_radiation".to_string(),
+            value: 500.0,
+            source: "open-meteo".to_string(),
+            fetched_at: now_ts - 3600,
+        }])
+        .unwrap();
+        let fresh = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
+        assert_eq!(fresh.forecast_fetched_at, Some(now_ts - 3600));
+        assert_eq!(fresh.forecast_age_seconds, Some(3600));
+        assert!(!fresh.status.contains(&"forecast_stale".to_string()));
+        assert!(!fresh.status.contains(&"forecast_data_future".to_string()));
+
+        let stale_at = now_ts - SOLAR_FORECAST_MAX_AGE_SECS - 1;
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: now_ts + 3600,
+            variable: "shortwave_radiation".to_string(),
+            value: 500.0,
+            source: "open-meteo".to_string(),
+            fetched_at: stale_at,
+        }])
+        .unwrap();
+        let stale = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
+        assert_eq!(stale.forecast_fetched_at, Some(stale_at));
+        assert_eq!(
+            stale.forecast_age_seconds,
+            Some(SOLAR_FORECAST_MAX_AGE_SECS + 1)
+        );
+        assert!(stale.status.contains(&"forecast_stale".to_string()));
+
+        let future_at = now_ts + 3600;
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: now_ts + 3600,
+            variable: "shortwave_radiation".to_string(),
+            value: 500.0,
+            source: "open-meteo".to_string(),
+            fetched_at: future_at,
+        }])
+        .unwrap();
+        let future = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
+        assert_eq!(future.forecast_fetched_at, Some(future_at));
+        assert_eq!(future.forecast_age_seconds, Some(-3600));
+        assert!(future.status.contains(&"forecast_data_future".to_string()));
+
+        let mut full_settings = five_kwp_settings();
+        full_settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![
+                crate::settings::TariffSlot {
+                    start: "00:00".to_string(),
+                    end: "02:00".to_string(),
+                    rate: 0.10,
+                },
+                crate::settings::TariffSlot {
+                    start: "02:00".to_string(),
+                    end: "23:59".to_string(),
+                    rate: 0.25,
+                },
+            ],
+        });
+        seed_full_forecast_state(&db, now);
+        let current = build_forecast_payload(&full_forecast_inputs(
+            &db,
+            Some(&battery_snapshot()),
+            now,
+            &full_settings,
+        ));
+        assert!(!matches!(
+            crate::server::api::compute_plan_recommendation(
+                &current,
+                &full_settings,
+                Some(&battery_snapshot()),
+                now_ts,
+            ),
+            crate::forecast::planner::PlanRecommendation::NoPlan { .. }
+        ));
+
+        let stale_at = now_ts - SOLAR_FORECAST_MAX_AGE_SECS - 1;
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 500.0,
+                source: "open-meteo".to_string(),
+                fetched_at: stale_at,
+            }])
+            .unwrap();
+        }
+        let stale_full = build_forecast_payload(&full_forecast_inputs(
+            &db,
+            Some(&battery_snapshot()),
+            now,
+            &full_settings,
+        ));
+        assert!(stale_full.status.contains(&"forecast_stale".to_string()));
+        assert!(matches!(
+            crate::server::api::compute_plan_recommendation(
+                &stale_full,
+                &full_settings,
+                Some(&battery_snapshot()),
+                now_ts,
+            ),
+            crate::forecast::planner::PlanRecommendation::NoPlan { .. }
+        ));
+    }
+
+    #[test]
     fn payload_reports_every_degradation_when_empty() {
         let db = test_db();
         let now = local_dt(2025, 6, 15, 12, 0);
@@ -1007,6 +1445,43 @@ mod tests {
         assert!(payload.battery.is_none());
         // Solar and consumption still served.
         assert!((payload.solar_tomorrow_kwh - 48.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn payload_omits_projection_for_non_finite_battery_inputs() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_full_forecast_state(&db, now);
+        let settings = five_kwp_settings();
+
+        let mut snap = battery_snapshot();
+        snap.battery_capacity_kwh = f32::NAN;
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(payload
+            .status
+            .contains(&"invalid_battery_configuration".to_string()));
+        assert!(payload.battery.is_none());
+
+        let mut snap = battery_snapshot();
+        let mut settings = five_kwp_settings();
+        settings.forecast_charge_efficiency = f64::NAN;
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(payload
+            .status
+            .contains(&"invalid_battery_configuration".to_string()));
+        assert!(payload.battery.is_none());
+
+        snap = battery_snapshot();
+        settings = five_kwp_settings();
+        settings.forecast_discharge_efficiency = f64::NAN;
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(payload
+            .status
+            .contains(&"invalid_battery_configuration".to_string()));
+        assert!(payload.battery.is_none());
     }
 
     #[test]

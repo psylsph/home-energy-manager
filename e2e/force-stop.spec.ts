@@ -196,7 +196,10 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
     expect(findWrite(writes, 95)).toBeDefined();
     expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
     expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
-    expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
+    // Target 100% = "no target": the flag is cleared (HR 20 = 0) while the
+    // target register is still written, matching givenergy-modbus
+    // set_charge_target(100) → disable_charge_target().
+    expect(findWrite(writes, 20)!.value).toBe(0);    // enable_charge_target
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
 
     // Stop. Verify the stop is consumed.
@@ -222,7 +225,7 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
     expect(findWrite(writes, 95)).toBeUndefined();
     expect(findWrite(writes, 27)!.value).toBe(1);
     expect(findWrite(writes, 96)!.value).toBe(1);
-    expect(findWrite(writes, 20)!.value).toBe(1);
+    expect(findWrite(writes, 20)!.value).toBe(0);
     expect(findWrite(writes, 116)!.value).toBe(100);
 
     const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });

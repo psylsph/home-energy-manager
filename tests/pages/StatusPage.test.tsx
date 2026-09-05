@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, cleanup } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, cleanup } from '@testing-library/react';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import StatusPage from '../../src/pages/StatusPage';
 import type { InverterSnapshot } from '../../src/lib/types';
@@ -61,6 +61,7 @@ function resetStore() {
     connectionState: 'disconnected',
     connectedHost: null,
     connectedSince: null,
+    lastConnectedDurationSec: null,
     connectFailures: 0,
     evcHost: '',
     evcPower: 0,
@@ -68,12 +69,20 @@ function resetStore() {
     evcCharging: false,
     evcConnected: false,
     evcEverConnected: false,
+    evcConnectionState: 'never_connected',
+    evcStale: false,
+    evcLastSuccessAtEpochMs: null,
+    evcAgeSeconds: null,
   });
 }
 
 beforeEach(() => {
   cleanup();
   resetStore();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('StatusPage', () => {
@@ -94,6 +103,12 @@ describe('StatusPage', () => {
     useInverterStore.setState({ connectionState: 'connected' });
     const { container } = render(<StatusPage />);
     expect(container.textContent).toContain('Waiting for data');
+  });
+
+  it('uses the shared awaiting-connection message for the no-snapshot state', () => {
+    useInverterStore.setState({ connectionState: 'connected' });
+    render(<StatusPage />);
+    expect(screen.getByText('Waiting for data…')).toBeDefined();
   });
 
   it('shows failure advice banner after 5+ connect failures', () => {
@@ -130,6 +145,17 @@ describe('StatusPage', () => {
     });
     const { container } = render(<StatusPage />);
     expect(container.textContent).toMatch(/last connected/i);
+  });
+
+  it('shows the completed connection duration after disconnecting', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_120_000);
+    useInverterStore.getState().setConnection('connected', '192.168.1.10', 1_700_000_000_000);
+    useInverterStore.getState().setConnection('disconnected');
+
+    const { container } = render(<StatusPage />);
+
+    expect(container.textContent).toContain('Last connected for 2m 0s');
   });
 
   it('renders main content when snapshot is available', () => {

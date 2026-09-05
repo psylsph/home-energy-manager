@@ -48,6 +48,17 @@ fn html_escape(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn production_bind_outcome(
+    result: Result<Result<u16, String>, std::sync::mpsc::RecvTimeoutError>,
+) -> Result<u16, String> {
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => Err(format!(
+            "Timed out waiting for embedded HTTP server to bind: {error}"
+        )),
+    }
+}
+
 /// Initialise the global tracing subscriber.
 ///
 /// Three layers are installed:
@@ -153,6 +164,7 @@ async fn initialize_app_state(
         ps.interval_secs = app_settings.poll_interval;
         ps.evc_host = app_settings.evc_host.clone();
         ps.evc_port = app_settings.evc_port;
+        ps.write_pacing_ms = app_settings.write_pacing_ms;
     }
 
     // Apply saved auto-winter config
@@ -419,7 +431,7 @@ pub fn run() {
                 tracing::info!("Production frontend path: {}", dist_dir);
 
                 let (bound_tx, bound_rx) = std::sync::mpsc::channel();
-                tauri::async_runtime::spawn(async move {
+                let server_task = tauri::async_runtime::spawn(async move {
                     start_server_with_frontend_on_port(
                         server_state,
                         "0.0.0.0",
@@ -436,10 +448,11 @@ pub fn run() {
                 // Home Energy Manager instance still running) the bind fails and
                 // the window shows a clear startup error instead of silently
                 // attaching to the existing instance's UI.
-                let bind_result = bound_rx.recv_timeout(std::time::Duration::from_secs(3));
-                if let Some(window) = app.get_webview_window("main") {
-                    match bind_result {
-                        Ok(Ok(bound_port)) => {
+                match production_bind_outcome(
+                    bound_rx.recv_timeout(std::time::Duration::from_secs(3)),
+                ) {
+                    Ok(bound_port) => {
+                        if let Some(window) = app.get_webview_window("main") {
                             tracing::info!("Navigating desktop window to local server on port {bound_port}");
                             let _ = window.eval(
                                 format!("window.location.replace('http://127.0.0.1:{}')", bound_port)
@@ -459,15 +472,17 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
-                        Ok(Err(e)) => {
-                            tracing::error!("Embedded HTTP server failed to start: {e}");
-                            show_startup_error(&window, &e);
-                        }
-                        Err(e) => {
-                            let message = format!("Timed out waiting for embedded HTTP server to bind: {e}");
-                            tracing::error!("{message}");
+                    }
+                    Err(message) => {
+                        tracing::error!("Embedded HTTP server failed to start: {message}");
+                        if let Some(window) = app.get_webview_window("main") {
                             show_startup_error(&window, &message);
                         }
+                        // A timeout can leave the server task waiting to
+                        // report its bind result. Stop it and return before
+                        // any poll/integration loops are spawned.
+                        server_task.abort();
+                        return Ok(());
                     }
                 }
             }
@@ -974,6 +989,24 @@ mod tests {
         assert!(!looks_like_unconfigured_utc(3600, true));
     }
 
+    #[test]
+    fn production_bind_outcome_blocks_background_startup_on_failure() {
+        assert_eq!(
+            production_bind_outcome(Ok(Ok(7337))),
+            Ok(7337),
+            "a successful bind allows background tasks to start"
+        );
+
+        let bind_error = production_bind_outcome(Ok(Err(String::from("port in use"))))
+            .expect_err("a reported bind error must stop startup");
+        assert_eq!(bind_error, "port in use");
+
+        let timeout_error =
+            production_bind_outcome(Err(std::sync::mpsc::RecvTimeoutError::Timeout))
+                .expect_err("a bind-report timeout must stop startup");
+        assert!(timeout_error.contains("Timed out waiting for embedded HTTP server to bind"));
+    }
+
     /// `initialize_app_state` must apply every persisted field to the live
     /// `AppState`: poll settings, auto-winter config, load-limiter config, the
     /// restored load-limiter state, persisted auto-winter saved values, and the
@@ -991,6 +1024,9 @@ mod tests {
             s.port = 1234;
             s.serial = "SN-INIT-TEST".to_string();
             s.poll_interval = 42;
+            // Non-default so the startup copy into PollSettings is observable
+            // (a missed copy silently reverts the E2E simulator to 1.5 s).
+            s.write_pacing_ms = 25;
             s.evc_host = "evc.local".to_string();
             s.evc_port = 5020;
             s.auto_winter_enabled = true;
@@ -1028,6 +1064,10 @@ mod tests {
                 assert_eq!(ps.interval_secs, 42);
                 assert_eq!(ps.evc_host, "evc.local");
                 assert_eq!(ps.evc_port, 5020);
+                // The write-pacing gap must reach the poll loop at startup,
+                // or a lowered E2E/simulator pacing silently reverts to the
+                // 1.5 s dongle default and long write batches crawl.
+                assert_eq!(ps.write_pacing_ms, 25);
             }
 
             // Auto-winter config

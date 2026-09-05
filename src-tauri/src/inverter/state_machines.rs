@@ -31,6 +31,19 @@ use crate::modbus::registers::{
     HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
 };
 
+/// Clear a slot instead of emitting a plausible schedule when restoring a
+/// corrupt captured value. User-provided times are validated at the API
+/// boundary; this fallback is only for defensive recovery paths.
+fn encode_hhmm_or_clear(hour: u8, minute: u8) -> u16 {
+    match encode_hhmm(hour, minute) {
+        Some(value) => value,
+        None => {
+            tracing::warn!(hour, minute, "invalid captured HHMM; clearing slot");
+            0
+        }
+    }
+}
+
 /// The owner of the inverter's shared discharge-control registers.
 ///
 /// Several features ultimately write the same small group of registers
@@ -42,8 +55,6 @@ use crate::modbus::registers::{
 /// Force retaining the deliberate HR318 override described in `DESIGN.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DischargeControlOwner {
-    /// Normal self-consumption baseline.
-    Eco,
     /// Price-driven Agile automation.
     Agile,
     /// Scheduled charge automation (Cosy / timed charge).
@@ -168,6 +179,13 @@ pub struct PriceSlot {
     pub valid_to: i64,   // unix timestamp
 }
 
+/// Keep the Agile cache in the newest-first order expected by
+/// `contiguous_run_window`. The Octopus API currently returns that order, but
+/// it is not a safe contract for the state machine to rely on.
+pub(crate) fn sort_price_slots_newest_first(prices: &mut [PriceSlot]) {
+    prices.sort_by_key(|slot| std::cmp::Reverse((slot.valid_from, slot.valid_to)));
+}
+
 // The legacy `AgileState { Idle, Charging, Discharging }` enum was removed
 // in the slot-based refactor. The new `AgileSlotAction` enum below carries
 // per-poll decisions directly to the write loop, and the inverter's own
@@ -190,6 +208,12 @@ pub enum AutoWinterState {
         /// Consecutive polls where temp was below threshold.
         consecutive: u32,
     },
+    /// Activation writes were issued but readback has not confirmed both
+    /// requested registers yet.
+    Activating {
+        /// Number of retries already issued after the first batch.
+        retries: u8,
+    },
     /// Winter mode is active and charging to target SOC.
     WinterActive,
     /// Temperature above Recovery Threshold, counting towards restore.
@@ -197,7 +221,28 @@ pub enum AutoWinterState {
         /// Consecutive polls where temp was above Recovery Threshold.
         consecutive: u32,
     },
+    /// Restoration writes were issued but readback has not confirmed the
+    /// saved pre-winter values yet.
+    Restoring {
+        /// Number of retries already issued after the first batch.
+        retries: u8,
+    },
+    /// A bounded activation/restoration retry budget was exhausted.
+    Error { message: String },
 }
+
+/// Outcome of the auto-winter register batch issued on the previous poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoWinterWriteOutcome {
+    /// No auto-winter batch was issued on the previous poll.
+    NoneIssued,
+    /// Every register in the previous batch was accepted.
+    Succeeded,
+    /// At least one register in the previous batch was rejected.
+    Failed,
+}
+
+const AUTO_WINTER_MAX_WRITE_RETRIES: u8 = 3;
 
 /// Configuration for auto winter mode.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -594,6 +639,9 @@ impl TemperatureLimiterConfig {
 pub enum AdaptiveChargeState {
     #[default]
     Inactive,
+    BaselinePending {
+        raw_value: u16,
+    },
     OutsideWindow,
     Preferred {
         period: usize,
@@ -616,6 +664,7 @@ impl AdaptiveChargeState {
     pub fn api_name(&self) -> &'static str {
         match self {
             Self::Inactive => "inactive",
+            Self::BaselinePending { .. } => "baseline_pending",
             Self::OutsideWindow => "outside_window",
             Self::Preferred { .. } => "preferred",
             Self::Recovery { .. } => "recovery",
@@ -672,6 +721,14 @@ fn raw_charge_rate_to_normalized(device_type: DeviceType, raw: u16) -> u8 {
         (raw.saturating_mul(2).min(100)) as u8
     } else {
         raw.min(100) as u8
+    }
+}
+
+fn observed_charge_rate_is_valid(device_type: DeviceType, raw: u16) -> bool {
+    match adaptive_charge_register(device_type) {
+        Some(HR_BATTERY_CHARGE_LIMIT) => (1..=50).contains(&raw),
+        Some(_) => (1..=100).contains(&raw),
+        None => false,
     }
 }
 
@@ -738,6 +795,15 @@ pub fn check_adaptive_charge(
                 desired_rate_percent: None,
             };
         }
+        if !observed_charge_rate_is_valid(snap.device_type, baseline.raw_value) {
+            *state = AdaptiveChargeState::Error {
+                message: "Saved charge limit is outside this inverter's valid range".to_string(),
+            };
+            return AdaptiveChargeOutcome {
+                write: None,
+                desired_rate_percent: None,
+            };
+        }
         if snap.charge_rate as u16 == baseline.raw_value {
             *saved = None;
             *state = AdaptiveChargeState::Inactive;
@@ -767,21 +833,59 @@ pub fn check_adaptive_charge(
         };
     }
 
+    let observed_raw = snap.charge_rate as u16;
+    if !observed_charge_rate_is_valid(snap.device_type, observed_raw) {
+        tracing::warn!(
+            device_type = ?snap.device_type,
+            observed_raw,
+            "Adaptive Charge: ignoring invalid observed charge limit"
+        );
+        if saved.is_none() {
+            *state = AdaptiveChargeState::Inactive;
+        }
+        return AdaptiveChargeOutcome {
+            write: None,
+            desired_rate_percent: None,
+        };
+    }
+
     if saved.is_none() {
+        let stable = matches!(
+            state,
+            AdaptiveChargeState::BaselinePending { raw_value } if *raw_value == observed_raw
+        );
+        if !stable {
+            *state = AdaptiveChargeState::BaselinePending {
+                raw_value: observed_raw,
+            };
+            return AdaptiveChargeOutcome {
+                write: None,
+                desired_rate_percent: None,
+            };
+        }
         *saved = Some(crate::settings::AdaptiveChargeSavedLimit {
             inverter_serial: snap.inverter_serial.clone(),
             device_type_code: snap.device_type_code.clone(),
             register_address: register,
-            raw_value: snap.charge_rate as u16,
+            raw_value: observed_raw,
         });
     }
-    let baseline = saved.as_ref().expect("baseline captured above");
+    let baseline = saved.as_ref().expect("baseline captured above").clone();
     if baseline.inverter_serial != snap.inverter_serial
         || baseline.device_type_code != snap.device_type_code
         || baseline.register_address != register
     {
         *state = AdaptiveChargeState::Error {
             message: "Saved charge limit belongs to a different inverter".to_string(),
+        };
+        return AdaptiveChargeOutcome {
+            write: None,
+            desired_rate_percent: None,
+        };
+    }
+    if !observed_charge_rate_is_valid(snap.device_type, baseline.raw_value) {
+        *state = AdaptiveChargeState::Error {
+            message: "Saved charge limit is outside this inverter's valid range".to_string(),
         };
         return AdaptiveChargeOutcome {
             write: None,
@@ -819,13 +923,38 @@ pub fn check_adaptive_charge(
     }
 
     let Some(period_index) = adaptive_period_at(config, now_minutes) else {
+        let observed = snap.charge_rate as u16;
+        let owned_window = matches!(
+            state,
+            AdaptiveChargeState::Preferred { .. } | AdaptiveChargeState::Recovery { .. }
+        );
+        let restoring = matches!(state, AdaptiveChargeState::Restoring);
+        let mut desired = baseline.raw_value;
+        if owned_window || restoring {
+            if observed != baseline.raw_value {
+                *state = AdaptiveChargeState::Restoring;
+                return AdaptiveChargeOutcome {
+                    write: Some(RegisterWrite {
+                        address: register,
+                        value: baseline.raw_value,
+                    }),
+                    desired_rate_percent: Some(raw_charge_rate_to_normalized(
+                        snap.device_type,
+                        baseline.raw_value,
+                    )),
+                };
+            }
+        } else if observed != baseline.raw_value {
+            // Outside an Adaptive-owned window, a later manual edit is the
+            // user's new baseline. Do not fight it with the old captured rate.
+            if let Some(saved) = saved.as_mut() {
+                saved.raw_value = observed;
+            }
+            desired = observed;
+        }
         *state = AdaptiveChargeState::OutsideWindow;
-        let desired = baseline.raw_value;
         return AdaptiveChargeOutcome {
-            write: (snap.charge_rate as u16 != desired).then_some(RegisterWrite {
-                address: register,
-                value: desired,
-            }),
+            write: None,
             desired_rate_percent: Some(raw_charge_rate_to_normalized(snap.device_type, desired)),
         };
     };
@@ -967,8 +1096,13 @@ pub(crate) fn cosy_slot_register_writes(
     device_type: DeviceType,
     active: bool,
 ) -> Vec<RegisterWrite> {
-    let start = encode_hhmm(slot.start_hour, slot.start_minute);
-    let end = encode_hhmm(slot.end_hour, slot.end_minute);
+    let (Some(start), Some(end)) = (
+        encode_hhmm(slot.start_hour, slot.start_minute),
+        encode_hhmm(slot.end_hour, slot.end_minute),
+    ) else {
+        tracing::warn!("Skipping Cosy slot with invalid HHMM components");
+        return Vec::new();
+    };
 
     let mut writes = Vec::new();
 
@@ -1062,6 +1196,43 @@ pub(crate) fn clear_cosy_slot_registers(device_type: DeviceType) -> Vec<Register
     writes
 }
 
+#[allow(async_fn_in_trait)]
+trait RegisterWriteExecutor {
+    async fn write_register(&mut self, write: &RegisterWrite) -> Result<(), String>;
+}
+
+impl RegisterWriteExecutor for ModbusClient {
+    async fn write_register(&mut self, write: &RegisterWrite) -> Result<(), String> {
+        ModbusClient::write_register(self, write.address, write.value)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Execute a list of register writes with delays between adjacent writes.
+async fn execute_register_writes<W: RegisterWriteExecutor>(
+    writer: &mut W,
+    writes: &[RegisterWrite],
+    label: &str,
+    inter_write_delay: Duration,
+) -> bool {
+    for (index, w) in writes.iter().enumerate() {
+        match writer.write_register(w).await {
+            Ok(()) => {
+                tracing::info!("{}: wrote reg {} = {}", label, w.address, w.value);
+                if index + 1 < writes.len() {
+                    tokio::time::sleep(inter_write_delay).await;
+                }
+            }
+            Err(e) => {
+                tracing::error!("{}: write reg {} failed: {e}", label, w.address);
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Execute a list of register writes to the inverter with inter-write delays.
 /// Returns `true` if all writes succeeded.
 pub(crate) async fn write_registers_to_inverter(
@@ -1069,18 +1240,7 @@ pub(crate) async fn write_registers_to_inverter(
     writes: &[RegisterWrite],
     label: &str,
 ) -> bool {
-    let mut all_ok = true;
-    for w in writes {
-        match client.write_register(w.address, w.value).await {
-            Ok(()) => tracing::info!("{}: wrote reg {} = {}", label, w.address, w.value),
-            Err(e) => {
-                tracing::error!("{}: write reg {} failed: {e}", label, w.address);
-                all_ok = false;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-    }
-    all_ok
+    execute_register_writes(client, writes, label, Duration::from_millis(1500)).await
 }
 
 // ===========================================================================
@@ -1099,11 +1259,31 @@ pub(crate) async fn write_registers_to_inverter(
 /// transition, the state machine requires `debounce_readings` consecutive
 /// polls with the temperature on the same side of the threshold before
 /// acting. A single reading on the other side resets the counter.
+#[cfg(test)]
 pub(crate) fn check_auto_winter(
     snap: &InverterSnapshot,
     config: &AutoWinterConfig,
     state: &mut AutoWinterState,
     saved: &mut Option<AutoWinterSaved>,
+) -> Option<Vec<RegisterWrite>> {
+    check_auto_winter_with_outcome(
+        snap,
+        config,
+        state,
+        saved,
+        AutoWinterWriteOutcome::NoneIssued,
+    )
+}
+
+/// Evaluate auto-winter state while reconciling the result of the previous
+/// register batch. Activation and restoration remain pending until the next
+/// sanitized snapshot confirms both requested registers.
+pub(crate) fn check_auto_winter_with_outcome(
+    snap: &InverterSnapshot,
+    config: &AutoWinterConfig,
+    state: &mut AutoWinterState,
+    saved: &mut Option<AutoWinterSaved>,
+    last_write_outcome: AutoWinterWriteOutcome,
 ) -> Option<Vec<RegisterWrite>> {
     if !config.enabled {
         *state = AutoWinterState::Idle;
@@ -1112,6 +1292,41 @@ pub(crate) fn check_auto_winter(
     }
 
     let temp = snap.battery_temperature;
+
+    let activation_writes = || {
+        vec![
+            RegisterWrite {
+                address: HR_ENABLE_CHARGE_TARGET,
+                value: 1,
+            },
+            RegisterWrite {
+                address: HR_CHARGE_TARGET_SOC,
+                value: config.target_soc as u16,
+            },
+        ]
+    };
+
+    let restoration_values = saved
+        .as_ref()
+        .map(|value| {
+            (
+                value.target_soc as u16,
+                if value.enable_charge_target { 1 } else { 0 },
+            )
+        })
+        .unwrap_or((100, 0));
+    let restoration_writes = || {
+        vec![
+            RegisterWrite {
+                address: HR_ENABLE_CHARGE_TARGET,
+                value: restoration_values.1,
+            },
+            RegisterWrite {
+                address: HR_CHARGE_TARGET_SOC,
+                value: restoration_values.0,
+            },
+        ]
+    };
 
     match state {
         AutoWinterState::Idle => {
@@ -1142,20 +1357,35 @@ pub(crate) fn check_auto_winter(
                             target_soc: snap.target_soc,
                         });
                     }
-                    *state = AutoWinterState::WinterActive;
-                    return Some(vec![
-                        RegisterWrite {
-                            address: HR_ENABLE_CHARGE_TARGET,
-                            value: 1,
-                        },
-                        RegisterWrite {
-                            address: HR_CHARGE_TARGET_SOC,
-                            value: config.target_soc as u16,
-                        },
-                    ]);
+                    *state = AutoWinterState::Activating { retries: 0 };
+                    return Some(activation_writes());
                 }
             } else if temp >= config.recovery_threshold {
                 *state = AutoWinterState::Idle;
+            }
+        }
+        AutoWinterState::Activating { retries } => {
+            if snap.enable_charge_target && snap.target_soc == config.target_soc {
+                *state = AutoWinterState::WinterActive;
+            } else {
+                let next_retries = match last_write_outcome {
+                    AutoWinterWriteOutcome::Failed | AutoWinterWriteOutcome::Succeeded => {
+                        retries.saturating_add(1)
+                    }
+                    AutoWinterWriteOutcome::NoneIssued => *retries,
+                };
+                if next_retries > AUTO_WINTER_MAX_WRITE_RETRIES {
+                    *state = AutoWinterState::Error {
+                        message: format!(
+                            "Auto-winter activation failed after {AUTO_WINTER_MAX_WRITE_RETRIES} retries"
+                        ),
+                    };
+                } else {
+                    *state = AutoWinterState::Activating {
+                        retries: next_retries,
+                    };
+                    return Some(activation_writes());
+                }
             }
         }
         AutoWinterState::WinterActive => {
@@ -1172,36 +1402,49 @@ pub(crate) fn check_auto_winter(
             if temp >= config.recovery_threshold {
                 *consecutive += 1;
                 if *consecutive >= config.debounce_readings {
-                    let saved_settings = saved.take();
-                    let (restore_target, restore_enable) = match saved_settings {
-                        Some(s) => (
-                            s.target_soc as u16,
-                            if s.enable_charge_target { 1 } else { 0 },
-                        ),
-                        None => (100, 0),
-                    };
+                    let (restore_target, restore_enable) = restoration_values;
                     tracing::info!(
                         consecutive,
                         "Auto winter: restoring (HR 20={}, HR 116={})",
                         restore_enable,
                         restore_target,
                     );
-                    *state = AutoWinterState::Idle;
-                    return Some(vec![
-                        RegisterWrite {
-                            address: HR_ENABLE_CHARGE_TARGET,
-                            value: restore_enable,
-                        },
-                        RegisterWrite {
-                            address: HR_CHARGE_TARGET_SOC,
-                            value: restore_target,
-                        },
-                    ]);
+                    *state = AutoWinterState::Restoring { retries: 0 };
+                    return Some(restoration_writes());
                 }
             } else if temp < config.cold_threshold {
                 *state = AutoWinterState::WinterActive;
             }
         }
+        AutoWinterState::Restoring { retries } => {
+            let (restore_target, restore_enable) = restoration_values;
+            if snap.target_soc as u16 == restore_target
+                && snap.enable_charge_target == (restore_enable == 1)
+            {
+                saved.take();
+                *state = AutoWinterState::Idle;
+            } else {
+                let next_retries = match last_write_outcome {
+                    AutoWinterWriteOutcome::Failed | AutoWinterWriteOutcome::Succeeded => {
+                        retries.saturating_add(1)
+                    }
+                    AutoWinterWriteOutcome::NoneIssued => *retries,
+                };
+                if next_retries > AUTO_WINTER_MAX_WRITE_RETRIES {
+                    *state = AutoWinterState::Error {
+                        message: format!(
+                            "Auto-winter restoration failed after {AUTO_WINTER_MAX_WRITE_RETRIES} retries"
+                        ),
+                    };
+                } else {
+                    *state = AutoWinterState::Restoring {
+                        retries: next_retries,
+                    };
+                    return Some(restoration_writes());
+                }
+            }
+        }
+        AutoWinterState::Error { .. } => {}
     }
 
     None
@@ -1420,6 +1663,7 @@ pub(crate) fn check_load_limiter(
     check_load_limiter_with_other_pause(snap, config, state, poll_interval_secs, saved, false)
 }
 
+#[cfg(test)]
 pub(crate) fn check_load_limiter_with_other_pause(
     snap: &InverterSnapshot,
     config: &LoadLimiterConfig,
@@ -1441,7 +1685,7 @@ pub(crate) fn check_load_limiter_with_other_pause(
     )
 }
 
-fn check_load_limiter_at(
+pub(crate) fn check_load_limiter_at(
     snap: &InverterSnapshot,
     config: &LoadLimiterConfig,
     state: &mut LoadLimiterState,
@@ -1877,6 +2121,15 @@ pub fn inverter_minute_of_day(snapshot: &InverterSnapshot) -> Option<u16> {
     }
 }
 
+/// Choose the scheduling minute shared by all time-driven automations.
+///
+/// The inverter wall clock is authoritative because it is the clock that
+/// applies the written schedules. The host minute is used only when the
+/// inverter clock registers are absent or malformed.
+pub fn authoritative_minute_of_day(snapshot: &InverterSnapshot, host_minute: u16) -> u16 {
+    inverter_minute_of_day(snapshot).unwrap_or(host_minute)
+}
+
 /// Check the Timed Export state machine and return any required writes.
 ///
 /// This is a pure **reconciler** that consumes:
@@ -2011,8 +2264,8 @@ pub fn check_timed_export(
         }
         // Agile/Cosy and manual Timed Discharge use the same physical
         // HR27/enable-discharge shape as Timed Export. When the managed
-        // schedule is off, a populated physical slot is evidence that
-        // another controller owns those registers — including Agile
+        // schedule is off or has no configured slots, a populated physical
+        // slot is evidence that another controller owns those registers — including Agile
         // arming export after a Stop that retained the desired slots
         // (code-review blocking finding: the repair used to fire for that
         // shape and oscillate export↔Eco with Agile every other poll).
@@ -2020,7 +2273,7 @@ pub fn check_timed_export(
         // is already disarmed by the awaited transactional stop path. A
         // genuinely stale raw export state has no slot and still follows
         // the repair path below.
-        if !config.schedule_enabled && physical_slot_configured {
+        if physical_slot_configured {
             *state = TimedExportState::Off;
             return quiet(state);
         }
@@ -2470,8 +2723,17 @@ pub fn build_timed_export_slot_restore_writes(
         if !slot.is_configured() {
             continue;
         }
-        let start = encode_hhmm(slot.start_hour, slot.start_minute);
-        let end = encode_hhmm(slot.end_hour, slot.end_minute);
+        let Some(start) = encode_hhmm(slot.start_hour, slot.start_minute) else {
+            tracing::warn!(
+                slot_num,
+                "Skipping timed-export slot with invalid start time"
+            );
+            continue;
+        };
+        let Some(end) = encode_hhmm(slot.end_hour, slot.end_minute) else {
+            tracing::warn!(slot_num, "Skipping timed-export slot with invalid end time");
+            continue;
+        };
         match discharge_slot_command_for(device_type, slot_num, start, end) {
             Ok(cmd) => match cmd.encode() {
                 Ok(mut w) => out.append(&mut w),
@@ -2525,10 +2787,16 @@ pub fn build_timed_export_slot_compensation_writes(
     for slot in 1..=device_type.max_discharge_slots() {
         let prior_slot = prior.get(slot as usize - 1).filter(|s| s.is_configured());
         let (start, end) = match prior_slot {
-            Some(s) => (
+            Some(s) => match (
                 encode_hhmm(s.start_hour, s.start_minute),
                 encode_hhmm(s.end_hour, s.end_minute),
-            ),
+            ) {
+                (Some(start), Some(end)) => (start, end),
+                _ => {
+                    tracing::warn!(slot, "invalid prior timed-export slot; clearing it");
+                    (0, 0)
+                }
+            },
             None => (0, 0),
         };
         match discharge_slot_command_for(device_type, slot, start, end) {
@@ -2814,13 +3082,20 @@ pub(crate) fn push_pause_restore_writes(
         return;
     };
     if let Some(slot) = pause_slot {
+        let (Some(start), Some(end)) = (
+            encode_hhmm(slot.start_hour, slot.start_minute),
+            encode_hhmm(slot.end_hour, slot.end_minute),
+        ) else {
+            tracing::warn!("Skipping pause-mode restore with invalid HHMM components");
+            return;
+        };
         writes.push(RegisterWrite {
             address: crate::modbus::registers::HR_BATTERY_PAUSE_SLOT_1_START,
-            value: encode_hhmm(slot.start_hour, slot.start_minute),
+            value: start,
         });
         writes.push(RegisterWrite {
             address: crate::modbus::registers::HR_BATTERY_PAUSE_SLOT_1_END,
-            value: encode_hhmm(slot.end_hour, slot.end_minute),
+            value: end,
         });
     }
     writes.push(RegisterWrite {
@@ -2923,21 +3198,21 @@ pub(crate) fn build_force_discharge_auto_revert_writes(
         let (e1h, e1m) = pre_slot_1_end.unwrap_or((0, 0));
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_1_START,
-            value: encode_hhmm(s1h, s1m),
+            value: encode_hhmm_or_clear(s1h, s1m),
         });
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_1_END,
-            value: encode_hhmm(e1h, e1m),
+            value: encode_hhmm_or_clear(e1h, e1m),
         });
         let (s2h, s2m) = pre_slot_2_start.unwrap_or((0, 0));
         let (e2h, e2m) = pre_slot_2_end.unwrap_or((0, 0));
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_2_START,
-            value: encode_hhmm(s2h, s2m),
+            value: encode_hhmm_or_clear(s2h, s2m),
         });
         writes.push(RegisterWrite {
             address: HR_DISCHARGE_SLOT_2_END,
-            value: encode_hhmm(e2h, e2m),
+            value: encode_hhmm_or_clear(e2h, e2m),
         });
 
         // Default to eco (1) on restore — matches the explicit Stop
@@ -3329,6 +3604,20 @@ mod tests {
         let snap = adaptive_snapshot(50, 50);
         let mut state = AdaptiveChargeState::Inactive;
         let mut saved = None;
+        let first = check_adaptive_charge(
+            &snap,
+            &adaptive_config(),
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(first.write.is_none());
+        assert_eq!(
+            state,
+            AdaptiveChargeState::BaselinePending { raw_value: 50 }
+        );
+
         let outcome = check_adaptive_charge(
             &snap,
             &adaptive_config(),
@@ -3347,6 +3636,60 @@ mod tests {
         assert_eq!(write.address, HR_BATTERY_CHARGE_LIMIT);
         assert_eq!(write.value, 20);
         assert_eq!(outcome.desired_rate_percent, Some(40));
+    }
+
+    #[test]
+    fn adaptive_baseline_ignores_invalid_rates_and_requires_stability() {
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Inactive;
+        let mut saved = None;
+
+        for raw_rate in [0, 100] {
+            let outcome = check_adaptive_charge(
+                &adaptive_snapshot(50, raw_rate),
+                &config,
+                true,
+                &mut state,
+                &mut saved,
+                9 * 60,
+            );
+            assert!(outcome.write.is_none());
+            assert!(
+                saved.is_none(),
+                "invalid raw rate {raw_rate} must not be saved"
+            );
+            assert_eq!(state, AdaptiveChargeState::Inactive);
+        }
+
+        let first_valid = check_adaptive_charge(
+            &adaptive_snapshot(50, 25),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(first_valid.write.is_none());
+        assert_eq!(
+            state,
+            AdaptiveChargeState::BaselinePending { raw_value: 25 }
+        );
+        assert!(saved.is_none());
+
+        let second_valid = check_adaptive_charge(
+            &adaptive_snapshot(50, 25),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert_eq!(saved.as_ref().map(|value| value.raw_value), Some(25));
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Preferred { period: 0, .. }
+        ));
+        assert_eq!(second_valid.write.expect("preferred rate write").value, 20);
     }
 
     #[test]
@@ -3427,14 +3770,83 @@ mod tests {
 
         let outside = check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 18 * 60);
         assert_eq!(outside.write.expect("outside restores baseline").value, 35);
-        assert_eq!(state, AdaptiveChargeState::OutsideWindow);
+        assert_eq!(state, AdaptiveChargeState::Restoring);
 
         let restored = adaptive_snapshot(50, 35);
+        let confirmed =
+            check_adaptive_charge(&restored, &config, true, &mut state, &mut saved, 18 * 60);
+        assert!(confirmed.write.is_none());
+        assert_eq!(state, AdaptiveChargeState::OutsideWindow);
+
         let disabled =
             check_adaptive_charge(&restored, &config, false, &mut state, &mut saved, 18 * 60);
         assert!(disabled.write.is_none());
         assert!(saved.is_none());
         assert_eq!(state, AdaptiveChargeState::Inactive);
+    }
+
+    #[test]
+    fn adaptive_releases_outside_window_ownership_after_confirmation() {
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Preferred {
+            period: 0,
+            low_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 35,
+        });
+
+        // Leaving an Adaptive-owned window may restore the captured baseline
+        // once, but this is a pending transition until readback confirms it.
+        let transition = check_adaptive_charge(
+            &adaptive_snapshot(50, 50),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            18 * 60,
+        );
+        assert_eq!(transition.write.expect("one transition restore").value, 35);
+        assert_eq!(state, AdaptiveChargeState::Restoring);
+
+        let confirmed = check_adaptive_charge(
+            &adaptive_snapshot(50, 35),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            18 * 60,
+        );
+        assert!(confirmed.write.is_none());
+        assert_eq!(state, AdaptiveChargeState::OutsideWindow);
+
+        // A later manual edit outside the window becomes the new baseline;
+        // Adaptive must not reassert the stale 35% value every poll.
+        let manual = check_adaptive_charge(
+            &adaptive_snapshot(50, 41),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            18 * 60,
+        );
+        assert!(manual.write.is_none());
+        assert_eq!(saved.as_ref().map(|value| value.raw_value), Some(41));
+        assert_eq!(state, AdaptiveChargeState::OutsideWindow);
+
+        let repeated = check_adaptive_charge(
+            &adaptive_snapshot(50, 41),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            18 * 60,
+        );
+        assert!(repeated.write.is_none());
+        assert_eq!(saved.as_ref().map(|value| value.raw_value), Some(41));
     }
 
     #[test]
@@ -3556,13 +3968,13 @@ mod tests {
         };
         let writes = check_auto_winter(&snap, &config, &mut state, &mut saved).expect("activates");
 
-        assert_eq!(state, AutoWinterState::WinterActive);
+        assert!(matches!(state, AutoWinterState::Activating { retries: 0 }));
         // Saved values reflect the snapshot *before* activation.
         assert_eq!(
             saved,
             Some(AutoWinterSaved {
                 enable_charge_target: false,
-                target_soc: 0,
+                target_soc: 4,
             })
         );
         // Writes enable charge target + set target SOC.
@@ -3572,6 +3984,55 @@ mod tests {
         assert!(writes
             .iter()
             .any(|w| w.address == HR_CHARGE_TARGET_SOC && w.value == 90));
+    }
+
+    #[test]
+    fn auto_winter_retries_activation_until_readback_confirms_it() {
+        let config = aw_config(8.0, 12.0, 90, 1);
+        let mut state = AutoWinterState::ColdPending { consecutive: 0 };
+        let mut saved = None;
+        let cold = InverterSnapshot {
+            battery_temperature: 4.0,
+            ..Default::default()
+        };
+
+        let first_writes = check_auto_winter_with_outcome(
+            &cold,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::NoneIssued,
+        )
+        .expect("activation writes");
+        assert_eq!(first_writes.len(), 2);
+        assert!(matches!(state, AutoWinterState::Activating { retries: 0 }));
+
+        let retry_writes = check_auto_winter_with_outcome(
+            &cold,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::Failed,
+        )
+        .expect("failed activation must retry");
+        assert_eq!(retry_writes.len(), 2);
+        assert!(matches!(state, AutoWinterState::Activating { retries: 1 }));
+
+        let confirmed = InverterSnapshot {
+            battery_temperature: 4.0,
+            enable_charge_target: true,
+            target_soc: 90,
+            ..Default::default()
+        };
+        assert!(check_auto_winter_with_outcome(
+            &confirmed,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::Succeeded,
+        )
+        .is_none());
+        assert_eq!(state, AutoWinterState::WinterActive);
     }
 
     #[test]
@@ -3597,8 +4058,11 @@ mod tests {
 
         // Second warm reading: restore.
         let writes = check_auto_winter(&snap, &config, &mut state, &mut saved).expect("restores");
-        assert_eq!(state, AutoWinterState::Idle);
-        assert!(saved.is_none(), "saved consumed on restore");
+        assert!(matches!(state, AutoWinterState::Restoring { retries: 0 }));
+        assert!(
+            saved.is_some(),
+            "saved remains until readback confirms restore"
+        );
         // Restores the saved target SOC (77) + enable (1).
         assert!(writes
             .iter()
@@ -3606,6 +4070,100 @@ mod tests {
         assert!(writes
             .iter()
             .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
+    }
+
+    #[test]
+    fn auto_winter_retries_restore_until_readback_confirms_it() {
+        let config = aw_config(8.0, 12.0, 90, 2);
+        let mut state = AutoWinterState::WinterActive;
+        let mut saved = Some(AutoWinterSaved {
+            enable_charge_target: true,
+            target_soc: 77,
+        });
+        let warm = InverterSnapshot {
+            battery_temperature: 13.0,
+            ..Default::default()
+        };
+
+        assert!(check_auto_winter_with_outcome(
+            &warm,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::NoneIssued,
+        )
+        .is_none());
+        let first_writes = check_auto_winter_with_outcome(
+            &warm,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::NoneIssued,
+        )
+        .expect("restore writes");
+        assert_eq!(first_writes.len(), 2);
+        assert!(matches!(state, AutoWinterState::Restoring { retries: 0 }));
+        assert!(saved.is_some(), "saved values remain until readback");
+
+        let retry_writes = check_auto_winter_with_outcome(
+            &warm,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::Failed,
+        )
+        .expect("failed restore must retry");
+        assert_eq!(retry_writes.len(), 2);
+        assert!(matches!(state, AutoWinterState::Restoring { retries: 1 }));
+
+        let confirmed = InverterSnapshot {
+            battery_temperature: 13.0,
+            enable_charge_target: true,
+            target_soc: 77,
+            ..Default::default()
+        };
+        assert!(check_auto_winter_with_outcome(
+            &confirmed,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::Succeeded,
+        )
+        .is_none());
+        assert_eq!(state, AutoWinterState::Idle);
+        assert!(saved.is_none(), "saved values clear after readback");
+    }
+
+    #[test]
+    fn auto_winter_terminal_write_failure_does_not_claim_winter_active() {
+        let config = aw_config(8.0, 12.0, 90, 1);
+        let mut state = AutoWinterState::ColdPending { consecutive: 0 };
+        let mut saved = None;
+        let cold = InverterSnapshot {
+            battery_temperature: 4.0,
+            ..Default::default()
+        };
+        assert!(check_auto_winter_with_outcome(
+            &cold,
+            &config,
+            &mut state,
+            &mut saved,
+            AutoWinterWriteOutcome::NoneIssued,
+        )
+        .is_some());
+
+        for _ in 0..=AUTO_WINTER_MAX_WRITE_RETRIES {
+            let _ = check_auto_winter_with_outcome(
+                &cold,
+                &config,
+                &mut state,
+                &mut saved,
+                AutoWinterWriteOutcome::Failed,
+            );
+        }
+
+        assert!(matches!(state, AutoWinterState::Error { .. }));
+        assert!(!matches!(state, AutoWinterState::WinterActive));
     }
 
     #[test]
@@ -4672,8 +5230,8 @@ mod tests {
             .iter()
             .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1));
         // Slot 1 restored to 17:00.
-        let s1 = encode_hhmm(17, 0);
-        let e1 = encode_hhmm(19, 0);
+        let s1 = encode_hhmm(17, 0).expect("valid test start time");
+        let e1 = encode_hhmm(19, 0).expect("valid test end time");
         assert!(writes
             .iter()
             .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == s1));
@@ -4768,13 +5326,15 @@ mod tests {
             .iter()
             .any(|w| w.address == HR_BATTERY_PAUSE_MODE && w.value == 2));
         // HR319 restored to pause start 20:00
-        assert!(writes
-            .iter()
-            .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_START && w.value == encode_hhmm(20, 0)));
+        assert!(writes.iter().any(|w| {
+            w.address == HR_BATTERY_PAUSE_SLOT_1_START
+                && w.value == encode_hhmm(20, 0).expect("valid test start time")
+        }));
         // HR320 restored to pause end 15:00
-        assert!(writes
-            .iter()
-            .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_END && w.value == encode_hhmm(15, 0)));
+        assert!(writes.iter().any(|w| {
+            w.address == HR_BATTERY_PAUSE_SLOT_1_END
+                && w.value == encode_hhmm(15, 0).expect("valid test end time")
+        }));
     }
 
     #[test]
@@ -4851,12 +5411,14 @@ mod tests {
         assert!(writes
             .iter()
             .any(|w| w.address == HR_BATTERY_PAUSE_MODE && w.value == 2));
-        assert!(writes
-            .iter()
-            .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_START && w.value == encode_hhmm(20, 0)));
-        assert!(writes
-            .iter()
-            .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_END && w.value == encode_hhmm(15, 0)));
+        assert!(writes.iter().any(|w| {
+            w.address == HR_BATTERY_PAUSE_SLOT_1_START
+                && w.value == encode_hhmm(20, 0).expect("valid test start time")
+        }));
+        assert!(writes.iter().any(|w| {
+            w.address == HR_BATTERY_PAUSE_SLOT_1_END
+                && w.value == encode_hhmm(15, 0).expect("valid test end time")
+        }));
         // Slot values precede the pause mode so the inverter never observes
         // an enabled pause with incomplete window data.
         let slot_start_idx = writes
@@ -4964,6 +5526,37 @@ mod tests {
         // the real Octopus response shape.
         v.sort_by_key(|s| std::cmp::Reverse(s.valid_to));
         v
+    }
+
+    #[test]
+    fn agile_price_cache_is_sorted_newest_first() {
+        let mut prices = vec![
+            PriceSlot {
+                pence: 20.0,
+                valid_from: 3_600,
+                valid_to: 5_400,
+            },
+            PriceSlot {
+                pence: 10.0,
+                valid_from: 0,
+                valid_to: 1_800,
+            },
+            PriceSlot {
+                pence: 15.0,
+                valid_from: 1_800,
+                valid_to: 3_600,
+            },
+        ];
+
+        sort_price_slots_newest_first(&mut prices);
+
+        assert_eq!(
+            prices
+                .iter()
+                .map(|slot| slot.valid_from)
+                .collect::<Vec<_>>(),
+            vec![3_600, 1_800, 0]
+        );
     }
 
     #[test]
@@ -5409,6 +6002,91 @@ mod tests {
             crate::modbus::registers::HR_CHARGE_TARGET_SOC_1
         );
         assert_eq!(writes[5].value, 100);
+    }
+
+    #[tokio::test]
+    async fn cosy_prerequisite_failure_does_not_attempt_enable_writes() {
+        struct RecordingWriter {
+            attempted: Vec<u16>,
+            failure_address: u16,
+        }
+
+        impl RegisterWriteExecutor for RecordingWriter {
+            async fn write_register(&mut self, write: &RegisterWrite) -> Result<(), String> {
+                self.attempted.push(write.address);
+                if write.address == self.failure_address {
+                    Err("simulated prerequisite failure".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let slot = crate::settings::CosySlot {
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 5,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        let writes = cosy_slot_register_writes(&slot, DeviceType::Gen3Hybrid, true);
+
+        for failure_index in 0..2 {
+            let failure_address = writes[failure_index].address;
+            let mut writer = RecordingWriter {
+                attempted: Vec::new(),
+                failure_address,
+            };
+            let ok =
+                execute_register_writes(&mut writer, &writes, "Cosy test", Duration::ZERO).await;
+
+            assert!(!ok);
+            assert_eq!(writer.attempted.len(), failure_index + 1);
+            assert!(
+                writer
+                    .attempted
+                    .iter()
+                    .all(|address| *address != HR_ENABLE_CHARGE
+                        && *address != HR_ENABLE_CHARGE_TARGET)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn register_writes_do_not_delay_after_the_final_write() {
+        struct RecordingWriter {
+            attempted: Vec<u16>,
+        }
+
+        impl RegisterWriteExecutor for RecordingWriter {
+            async fn write_register(&mut self, write: &RegisterWrite) -> Result<(), String> {
+                self.attempted.push(write.address);
+                Ok(())
+            }
+        }
+
+        let writes = [RegisterWrite {
+            address: HR_CHARGE_SLOT_1_START,
+            value: 200,
+        }];
+        let mut writer = RecordingWriter {
+            attempted: Vec::new(),
+        };
+
+        let result = tokio::time::timeout(
+            Duration::ZERO,
+            execute_register_writes(
+                &mut writer,
+                &writes,
+                "Cosy final-write delay test",
+                Duration::from_secs(60),
+            ),
+        )
+        .await;
+
+        assert_eq!(result, Ok(true));
+        assert_eq!(writer.attempted.len(), writes.len());
     }
 
     // -----------------------------------------------------------------------
@@ -6604,6 +7282,39 @@ mod tests {
     }
 
     #[test]
+    fn timed_export_slotless_repair_defers_to_populated_agile_slots() {
+        let config = TimedExportConfig {
+            schedule_enabled: true,
+            slots: Vec::new(),
+            device_rearm_confirmed: false,
+            stop_pending: false,
+        };
+        let mut state = TimedExportState::Off;
+        let mut snapshot = export_armed_snapshot();
+        snapshot.discharge_slots[0] = ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 0,
+            target_soc: 4,
+        };
+
+        // Agile may have populated the physical slot bank while HEM's
+        // Timed Export schedule has no configured slots. The Off repair must
+        // not replace Agile's schedule with Eco.
+        let decision = check_timed_export_with_defaults(
+            &snapshot,
+            &config,
+            &mut state,
+            12 * 60,
+            DeviceType::Gen3Hybrid,
+        );
+        assert!(decision.writes.is_empty());
+        assert_eq!(state, TimedExportState::Off);
+    }
+
+    #[test]
     fn timed_export_configured_repairs_export_armed_outside_window() {
         // Outside a window but the registers say export is still armed
         // (another controller, failed exit): idempotent repair.
@@ -7107,6 +7818,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(inverter_minute_of_day(&snap), None);
+    }
+
+    #[test]
+    fn authoritative_minute_prefers_inverter_clock_over_host_clock() {
+        let snap = InverterSnapshot {
+            inverter_time: "2026-08-29 23:30:00".to_string(),
+            ..Default::default()
+        };
+
+        // Simulate a UTC host at 00:30 while the inverter/user clock is still
+        // 23:30. Every schedule evaluator must receive 23:30.
+        assert_eq!(authoritative_minute_of_day(&snap, 30), 23 * 60 + 30);
     }
 
     #[test]

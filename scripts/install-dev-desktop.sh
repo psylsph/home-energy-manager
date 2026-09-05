@@ -27,10 +27,34 @@ else
   warn() { echo "⚠ $*"; }
 fi
 
+# Desktop Entry string values use backslash escapes, while Exec is a command
+# line whose executable argument needs desktop-entry quoting. Keep these
+# encodings separate: quotes around Icon would become part of the icon path.
+desktop_string_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value// /\\s}"
+  value="${value//$'\t'/\\t}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  printf '%s' "$value"
+}
+
+desktop_exec_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\`/\\\`}"
+  value="${value//\$/\\\$}"
+  printf '"%s"' "$value"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY="$APP_DIR/src-tauri/target/debug/givenergy-local"
 ICON="$APP_DIR/src-tauri/icons/128x128.png"
+EXEC_ENTRY="$(desktop_exec_quote "$BINARY")"
+ICON_ENTRY="$(desktop_string_escape "$ICON")"
 
 if [ ! -f "$BINARY" ]; then
   warn "Dev binary not found — build first with: cargo tauri dev"
@@ -44,8 +68,8 @@ cat > "$DESKTOP_DIR/com.givenergy.local.desktop" << DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Home Energy Manager (Dev)
-Exec=$BINARY
-Icon=$ICON
+Exec=$EXEC_ENTRY
+Icon=$ICON_ENTRY
 Terminal=false
 DESKTOP
 

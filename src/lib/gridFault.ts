@@ -42,7 +42,7 @@ export function inverterTemperatureAlertKind(
 ): 'inverter_temp_low' | 'inverter_temp_high' | null {
   const temp = snapshot.inverter_temperature;
   if (!Number.isFinite(temp)) return null;
-  if (config.inverter_temp_min > 0 && temp < config.inverter_temp_min) return 'inverter_temp_low';
+  if (config.inverter_temp_min !== 0 && temp < config.inverter_temp_min) return 'inverter_temp_low';
   if (config.inverter_temp_max > 0 && temp > config.inverter_temp_max) return 'inverter_temp_high';
   return null;
 }

@@ -231,6 +231,10 @@ pub fn mismatch_notification_due(
 pub struct AlertDebounce {
     /// Map from alert type to the last time it was sent.
     last_sent: HashMap<AlertType, Instant>,
+    /// Alert types with a notification currently being delivered. A pending
+    /// attempt is separate from `last_sent` so a failed sender does not start
+    /// the cooldown and a second poll cannot duplicate the same attempt.
+    pending: std::collections::HashSet<AlertType>,
     /// Set of alert types currently in an active (fired) state.
     active: std::collections::HashSet<AlertType>,
     /// Consecutive-cycle count of the inverter's raw `IR(57)` warning flag.
@@ -258,6 +262,7 @@ impl AlertDebounce {
     pub fn new() -> Self {
         Self {
             last_sent: HashMap::new(),
+            pending: std::collections::HashSet::new(),
             active: std::collections::HashSet::new(),
             battery_warning_streak: 0,
             solar_clipping_streak: 0,
@@ -372,12 +377,27 @@ impl AlertDebounce {
     /// Returns `true` if this alert type should fire (cooldown has elapsed).
     pub fn should_fire(&mut self, alert_type: AlertType, cooldown_minutes: u32) -> bool {
         let cooldown = std::time::Duration::from_secs(cooldown_minutes as u64 * 60);
+        if self.pending.contains(&alert_type) {
+            return false;
+        }
         match self.last_sent.get(&alert_type) {
             Some(last) if last.elapsed() < cooldown => false,
             _ => {
-                self.last_sent.insert(alert_type, Instant::now());
-                self.active.insert(alert_type);
+                self.pending.insert(alert_type);
                 true
+            }
+        }
+    }
+
+    /// Complete one notification attempt. Only an attempt with at least one
+    /// successful channel is recorded in the cooldown and active sets;
+    /// failed attempts are released so the next poll can retry immediately.
+    pub fn record_delivery(&mut self, alert_types: &[AlertType], delivered: bool) {
+        for alert_type in alert_types {
+            self.pending.remove(alert_type);
+            if delivered {
+                self.last_sent.insert(*alert_type, Instant::now());
+                self.active.insert(*alert_type);
             }
         }
     }
@@ -399,6 +419,7 @@ impl AlertDebounce {
     /// clearing its cooldown and re-enabling immediate re-fire.
     pub fn reset_for_type(&mut self, alert_type: AlertType) {
         self.last_sent.remove(&alert_type);
+        self.pending.remove(&alert_type);
         self.active.remove(&alert_type);
     }
 
@@ -408,6 +429,7 @@ impl AlertDebounce {
     /// flag doesn't carry across a config change.
     pub fn clear(&mut self) {
         self.last_sent.clear();
+        self.pending.clear();
         self.active.clear();
         self.battery_warning_streak = 0;
         self.solar_clipping_streak = 0;
@@ -457,7 +479,7 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
         if config.batt_temp_max > 0.0 && temp > config.batt_temp_max {
             alerts.push(AlertType::BatteryTempHigh);
         }
-        if config.batt_temp_min > 0.0 && temp < config.batt_temp_min {
+        if config.batt_temp_min != 0.0 && temp < config.batt_temp_min {
             alerts.push(AlertType::BatteryTempLow);
         }
     }
@@ -468,7 +490,7 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
         if config.inverter_temp_max > 0.0 && inverter_temp > config.inverter_temp_max {
             alerts.push(AlertType::InverterTempHigh);
         }
-        if config.inverter_temp_min > 0.0 && inverter_temp < config.inverter_temp_min {
+        if config.inverter_temp_min != 0.0 && inverter_temp < config.inverter_temp_min {
             alerts.push(AlertType::InverterTempLow);
         }
     }
@@ -573,6 +595,7 @@ pub fn build_cleared_message(snapshot: &InverterSnapshot, alerts: &[AlertType]) 
 /// (not by [`evaluate_alerts`], which has no access to connection state).
 pub fn build_connection_lost_message(host: &str) -> String {
     let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let host = crate::alerts::report::escape_html(host);
     let mut msg = format!("📡 HEM Connection Lost — {}\n", time);
     msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
     msg.push_str(&format!(
@@ -584,6 +607,7 @@ pub fn build_connection_lost_message(host: &str) -> String {
 /// Build a "contact restored" notification message.
 pub fn build_connection_restored_message(host: &str) -> String {
     let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let host = crate::alerts::report::escape_html(host);
     let mut msg = format!("✅ HEM Connection Restored — {}\n", time);
     msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
     msg.push_str(&format!("Contact with <b>{host}</b> re-established."));
@@ -789,11 +813,11 @@ pub async fn send_battery_voltage_mismatch_restored_notification(
 
 /// Fan a pre-built alert message out to every configured channel.
 /// Shared by the battery connection-lost/restored senders above.
-async fn dispatch_alert_text(
+pub(crate) async fn dispatch_alert_text(
     config: &crate::settings::AlertsConfig,
     text: &str,
     kind: &'static str,
-) {
+) -> bool {
     let token = config.telegram_bot_token.clone();
     let chat_id = config.telegram_chat_id.clone();
     let ntfy_topic = config.ntfy_topic.clone();
@@ -801,24 +825,30 @@ async fn dispatch_alert_text(
     let pushover_token = config.pushover_app_token.clone();
     let pushover_key = config.pushover_user_key.clone();
     let text_clone = text.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
+        let mut delivered = false;
         if !token.is_empty() && !chat_id.is_empty() {
-            if let Err(e) = send_telegram_message(&token, &chat_id, &text_clone) {
-                tracing::warn!("Telegram {kind} notification failed: {e}");
+            match send_telegram_message(&token, &chat_id, &text_clone) {
+                Ok(()) => delivered = true,
+                Err(e) => tracing::warn!("Telegram {kind} notification failed: {e}"),
             }
         }
         if !ntfy_topic.is_empty() {
-            if let Err(e) = send_ntfy_message(&ntfy_topic, &ntfy_server, &text_clone) {
-                tracing::warn!("ntfy {kind} notification failed: {e}");
+            match send_ntfy_message(&ntfy_topic, &ntfy_server, &text_clone) {
+                Ok(()) => delivered = true,
+                Err(e) => tracing::warn!("ntfy {kind} notification failed: {e}"),
             }
         }
         if !pushover_token.is_empty() && !pushover_key.is_empty() {
-            if let Err(e) = send_pushover_message(&pushover_token, &pushover_key, &text_clone) {
-                tracing::warn!("Pushover {kind} notification failed: {e}");
+            match send_pushover_message(&pushover_token, &pushover_key, &text_clone) {
+                Ok(()) => delivered = true,
+                Err(e) => tracing::warn!("Pushover {kind} notification failed: {e}"),
             }
         }
+        delivered
     })
-    .await;
+    .await
+    .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,6 +1473,15 @@ fn parse_command(text: &str) -> String {
 
 /// Build the `/today` summary by querying today's history and the configured
 /// tariffs. Async because it locks the history DB and reads settings.
+async fn get_readings_for_date_blocking(
+    db: std::sync::Arc<crate::history::HistoryDb>,
+    date: chrono::NaiveDate,
+) -> Result<Vec<crate::alerts::report::ReadingRow>, String> {
+    tokio::task::spawn_blocking(move || db.get_readings_for_date(date))
+        .await
+        .map_err(|error| format!("history database worker failed: {error}"))?
+}
+
 async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
     let today = chrono::Local::now().date_naive();
     let date_str = today.format("%A %d %B").to_string();
@@ -1455,7 +1494,7 @@ async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
         return "⚠️ History database not available.".to_string();
     };
 
-    let rows = match db.get_readings_for_date(today) {
+    let rows = match get_readings_for_date_blocking(db, today).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!("Telegram /today query failed: {e}");
@@ -1466,7 +1505,7 @@ async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
         return "⚠️ No history data for today yet.".to_string();
     }
 
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     match crate::alerts::report::generate_daily_summary_text(&rows, &date_str, &settings) {
         Some(s) => s,
         None => "⚠️ Not enough data to summarise today yet.".to_string(),
@@ -1488,14 +1527,13 @@ async fn build_report_reply(
     let db = db_guard.clone();
     drop(db_guard);
 
-    let db = db.as_ref()?;
-    let rows = db.get_readings_for_date(yesterday).ok()?;
+    let rows = get_readings_for_date_blocking(db?, yesterday).await.ok()?;
     if rows.len() < 2 {
         return None;
     }
 
     let html = crate::alerts::report::generate_daily_report_html(&rows, &date_str)?;
-    let settings = crate::settings::Settings::load();
+    let settings = crate::settings::Settings::load_async().await;
     let caption = crate::alerts::report::generate_daily_summary_text(&rows, &date_str, &settings)
         .unwrap_or_else(|| "📊 Daily report".to_string());
 
@@ -1624,6 +1662,30 @@ pub(crate) fn poll_error_severity(err: &ureq::Error) -> PollErrorSeverity {
     }
 }
 
+type TelegramUpdate = (Option<i64>, i64, String);
+
+fn parse_telegram_updates(data: &serde_json::Value) -> Vec<TelegramUpdate> {
+    let mut updates = Vec::new();
+    if let Some(results) = data["result"].as_array() {
+        for update in results {
+            let update_id = update.get("update_id").and_then(|value| value.as_i64());
+            if let Some(msg) = update.get("message") {
+                let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
+                let text = msg["text"].as_str().unwrap_or("").to_string();
+                updates.push((update_id, chat_id, text));
+            }
+        }
+    }
+    updates
+}
+
+fn advance_telegram_offset(offset: i64, update_id: Option<i64>) -> i64 {
+    match update_id {
+        Some(update_id) if update_id >= offset => update_id.saturating_add(1),
+        _ => offset,
+    }
+}
+
 /// Spawns a background task that polls Telegram for commands and replies
 /// with inverter data. Supported commands: `/status`, `/today`, `/battery`,
 /// `/mode`, `/version`, `/help`.
@@ -1676,8 +1738,8 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
             // `ureq::Error` so the loop can classify them (benign timeout vs.
             // genuine failure) and grow the backoff; a successful poll (even
             // an empty one) resets it.
-            let poll_outcome = tokio::task::spawn_blocking(
-                move || -> Result<Vec<(i64, i64, String)>, ureq::Error> {
+            let poll_outcome =
+                tokio::task::spawn_blocking(move || -> Result<Vec<TelegramUpdate>, ureq::Error> {
                     let url = format!(
                         "https://api.telegram.org/bot{}/getUpdates?offset={}&timeout=10",
                         poll_token, cur_offset
@@ -1686,19 +1748,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                         Ok(r) => {
                             let body = r.into_body().read_to_string().unwrap_or_default();
                             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
-                                let mut msgs = Vec::new();
-                                if let Some(results) = data["result"].as_array() {
-                                    for update in results {
-                                        let update_id = update["update_id"].as_i64().unwrap_or(0);
-                                        if let Some(msg) = update.get("message") {
-                                            let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
-                                            let text =
-                                                msg["text"].as_str().unwrap_or("").to_string();
-                                            msgs.push((update_id, chat_id, text));
-                                        }
-                                    }
-                                }
-                                Ok(msgs)
+                                Ok(parse_telegram_updates(&data))
                             } else {
                                 // A body we couldn't parse isn't a transport
                                 // failure — map it to an empty success so it
@@ -1708,9 +1758,8 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                         }
                         Err(e) => Err(e),
                     }
-                },
-            )
-            .await;
+                })
+                .await;
 
             let updates = match poll_outcome {
                 Ok(Ok(updates)) => {
@@ -1754,9 +1803,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
             };
 
             for (update_id, chat_id, text) in &updates {
-                if *update_id >= offset {
-                    offset = update_id + 1;
-                }
+                offset = advance_telegram_offset(offset, *update_id);
 
                 // Allowlist: only respond to the configured chat.
                 match allowed_chat {
@@ -2050,6 +2097,16 @@ mod tests {
     }
 
     #[test]
+    fn test_battery_temp_negative_low_threshold_triggers() {
+        let mut snap = make_snapshot();
+        snap.battery_temperature = -10.0;
+        let mut config = alerts_config();
+        config.batt_temp_min = -5.0;
+        let alerts = evaluate_alerts(&snap, &config);
+        assert!(alerts.contains(&AlertType::BatteryTempLow));
+    }
+
+    #[test]
     fn test_battery_temp_no_alert_when_ok() {
         let snap = make_snapshot();
         let mut config = alerts_config();
@@ -2082,6 +2139,16 @@ mod tests {
         let mut snap = make_snapshot();
         snap.inverter_temperature = 5.0;
         let alerts = evaluate_alerts(&snap, &alerts_config());
+        assert!(alerts.contains(&AlertType::InverterTempLow));
+    }
+
+    #[test]
+    fn test_inverter_temp_negative_low_threshold_triggers() {
+        let mut snap = make_snapshot();
+        snap.inverter_temperature = -10.0;
+        let mut config = alerts_config();
+        config.inverter_temp_min = -5.0;
+        let alerts = evaluate_alerts(&snap, &config);
         assert!(alerts.contains(&AlertType::InverterTempLow));
     }
 
@@ -2218,6 +2285,17 @@ mod tests {
         let mut d = AlertDebounce::new();
         d.should_fire(AlertType::GridOffline, 30);
         assert!(d.should_fire(AlertType::BatterySocLow, 30)); // different type allowed
+    }
+
+    #[test]
+    fn test_debounce_only_starts_cooldown_after_successful_delivery() {
+        let mut d = AlertDebounce::new();
+        assert!(d.should_fire(AlertType::GridOffline, 30));
+        d.record_delivery(&[AlertType::GridOffline], false);
+        assert!(d.should_fire(AlertType::GridOffline, 30));
+
+        d.record_delivery(&[AlertType::GridOffline], true);
+        assert!(!d.should_fire(AlertType::GridOffline, 30));
     }
 
     // ================================================================
@@ -2977,6 +3055,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn telegram_offset_ignores_updates_without_an_id() {
+        let payload = serde_json::json!({
+            "result": [{
+                "message": {"chat": {"id": 123}, "text": "/status"}
+            }]
+        });
+        let updates = parse_telegram_updates(&payload);
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, None);
+        assert_eq!(advance_telegram_offset(0, updates[0].0), 0);
+        assert_eq!(advance_telegram_offset(42, Some(42)), 43);
+        assert_eq!(advance_telegram_offset(42, Some(41)), 42);
+    }
+
     // ================================================================
     // telegram_agent — no-pooling + global timeout config
     // ================================================================
@@ -3085,6 +3179,7 @@ mod tests {
     fn test_extract_cleared_reports_resolved_and_drops_from_active() {
         let mut d = AlertDebounce::new();
         assert!(d.should_fire(AlertType::BatteryTempHigh, 30));
+        d.record_delivery(&[AlertType::BatteryTempHigh], true);
         // No longer triggered this cycle → reported as cleared and removed.
         assert_eq!(d.extract_cleared(&[]), vec![AlertType::BatteryTempHigh]);
         // A second pass must not re-report it (it's gone from the active set).
@@ -3096,6 +3191,10 @@ mod tests {
         let mut d = AlertDebounce::new();
         d.should_fire(AlertType::BatteryTempHigh, 30);
         d.should_fire(AlertType::BatterySocLow, 30);
+        d.record_delivery(
+            &[AlertType::BatteryTempHigh, AlertType::BatterySocLow],
+            true,
+        );
         // BatteryTempHigh is still triggered → only BatterySocLow clears.
         assert_eq!(
             d.extract_cleared(&[AlertType::BatteryTempHigh]),
@@ -3111,6 +3210,7 @@ mod tests {
     fn test_reset_for_type_re_enables_immediate_refire() {
         let mut d = AlertDebounce::new();
         assert!(d.should_fire(AlertType::BatteryTempHigh, 30));
+        d.record_delivery(&[AlertType::BatteryTempHigh], true);
         // Inside the cooldown window a repeat fire is suppressed.
         assert!(!d.should_fire(AlertType::BatteryTempHigh, 30));
         // reset_for_type clears both the cooldown and the active entry, so the
@@ -3126,6 +3226,10 @@ mod tests {
         let mut d = AlertDebounce::new();
         d.should_fire(AlertType::BatteryTempHigh, 30);
         d.should_fire(AlertType::BatterySocLow, 30);
+        d.record_delivery(
+            &[AlertType::BatteryTempHigh, AlertType::BatterySocLow],
+            true,
+        );
         // Build the streak up to the confirmation threshold (3 consecutive
         // trues) so we can prove clear() resets it afterwards.
         assert!(!d.confirm_battery_warning(true)); // streak 1
@@ -3148,6 +3252,7 @@ mod tests {
         assert!(d.is_empty());
         assert_eq!(d.len(), 0);
         d.should_fire(AlertType::BatteryTempHigh, 30);
+        d.record_delivery(&[AlertType::BatteryTempHigh], true);
         assert!(!d.is_empty());
         assert_eq!(d.len(), 1);
     }
@@ -3184,6 +3289,17 @@ mod tests {
         let msg = build_connection_restored_message("inverter.local");
         assert!(msg.contains("Connection Restored"));
         assert!(msg.contains("inverter.local"));
+    }
+
+    #[test]
+    fn test_connection_messages_escape_html_host() {
+        let host = "<inverter>&\"";
+        let lost = build_connection_lost_message(host);
+        let restored = build_connection_restored_message(host);
+        for message in [lost, restored] {
+            assert!(message.contains("&lt;inverter&gt;&amp;&quot;"));
+            assert!(!message.contains(host));
+        }
     }
 
     #[test]

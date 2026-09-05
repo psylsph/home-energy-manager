@@ -119,6 +119,18 @@ describe('useGridOutageNotifications', () => {
     expect(notificationInstances[1].body).toContain('241.3V');
   });
 
+  it('renders a safe voltage value when restored-grid telemetry is not finite', () => {
+    renderHook(() => useGridOutageNotifications());
+    setSnapshot(makeSnapshot({ grid_loss: true, grid_online: false }));
+    setSnapshot(makeSnapshot({
+      grid_loss: false,
+      grid_online: true,
+      grid_voltage: null as unknown as number,
+    }));
+
+    expect(notificationInstances[1]!.body).toContain('Grid voltage is back at —.');
+  });
+
   it('does not re-notify while a fault is ongoing', () => {
     renderHook(() => useGridOutageNotifications());
     // First poll: fault onset → one notification.

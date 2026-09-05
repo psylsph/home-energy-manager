@@ -16,9 +16,9 @@ import type { FullConfig } from '@playwright/test';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
 import { startModbusServer, stopModbusServer } from './mock-modbus.js';
 import { backendExecutableName } from './binary-path.js';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,16 +36,21 @@ const BINARY_PATH = path.resolve(
   backendExecutableName(),
 );
 
+// The mock server lives in this process, so the exit handler closes it by
+// letting process shutdown release its listeners and only kills child-owned
+// ports. The normal returned teardown still closes the servers explicitly.
+process.on('exit', () => {
+  killPort(HTTP_PORT);
+  killPort(MODBUS_PORT);
+  killPort(ADMIN_PORT);
+});
+
 export default async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
   console.log('[global-setup] Starting E2E infrastructure...');
 
   // Kill leftover processes on our ports from previous runs.
   for (const port of [MODBUS_PORT, ADMIN_PORT, HTTP_PORT]) {
-    try {
-      execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-    } catch {
-      /* ignore */
-    }
+    killPort(port);
   }
   await new Promise((r) => setTimeout(r, 500));
 
@@ -74,11 +79,7 @@ export default async function globalSetup(_config: FullConfig): Promise<() => Pr
     // Safety net: free the backend/mock ports in case a spec file's afterAll
     // didn't run (e.g. the suite was aborted mid-file).
     for (const port of [HTTP_PORT, MODBUS_PORT]) {
-      try {
-        execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-      } catch {
-        /* ignore */
-      }
+      killPort(port);
     }
     console.log('[global-setup] Done');
   };

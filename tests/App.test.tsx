@@ -92,12 +92,14 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
   beforeEach(() => {
     silenceConsoleError();
     window.location.hash = '';
+    useInverterStore.setState({ developerMode: false });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     cleanup();
     window.location.hash = '';
+    useInverterStore.setState({ developerMode: false });
   });
 
   it('contains a throwing page to its own route (shows the fallback, not a crash)', () => {
@@ -127,6 +129,24 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
     expect(screen.getByText(/Home Energy Manager/)).toBeDefined();
     expect(screen.getByRole('link', { name: 'Battery' })).toBeDefined();
     expect(screen.getByRole('link', { name: 'Settings' })).toBeDefined();
+  });
+
+  it('redirects an unknown route to Status instead of leaving the main area blank', async () => {
+    await navigate('/not-a-real-page');
+    render(<App />);
+    expect(await screen.findByText('Status exploded')).toBeDefined();
+  });
+
+  it('redirects away from Logs when Developer Mode is turned off', async () => {
+    useInverterStore.setState({ developerMode: true });
+    await navigate('/logs');
+    render(<App />);
+    expect(screen.getByTestId('mock-Logs')).toBeDefined();
+
+    await act(async () => {
+      useInverterStore.setState({ developerMode: false });
+    });
+    expect(await screen.findByText('Status exploded')).toBeDefined();
   });
 
   // Each core route renders its (mocked) page. This also guards the structural

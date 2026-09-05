@@ -200,11 +200,12 @@ test.describe('Quick Actions', () => {
     expect(findWrite(writes, 95)!.value).not.toBe(0);
 
     // HR 27 = 1 (eco), HR 59 = 0 (clear stale discharge), HR 96 = 1 (enable_charge),
-    // HR 20 = 1 (enable_charge_target), HR 116 = 100 (target SOC)
+    // HR 20 = 0 (target 100% means "no target" — flag cleared per
+    // givenergy-modbus set_charge_target(100)), HR 116 = 100 (target SOC)
     expect(findWrite(writes, 27)!.value).toBe(1);
     expect(findWrite(writes, 59)!.value).toBe(0);
     expect(findWrite(writes, 96)!.value).toBe(1);
-    expect(findWrite(writes, 20)!.value).toBe(1);
+    expect(findWrite(writes, 20)!.value).toBe(0);
     expect(findWrite(writes, 116)!.value).toBe(100);
 
     const conflict = await fetch(`${baseUrl}/api/control/force-discharge`, {
@@ -773,7 +774,7 @@ test.describe('API Control Endpoints', () => {
     expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
     expect(findWrite(writes, 59)!.value).toBe(0);    // clear stale discharge
     expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
-    expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
+    expect(findWrite(writes, 20)!.value).toBe(0);    // target 100% = no target
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
 
     // Slot registers must appear before enable_charge (HR96)
@@ -997,7 +998,7 @@ test.describe('Quick Actions - extended', () => {
     expect(findWrite(writes, 27)!.value).toBe(1);    // eco mode
     expect(findWrite(writes, 59)!.value).toBe(0);    // clear stale discharge
     expect(findWrite(writes, 96)!.value).toBe(1);    // enable_charge
-    expect(findWrite(writes, 20)!.value).toBe(1);    // enable_charge_target
+    expect(findWrite(writes, 20)!.value).toBe(0);    // target 100% = no target
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
 
     // Verify no slot registers were written
@@ -1078,7 +1079,7 @@ test.describe('Quick Actions - extended', () => {
     expect(findWrite(allWrites, 27)!.value).toBe(1);    // eco mode
     expect(findWrite(allWrites, 59)!.value).toBe(0);    // clear stale discharge
     expect(findWrite(allWrites, 96)!.value).toBe(1);    // enable_charge
-    expect(findWrite(allWrites, 20)!.value).toBe(1);    // enable_charge_target
+    expect(findWrite(allWrites, 20)!.value).toBe(0);    // target 100% = no target
     expect(findWrite(allWrites, 116)!.value).toBe(100); // target SOC
 
     const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
@@ -1321,7 +1322,7 @@ test.describe('Edge Cases', () => {
     // Force-charge flags still present
     expect(findWrite(writes, 27)!.value).toBe(1);
     expect(findWrite(writes, 96)!.value).toBe(1);
-    expect(findWrite(writes, 20)!.value).toBe(1);
+    expect(findWrite(writes, 20)!.value).toBe(0);
     expect(findWrite(writes, 116)!.value).toBe(100);
   });
 
@@ -1350,7 +1351,7 @@ test.describe('Edge Cases', () => {
     // Force-charge flags still present
     expect(findWrite(writes, 27)!.value).toBe(1);
     expect(findWrite(writes, 96)!.value).toBe(1);
-    expect(findWrite(writes, 20)!.value).toBe(1);
+    expect(findWrite(writes, 20)!.value).toBe(0);
     expect(findWrite(writes, 116)!.value).toBe(100);
   });
 

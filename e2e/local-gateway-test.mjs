@@ -9,13 +9,13 @@
  * Usage: node e2e/local-gateway-test.mjs
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
-import * as fs from 'fs';
 import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { setTimeout as sleep } from 'timers/promises';
 import { writeTestSettings } from './test-settings.mjs';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,11 +32,18 @@ const BACKEND_PATH = path.resolve(
 );
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
 
-function killPort(port) {
-  try {
-    execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-  } catch { /* ignore */ }
-}
+let activeSimulator = null;
+let activeBackend = null;
+
+// This script is also used directly, outside Playwright's teardown hooks.
+// Ensure Ctrl+C, an uncaught error, or runner termination cannot leave either
+// owned child listening on its fixed test port.
+process.on('exit', () => {
+  activeBackend?.kill('SIGKILL');
+  activeSimulator?.kill('SIGKILL');
+  killPort(MODBUS_PORT);
+  killPort(HTTP_PORT);
+});
 
 async function startSimulator() {
   console.log(`[gateway-test] Starting simulator on port ${MODBUS_PORT}...`);
@@ -75,6 +82,7 @@ async function startBackend() {
     port: MODBUS_PORT,
     httpPort: HTTP_PORT,
     pollInterval: 5,
+    writePacingMs: 25,
   });
 
   const proc = spawn(BACKEND_PATH, ['--headless', '--port', String(HTTP_PORT), '--dist', DIST_DIR], {
@@ -98,7 +106,7 @@ async function waitForConnection(baseUrl, maxRetries = 20) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       const status = await fetchJson(`${baseUrl}/api/status`);
-      if (status.connected) return status;
+      if (status.connection === 'connected') return status;
     } catch { /* retry */ }
     await sleep(1000);
   }
@@ -109,7 +117,7 @@ async function waitForSnapshot(baseUrl, maxRetries = 15) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       const snap = await fetchJson(`${baseUrl}/api/snapshot`);
-      if (snap && snap.device_type_code) return snap;
+      if (snap?.data?.device_type_code) return snap.data;
     } catch { /* retry */ }
     await sleep(1000);
   }
@@ -131,7 +139,9 @@ async function main() {
   await sleep(500);
 
   const sim = await startSimulator();
+  activeSimulator = sim;
   const { proc: backend, settingsFixture } = await startBackend();
+  activeBackend = backend;
 
   try {
     const baseUrl = `http://127.0.0.1:${HTTP_PORT}`;
@@ -151,13 +161,13 @@ async function main() {
     assert('First inverter serial present', !!snap.first_inverter_serial);
     assert('Solar power >= 0', snap.solar_power >= 0, `Got ${snap.solar_power}`);
     assert('Home power >= 0', snap.home_power >= 0, `Got ${snap.home_power}`);
-    assert('Grid frequency is NaN', Number.isNaN(snap.grid_frequency), `Got ${snap.grid_frequency}`);
+    assert('Grid frequency is unavailable', snap.grid_frequency === null, `Got ${snap.grid_frequency}`);
     assert('No faults', Array.isArray(snap.gateway_fault_codes) && snap.gateway_fault_codes.length === 0);
     assert('Max charge slots >= 2', snap.max_charge_slots >= 2, `Got ${snap.max_charge_slots}`);
 
     // API endpoints respond
-    const rateResp = await fetchJson(`${baseUrl}/api/control/charge-rate`);
-    assert('Charge rate API responds', rateResp.ok !== false);
+    const statusResp = await fetchJson(`${baseUrl}/api/status`);
+    assert('Status API responds', statusResp.ok !== false);
 
     const now = Math.floor(Date.now() / 1000);
     const history = await fetchJson(`${baseUrl}/api/history?range=today&t=${now}`);
@@ -170,8 +180,10 @@ async function main() {
     backend.kill('SIGTERM'); sim.kill('SIGTERM');
     await sleep(1000);
     backend.kill('SIGKILL'); sim.kill('SIGKILL');
-    try { await settingsFixture.cleanup(); } catch {}
+    try { await settingsFixture.cleanup(); } catch { /* best effort */ }
     killPort(MODBUS_PORT); killPort(HTTP_PORT);
+    activeBackend = null;
+    activeSimulator = null;
   }
   process.exit(failed > 0 ? 1 : 0);
 }

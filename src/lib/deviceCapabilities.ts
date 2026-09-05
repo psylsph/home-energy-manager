@@ -87,8 +87,8 @@ export function deviceSupportsEps(
  *   - 0x81xx — HV Gen3 hybrid → HR 1063
  *   - 0x82xx — All-in-One hybrid → HR 1063
  *
- * Single-phase / AC-coupled hybrids (Gen1/2/3/4, Polar, Gen3+, AC, AC Mk2,
- * and the residential All-in-One 0x80xx) have NO configurable export limit:
+ * Single-phase / AC-coupled hybrids (Gen1/2/3/4, Polar, Gen3+, AC, AC Mk2)
+ * and residential All-in-One 0x80xx models have NO configurable export limit:
  * their HR(26) `grid_port_max_power_output` is the read-only rated hardware
  * max output, not an export-limit setting, and `/api/control/export-limit`
  * refuses the write for them. Used by `InverterPage` to show the "Grid Export

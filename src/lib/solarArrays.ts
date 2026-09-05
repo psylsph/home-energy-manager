@@ -12,9 +12,8 @@ export const SOLAR_PV2_COLOR = '#3B82F6';
  * (issue #110). Returns `null` when the array has no rated capacity
  * (`rated_kw <= 0`) so the caller can hide the % and show power-only.
  *
- * Capped at 100% only for display sanity when the dongle reports a glitch
- * spike above the array's rating — callers that want the raw ratio should
- * divide directly.
+ * The returned percentage is not capped; SolarPage caps only the progress-bar
+ * fill for display sanity while keeping the numeric reading accurate.
  */
 export function percentOfRated(powerW: number, ratedKw: number): number | null {
   if (!ratedKw || ratedKw <= 0) return null;

@@ -16,6 +16,35 @@ use crate::inverter::model::ScheduleSlot;
 /// directory" when the temp was already renamed by another save.
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
+/// Recover the guard from a poisoned mutex instead of turning one panicking
+/// settings writer into a permanent outage for all later saves. The settings
+/// lock only protects the read-modify-write transaction; after a panic, the
+/// underlying value is still the unit marker and is safe to reuse.
+fn recover_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::error!("Settings lock poisoned; recovering the underlying lock");
+        poisoned.into_inner()
+    })
+}
+
+fn settings_lock() -> std::sync::MutexGuard<'static, ()> {
+    recover_lock(&SETTINGS_LOCK)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| format!("Failed to sync settings directory: {e}"))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), String> {
+    // Windows does not support opening a directory as a regular File for
+    // fsync. The temporary file is still flushed before the atomic replace.
+    Ok(())
+}
+
 /// Test-only fault injection: how many upcoming [`Settings::update`] calls
 /// must fail with an error before real persistence resumes. Lets endpoint
 /// tests drive the persistence-failure branches (schedule rollback, physical
@@ -1028,6 +1057,13 @@ pub struct Settings {
     pub serial: String,
     /// Poll interval in seconds.
     pub poll_interval: u64,
+    /// Milliseconds to wait between consecutive Modbus register writes in a
+    /// queued batch. The default 1500 ms keeps real GivEnergy dongles from
+    /// dropping frames during long slot batches; the E2E suites set a low
+    /// value against the local simulator, which answers instantly and has
+    /// no firmware pacing requirement.
+    #[serde(default = "default_write_pacing_ms")]
+    pub write_pacing_ms: u64,
     /// HTTP server port (default 7337). Change to run multiple instances.
     #[serde(default = "default_http_port")]
     pub http_port: u16,
@@ -1471,6 +1507,12 @@ fn default_check_for_updates() -> bool {
     true
 }
 
+/// Default for [`Settings::write_pacing_ms`] — the documented ~1.5 s dongle
+/// inter-write gap.
+fn default_write_pacing_ms() -> u64 {
+    1500
+}
+
 fn default_octopus_gas_unit() -> String {
     "unknown".to_string()
 }
@@ -1689,6 +1731,7 @@ impl Default for Settings {
             port: 8899,
             serial: String::new(),
             poll_interval: 60,
+            write_pacing_ms: default_write_pacing_ms(),
             http_port: default_http_port(),
             evc_host: String::new(),
             evc_port: default_evc_port(),
@@ -1874,6 +1917,19 @@ impl Settings {
         }
     }
 
+    /// Load settings on Tokio's blocking pool. File-backed settings are small,
+    /// but handlers must not perform even that synchronous I/O on an async
+    /// worker thread.
+    pub async fn load_async() -> Self {
+        match tokio::task::spawn_blocking(Self::load).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::error!("Settings load task failed: {error}; using defaults");
+                Self::default()
+            }
+        }
+    }
+
     /// Save current settings to disk using an atomic write (temp file + rename).
     ///
     /// A global mutex serializes concurrent saves so two async tasks don't
@@ -1882,9 +1938,7 @@ impl Settings {
     /// out from under another. The temp file name also includes a timestamp
     /// to avoid collisions if the mutex is ever removed.
     pub fn save(&self) -> Result<(), String> {
-        let _lock = SETTINGS_LOCK
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
+        let _lock = settings_lock();
         self.save_unlocked()
     }
 
@@ -1935,8 +1989,14 @@ impl Settings {
         // Clean up any orphaned temp file from a previous crash.
         let _ = std::fs::remove_file(&tmp_path);
         fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write temp settings: {}", e))?;
+        fs::File::open(&tmp_path)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| format!("Failed to sync temp settings: {e}"))?;
         fs::rename(&tmp_path, &path)
             .map_err(|e| format!("Failed to rename settings file: {}", e))?;
+        if let Some(parent) = path.parent() {
+            sync_directory(parent)?;
+        }
 
         tracing::debug!("Settings saved to {}", path.display());
         Ok(())
@@ -1958,9 +2018,7 @@ impl Settings {
     where
         F: FnOnce(&mut Settings) -> T,
     {
-        let _lock = SETTINGS_LOCK
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
+        let _lock = settings_lock();
 
         // Test-only fault injection: endpoint tests need to exercise the
         // persistence-failure branches (schedule rollback, physical-write
@@ -1988,6 +2046,17 @@ impl Settings {
         Ok(payload)
     }
 
+    /// Run [`Settings::update`] on Tokio's blocking pool.
+    pub async fn update_async<T, F>(f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Settings) -> T + Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || Self::update(f))
+            .await
+            .map_err(|error| format!("Settings update task failed: {error}"))?
+    }
+
     /// Like [`Settings::update`], but the closure can REJECT the write.
     ///
     /// Validation-heavy callers (e.g. `update_settings`) need all-or-nothing
@@ -2002,9 +2071,7 @@ impl Settings {
     where
         F: FnOnce(&mut Settings) -> Result<T, String>,
     {
-        let _lock = SETTINGS_LOCK
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
+        let _lock = settings_lock();
 
         let mut settings = Self::load();
         match f(&mut settings) {
@@ -2014,6 +2081,17 @@ impl Settings {
             }
             Err(rejection) => Ok(Err(rejection)),
         }
+    }
+
+    /// Run [`Settings::try_update`] on Tokio's blocking pool.
+    pub async fn try_update_async<T, F>(f: F) -> Result<Result<T, String>, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Settings) -> Result<T, String> + Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || Self::try_update(f))
+            .await
+            .map_err(|error| format!("Settings update task failed: {error}"))?
     }
 }
 
@@ -2085,12 +2163,61 @@ mod tests {
     }
 
     #[test]
+    fn save_removes_temporary_file_after_atomic_replace() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let settings = Settings {
+                host: "192.168.1.50".to_string(),
+                ..Settings::default()
+            };
+            settings.save().expect("isolated settings save");
+
+            let dir = Settings::settings_dir();
+            assert!(dir.join("settings.json").is_file());
+            assert!(!dir.join("settings.json.tmp").exists());
+            assert_eq!(Settings::load().host, "192.168.1.50");
+        });
+    }
+
+    #[test]
+    fn poisoned_settings_lock_is_recovered() {
+        let mutex = Arc::new(Mutex::new(()));
+        let poisoned_mutex = Arc::clone(&mutex);
+        let join = std::thread::spawn(move || {
+            let _guard = poisoned_mutex
+                .lock()
+                .expect("local mutex should start healthy");
+            panic!("intentionally poison the local mutex");
+        })
+        .join();
+        assert!(join.is_err());
+
+        let guard = recover_lock(&mutex);
+        drop(guard);
+        let _guard = recover_lock(&mutex);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_update_persists_off_worker() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            Settings::update_async(|settings| {
+                settings.host = "192.168.1.51".to_string();
+            })
+            .await
+            .expect("async settings update");
+
+            assert_eq!(Settings::load().host, "192.168.1.51");
+        })
+        .await;
+    }
+
+    #[test]
     fn settings_roundtrip() {
         let s = Settings {
             host: "10.0.0.50".to_string(),
             port: 502,
             serial: "TEST123".to_string(),
             poll_interval: 10,
+            write_pacing_ms: 1500,
             http_port: 8080,
             auto_connect: false,
             import_tariff: 0.30,
@@ -2685,6 +2812,7 @@ mod tests {
             port: 8899,
             serial: "TEST99".to_string(),
             poll_interval: 15,
+            write_pacing_ms: 1500,
             http_port: 7337,
             auto_connect: true,
             import_tariff: 0.285,
@@ -4067,6 +4195,27 @@ mod tests {
     // be quarantined for recovery, and a save over it must never rotate the
     // corrupt content onto the last good `.bak`.
     // =======================================================================
+
+    #[test]
+    fn write_pacing_ms_defaults_to_the_dongle_gap_when_absent() {
+        // Existing settings.json files predate the field; deserialization must
+        // fall back to the documented 1.5 s dongle pacing, not 0 (which would
+        // hammer real hardware with back-to-back FC6 writes).
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("write_pacing_ms")
+            .expect("serialized settings must include write_pacing_ms");
+        let parsed: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.write_pacing_ms, 1500);
+
+        // An explicit value round-trips so the E2E fixtures can lower it.
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value["write_pacing_ms"] = serde_json::json!(25);
+        let parsed: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.write_pacing_ms, 25);
+    }
 
     #[test]
     fn corrupt_settings_file_is_quarantined_and_left_in_place() {

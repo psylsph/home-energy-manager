@@ -47,6 +47,11 @@ describe('grid/system alert helpers', () => {
     expect(alerts.map((alert) => alert.kind)).toContain('inverter_temp_low');
   });
 
+  it('allows a negative inverter temperature low threshold', () => {
+    const config = { inverter_temp_min: -5, inverter_temp_max: 60 };
+    expect(hasInverterTemperatureAlert(snap({ inverter_temperature: -10 }), config)).toBe(true);
+  });
+
   it('ignores non-finite inverter temperature values', () => {
     expect(hasInverterTemperatureAlert(snap({ inverter_temperature: Number.NaN }), tempConfig)).toBe(false);
   });

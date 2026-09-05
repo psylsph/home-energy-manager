@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiGet, apiPost, getApiBase, getServerPort } from '../lib/api';
 import { openExternal } from '../lib/openExternal';
 import type { PollSettings, DiscoveredInverter, DiscoveredEvc, TariffConfig } from '../lib/types';
@@ -267,7 +267,7 @@ export default function SettingsPage() {
   const [intervalSecs, setIntervalSecs] = useState(20);
 
   // HTTP server port
-  const [httpPort, setHttpPort] = useState(7337);
+  const [httpPort, setHttpPort] = useState<number | ''>(7337);
 
   // EV Charger
   const [evcHost, setEvcHost] = useState('');
@@ -294,7 +294,10 @@ export default function SettingsPage() {
   const [checkForUpdates, setCheckForUpdates] = useState(true);
   // Read-only API key and port (developer mode, external access).
   const [apiKey, setApiKey] = useState('');
-  const [apiPort, setApiPort] = useState(7338);
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  const [apiKeyLast4, setApiKeyLast4] = useState('');
+  const [apiPort, setApiPort] = useState<number | ''>(7338);
+  const [apiKeySaving, setApiKeySaving] = useState(false);
   // `null` while we haven't asked the OS yet — we only show the toggle's
   // actual state if the plugin was reachable. The toggle is hidden
   // entirely in headless mode (no Tauri shell to register).
@@ -342,6 +345,8 @@ export default function SettingsPage() {
   const [hiddenPanels, setHiddenPanels] = useState<string[]>([]);
   const [panelSaving, setPanelSaving] = useState(false);
 
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Email alerts
   const [alertsConfig, setAlertsConfig] = useState({
     enabled: false, telegram_bot_token: '', telegram_chat_id: '',
@@ -388,10 +393,23 @@ export default function SettingsPage() {
   const [weatherSaving, setWeatherSaving] = useState(false);
   const [weatherBackfilling, setWeatherBackfilling] = useState(false);
 
+  useEffect(() => () => {
+    if (flashTimer.current !== null) {
+      clearTimeout(flashTimer.current);
+      flashTimer.current = null;
+    }
+  }, []);
+
   const flash = useCallback((text: string, ok: boolean) => {
+    if (flashTimer.current !== null) {
+      clearTimeout(flashTimer.current);
+    }
     setMessage({ text, ok });
-    setTimeout(() => setMessage(null), 4000);
-  }, [setMessage]);
+    flashTimer.current = setTimeout(() => {
+      flashTimer.current = null;
+      setMessage(null);
+    }, 4000);
+  }, []);
 
   // Load settings on mount
   useEffect(() => {
@@ -454,7 +472,12 @@ export default function SettingsPage() {
         setMinimiseToTray(s.minimise_to_tray ?? false);
         setStartMinimised(s.start_minimised ?? false);
         setCheckForUpdates(s.check_for_updates ?? true);
-        setApiKey(s.api_key ?? '');
+        // GET /api/settings never returns the secret. The input stays blank
+        // so saving a newly entered key is explicit; metadata identifies an
+        // existing key without exposing it.
+        setApiKey('');
+        setApiKeyConfigured(Boolean(s.api_key_configured));
+        setApiKeyLast4(s.api_key_last4 ?? '');
         setApiPort(s.api_port ?? 7338);
         setSettingsLoaded(true);
       } catch (e: unknown) {
@@ -468,7 +491,10 @@ export default function SettingsPage() {
       try {
         const res = await apiGet<{ ok: boolean; data: { config: typeof alertsConfig } }>('/api/alerts');
         if (res.ok && res.data?.config) {
-          setAlertsConfig(res.data.config);
+          // Older backends may omit fields added to AlertsConfig later. Merge
+          // the response into the initialized defaults so those fields remain
+          // controlled inputs and are not sent back as `undefined` on save.
+          setAlertsConfig((current) => ({ ...current, ...res.data.config }));
         }
       } catch (e: unknown) {
         console.warn('Failed to load alerts config:', e);
@@ -512,8 +538,8 @@ export default function SettingsPage() {
   const lanUrl = lanIp ? `http://${lanIp}:${getServerPort()}` : getApiBase();
   // Read-only URL — same as lanUrl with the `?RO` flag appended, which
   // hides the Control and Settings nav icons in the visitor's browser
-  // (issue #114). Sticky via localStorage, so the recipient only needs
-  // to visit it once.
+  // (issue #114). Sticky via sessionStorage for the current browser tab,
+  // so the recipient only needs to visit it once during that session.
   const lanReadOnlyUrl = `${lanUrl}?RO`;
   // Mini display GUI page — a tiny self-contained glance view sized for a
   // phone or Apple Watch screen. It fetches /api/mini/status itself, so the
@@ -561,11 +587,42 @@ export default function SettingsPage() {
 
   // Save HTTP port
   const handleHttpPortSave = async () => {
+    if (httpPort === '') {
+      flash('HTTP port cannot be blank', false);
+      return;
+    }
     try {
       await apiPost('/api/settings', { http_port: httpPort });
       flash(`HTTP port set to ${httpPort}. Restart required to take effect.`, true);
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Failed to update HTTP port', false);
+    }
+  };
+
+  // Save the optional read-only API credentials without losing the draft on
+  // failure, so a transient server error can be retried.
+  const handleApiKeySave = async (clear = false) => {
+    if (apiPort === '') {
+      setMessage({ text: 'API port cannot be blank', ok: false });
+      return;
+    }
+    setApiKeySaving(true);
+    try {
+      const payload: { api_port: number | ''; api_key?: string } = { api_port: apiPort };
+      // The server redacts configured keys on GET. An empty draft therefore
+      // means "leave the saved key alone" unless the user explicitly clears it.
+      if (clear || apiKey.trim() || !apiKeyConfigured) {
+        payload.api_key = clear ? '' : apiKey;
+      }
+      await apiPost('/api/settings', payload);
+      setMessage({ text: 'API key saved. Restart the app for the read-only server to start.', ok: true });
+    } catch (error) {
+      setMessage({
+        text: error instanceof Error ? error.message : 'Failed to save API key',
+        ok: false,
+      });
+    } finally {
+      setApiKeySaving(false);
     }
   };
 
@@ -1235,8 +1292,8 @@ export default function SettingsPage() {
         {/* Read-only link (issue #114) — share this with family members
             who only need to view the data. Visiting the URL with the `?RO`
             flag hides the Control and Settings tabs in that browser, and
-            the flag is pinned via localStorage so it stays hidden across
-            reloads. No server-side enforcement — the link keeps anyone
+            the flag is pinned via sessionStorage so it stays hidden across
+            reloads in that tab. No server-side enforcement — the link keeps anyone
             with browser devtools out of the way, but isn't a security
             boundary. */}
         <div className="flex items-center gap-3 mt-2">
@@ -1336,7 +1393,7 @@ export default function SettingsPage() {
               min={1024}
               max={65535}
               value={httpPort}
-              onChange={(e) => setHttpPort(Number(e.target.value))}
+              onChange={(e) => setHttpPort(e.target.value === '' ? '' : Number(e.target.value))}
               className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
             />
             <button
@@ -2015,7 +2072,7 @@ export default function SettingsPage() {
                     <label className="flex flex-col gap-1">
                       <span className="text-text-secondary text-xs font-sans">Battery temp below °C</span>
                       <input
-                        type="number" step="0.5" min="0" max="50"
+                        type="number" step="0.5" min="-40" max="50"
                         value={alertsConfig.batt_temp_min}
                         onChange={(e) => setAlertsConfig((p) => ({ ...p, batt_temp_min: Number(e.target.value) }))}
                         className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
@@ -2033,7 +2090,7 @@ export default function SettingsPage() {
                     <label className="flex flex-col gap-1">
                       <span className="text-text-secondary text-xs font-sans">Inverter temp below °C</span>
                       <input
-                        type="number" step="0.5" min="0" max="100"
+                        type="number" step="0.5" min="-40" max="100"
                         value={alertsConfig.inverter_temp_min}
                         onChange={(e) => setAlertsConfig((p) => ({ ...p, inverter_temp_min: Number(e.target.value) }))}
                         className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-full border border-bg-elevated focus:border-accent outline-none transition-colors"
@@ -2545,7 +2602,9 @@ export default function SettingsPage() {
                 type="text"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="Leave empty to disable"
+                placeholder={apiKeyConfigured
+                  ? `Saved${apiKeyLast4 ? ` (ends ${apiKeyLast4})` : ''} — enter a new key to replace`
+                  : 'Leave empty to disable'}
                 className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
               />
             </label>
@@ -2554,20 +2613,27 @@ export default function SettingsPage() {
               <input
                 type="number"
                 value={apiPort || ''}
-                onChange={(e) => setApiPort(Number(e.target.value))}
+                onChange={(e) => setApiPort(e.target.value === '' ? '' : Number(e.target.value))}
                 placeholder="e.g. 7338"
                 className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors w-32"
               />
             </label>
             <button
-              onClick={async () => {
-                await apiPost('/api/settings', { api_key: apiKey, api_port: apiPort });
-                setMessage({ text: 'API key saved. Restart the app for the read-only server to start.', ok: true });
-              }}
+              onClick={() => { void handleApiKeySave(); }}
+              disabled={apiKeySaving}
               className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
             >
-              Save API Key
+              {apiKeySaving ? 'Saving…' : 'Save API Key'}
             </button>
+            {apiKeyConfigured && (
+              <button
+                onClick={() => handleApiKeySave(true)}
+                disabled={apiKeySaving}
+                className="self-start text-red-300 text-sm px-2 py-2 hover:text-red-200 transition-colors disabled:opacity-50"
+              >
+                Clear saved key
+              </button>
+            )}
           </div>
         )}
       </section>

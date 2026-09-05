@@ -4,7 +4,9 @@
 set -Eeuo pipefail
 
 REPO="psylsph/home-energy-manager"
-SCRIPT_REF="${HEM_SCRIPT_REF:-master}"
+# Keep the bootstrap installer on the latest released tag. The tag is
+# immutable, so this digest cannot silently drift when master changes.
+SCRIPT_REF="${HEM_SCRIPT_REF:-v0.79.0}"
 INSTALLER_SHA256="342bfc94cddbcf6fd2304db13322378af60aeedd848229f6df1986ea87b98631"
 CTID="${HEM_CTID:-}"
 HOSTNAME="${HEM_HOSTNAME:-home-energy-manager}"
@@ -19,11 +21,28 @@ PORT="${HEM_PORT:-7337}"
 TEMPLATE_STORAGE="${HEM_TEMPLATE_STORAGE:-}"
 ROOTFS_STORAGE="${HEM_ROOTFS_STORAGE:-}"
 KEEP_INSTALLER="${HEM_KEEP_INSTALLER:-0}"
+CREATED_CTID=""
 
 fail() {
   printf 'Error: %s\n' "$*" >&2
   exit 1
 }
+
+cleanup_on_exit() {
+  local status="$?"
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ -n "$CREATED_CTID" ]; then
+    printf 'Provisioning failed; removing container %s...\n' "$CREATED_CTID" >&2
+    pct stop "$CREATED_CTID" || true
+    pct destroy "$CREATED_CTID" --purge || true
+  fi
+  if [ -n "${TMPDIR:-}" ]; then
+    rm -rf "$TMPDIR"
+  fi
+  exit "$status"
+}
+
+trap cleanup_on_exit EXIT
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
@@ -115,6 +134,8 @@ if [ -n "$GATEWAY" ]; then
 fi
 
 printf 'Creating unprivileged LXC %s...\n' "$CTID"
+# Mark the CT before creation so the EXIT trap handles partial allocations.
+CREATED_CTID="$CTID"
 pct create "$CTID" "$TEMPLATE_VOLUME" \
   --arch amd64 \
   --ostype debian \
@@ -140,7 +161,6 @@ done
 [ "$network_ready" -eq 1 ] || fail "container started but could not reach github.com"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
 INSTALLER="$TMPDIR/home-energy-manager-install.sh"
 INSTALLER_URL="https://raw.githubusercontent.com/${REPO}/${SCRIPT_REF}/scripts/proxmox/install.sh"
 printf 'Downloading the in-container installer...\n'

@@ -29,7 +29,7 @@ import {
   supportsHistoryDate,
   trimDomainStartToFirstDataPoint,
 } from '../lib/historyRangeConfig';
-import { formatPower } from '../lib/format';
+import { formatPower, formatTimestamp } from '../lib/format';
 import { getSeriesOpacity } from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
@@ -58,6 +58,28 @@ interface PowerHistoryState {
   range: HistoryRange | null;
   data: Record<string, TimePoint[]>;
   error: string;
+}
+
+interface PowerCostState {
+  requestKey: string;
+  importCostGbp: number;
+  exportIncomeGbp: number;
+  netCostGbp: number;
+  standingChargeGbp: number;
+  standingChargePPerDay: number;
+  daysInRange: number;
+}
+
+function emptyPowerCost(requestKey: string): PowerCostState {
+  return {
+    requestKey,
+    importCostGbp: 0,
+    exportIncomeGbp: 0,
+    netCostGbp: 0,
+    standingChargeGbp: 0,
+    standingChargePPerDay: 0,
+    daysInRange: 0,
+  };
 }
 
 // The net battery_power / grid_power drive the combined power CHART (one signed
@@ -725,6 +747,9 @@ export default function PowerPage() {
   const rolling = isRollingHistoryRange(range);
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));
+  useEffect(() => {
+    lastDateRef.current = getHistoryPickerValue(range, offset);
+  }, [range, offset, now]);
   const refreshKey = shouldRefreshHistoryRange(range, offset) ? now : 0;
   const [history, setHistory] = useState<PowerHistoryState>({
     range: null,
@@ -737,21 +762,8 @@ export default function PowerPage() {
   // /api/report. Defaults to zeroed values while the request is in flight
   // or fails — the report degrades gracefully to kWh-only when the
   // backend hasn't returned cost data yet.
-  const [cost, setCost] = useState<{
-    importCostGbp: number;
-    exportIncomeGbp: number;
-    netCostGbp: number;
-    standingChargeGbp: number;
-    standingChargePPerDay: number;
-    daysInRange: number;
-  }>({
-    importCostGbp: 0,
-    exportIncomeGbp: 0,
-    netCostGbp: 0,
-    standingChargeGbp: 0,
-    standingChargePPerDay: 0,
-    daysInRange: 0,
-  });
+  const costRequestKey = `${range}:${offset}:${rolling}`;
+  const [cost, setCost] = useState<PowerCostState>(() => emptyPowerCost(costRequestKey));
   const [costFallbackConfig, setCostFallbackConfig] = useState<PowerCostFallbackConfig | null>(null);
 
   useEffect(() => {
@@ -781,6 +793,7 @@ export default function PowerPage() {
   // always match what's on screen.
   useEffect(() => {
     let cancelled = false;
+    const requestKey = `${range}:${offset}:${rolling}`;
     const params = new URLSearchParams();
     params.set('range', range);
     if (offset) params.set('offset', String(offset));
@@ -795,8 +808,10 @@ export default function PowerPage() {
       standing_charge_p_per_day: number;
     }>(`/api/report?${params.toString()}`)
       .then((res) => {
-        if (cancelled || !res.ok) return;
+        if (cancelled) return;
+        if (!res.ok) throw new Error('Report request failed');
         setCost({
+          requestKey,
           importCostGbp: res.import_cost_gbp ?? 0,
           exportIncomeGbp: res.export_income_gbp ?? 0,
           netCostGbp: res.net_cost_gbp ?? 0,
@@ -806,9 +821,10 @@ export default function PowerPage() {
         });
       })
       .catch(() => {
-        // Network failure / no backend — keep the previous cost values
-        // rather than zeroing them, so a transient blip doesn't make
-        // the report flicker to £0.
+        if (cancelled) return;
+        // A failed request must not leave costs from another range attached
+        // to the current range's energy samples or exports.
+        setCost(emptyPowerCost(requestKey));
       });
     return () => {
       cancelled = true;
@@ -855,6 +871,9 @@ export default function PowerPage() {
   );
   const yDomain = useMemo(() => calculateDomain(rows), [rows]);
   const report = useMemo(() => {
+    const activeCost = cost.requestKey === costRequestKey
+      ? cost
+      : emptyPowerCost(costRequestKey);
     const r = calculatePowerReport(
       rows,
       range,
@@ -871,21 +890,21 @@ export default function PowerPage() {
     const fallback = costFallbackConfig
       ? calculatePowerCostFallback(rows, displayDomain, {
           ...costFallbackConfig,
-          daysInRange: cost.daysInRange > 0 ? cost.daysInRange : undefined,
+          daysInRange: activeCost.daysInRange > 0 ? activeCost.daysInRange : undefined,
         })
       : null;
-    const apiImportEnergyGbp = Math.max(0, cost.importCostGbp - cost.standingChargeGbp);
+    const apiImportEnergyGbp = Math.max(0, activeCost.importCostGbp - activeCost.standingChargeGbp);
     const fallbackImportEnergyGbp = fallback
       ? Math.max(0, fallback.importCostGbp - fallback.standingChargeGbp)
       : 0;
-    const standingChargeGbp = cost.standingChargeGbp > 0
-      ? cost.standingChargeGbp
+    const standingChargeGbp = activeCost.standingChargeGbp > 0
+      ? activeCost.standingChargeGbp
       : fallback?.standingChargeGbp ?? 0;
     const importEnergyGbp = apiImportEnergyGbp > 0.000_001 || !fallback || fallback.importKwh <= 0.001
       ? apiImportEnergyGbp
       : fallbackImportEnergyGbp;
-    const exportIncomeGbp = cost.exportIncomeGbp > 0.000_001 || !fallback || fallback.exportKwh <= 0.001
-      ? cost.exportIncomeGbp
+    const exportIncomeGbp = activeCost.exportIncomeGbp > 0.000_001 || !fallback || fallback.exportKwh <= 0.001
+      ? activeCost.exportIncomeGbp
       : fallback.exportIncomeGbp;
     const importCostGbp = importEnergyGbp + standingChargeGbp;
     return {
@@ -896,13 +915,13 @@ export default function PowerPage() {
         exportIncomeGbp,
         netCostGbp: importCostGbp - exportIncomeGbp,
         standingChargeGbp,
-        standingChargePPerDay: cost.standingChargePPerDay > 0
-          ? cost.standingChargePPerDay
+        standingChargePPerDay: activeCost.standingChargePPerDay > 0
+          ? activeCost.standingChargePPerDay
           : fallback?.standingChargePPerDay ?? 0,
-        daysInRange: cost.daysInRange > 0 ? cost.daysInRange : fallback?.daysInRange ?? 0,
+        daysInRange: activeCost.daysInRange > 0 ? activeCost.daysInRange : fallback?.daysInRange ?? 0,
       },
     };
-  }, [rows, range, displayDomain, offset, cost, costFallbackConfig]);
+  }, [rows, range, displayDomain, offset, cost, costFallbackConfig, costRequestKey]);
   const hasData = rows.length > 0;
   const waitingForLiveData = snapshot == null;
   const toggleSeries = (key: PowerChartKey) => {
@@ -942,7 +961,7 @@ export default function PowerPage() {
           </p>
         </div>
         <div className="text-text-secondary text-xs font-sans text-right">
-          {snapshot ? new Date(snapshot.timestamp * 1000).toLocaleTimeString() : 'Waiting for data'}
+          {snapshot ? formatTimestamp(snapshot.timestamp * 1000) : 'Waiting for data'}
         </div>
       </div>
 

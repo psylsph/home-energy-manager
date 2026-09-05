@@ -5,6 +5,7 @@ import EnergyOrbitDiagram from '../components/EnergyOrbitDiagram';
 import BatteryPanel from '../components/BatteryPanel';
 import SummaryTiles from '../components/SummaryTiles';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
+import AwaitingConnection from '../components/AwaitingConnection';
 import { formatPercent, formatPower } from '../lib/format';
 import { gridFaultAdvice, gridFaultReason, gridFaultTitle, hasGridFault } from '../lib/gridFault';
 
@@ -32,6 +33,7 @@ export default function StatusPage() {
     connectionState,
     connectedHost,
     connectedSince,
+    lastConnectedDurationSec,
     connectFailures,
     evcHost,
     evcPower,
@@ -57,80 +59,22 @@ export default function StatusPage() {
   const durationSec =
     connectionState === 'connected' && connectedSince != null
       ? elapsedSec(connectedSince)
-      : 0;
+      : lastConnectedDurationSec ?? 0;
+  const hasConnectionDuration = connectedSince != null || lastConnectedDurationSec != null;
   void now; // used to trigger re-renders for live uptime counter
-
-  const showFailureAdvice =
-    connectionState === 'disconnected' && connectFailures >= 5;
 
   if (!snapshot) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <div className="w-10 h-10 border-4 border-accent border-t-transparent rounded-full animate-spin" />
-        <p className="text-text-secondary text-sm font-sans">
-          {connectionState === 'reconnecting'
-            ? 'Connection lost — reconnecting…'
-            : connectionState === 'disconnected'
-              ? 'Disconnected — will retry automatically'
-              : 'Waiting for data'}
-        </p>
-
-        {/* Prolonged failure advice banner */}
-        {showFailureAdvice && (
-          <div className="rounded-2xl border border-amber-500/40 bg-amber-950/30 px-5 py-4 text-amber-100 shadow-lg max-w-md">
-            <div className="flex items-start gap-3">
-              <span className="text-2xl" aria-hidden="true">💡</span>
-              <div className="flex flex-col gap-2">
-                <p className="text-sm font-semibold">
-                  Can't reach the dongle after {Math.min(connectFailures, 99)}+ attempts
-                </p>
-                <p className="text-xs text-amber-100/80 leading-relaxed">
-                  This is usually because the GivEnergy dongle has locked up.
-                  Try <strong>power-cycling the inverter</strong> (turn off the
-                  AC isolator, wait 30&nbsp;seconds, turn it back on). The dongle
-                  will reboot and should reconnect within a few minutes.
-                </p>
-                <button
-                  onClick={reconnect}
-                  disabled={reconnecting}
-                  className="self-start mt-1 px-4 py-1.5 text-xs font-semibold rounded-lg bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/30 transition-colors disabled:opacity-50"
-                >
-                  {reconnecting ? 'Reconnecting…' : 'Retry now'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className="flex flex-col items-center gap-2">
-          {connectedHost && (
-            <p className="text-text-secondary/60 text-xs font-sans">
-              Host: {connectedHost}
-            </p>
-          )}
-          {connectedSince != null && (
-            <p className="text-text-secondary/60 text-xs font-sans">
-              Last connected for {formatDuration(durationSec)}
-            </p>
-          )}
-          {connectionState !== 'disconnected' && (
-            <button
-              onClick={reconnect}
-              disabled={reconnecting}
-              className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-bg-surface hover:bg-white/10 border border-white/10 transition-colors disabled:opacity-50"
-            >
-              {reconnecting ? 'Reconnecting…' : 'Reconnect'}
-            </button>
-          )}
-        </div>
-
-        <p className="text-text-secondary/60 text-xs font-sans text-center max-w-xs">
-          If data doesn't appear, try restarting the app and check your firewall settings.
-          If you've recently factory-reset your dongle, make sure the <strong>WiFi-UART</strong>
-          setting is <strong>Server</strong> (not Client).
-          See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">FAQ</a> for help.
-        </p>
-      </div>
+      <AwaitingConnection
+        connectionState={connectionState}
+        connectedHost={connectedHost}
+        showRetry={connectionState !== 'disconnected'}
+        retryLabel="Reconnect"
+        connectFailures={connectFailures}
+        extraNote={hasConnectionDuration ? `Last connected for ${formatDuration(durationSec)}` : undefined}
+        showFaq
+        faqExtraNote="If you've recently factory-reset your dongle, make sure the WiFi-UART setting is Server (not Client)."
+      />
     );
   }
 
@@ -153,7 +97,7 @@ export default function StatusPage() {
                 {connectedHost.replace(/:.*$/, '')}
               </span>
             )}
-            {connectedSince != null && (
+            {hasConnectionDuration && (
               <span className="ml-1 text-text-secondary/50">
                 &middot; last connected for {formatDuration(durationSec)}
               </span>

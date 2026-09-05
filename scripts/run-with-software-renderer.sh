@@ -73,4 +73,10 @@ echo "  WEBKIT_DISABLE_COMPOSITING_MODE=${WEBKIT_DISABLE_COMPOSITING_MODE}"
 echo "  GDK_BACKEND=${GDK_BACKEND:-<unset>}"
 echo
 
+# The first `--` is a wrapper/binary separator, as documented above. It is
+# consumed here so the real binary receives only its own arguments.
+if [ "${1:-}" = "--" ]; then
+  shift
+fi
+
 exec "$BINARY" "$@"

@@ -335,7 +335,7 @@ pub async fn start_server_with_frontend_on_port(
 /// Checks for a `Bearer <key>` token in the `Authorization` header.
 /// Returns 401 Unauthorized if the key is missing or doesn't match.
 async fn api_key_auth(req: Request, next: Next) -> Response {
-    let expected_key = crate::settings::Settings::load().api_key;
+    let expected_key = crate::settings::Settings::load_async().await.api_key;
 
     if expected_key.is_empty() {
         // No key configured — deny all requests (shouldn't happen since

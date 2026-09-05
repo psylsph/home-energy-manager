@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { Profiler } from 'react';
 
 // ---------------------------------------------------------------------------
 // SolarPowerChart replicates the History → Solar "PV Power" chart on the
@@ -24,8 +25,15 @@ import SolarPowerChart from '../../src/components/SolarPowerChart';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot, SolarArraySummary } from '../../src/lib/types';
 
+const defaultSetYLockMax = useInverterStore.getState().setPanelGraphsYLockMax;
+
 function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
+}
+
+function YLockMaxWatcher() {
+  const max = useInverterStore((state) => state.panelGraphsYLockMax);
+  return <output data-testid="y-lock-max">{max}</output>;
 }
 
 describe('<SolarPowerChart/>', () => {
@@ -37,6 +45,7 @@ describe('<SolarPowerChart/>', () => {
       gridLineWeight: 'normal',
       panelGraphsYLock: false,
       panelGraphsYLockMax: 0,
+      setPanelGraphsYLockMax: defaultSetYLockMax,
       snapshot: null,
     });
   });
@@ -69,6 +78,15 @@ describe('<SolarPowerChart/>', () => {
     fetchHistoryMock.mockResolvedValue({ pv1_power: [], pv2_power: [] });
     const { container } = render(<SolarPowerChart />);
     await waitFor(() => {
+      expect(container.textContent).toContain('No solar history in the last 24h');
+    });
+  });
+
+  it('uses today-specific empty-state copy for the today scale', async () => {
+    useInverterStore.setState({ panelGraphsScale: 'today' });
+    fetchHistoryMock.mockResolvedValue({ pv1_power: [], pv2_power: [] });
+    const { container } = render(<SolarPowerChart />);
+    await waitFor(() => {
       expect(container.textContent).toContain('No solar history yet today');
     });
   });
@@ -83,7 +101,12 @@ describe('<SolarPowerChart/>', () => {
 
   it('requests pv1_power and pv2_power from fetchHistory', async () => {
     fetchHistoryMock.mockResolvedValue({ pv1_power: [], pv2_power: [] });
-    render(<SolarPowerChart />);
+    render(
+      <>
+        <YLockMaxWatcher />
+        <SolarPowerChart />
+      </>,
+    );
     await waitFor(() => {
       expect(fetchHistoryMock).toHaveBeenCalled();
     });
@@ -148,6 +171,35 @@ describe('<SolarPowerChart/>', () => {
     });
     // Restore to avoid leaking across tests.
     setPanelGraphsYLockMax(0);
+  });
+
+  it('shares a rising locked ceiling without a render-phase update warning', async () => {
+    useInverterStore.setState({ panelGraphsYLock: true, panelGraphsYLockMax: 0 });
+    fetchHistoryMock.mockResolvedValue({
+      pv1_power: [{ t: 1000, v: 7000 }],
+      pv2_power: [],
+    });
+    const events: string[] = [];
+    const originalSetYLockMax = useInverterStore.getState().setPanelGraphsYLockMax;
+    useInverterStore.setState({
+      setPanelGraphsYLockMax: (max) => {
+        events.push('set');
+        originalSetYLockMax(max);
+      },
+    });
+
+    render(
+      <>
+        <Profiler id="solar-chart" onRender={() => events.push('commit')}>
+          <SolarPowerChart />
+        </Profiler>
+      </>,
+    );
+
+    await waitFor(() => {
+      expect(useInverterStore.getState().panelGraphsYLockMax).toBe(10000);
+    });
+    expect(events.indexOf('set')).toBeGreaterThan(events.indexOf('commit', 1));
   });
 
   it('uses the DC-string nameplate as a static Y-axis ceiling when configured (issue #192)', async () => {

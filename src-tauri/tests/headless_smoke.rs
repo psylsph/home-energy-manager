@@ -27,6 +27,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 struct TempConfig {
@@ -59,15 +60,44 @@ impl Drop for TempConfig {
     }
 }
 
-/// Resolve the headless binary path. Returns `None` if neither
-/// debug nor release build is present.
+/// Resolve the headless binary path for the profile running this test.
+/// Cargo exposes the exact executable path to integration tests; use it when
+/// available so custom target directories and executable naming are handled
+/// correctly. The profile-relative fallback is needed when the binary was
+/// built separately (for example by a release CI job).
 fn binary_path() -> Option<PathBuf> {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let candidates = [
-        PathBuf::from(manifest_dir).join("target/debug/givenergy-local"),
-        PathBuf::from(manifest_dir).join("target/release/givenergy-local"),
-    ];
-    candidates.into_iter().find(|p| p.exists())
+    for variable in [
+        "CARGO_BIN_EXE_givenergy-local",
+        "CARGO_BIN_EXE_givenergy_local",
+    ] {
+        if let Some(path) = std::env::var_os(variable).map(PathBuf::from) {
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+    binary_path_for_profile(
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        target_dir,
+    )
+}
+
+fn binary_path_for_profile(
+    profile: &str,
+    manifest_dir: PathBuf,
+    target_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let target_dir = target_dir.unwrap_or_else(|| manifest_dir.join("target"));
+    let binary = format!("givenergy-local{}", std::env::consts::EXE_SUFFIX);
+    let candidate = target_dir.join(profile).join(binary);
+    candidate.is_file().then_some(candidate)
 }
 
 /// Bind a free port, hand it back as a u16, and immediately drop
@@ -87,30 +117,24 @@ fn pick_ephemeral_port() -> u16 {
     port
 }
 
-/// Poll `url` until it returns any HTTP response, or `timeout`
-/// elapses. Any HTTP status counts as "the server is up" — the
-/// endpoint may legitimately 4xx for our test inputs. We use a
-/// raw TCP connect for the poll loop (faster than a full HTTP
-/// round-trip and avoids ureq's default behaviour of blocking
-/// for a long time on connection errors).
-fn wait_for_http(url: &str, timeout: Duration) -> Result<(), String> {
-    // Parse the host:port out of the URL. We only need the
-    // authority — the path is irrelevant to "is the server
-    // listening".
+/// Poll HEM's status endpoint until it returns the expected JSON identity or
+/// `timeout` elapses. Each attempt has its own short connect/read deadline so
+/// a foreign listener that accepts and then goes silent cannot hang teardown.
+fn wait_for_hem(url: &str, timeout: Duration) -> Result<(), String> {
     let authority = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .and_then(|s| s.split('/').next())
         .ok_or_else(|| format!("could not parse authority from {url}"))?;
+    let address = authority
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| format!("bad address: {e}"))?;
     let deadline = Instant::now() + timeout;
     let mut last_err = String::new();
     while Instant::now() < deadline {
-        match std::net::TcpStream::connect_timeout(
-            &authority.parse().map_err(|e| format!("bad address: {e}"))?,
-            Duration::from_millis(500),
-        ) {
-            Ok(_stream) => return Ok(()),
-            Err(e) => last_err = format!("{e}"),
+        match request_hem_status(&address) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e.to_string(),
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -119,13 +143,145 @@ fn wait_for_http(url: &str, timeout: Duration) -> Result<(), String> {
     ))
 }
 
+fn request_hem_status(address: &std::net::SocketAddr) -> Result<(), String> {
+    use std::io::Write;
+
+    let attempt_timeout = Duration::from_millis(250);
+    let mut stream = std::net::TcpStream::connect_timeout(address, attempt_timeout)
+        .map_err(|e| format!("connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(attempt_timeout))
+        .map_err(|e| format!("set read timeout failed: {e}"))?;
+    stream
+        .set_write_timeout(Some(attempt_timeout))
+        .map_err(|e| format!("set write timeout failed: {e}"))?;
+    stream
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .map_err(|e| format!("write failed: {e}"))?;
+
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                response.extend_from_slice(&buffer[..n]);
+                if response.len() > 128 * 1024 {
+                    return Err("response exceeded 128 KiB".to_string());
+                }
+                if response_complete(&response) {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(e) => return Err(format!("read failed: {e}")),
+        }
+    }
+
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "response had no HTTP headers".to_string())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|e| format!("response headers were not UTF-8: {e}"))?;
+    let status_line = headers.lines().next().unwrap_or_default();
+    if !(status_line.starts_with("HTTP/1.1 200 ") || status_line.starts_with("HTTP/1.0 200 ")) {
+        return Err(format!("unexpected HTTP status: {status_line}"));
+    }
+    let body = &response[header_end + 4..];
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("status response was not JSON: {e}"))?;
+    if json.get("ok").and_then(serde_json::Value::as_bool) != Some(true)
+        || json.get("connection").is_none()
+    {
+        return Err("status response was not a HEM status payload".to_string());
+    }
+    Ok(())
+}
+
+fn response_complete(response: &[u8]) -> bool {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    let Some(content_length) = headers.lines().find_map(|line| {
+        line.strip_prefix("Content-Length:")
+            .or_else(|| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+    }) else {
+        return false;
+    };
+    response.len() >= header_end + 4 + content_length
+}
+
 /// Force-kill the subprocess and reap. We don't attempt a graceful
 /// shutdown signal because (a) the SIGTERM-vs-SIGKILL dance is
 /// platform-specific and (b) the test only cares that the binary
 /// reaches a responsive HTTP server, not that it exits cleanly.
-fn terminate(child: &mut Child) {
+const MAX_CHILD_OUTPUT_BYTES: usize = 64 * 1024;
+
+struct ChildOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+struct OutputDrainers {
+    stdout: Option<JoinHandle<Vec<u8>>>,
+    stderr: Option<JoinHandle<Vec<u8>>>,
+}
+
+fn drain_reader<R: Read>(mut reader: R) -> Vec<u8> {
+    let mut captured = Vec::with_capacity(MAX_CHILD_OUTPUT_BYTES);
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes_read = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let remaining = MAX_CHILD_OUTPUT_BYTES.saturating_sub(captured.len());
+        if remaining > 0 {
+            captured.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
+        }
+    }
+    captured
+}
+
+fn spawn_output_drainers(child: &mut Child) -> OutputDrainers {
+    let stdout = child
+        .stdout
+        .take()
+        .map(|reader| std::thread::spawn(move || drain_reader(reader)));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|reader| std::thread::spawn(move || drain_reader(reader)));
+    OutputDrainers { stdout, stderr }
+}
+
+fn join_output_drainer(handle: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default()
+}
+
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+fn terminate(child: &mut Child, drainers: OutputDrainers) -> ChildOutput {
     let _ = child.kill();
     let _ = child.wait();
+    ChildOutput {
+        stdout: join_output_drainer(drainers.stdout),
+        stderr: join_output_drainer(drainers.stderr),
+    }
 }
 
 #[test]
@@ -165,10 +321,11 @@ fn headless_init_tracing_and_run_headless_reach_a_responsive_http_server() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn givenergy-local --headless");
+    let drainers = spawn_output_drainers(&mut child);
 
     // The init_tracing + bind-to-port path takes a few hundred ms
     // in CI; 10s is comfortably above the cold-start case.
-    let ready = wait_for_http(&format!("{base_url}/api/status"), Duration::from_secs(10));
+    let ready = wait_for_hem(&format!("{base_url}/api/status"), Duration::from_secs(10));
     let result = ready.and_then(|()| {
         // Hit a handful of endpoints to confirm both init paths ran
         // to completion: the in-memory LogRing is wired (we
@@ -197,17 +354,140 @@ fn headless_init_tracing_and_run_headless_reach_a_responsive_http_server() {
 
     // Always tear the process down before reporting — a leaked
     // binary would hold the port and break the next test run.
-    terminate(&mut child);
+    let output = terminate(&mut child, drainers);
 
     // Surface the child's stderr if anything went wrong, so a
     // failure points at the actual log line rather than "no
     // response".
     if result.is_err() {
-        if let Some(mut stderr) = child.stderr.take() {
-            let mut buf = String::new();
-            let _ = stderr.read_to_string(&mut buf);
-            eprintln!("--- child stderr ---\n{buf}\n--- end stderr ---");
-        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("--- child stderr ---\n{stderr}\n--- end stderr ---");
     }
     result.expect("headless startup reached a responsive HTTP server");
+}
+
+#[test]
+fn headless_exits_when_http_port_is_already_occupied() {
+    let Some(bin) = binary_path() else {
+        eprintln!("skipping headless launch-failure test: givenergy-local binary is not built");
+        return;
+    };
+
+    let temp = TempConfig::new();
+    let occupied = std::net::TcpListener::bind("0.0.0.0:0").expect("bind occupied test port");
+    let port = occupied
+        .local_addr()
+        .expect("local_addr on occupied test port")
+        .port();
+    let mut child = Command::new(&bin)
+        .args(["--headless", "--port", &port.to_string()])
+        .env("GIVENERGY_LOCAL_CONFIG_DIR", &temp.config)
+        .env("HOME", &temp.home)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn givenergy-local --headless");
+    let drainers = spawn_output_drainers(&mut child);
+
+    let status = wait_for_exit(&mut child, Duration::from_secs(10));
+    let output = terminate(&mut child, drainers);
+
+    assert!(
+        status.is_some(),
+        "headless process remained alive after HTTP bind failure; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    drop(occupied);
+    std::net::TcpListener::bind(("0.0.0.0", port))
+        .expect("headless launch failure must not leave the HTTP port occupied");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{binary_path_for_profile, spawn_output_drainers, terminate, wait_for_hem};
+    use std::path::PathBuf;
+
+    #[test]
+    fn binary_path_uses_the_active_profile_not_the_other_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "givenergy-local-profile-resolver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let debug = root.join("target/debug/givenergy-local");
+        let release = root.join("target/release/givenergy-local");
+        std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(release.parent().unwrap()).unwrap();
+        std::fs::write(&debug, b"debug sentinel").unwrap();
+        std::fs::write(&release, b"release sentinel").unwrap();
+
+        assert_eq!(
+            binary_path_for_profile("debug", PathBuf::from(&root), None),
+            Some(debug.clone())
+        );
+        assert_eq!(
+            binary_path_for_profile("release", PathBuf::from(&root), None),
+            Some(release.clone())
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chatty_child_output_does_not_block_reap_and_is_bounded() {
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2; sleep 30",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn chatty fixture");
+        let drainers = spawn_output_drainers(&mut child);
+
+        let started = std::time::Instant::now();
+        let output = terminate(&mut child, drainers);
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "chatty child teardown took too long"
+        );
+        assert!(output.stdout.len() <= super::MAX_CHILD_OUTPUT_BYTES);
+        assert!(output.stderr.len() <= super::MAX_CHILD_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_rejects_a_foreign_accept_only_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = std::thread::spawn(move || {
+            let Ok((_stream, _address)) = listener.accept() else {
+                return;
+            };
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+
+        let started = std::time::Instant::now();
+        let result = wait_for_hem(
+            &format!("http://127.0.0.1:{port}/api/status"),
+            std::time::Duration::from_millis(250),
+        );
+
+        assert!(
+            result.is_err(),
+            "a foreign listener must not count as ready"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "foreign readiness probe must have a bounded deadline"
+        );
+        acceptor.join().unwrap();
+    }
 }

@@ -345,11 +345,8 @@ impl ControlCommand {
             ControlCommand::SetChargeTargetSoc { soc } => {
                 // Reference bounds: [4-100].
                 validate_range(*soc, 4, 100, "target SOC")?;
-                // Per GivTCP reference: 100% means "no limit", so disable the
-                // charge target flag rather than leaving it enabled.
-                let enable: u16 = if *soc >= 100 { 0 } else { 1 };
                 vec![
-                    rw(HR_ENABLE_CHARGE_TARGET, enable),
+                    rw(HR_ENABLE_CHARGE_TARGET, charge_target_flag(*soc)),
                     rw(HR_CHARGE_TARGET_SOC, *soc),
                 ]
             }
@@ -538,7 +535,7 @@ impl ControlCommand {
                     rw(HR_BATTERY_POWER_MODE, 1), // eco mode — required for charge to work
                     rw(HR_ENABLE_DISCHARGE, 0),   // clear any stale discharge flag
                     rw(HR_ENABLE_CHARGE, 1),
-                    rw(HR_ENABLE_CHARGE_TARGET, 1),
+                    rw(HR_ENABLE_CHARGE_TARGET, charge_target_flag(*target_soc)),
                     rw(HR_CHARGE_TARGET_SOC, *target_soc),
                 ]
             }
@@ -615,7 +612,7 @@ impl ControlCommand {
                     rw(HR_ENABLE_DISCHARGE, 0),   // clear stale discharge
                     rw(HR_CHARGE_SLOT_1_START, *start_hhmm),
                     rw(HR_CHARGE_SLOT_1_END, *end_hhmm),
-                    rw(HR_ENABLE_CHARGE_TARGET, 1),
+                    rw(HR_ENABLE_CHARGE_TARGET, charge_target_flag(*target_soc)),
                     rw(HR_CHARGE_TARGET_SOC, *target_soc),
                     rw(HR_ENABLE_CHARGE, 1),
                 ]
@@ -826,6 +823,14 @@ fn validate_range(val: u16, min: u16, max: u16, name: &str) -> Result<(), String
     } else {
         Ok(())
     }
+}
+
+/// Return the HR(20) charge-target flag for a validated target SOC.
+///
+/// A target of 100% is the inverter's "no target" value: charging should be
+/// allowed to continue to full rather than stopping at an explicit target.
+fn charge_target_flag(target_soc: u16) -> u16 {
+    u16::from(target_soc < 100)
 }
 
 /// Validate a packed HHMM time value.
@@ -1233,6 +1238,35 @@ mod tests {
     }
 
     #[test]
+    fn target_soc_100_disables_target_for_all_single_phase_charge_paths() {
+        let normal = ControlCommand::SetChargeTargetSoc { soc: 100 }
+            .encode()
+            .unwrap();
+        let force = ControlCommand::ForceCharge { target_soc: 100 }
+            .encode()
+            .unwrap();
+        let agile = ControlCommand::AgileChargeSlot {
+            start_hhmm: 200,
+            end_hhmm: 400,
+            target_soc: 100,
+        }
+        .encode()
+        .unwrap();
+
+        for writes in [&normal, &force, &agile] {
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|write| write.address == HR_ENABLE_CHARGE_TARGET)
+                    .expect("charge path must write the target flag")
+                    .value,
+                0,
+                "100% means charge without an SOC target"
+            );
+        }
+    }
+
+    #[test]
     fn set_target_soc_slot_validates_range() {
         // Per-slot target SOC must honour the same [4, 100] battery-protection
         // band as the global target (HR 116). The existing per-slot encode tests
@@ -1636,7 +1670,7 @@ mod tests {
         assert_eq!(writes[3].address, HR_CHARGE_SLOT_1_END);
         assert_eq!(writes[3].value, 430);
         assert_eq!(writes[4].address, HR_ENABLE_CHARGE_TARGET);
-        assert_eq!(writes[4].value, 1);
+        assert_eq!(writes[4].value, 0); // 100% means no SOC target
         assert_eq!(writes[5].address, HR_CHARGE_TARGET_SOC);
         assert_eq!(writes[5].value, 100);
         assert_eq!(writes[6].address, HR_ENABLE_CHARGE);

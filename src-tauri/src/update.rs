@@ -229,7 +229,7 @@ pub async fn run_update_loop(state: std::sync::Arc<AppState>) {
     tick.tick().await;
     loop {
         tick.tick().await;
-        if Settings::load().check_for_updates {
+        if Settings::load_async().await.check_for_updates {
             refresh(&state).await;
         }
     }
@@ -285,7 +285,7 @@ async fn try_begin_on_demand_refresh(state: &std::sync::Arc<AppState>) -> bool {
 pub async fn get_latest_version(
     State(state): State<std::sync::Arc<AppState>>,
 ) -> (StatusCode, Json<Value>) {
-    let check_enabled = Settings::load().check_for_updates;
+    let check_enabled = Settings::load_async().await.check_for_updates;
     let current = env!("CARGO_PKG_VERSION");
 
     if !check_enabled {

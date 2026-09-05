@@ -6,7 +6,7 @@ vi.stubGlobal('fetch', mockFetch);
 
 // Set a non-dev port so getServerPort() returns it
 Object.defineProperty(window, 'location', {
-  value: { port: '7337', hostname: '127.0.0.1' },
+  value: { port: '7337', hostname: '127.0.0.1', host: '127.0.0.1:7337', protocol: 'http:' },
   writable: true,
 });
 
@@ -30,6 +30,23 @@ describe('api', () => {
       const url = getWsUrl();
       expect(url).toBe('ws://127.0.0.1:7337/ws');
     });
+  });
+
+  it('uses the reverse-proxy origin when the browser URL has no port', () => {
+    const originalLocation = { ...window.location };
+    Object.assign(window.location, {
+      port: '',
+      hostname: 'energy.example',
+      host: 'energy.example',
+      protocol: 'https:',
+    });
+
+    try {
+      expect(getApiBase()).toBe('https://energy.example');
+      expect(getWsUrl()).toBe('wss://energy.example/ws');
+    } finally {
+      Object.assign(window.location, originalLocation);
+    }
   });
 
   describe('apiGet', () => {

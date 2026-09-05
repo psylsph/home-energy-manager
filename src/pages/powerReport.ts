@@ -72,9 +72,9 @@ export interface PowerReportSummary {
   solarCoveragePct: number | null;
   gridDependencyPct: number | null;
   // Issue #131: cost totals sourced from /api/report (server-side
-  // integration against the configured tariff + standing charge). When
-  // the fetch hasn't returned yet, these stay at 0 and the report tiles
-  // show "—" via the formatGbp fallback in the export rendering.
+  // integration against the configured tariff + standing charge). Until
+  // that response is available, PowerPage keeps these values at zero and
+  // may use its sample-based fallback when enough history is available.
   importCostGbp: number;
   exportIncomeGbp: number;
   netCostGbp: number;

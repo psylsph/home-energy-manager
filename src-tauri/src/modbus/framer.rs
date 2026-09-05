@@ -78,11 +78,6 @@ pub enum FramerError {
 
     #[error("CRC mismatch: expected 0x{expected:04X}, calculated 0x{calculated:04X}")]
     CrcMismatch { expected: u16, calculated: u16 },
-
-    #[error(
-        "inner payload too short for CRC: need at least 3 bytes (slave + func + CRC), got {0}"
-    )]
-    InnerPayloadTooShort(usize),
 }
 
 // ---------------------------------------------------------------------------
@@ -291,10 +286,6 @@ pub fn decode_frame(data: &[u8]) -> Result<DecodedFrame, FramerError> {
 
     // --- Extract inner PDU (from byte 26 to end) ---
     let inner_pdu = &data[HEADER_SIZE..];
-    if inner_pdu.len() < 4 {
-        // Need at least: slave(1) + func(1) + CRC(2)
-        return Err(FramerError::InnerPayloadTooShort(inner_pdu.len()));
-    }
 
     // Split off the trailing CRC (last 2 bytes)
     let crc_offset = inner_pdu.len() - 2;

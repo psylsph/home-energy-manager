@@ -216,12 +216,12 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     });
 
     // AgileChargeSlot writes HR 94 (slot start), HR 95 (slot end),
-    // HR 116 = 100, HR 20 = 1, HR 96 = 1. Use last-write so a stale clear
+    // HR 116 = 100, HR 20 = 0, HR 96 = 1. Use last-write so a stale clear
     // from a prior poll can't fool the predicate/assertions. The slot
     // start/end HHMM are time-of-day dependent (the window can legitimately
     // end at midnight = 0), so we assert the arm *signals* (enable_charge =
-    // 1, charge_target = 1, target_soc = 100) and that the slot registers
-    // were written, not their numeric values.
+    // 1, target 100 = no target flag, target_soc = 100) and that the slot
+    // registers were written, not their numeric values.
     const writes = await waitForWrites(
       peekModbusWrites,
       drainModbusWrites,
@@ -232,7 +232,7 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     expect(lastWrite(writes, HR_CHARGE_SLOT_1_START)).toBeDefined();
     expect(lastWrite(writes, HR_CHARGE_SLOT_1_END)).toBeDefined();
     expect(lastWrite(writes, HR_ENABLE_CHARGE)?.value).toBe(1);
-    expect(lastWrite(writes, HR_ENABLE_CHARGE_TARGET)?.value).toBe(1);
+    expect(lastWrite(writes, HR_ENABLE_CHARGE_TARGET)?.value).toBe(0);
     expect(lastWrite(writes, HR_CHARGE_TARGET_SOC)?.value).toBe(100);
   });
 
@@ -539,12 +539,11 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
   });
 
   test('threshold gap enforcement rejects inverted charge/discharge pair', async ({ baseUrl }) => {
-    // The 5p minimum gap is enforced by the FRONTEND Apply handler
-    // (saveConfig clamps discharge_threshold up to charge_threshold + 5);
-    // the backend accepts any numeric pair. Verify that here so a future
-    // backend guard doesn't silently change the contract: an inverted
-    // pair is accepted (ok=true), and the clamp lives in the UI layer
-    // — covered by tests/pages/controlPageAgileScope.test.tsx.
+    // The backend rejects an inverted or overlapping pair outright
+    // (validate_agile_thresholds: charge >= discharge → error response), so
+    // a bad pair can never reach the poll loop even from a direct API call.
+    // The UI additionally clamps discharge up to charge + 5 before saving
+    // (covered by tests/pages/controlPageAgileScope.test.tsx).
     const resp = await fetch(`${baseUrl}/api/agile`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -555,7 +554,7 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
       }),
     });
     const data = await resp.json();
-    expect(data.ok).toBe(true);
+    expect(data.ok).toBe(false);
     // Restore defaults so nothing leaks.
     await setAgile(baseUrl, { scope: 'off' });
   });

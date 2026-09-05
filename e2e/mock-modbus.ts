@@ -25,6 +25,7 @@
 import * as net from 'net';
 import * as http from 'http';
 import { crc16 } from './crc16.js';
+import { attachErrorHandler } from './process-errors.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,14 +40,17 @@ export interface RegisterWrite {
 // Register storage
 // ---------------------------------------------------------------------------
 
-/** Input registers (read-only telemetry), 120 registers. */
-const inputRegs = new Uint16Array(120);
+/** Input registers (read-only telemetry), including the IR 180-183 block. */
+const inputRegs = new Uint16Array(184);
 
 /** Holding registers (read/write config), 2100 registers (covers HR 2040-2075 for Gateway). */
 const holdingRegs = new Uint16Array(2100);
 
 /** All register writes received by the server, in order. */
 const writes: RegisterWrite[] = [];
+
+/** Protocol violations observed by the mock, surfaced through the admin API. */
+const protocolErrors: string[] = [];
 
 /**
  * When enabled, emulates Gen3 Hybrid firmware that re-asserts HR59=1
@@ -96,6 +100,7 @@ export function resetState(): void {
   inputRegs.fill(0);
   holdingRegs.fill(0);
   writes.length = 0;
+  protocolErrors.length = 0;
   rearmHr59Enabled = false;
   hr59ReassertPending = false;
   rejectWritesRemaining = 0;
@@ -127,6 +132,11 @@ export function setHoldingReg(addr: number, value: number): void {
 /** Get a holding register value. */
 export function getHoldingReg(addr: number): number {
   return addr < holdingRegs.length ? holdingRegs[addr] : 0;
+}
+
+/** Return protocol errors recorded since the last reset. */
+export function getProtocolErrors(): string[] {
+  return [...protocolErrors];
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +281,23 @@ const UNIT_ID = 0x01;
 const FUNCTION_TRANSPARENT = 0x02;
 const SERIAL_LEN = 10;
 const HEADER_SIZE = 2 + 2 + 2 + 1 + 1 + SERIAL_LEN + 8; // = 26
+const MIN_FRAME_SIZE = HEADER_SIZE + 4;
+const MAX_FRAME_BODY = 512;
+const MAX_REGISTERS_PER_REQUEST = 125;
+const VALID_SLAVE_IDS = new Set([
+  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+  0x11, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+]);
+
+export interface ValidatedRequest {
+  slave: number;
+  functionCode: number;
+  payload: Buffer;
+  startRegister?: number;
+  registerCount?: number;
+  register?: number;
+  value?: number;
+}
 
 function encodeSerial(serial: string): Buffer {
   const buf = Buffer.alloc(SERIAL_LEN, 0x20); // space-padded
@@ -278,7 +305,7 @@ function encodeSerial(serial: string): Buffer {
   return buf;
 }
 
-function buildFrame(serial: string, slave: number, func: number, payload: Buffer): Buffer {
+export function buildFrame(serial: string, slave: number, func: number, payload: Buffer): Buffer {
   const serialBuf = encodeSerial(serial);
 
   // Inner PDU: slave + func + payload + CRC
@@ -368,6 +395,98 @@ function buildWriteResponse(
   return buildFrame(serial, slave, 0x06, payload);
 }
 
+/**
+ * Validate and decode an incoming request before it can touch mock state.
+ * Keeping this strict makes an E2E test fail on malformed traffic instead of
+ * hiding a bad request behind zero-filled register data.
+ */
+export function validateRequestFrame(frame: Buffer): ValidatedRequest {
+  if (frame.length < 6) {
+    throw new Error(`frame too short for length header: ${frame.length} bytes`);
+  }
+
+  const declaredLength = frame.readUInt16BE(4);
+  if (declaredLength !== frame.length - 6) {
+    throw new Error(
+      `frame length mismatch: header=${declaredLength}, actual=${frame.length - 6}`,
+    );
+  }
+  if (declaredLength > MAX_FRAME_BODY) {
+    throw new Error(`frame body exceeds mock limit: ${declaredLength} bytes`);
+  }
+  if (frame.length < MIN_FRAME_SIZE) {
+    throw new Error(`frame too short: expected at least ${MIN_FRAME_SIZE} bytes, got ${frame.length}`);
+  }
+
+  if (frame.readUInt16BE(0) !== TRANSACTION_ID) {
+    throw new Error('invalid transaction ID');
+  }
+  if (frame.readUInt16BE(2) !== PROTOCOL_ID) {
+    throw new Error('invalid protocol ID');
+  }
+  if (frame[6] !== UNIT_ID) {
+    throw new Error(`invalid unit ID: ${frame[6]}`);
+  }
+  if (frame[7] !== FUNCTION_TRANSPARENT) {
+    throw new Error(`invalid transparent function ID: ${frame[7]}`);
+  }
+
+  const innerPdu = frame.subarray(HEADER_SIZE);
+  const crcOffset = innerPdu.length - 2;
+  const receivedCrc = innerPdu.readUInt16LE(crcOffset);
+  const calculatedCrc = crc16(innerPdu.subarray(0, crcOffset));
+  if (receivedCrc !== calculatedCrc) {
+    throw new Error(
+      `CRC mismatch: received=0x${receivedCrc.toString(16)}, calculated=0x${calculatedCrc.toString(16)}`,
+    );
+  }
+
+  const slave = innerPdu[0];
+  if (!VALID_SLAVE_IDS.has(slave)) {
+    throw new Error(`invalid slave ID: 0x${slave.toString(16)}`);
+  }
+  const functionCode = innerPdu[1];
+  const payload = innerPdu.subarray(2, crcOffset);
+
+  if (functionCode === 0x03 || functionCode === 0x04) {
+    if (payload.length !== 4) {
+      throw new Error(`read request payload must be 4 bytes, got ${payload.length}`);
+    }
+    const startRegister = payload.readUInt16BE(0);
+    const registerCount = payload.readUInt16BE(2);
+    if (registerCount === 0 || registerCount > MAX_REGISTERS_PER_REQUEST) {
+      throw new Error(`invalid register count: ${registerCount}`);
+    }
+    const regs = functionCode === 0x03 ? holdingRegs : inputRegs;
+    if (startRegister + registerCount > regs.length) {
+      throw new Error(
+        `register range ${startRegister}..${startRegister + registerCount - 1} exceeds ${functionCode === 0x03 ? 'holding' : 'input'} register bank`,
+      );
+    }
+    return { slave, functionCode, payload, startRegister, registerCount };
+  }
+
+  if (functionCode === 0x06) {
+    if (payload.length !== 4) {
+      throw new Error(`write request payload must be 4 bytes, got ${payload.length}`);
+    }
+    const register = payload.readUInt16BE(0);
+    if (register >= holdingRegs.length) {
+      throw new Error(`holding register ${register} is out of range`);
+    }
+    return { slave, functionCode, payload, register, value: payload.readUInt16BE(2) };
+  }
+
+  throw new Error(`unsupported inner function code: 0x${functionCode.toString(16)}`);
+}
+
+function recordProtocolError(sock: net.Socket, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  protocolErrors.push(message);
+  console.error(`[mock-modbus] ${message}`);
+  sock.destroy();
+}
+
 // ---------------------------------------------------------------------------
 // Client connection handler (Modbus TCP)
 // ---------------------------------------------------------------------------
@@ -380,9 +499,11 @@ function handleClient(sock: net.Socket): void {
 
     // Process complete frames
     while (buffer.length >= 6) {
-      const txnId = buffer.readUInt16BE(0);
-      const protoId = buffer.readUInt16BE(2);
       const length = buffer.readUInt16BE(4);
+      if (length > MAX_FRAME_BODY) {
+        recordProtocolError(sock, new Error(`frame body exceeds mock limit: ${length} bytes`));
+        return;
+      }
       const totalFrameLen = 6 + length;
 
       if (buffer.length < totalFrameLen) break; // incomplete frame
@@ -390,24 +511,22 @@ function handleClient(sock: net.Socket): void {
       const frame = buffer.subarray(0, totalFrameLen);
       buffer = buffer.subarray(totalFrameLen);
 
-      // Validate header
-      if (txnId !== TRANSACTION_ID || protoId !== PROTOCOL_ID) {
-        continue;
+      let request: ValidatedRequest;
+      try {
+        request = validateRequestFrame(frame);
+      } catch (error) {
+        recordProtocolError(sock, error);
+        return;
       }
 
-      // Parse inner PDU (from byte 26)
-      if (frame.length < HEADER_SIZE + 4) continue;
-
-      const innerPdu = frame.subarray(HEADER_SIZE);
-      const slave = innerPdu[0];
-      const innerFunc = innerPdu[1];
-      const innerPayload = innerPdu.subarray(2, innerPdu.length - 2); // strip CRC
+      // The validator owns these fields; retain the local names for the
+      // response-building code below.
+      const { slave, functionCode: innerFunc } = request;
 
       if (innerFunc === 0x03 || innerFunc === 0x04) {
         // Read holding/input registers
-        if (innerPayload.length < 4) continue;
-        const startReg = innerPayload.readUInt16BE(0);
-        const regCount = innerPayload.readUInt16BE(2);
+        const startReg = request.startRegister!;
+        const regCount = request.registerCount!;
 
         const regs = innerFunc === 0x03 ? holdingRegs : inputRegs;
         const response = buildReadResponse('SA12345678', slave, innerFunc, startReg, regCount, regs);
@@ -426,10 +545,8 @@ function handleClient(sock: net.Socket): void {
         }
       } else if (innerFunc === 0x06) {
         // Write single holding register
-        if (innerPayload.length < 4) continue;
-
-        const register = innerPayload.readUInt16BE(0);
-        const value = innerPayload.readUInt16BE(2);
+        const register = request.register!;
+        const value = request.value!;
 
         // Write-rejection emulation: respond with a Modbus exception
         // (FC 0x86, code 4 = server device failure) without applying the
@@ -439,7 +556,7 @@ function handleClient(sock: net.Socket): void {
           rejectWritesRemaining -= 1;
           const exception = buildFrame(
             'SA12345678',
-            0x11,
+            slave,
             0x06 | 0x80,
             Buffer.from([0x04]),
           );
@@ -467,14 +584,14 @@ function handleClient(sock: net.Socket): void {
 
         writes.push({ address: register, value });
 
-        // Send ack — use device address 0x11 for write responses
-        const response = buildWriteResponse('SA12345678', 0x11, register, value);
+        // Send the ack from the addressed device.
+        const response = buildWriteResponse('SA12345678', slave, register, value);
         sock.write(response);
       }
     }
   });
 
-  sock.on('error', () => { /* ignore */ });
+  attachErrorHandler(sock, 'mock Modbus client');
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +604,7 @@ const ADMIN_PORT = 18900;
  * Start the HTTP admin API for test workers to query captured writes.
  * Endpoints:
  *   GET  /writes       — peek at captured writes (non-destructive)
+ *   GET  /protocol-errors — protocol violations since the last reset
  *   POST /writes/drain — drain all captured writes
  *   POST /reset        — reset all state
  *   POST /holding-reg  — set a holding register {address, value}
@@ -501,6 +619,8 @@ export function startAdminApi(): http.Server {
 
     if (req.method === 'GET' && req.url === '/writes') {
       res.end(JSON.stringify({ ok: true, writes }));
+    } else if (req.method === 'GET' && req.url === '/protocol-errors') {
+      res.end(JSON.stringify({ ok: true, errors: getProtocolErrors() }));
     } else if (req.method === 'POST' && req.url === '/writes/drain') {
       const result = [...writes];
       writes.length = 0;
@@ -568,6 +688,7 @@ export function startAdminApi(): http.Server {
     }
   });
 
+  attachErrorHandler(server, 'mock Modbus admin API');
   server.listen(ADMIN_PORT, '127.0.0.1', () => {
     console.log(`Mock Modbus admin API listening on 127.0.0.1:${ADMIN_PORT}`);
   });
@@ -582,6 +703,40 @@ export function startAdminApi(): http.Server {
 let modbusServer: net.Server | null = null;
 let adminServer: http.Server | null = null;
 
+export interface ClosableServer {
+  close(callback?: (error?: Error) => void): void;
+  closeAllConnections?: () => void;
+  closeIdleConnections?: () => void;
+}
+
+/** Close a Node server without waiting indefinitely for an open client. */
+export async function closeServerWithDeadline(
+  server: ClosableServer,
+  label: string,
+  timeoutMs = 1_000,
+): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      console.warn(`[${label}] server close exceeded ${timeoutMs}ms`);
+      finish();
+    }, timeoutMs);
+
+    // These methods close active and idle sockets before close() waits for
+    // the listener itself. They are available on the supported Node runtime;
+    // optional chaining keeps the helper compatible with older Node types.
+    server.closeAllConnections?.();
+    server.closeIdleConnections?.();
+    server.close(() => finish());
+  });
+}
+
 /**
  * Start the mock Modbus TCP server on the given port.
  * Also starts the admin HTTP API on port ADMIN_PORT.
@@ -594,6 +749,7 @@ export async function startModbusServer(port: number = 18899): Promise<void> {
 
   return new Promise((resolve) => {
     modbusServer = net.createServer(handleClient);
+    attachErrorHandler(modbusServer, 'mock Modbus TCP server');
     modbusServer.listen(port, '127.0.0.1', () => {
       console.log(`Mock Modbus server listening on 127.0.0.1:${port}`);
       resolve();
@@ -606,14 +762,10 @@ export async function startModbusServer(port: number = 18899): Promise<void> {
  */
 export async function stopModbusServer(): Promise<void> {
   if (adminServer) {
-    await new Promise<void>((resolve) => { adminServer!.close(() => resolve()); });
+    await closeServerWithDeadline(adminServer, 'mock admin server');
     adminServer = null;
   }
   if (!modbusServer) return;
-  return new Promise((resolve) => {
-    modbusServer!.close(() => {
-      modbusServer = null;
-      resolve();
-    });
-  });
+  await closeServerWithDeadline(modbusServer, 'mock Modbus server');
+  modbusServer = null;
 }

@@ -31,8 +31,11 @@ describe('forecastStatusMessages', () => {
       'insufficient_consumption_history',
       'no_snapshot',
       'no_battery_capacity',
+      'invalid_battery_configuration',
+      'forecast_stale',
+      'forecast_data_future',
     ]);
-    expect(messages).toHaveLength(7);
+    expect(messages).toHaveLength(10);
     expect(messages[0]).toMatch(/weather integration/i);
     expect(messages[1]).toMatch(/location/i);
     expect(messages[2]).toMatch(/no forecast data/i);
@@ -40,6 +43,9 @@ describe('forecastStatusMessages', () => {
     expect(messages[4]).toMatch(/consumption history/i);
     expect(messages[5]).toMatch(/inverter/i);
     expect(messages[6]).toMatch(/battery/i);
+    expect(messages[7]).toMatch(/battery projection|efficiency/i);
+    expect(messages[8]).toMatch(/stale|refresh/i);
+    expect(messages[9]).toMatch(/future|refresh/i);
   });
 
   it('passes through unknown codes verbatim so new backend codes stay visible', () => {
@@ -426,6 +432,8 @@ describe('toBatteryChartData', () => {
 describe('tomorrowSummary', () => {
   const base: ForecastData = {
     generated_at: 1_700_000_000,
+    forecast_fetched_at: 1_700_000_000,
+    forecast_age_seconds: 0,
     status: [],
     performance_ratio: 0.8,
     performance_ratio_days: 12,

@@ -43,20 +43,32 @@ pub struct LogRing {
 }
 
 struct LogRingInner {
-    data: Vec<String>,
+    data: Vec<LogRecord>,
     capacity: usize,
     cursor: usize, // next write position
     len: usize,    // number of valid entries
+    next_id: usize,
+}
+
+struct LogRecord {
+    id: usize,
+    line: String,
 }
 
 impl LogRing {
     pub fn new(capacity: usize) -> Self {
         Self {
             buf: Mutex::new(LogRingInner {
-                data: vec![String::new(); capacity],
+                data: (0..capacity)
+                    .map(|_| LogRecord {
+                        id: 0,
+                        line: String::new(),
+                    })
+                    .collect(),
                 capacity,
                 cursor: 0,
                 len: 0,
+                next_id: 1,
             }),
             min_level: AtomicU8::new(DEFAULT_CAPTURE_LEVEL),
         }
@@ -66,7 +78,12 @@ impl LogRing {
     pub fn push(&self, line: &str) {
         let mut inner = self.buf.lock();
         let cursor = inner.cursor;
-        inner.data[cursor] = line.to_string();
+        let id = inner.next_id;
+        inner.next_id += 1;
+        inner.data[cursor] = LogRecord {
+            id,
+            line: line.to_string(),
+        };
         inner.cursor = (cursor + 1) % inner.capacity;
         if inner.len < inner.capacity {
             inner.len += 1;
@@ -89,42 +106,50 @@ impl LogRing {
         let mut result = Vec::with_capacity(inner.len);
         for i in 0..inner.len {
             let idx = (start + i) % inner.capacity;
-            result.push(inner.data[idx].clone());
+            result.push(inner.data[idx].line.clone());
         }
         result
     }
 
-    /// Read lines starting from a given chronological index.
-    /// Returns `(lines, next_index)` where `next_index` is the index to pass
-    /// as `after` on the next poll. Returns an empty vec when `after` is
-    /// beyond the oldest available entry (the buffer has wrapped).
+    /// Read lines newer than the given monotonically increasing ID.
+    /// Returns `(lines, newest_id)` where `newest_id` is the ID to pass as
+    /// `after` on the next poll. If the requested ID predates the retained
+    /// ring contents, all currently retained lines are returned.
     pub fn read_from(&self, after: usize) -> (Vec<String>, usize) {
         let inner = self.buf.lock();
         if inner.len == 0 {
             return (Vec::new(), 0);
         }
-        // When the buffer is partially filled (len < capacity), entries are
-        // stored at indices 0..len with cursor at len. When full, entries
-        // wrap around starting at cursor (the oldest entry).
-        let (oldest_idx, newest_idx) = if inner.len < inner.capacity {
-            // Partially filled: indices 0..len-1, cursor at len.
-            (0, inner.len - 1)
+        let start = if inner.len < inner.capacity {
+            0
         } else {
-            // Full: oldest at cursor, newest at cursor + len - 1.
-            (inner.cursor, inner.cursor + inner.len - 1)
+            inner.cursor
         };
-        if after >= newest_idx {
-            // Client is caught up — no new lines.
-            return (Vec::new(), newest_idx);
+        let newest_id = inner.data[(start + inner.len - 1) % inner.capacity].id;
+        let mut result = Vec::new();
+        for i in 0..inner.len {
+            let idx = (start + i) % inner.capacity;
+            let record = &inner.data[idx];
+            if record.id <= after {
+                continue;
+            }
+            result.push(record.line.clone());
         }
-        let read_from = after.max(oldest_idx);
-        let count = newest_idx - read_from;
-        let mut result = Vec::with_capacity(count);
-        for i in 0..=count {
-            let idx = (read_from + i) % inner.capacity;
-            result.push(inner.data[idx].clone());
+        (result, newest_id)
+    }
+
+    /// Return the ID of the newest retained line, or zero for an empty ring.
+    pub fn newest_id(&self) -> usize {
+        let inner = self.buf.lock();
+        if inner.len == 0 {
+            return 0;
         }
-        (result, newest_idx + 1)
+        let start = if inner.len < inner.capacity {
+            0
+        } else {
+            inner.cursor
+        };
+        inner.data[(start + inner.len - 1) % inner.capacity].id
     }
 }
 
@@ -139,9 +164,9 @@ pub struct LogQuery {
 
 /// GET /api/logs — return recent log lines.
 ///
-/// Query params: `?after=<n>` returns lines starting from index `n`.
+/// Query params: `?after=<n>` returns lines newer than ID `n`.
 /// Returns `{ "ok": true, "lines": [...], "next": <n> }` where `next` is
-/// the index to use as `after` on the next poll for incremental fetching.
+/// the newest ID to use as `after` on the next poll for incremental fetching.
 pub async fn get_logs(
     State(state): State<Arc<crate::inverter::poll::AppState>>,
     Query(query): Query<LogQuery>,
@@ -150,7 +175,7 @@ pub async fn get_logs(
         Some(after) => state.log_ring.read_from(after),
         None => {
             let lines = state.log_ring.read_all();
-            (lines, 0)
+            (lines, state.log_ring.newest_id())
         }
     };
     Json(json!({
@@ -377,9 +402,9 @@ mod tests {
         for i in 0..5 {
             ring.push(&format!("line {i}"));
         }
-        let (lines, next_idx) = ring.read_from(4);
+        let (lines, next_idx) = ring.read_from(5);
         assert!(lines.is_empty());
-        assert_eq!(next_idx, 4);
+        assert_eq!(next_idx, 5);
     }
 
     #[test]
@@ -394,6 +419,21 @@ mod tests {
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[0], "line 1");
         assert_eq!(lines[4], "line 5");
+    }
+
+    #[test]
+    fn read_from_returns_entries_added_after_a_full_ring_wrap() {
+        let ring = LogRing::new(3);
+        ring.push("line 0");
+        ring.push("line 1");
+        ring.push("line 2");
+        let (_, cursor) = ring.read_from(0);
+
+        ring.push("line 3");
+
+        let (lines, newest) = ring.read_from(cursor);
+        assert_eq!(lines, vec!["line 3"]);
+        assert_eq!(newest, cursor + 1);
     }
 
     // -----------------------------------------------------------------
@@ -513,13 +553,13 @@ mod tests {
         for i in 0..3 {
             ring.push(&format!("line {i}"));
         }
-        // newest_idx is len-1 = 2, so after=2 must return empty.
-        let (lines, next) = ring.read_from(2);
+        // The newest ID is 3, so after=3 must return empty.
+        let (lines, next) = ring.read_from(3);
         assert!(lines.is_empty());
-        assert_eq!(next, 2);
+        assert_eq!(next, 3);
         let (lines, next) = ring.read_from(99);
         assert!(lines.is_empty());
-        assert_eq!(next, 2);
+        assert_eq!(next, 3);
     }
 
     #[test]

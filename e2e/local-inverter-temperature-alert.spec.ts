@@ -12,6 +12,8 @@ import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 import { simulatorBinaryPath } from './binary-path.js';
+import { attachErrorHandler } from './process-errors.js';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,9 +35,8 @@ async function startHighTemperatureInfrastructure(): Promise<{ baseUrl: string; 
   if (!fs.existsSync(BACKEND_PATH)) throw new Error(`Backend not found at ${BACKEND_PATH}`);
   if (!fs.existsSync(path.join(DIST_DIR, 'index.html'))) throw new Error(`Frontend dist not found at ${DIST_DIR}`);
 
-  const { execSync } = await import('child_process');
-  execSync(`fuser -k ${modbusPort}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-  execSync(`fuser -k ${httpPort}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
+  killPort(modbusPort);
+  killPort(httpPort);
   await new Promise((r) => setTimeout(r, 500));
 
   simulator = spawn(
@@ -54,6 +55,7 @@ async function startHighTemperatureInfrastructure(): Promise<{ baseUrl: string; 
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
+  attachErrorHandler(simulator, 'temperature simulator');
 
   simulator.stdout?.on('data', (d: Buffer) => console.log(`[sim:temp] ${d.toString().trim()}`));
   simulator.stderr?.on('data', (d: Buffer) => console.log(`[sim:temp:err] ${d.toString().trim()}`));
@@ -64,6 +66,7 @@ async function startHighTemperatureInfrastructure(): Promise<{ baseUrl: string; 
     port: modbusPort,
     httpPort,
     pollInterval: 2,
+      writePacingMs: 25,
   });
 
   backend = spawn(
@@ -74,6 +77,7 @@ async function startHighTemperatureInfrastructure(): Promise<{ baseUrl: string; 
       env: { ...process.env, ...settingsFixture.env },
     },
   );
+  attachErrorHandler(backend, 'temperature backend');
 
   backend.stdout?.on('data', (d: Buffer) => console.log(`[backend:temp] ${d.toString().trim()}`));
   backend.stderr?.on('data', (d: Buffer) => console.log(`[backend:temp:err] ${d.toString().trim()}`));

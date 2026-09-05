@@ -319,6 +319,35 @@ describe('<ControlPage/> — connection-state gate', () => {
     ).toBeDefined();
   });
 
+  it('does not treat an equal-endpoint charge slot as active all day', async () => {
+    // An enabled 12:00–12:00 slot is the inverter's zero-length/disabled
+    // representation. It must not make Force Charge appear active or block
+    // the independent Force Discharge action.
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        inverter_time: '2025-06-15 12:00:00',
+        enable_charge: true,
+        battery_power_mode: 1,
+        charge_slots: [
+          { enabled: true, start_hour: 12, start_minute: 0, end_hour: 12, end_minute: 0, target_soc: 100 },
+          { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
+        ],
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const forceChargeLabel = await screen.findByText('Force Charge');
+    const forceDischargeLabel = await screen.findByText('Force Discharge');
+    const forceCharge = forceChargeLabel.closest('button');
+    const forceDischarge = forceDischargeLabel.closest('button');
+    expect(forceCharge).not.toBeNull();
+    expect(forceDischarge).not.toBeNull();
+    expect((forceCharge as HTMLButtonElement).disabled).toBe(false);
+    expect((forceDischarge as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('uses a logarithmic five-minute duration slider defaulting to one hour', async () => {
     useInverterStore.setState({
       snapshot: makeSnapshot(),
@@ -380,7 +409,9 @@ describe('<ControlPage/> — connection-state gate', () => {
           enable_charge: true,
           enable_discharge: true,
           charge_slots: [
-            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
+            // Force Charge readback includes a real active window; an
+            // enabled zero-length slot is the inverter's disabled encoding.
+            { enabled: true, start_hour: 0, start_minute: 0, end_hour: 23, end_minute: 59, target_soc: 100 },
             { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
           ],
           discharge_slots: [

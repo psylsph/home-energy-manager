@@ -58,6 +58,11 @@ async function postJson(
  * no earlier test leaves schedule state behind for the next one.
  */
 async function resetToCleanState(baseUrl: string): Promise<void> {
+  // Canonical clean slate: clear the desired schedule, any #137 backup,
+  // force reverts and queued writes left by earlier specs (harness-only
+  // endpoint, armed by --e2e-admin in the local global setup).
+  await fetch(`${baseUrl}/api/test/reset`, { method: 'POST' });
+
   await postJson(baseUrl, '/api/control/timed-export', { enabled: false });
 
   await expect
@@ -183,12 +188,11 @@ test.describe('Real simulator — HEM-managed Timed Export schedule', () => {
 
     await page.goto('/#/control');
 
-    // The schedule card reads Configured (waiting for the window), never
-    // "Active now" / the amber exporting banner for a future slot.
-    await expect(
-      page.getByText('Timed Export — Configured'),
-      { timeout: 15_000 },
-    ).toBeVisible();
+    // The schedule card reads Configured (waiting for the window) — pinned
+    // via the configured-only "Next export starts at" line — never the amber
+    // exporting banner for a future slot. (The quick-action button carries a
+    // copy of the state label, so a bare getByText would be ambiguous.)
+    await expect(page.getByText(/Next export starts at/)).toBeVisible({ timeout: 15_000 });
     await expect(
       page.getByText('Timed Export is exporting now.'),
     ).toHaveCount(0);

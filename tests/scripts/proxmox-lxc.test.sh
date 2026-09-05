@@ -46,6 +46,18 @@ assert_eq() {
   fi
 }
 
+assert_nonzero() {
+  local label="$1" actual="$2"
+  if [ "$actual" -ne 0 ]; then
+    echo "  PASS  $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $label"
+    echo "        expected a non-zero exit status"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 make_mock() {
   local dir="$1" name="$2"
   shift 2
@@ -94,7 +106,13 @@ printf 'pct %s\n' "$*" >>"$HEM_TEST_LOG"
 case "${1:-}" in
   status) exit 1 ;;
   exec)
+    if [[ "${HEM_PCT_FAIL_INSTALLER:-0}" == "1" ]] && [[ "$*" == *'home-energy-manager-install.sh'* ]]; then
+      exit 42
+    fi
     if [[ "$*" == *'hostname -I'* ]]; then echo '192.0.2.10'; fi
+    exit 0
+    ;;
+  stop|destroy)
     exit 0
     ;;
 esac
@@ -117,7 +135,7 @@ run_create() {
   local stage="$1"
   PATH="$stage/bin:/usr/bin:/bin" \
     HEM_TEST_LOG="$stage/commands.log" \
-    HEM_TEST_INSTALLER="$REPO_ROOT/scripts/proxmox/install.sh" \
+    HEM_TEST_INSTALLER="$VERSIONED_INSTALLER" \
     HEM_SCRIPT_REF="test-ref" \
     HEM_GATEWAY="${HEM_TEST_GATEWAY:-}" \
     bash "$CREATE" >"$stage/output.log" 2>&1
@@ -126,11 +144,19 @@ run_create() {
 echo "tests/scripts/proxmox-lxc.test.sh"
 echo
 
-echo "0. pinned installer digest in create-lxc.sh matches the real install.sh"
+echo "0. installer bootstrap uses a versioned immutable ref"
+PINNED_REF="$(grep -oP 'SCRIPT_REF=\"\$\{HEM_SCRIPT_REF:-\K[^}]+' "$CREATE")"
+EXPECTED_REF="v$(grep -oP '^[[:space:]]*\"version\": \"\K[^\"]+' "$REPO_ROOT/package.json" | head -1)"
+assert_eq "installer ref is the current versioned release" "$EXPECTED_REF" "$PINNED_REF"
 PINNED_DIGEST="$(grep -oP 'INSTALLER_SHA256="\K[0-9a-f]{64}' "$CREATE")"
-ACTUAL_DIGEST="$(sha256sum "$REPO_ROOT/scripts/proxmox/install.sh" | awk '{ print $1 }')"
+VERSIONED_INSTALLER="$(mktemp)"
+if ! git -C "$REPO_ROOT" show "${PINNED_REF}:scripts/proxmox/install.sh" >"$VERSIONED_INSTALLER" 2>/dev/null; then
+  echo "  FAIL  versioned installer tag is available locally"
+  FAIL=$((FAIL + 1))
+fi
+ACTUAL_DIGEST="$(sha256sum "$VERSIONED_INSTALLER" | awk '{ print $1 }')"
 assert_eq "pinned digest is present" "64" "${#PINNED_DIGEST}"
-assert_eq "pinned digest matches install.sh" "$ACTUAL_DIGEST" "$PINNED_DIGEST"
+assert_eq "pinned digest matches the tagged install.sh" "$ACTUAL_DIGEST" "$PINNED_DIGEST"
 
 echo
 echo "1. creates an unprivileged Debian 13 LXC and runs the installer"
@@ -151,6 +177,21 @@ assert_contains "uses bridged DHCP networking" "--net0 name=eth0,bridge=vmbr0,ip
 assert_contains "pushes in-container installer" "pct push 200" "$COMMANDS"
 assert_contains "runs in-container installer" "pct exec 200 -- env HEM_PORT=7337 bash /root/home-energy-manager-install.sh" "$COMMANDS"
 assert_contains "verifies the inspected installer copy" "Installer integrity verified" "$CREATE_OUTPUT"
+assert_not_contains "does not destroy a successful installation" "pct destroy 200" "$COMMANDS"
+rm -rf "$STAGE"
+
+echo
+echo "1b. removes a container created by a failed provisioning run"
+STAGE="$(mktemp -d)"
+stage_proxmox_mocks "$STAGE"
+set +e
+HEM_PCT_FAIL_INSTALLER=1 run_create "$STAGE"
+FAILED_CREATE_RC=$?
+set -e
+FAILED_COMMANDS="$(cat "$STAGE/commands.log")"
+assert_eq "failed provisioning returns the installer status" "42" "$FAILED_CREATE_RC"
+assert_contains "stops the newly-created container" "pct stop 200" "$FAILED_COMMANDS"
+assert_contains "destroys the newly-created container" "pct destroy 200 --purge" "$FAILED_COMMANDS"
 rm -rf "$STAGE"
 
 echo
@@ -165,6 +206,7 @@ COMMANDS="$(cat "$STAGE/commands.log")"
 assert_eq "invalid gateway exits non-zero" "1" "$RC"
 assert_not_contains "does not create a container" "pct create" "$COMMANDS"
 rm -rf "$STAGE"
+rm -f "$VERSIONED_INSTALLER"
 
 echo
 echo "3. installs the architecture-matched release and creates the service"
@@ -415,6 +457,51 @@ assert_eq "backup failure reports non-zero" "42" "$BACKUP_FAILURE_RC"
 assert_contains "restarts the existing service" "systemctl enable --now home-energy-manager.service" "$BACKUP_FAILURE_COMMANDS"
 assert_not_contains "does not replace the package" "apt install -y /tmp/" "$BACKUP_FAILURE_COMMANDS"
 rm -rf "$FAIL_STAGE"
+
+echo
+echo "5c. corrupt rollback backup leaves live data untouched"
+CORRUPT_STAGE="$(mktemp -d)"
+mkdir -p "$CORRUPT_STAGE/bin" "$CORRUPT_STAGE/root/var/lib/givenergy-local"
+: >"$CORRUPT_STAGE/commands.log"
+printf '{"inverter_host":"192.0.2.21"}\n' >"$CORRUPT_STAGE/root/var/lib/givenergy-local/settings.json"
+make_mock "$CORRUPT_STAGE/bin" tar <<'EOF'
+#!/bin/bash
+if [[ "$*" == *" -czf "* ]]; then
+  output=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-czf" ]; then
+      output="$2"
+      break
+    fi
+    shift
+  done
+  printf 'truncated backup\n' >"$output"
+  exit 0
+fi
+if [[ "$*" == *" -tzf "* ]]; then
+  exit 43
+fi
+exit 44
+EOF
+set +e
+PATH="$CORRUPT_STAGE/bin:$STAGE/bin:/usr/bin:/bin" \
+  HEM_TEST_LOG="$CORRUPT_STAGE/commands.log" \
+  HEM_TEST_DEB="$STAGE/deb-fixture" \
+  HEM_TEST_DIGEST="$DIGEST" \
+  HEM_TEST_INSTALLED_VERSION="1.2.2" \
+  HEM_TEST_HEALTH_FAIL_ONCE=1 \
+  HEM_TEST_HEALTH_STATE="$CORRUPT_STAGE/health-state" \
+  HEM_ROOT="$CORRUPT_STAGE/root" \
+  HEM_PORT=7444 \
+  bash "$REPO_ROOT/scripts/proxmox/install.sh" >"$CORRUPT_STAGE/output.log" 2>&1
+CORRUPT_ROLLBACK_RC=$?
+set -e
+CORRUPT_OUTPUT="$(cat "$CORRUPT_STAGE/output.log")"
+assert_nonzero "corrupt backup reports rollback failure" "$CORRUPT_ROLLBACK_RC"
+assert_eq "live settings survive corrupt backup" "yes" "$([ -f "$CORRUPT_STAGE/root/var/lib/givenergy-local/settings.json" ] && echo yes || echo no)"
+assert_contains "identifies the failed update" "Update failed" "$CORRUPT_OUTPUT"
+assert_contains "reports the invalid backup" "backup validation failed" "$CORRUPT_OUTPUT"
+rm -rf "$CORRUPT_STAGE"
 
 echo
 echo "6. failed post-update health check restores the previous package"

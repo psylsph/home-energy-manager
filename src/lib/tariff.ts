@@ -159,6 +159,7 @@ export function addTariffSlot(cfg: TariffConfig, defaultRate: number): TariffCon
     // Can't split a window narrower than 1 hour into two valid halves —
     // fall back to appending a window at the end (rare edge case).
     const lastEnd = cfg.slots.at(-1)!.end;
+    if (parseHHMM(lastEnd) === FINAL_SLOT_END_MINUTES) return cfg;
     return {
       slots: [
         ...cfg.slots,

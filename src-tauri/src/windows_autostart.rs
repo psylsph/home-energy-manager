@@ -19,11 +19,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Returns the path to the current user's Windows Startup folder.
-fn startup_folder() -> PathBuf {
-    let appdata =
-        std::env::var("APPDATA").expect("APPDATA environment variable must be set on Windows");
-    PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup")
+/// Returns the path to the current user's Windows Startup folder, or a
+/// descriptive error when Windows has not supplied `APPDATA`.
+fn startup_folder() -> Result<PathBuf, String> {
+    let appdata = std::env::var("APPDATA")
+        .map_err(|error| format!("APPDATA environment variable is unavailable: {error}"))?;
+    Ok(PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup"))
 }
 
 /// The filename used for the shortcut in the Startup folder.
@@ -34,7 +35,7 @@ const SHORTCUT_NAME: &str = "Home Energy Manager.lnk";
 ///
 /// Returns `Ok(())` on success, or an error message string on failure.
 pub fn enable() -> Result<(), String> {
-    let startup = startup_folder();
+    let startup = startup_folder()?;
     let shortcut_path = startup.join(SHORTCUT_NAME);
 
     // Get the current executable path.
@@ -74,7 +75,7 @@ pub fn enable() -> Result<(), String> {
 /// Returns `Ok(())` on success, or an error message string on failure.
 /// Succeeds if the shortcut doesn't exist (already removed).
 pub fn disable() -> Result<(), String> {
-    let startup = startup_folder();
+    let startup = startup_folder()?;
     let shortcut_path = startup.join(SHORTCUT_NAME);
 
     if !shortcut_path.exists() {
@@ -95,7 +96,7 @@ pub fn disable() -> Result<(), String> {
 ///
 /// Returns `Ok(true)` if the shortcut is present, `Ok(false)` if not.
 pub fn is_enabled() -> Result<bool, String> {
-    let startup = startup_folder();
+    let startup = startup_folder()?;
     let shortcut_path = startup.join(SHORTCUT_NAME);
     Ok(shortcut_path.exists())
 }
@@ -129,7 +130,8 @@ mod tests {
             let appdata = root.join("AppData/Roaming");
             let previous = std::env::var_os("APPDATA");
             std::env::set_var("APPDATA", &appdata);
-            std::fs::create_dir_all(startup_folder()).expect("create isolated Startup folder");
+            std::fs::create_dir_all(startup_folder().expect("APPDATA is set by the guard"))
+                .expect("create isolated Startup folder");
             Self {
                 _lock: lock,
                 root,
@@ -155,7 +157,7 @@ mod tests {
     #[test]
     fn startup_folder_returns_valid_path() {
         let _appdata = TestAppDataGuard::enter();
-        let path = startup_folder();
+        let path = startup_folder().expect("APPDATA is set by the guard");
         let path_str = path.to_string_lossy();
         assert!(
             path_str.contains("Start Menu\\Programs\\Startup"),
@@ -167,6 +169,21 @@ mod tests {
             "APPDATA path should exist: {}",
             path.parent().unwrap().display()
         );
+    }
+
+    #[test]
+    fn startup_folder_returns_error_when_appdata_is_missing() {
+        let lock = appdata_mutex().lock();
+        let previous = std::env::var_os("APPDATA");
+        std::env::remove_var("APPDATA");
+
+        let result = startup_folder().expect_err("missing APPDATA must be reported");
+
+        if let Some(previous) = previous {
+            std::env::set_var("APPDATA", previous);
+        }
+        drop(lock);
+        assert!(result.contains("APPDATA"));
     }
 
     /// `enable()` must create the shortcut file, and `is_enabled()` must
@@ -228,7 +245,7 @@ mod tests {
         let _ = disable();
         enable().expect("enable() should succeed");
 
-        let startup = startup_folder();
+        let startup = startup_folder().expect("APPDATA is set by the guard");
         let shortcut_path = startup.join(SHORTCUT_NAME);
         assert!(shortcut_path.exists(), "shortcut file should exist");
         assert!(

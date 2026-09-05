@@ -322,6 +322,26 @@ fn parse_archive_response(json: &serde_json::Value) -> Result<Vec<WeatherObserva
 // Backfill driver
 // ---------------------------------------------------------------------------
 
+type BackfillGuard = tokio::sync::OwnedMutexGuard<()>;
+
+/// Try to claim the single backfill slot without awaiting. This is called by
+/// both the daily loop and the manual endpoint, so the decision to start is
+/// atomic even when both wake at the same time.
+fn try_acquire_backfill_guard(state: &Arc<AppState>) -> Option<BackfillGuard> {
+    state.weather_backfill_lock.clone().try_lock_owned().ok()
+}
+
+/// Persist a completed chunk through the settings update lock. Updating the
+/// full settings object from a stale `load()` would allow another settings
+/// writer to be overwritten while a backfill is in progress.
+async fn persist_backfill_progress(completed: NaiveDate) -> Result<(), String> {
+    crate::settings::Settings::update_async(move |settings| {
+        settings.weather_config.last_backfill_completed = Some(completed);
+    })
+    .await
+    .map(|_| ())
+}
+
 /// Compute the next calendar-month window to backfill.
 ///
 /// `last_completed` is the last date that's *fully* populated. We advance
@@ -363,6 +383,28 @@ fn next_backfill_window(
     Some((start, month_end))
 }
 
+async fn insert_weather_blocking(
+    db: Arc<crate::history::HistoryDb>,
+    observations: Vec<WeatherObservation>,
+    source: &'static str,
+    fetched_at: i64,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        for observation in observations {
+            db.insert_weather(
+                observation.timestamp,
+                observation.temperature_c,
+                source,
+                observation.grid_lat,
+                observation.grid_lon,
+                fetched_at,
+            );
+        }
+    })
+    .await
+    .map_err(|error| format!("weather database worker failed: {error}"))
+}
+
 /// Run the backfill from `from` up to `today` (UTC), one calendar month
 /// per call to `fetch_archive_month`. Updates `state.last_backfill_completed`
 /// and `state.last_error` as it goes. Resumable: each tick advances by
@@ -394,21 +436,34 @@ async fn run_backfill_tick(state: Arc<AppState>) {
         match fetch_archive_month(&archive_base, lat, lon, window.0, window.1).await {
             Ok(obs) => {
                 let fetched_at = chrono::Utc::now().timestamp();
-                for o in &obs {
-                    db.insert_weather(
-                        o.timestamp,
-                        o.temperature_c,
-                        "backfill",
-                        o.grid_lat,
-                        o.grid_lon,
-                        fetched_at,
-                    );
+                let advance_to = if obs.is_empty() { window.0 } else { window.1 };
+                let row_count = obs.len();
+                if let Err(e) =
+                    insert_weather_blocking(db.clone(), obs, "backfill", fetched_at).await
+                {
+                    tracing::warn!(error = %e, "failed to store weather backfill");
+                    let mut ws = state.weather.lock().await;
+                    ws.last_error = Some(format!("Backfill database save failed: {e}"));
+                    break;
                 }
                 // Advance `last_completed` to the last day we actually
                 // fetched. The window's `end` is inclusive, so on success
                 // that's just `window.1`. On an empty range we skip the
                 // window start and try again next tick.
-                let advance_to = if obs.is_empty() { window.0 } else { window.1 };
+
+                if let Err(e) = persist_backfill_progress(advance_to).await {
+                    tracing::warn!(
+                        completed = %advance_to,
+                        error = %e,
+                        "failed to persist weather backfill progress"
+                    );
+                    let mut ws = state.weather.lock().await;
+                    ws.last_error = Some(format!("Backfill progress save failed: {e}"));
+                    // The database rows are retained, but without a durable
+                    // checkpoint the same window must be retried next tick.
+                    break;
+                }
+
                 last_completed = Some(advance_to);
 
                 {
@@ -419,7 +474,7 @@ async fn run_backfill_tick(state: Arc<AppState>) {
                 tracing::info!(
                     start = %window.0,
                     end = %window.1,
-                    rows = obs.len(),
+                    rows = row_count,
                     "weather backfill chunk complete",
                 );
             }
@@ -442,16 +497,18 @@ async fn run_backfill_tick(state: Arc<AppState>) {
         }
         chunks_done += 1;
     }
+}
 
-    // Persist the new `last_backfill_completed` to settings.json so it
-    // survives a crash.
-    if last_completed != config.last_backfill_completed {
-        let mut settings = crate::settings::Settings::load();
-        settings.weather_config.last_backfill_completed = last_completed;
-        if let Err(e) = settings.save() {
-            tracing::warn!("Failed to persist weather backfill progress: {e}");
-        }
+async fn run_backfill_guarded(state: Arc<AppState>, _guard: BackfillGuard) {
+    {
+        let mut ws = state.weather.lock().await;
+        ws.backfill_in_progress = true;
     }
+
+    run_backfill_tick(state.clone()).await;
+
+    let mut ws = state.weather.lock().await;
+    ws.backfill_in_progress = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,10 +548,11 @@ pub async fn run_weather_loop(state: Arc<AppState>) {
                 if ws.config.enabled
                     && ws.config.latitude.is_some()
                     && ws.config.longitude.is_some()
-                    && !ws.backfill_in_progress
                 {
                     drop(ws);
-                    run_backfill_tick(state.clone()).await;
+                    if let Some(guard) = try_acquire_backfill_guard(&state) {
+                        run_backfill_guarded(state.clone(), guard).await;
+                    }
                 }
             }
             _ = solar_tick.tick() => {
@@ -522,24 +580,18 @@ async fn run_live_fetch(state: Arc<AppState>) {
 
     match fetch_current(&config.open_meteo_base_url, lat, lon).await {
         Ok(obs) => {
-            let fetched_at = chrono::Utc::now().timestamp();
-            db.insert_weather(
-                obs.timestamp,
-                obs.temperature_c,
-                "current",
-                obs.grid_lat,
-                obs.grid_lon,
-                fetched_at,
-            );
+            let fetched_at = chrono::Utc::now();
+            if let Err(e) =
+                insert_weather_blocking(db, vec![obs.clone()], "current", fetched_at.timestamp())
+                    .await
+            {
+                tracing::warn!(error = %e, "failed to store live weather observation");
+                let mut ws = state.weather.lock().await;
+                ws.last_error = Some(format!("Live database save failed: {e}"));
+                return;
+            }
             let mut ws = state.weather.lock().await;
-            ws.last_fetch_at = Some(
-                chrono::DateTime::<chrono::Utc>::from_timestamp(obs.timestamp, 0)
-                    .unwrap_or_else(chrono::Utc::now),
-            );
-            ws.last_fetched_temperature_c = Some(obs.temperature_c);
-            ws.grid_cell_latitude = obs.grid_lat;
-            ws.grid_cell_longitude = obs.grid_lon;
-            ws.last_error = None;
+            apply_live_fetch_state(&mut ws, &obs, fetched_at);
         }
         Err(e) => {
             tracing::warn!("Weather live fetch failed: {e}");
@@ -549,24 +601,27 @@ async fn run_live_fetch(state: Arc<AppState>) {
     }
 }
 
+fn apply_live_fetch_state(
+    state: &mut WeatherState,
+    observation: &WeatherObservation,
+    fetched_at: chrono::DateTime<chrono::Utc>,
+) {
+    state.last_fetch_at = Some(fetched_at);
+    state.last_fetched_temperature_c = Some(observation.temperature_c);
+    state.grid_cell_latitude = observation.grid_lat;
+    state.grid_cell_longitude = observation.grid_lon;
+    state.last_error = None;
+}
+
 /// Public entry point used by `POST /api/weather/backfill` to start a
 /// one-shot backfill in the background. The Settings UI doesn't await
 /// the future — it polls `GET /api/weather` for progress.
 pub fn spawn_backfill(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        let mut ws = state.weather.lock().await;
-        if ws.backfill_in_progress {
-            // Already running — nothing to do.
-            return;
-        }
-        ws.backfill_in_progress = true;
-        drop(ws);
-
-        run_backfill_tick(state.clone()).await;
-
-        let mut ws = state.weather.lock().await;
-        ws.backfill_in_progress = false;
-    });
+    let Some(guard) = try_acquire_backfill_guard(&state) else {
+        // Already running — nothing to do.
+        return;
+    };
+    tokio::spawn(run_backfill_guarded(state, guard));
 }
 
 #[cfg(test)]
@@ -826,5 +881,78 @@ mod tests {
     fn parse_archive_response_empty_is_ok_empty() {
         let json = serde_json::json!({ "hourly": { "time": [], "temperature_2m": [] } });
         assert!(parse_archive_response(&json).unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_and_daily_backfill_share_one_exclusive_guard() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+
+            let first = try_acquire_backfill_guard(&state).expect("first backfill should start");
+            assert!(
+                try_acquire_backfill_guard(&state).is_none(),
+                "a second backfill must not start while the first is active"
+            );
+
+            drop(first);
+            assert!(
+                try_acquire_backfill_guard(&state).is_some(),
+                "the guard should become available after the first backfill exits"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_progress_update_merges_with_current_settings() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            crate::settings::Settings::update_async(|settings| {
+                settings.host = "192.168.1.51".to_string();
+                settings.weather_config.enabled = true;
+            })
+            .await
+            .expect("initial settings update");
+
+            let completed = d(2025, 6, 30);
+            persist_backfill_progress(completed)
+                .await
+                .expect("backfill progress update");
+
+            let settings = crate::settings::Settings::load();
+            assert_eq!(settings.host, "192.168.1.51");
+            assert!(settings.weather_config.enabled);
+            assert_eq!(
+                settings.weather_config.last_backfill_completed,
+                Some(completed)
+            );
+        })
+        .await;
+    }
+
+    #[test]
+    fn live_fetch_state_records_retrieval_time_not_model_timestamp() {
+        let observation = WeatherObservation {
+            timestamp: chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+                .unwrap()
+                .timestamp(),
+            temperature_c: 18.5,
+            grid_lat: Some(51.25),
+            grid_lon: Some(-0.5),
+        };
+        let fetched_at = chrono::DateTime::parse_from_rfc3339("2025-06-21T12:34:56Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut state = WeatherState::default();
+
+        apply_live_fetch_state(&mut state, &observation, fetched_at);
+
+        assert_eq!(state.last_fetch_at, Some(fetched_at));
+        assert_ne!(
+            state.last_fetch_at.map(|time| time.timestamp()),
+            Some(observation.timestamp)
+        );
+        assert_eq!(state.last_fetched_temperature_c, Some(18.5));
+        assert_eq!(state.grid_cell_latitude, Some(51.25));
+        assert_eq!(state.grid_cell_longitude, Some(-0.5));
     }
 }

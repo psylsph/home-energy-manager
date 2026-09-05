@@ -112,6 +112,28 @@ mod tests {
     }
 
     #[test]
+    fn southern_hemisphere_summer_noon_is_daylight() {
+        // Solar noon at Sydney is around 02:00 UTC near the December
+        // solstice; this guards the latitude sign and seasonal declination.
+        let at = Utc.with_ymd_and_hms(2026, 12, 21, 2, 0, 0).unwrap();
+        let position = calculate_solar_position(at, -33.86, 151.21).unwrap();
+
+        assert!(position.elevation_deg > 70.0);
+        assert!(!position.is_pv_dark());
+    }
+
+    #[test]
+    fn negative_longitude_summer_noon_is_daylight() {
+        // Solar noon near New York is around 16:00 UTC during daylight time;
+        // this guards the west-of-Greenwich longitude correction.
+        let at = Utc.with_ymd_and_hms(2026, 6, 21, 16, 0, 0).unwrap();
+        let position = calculate_solar_position(at, 40.71, -74.01).unwrap();
+
+        assert!(position.elevation_deg > 65.0);
+        assert!(!position.is_pv_dark());
+    }
+
+    #[test]
     fn invalid_coordinates_disable_solar_position_filtering() {
         let at = Utc.with_ymd_and_hms(2026, 9, 2, 0, 50, 0).unwrap();
 

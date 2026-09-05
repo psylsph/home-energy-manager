@@ -26,8 +26,7 @@
  *      empty so suites that exercise Agile must supply their own mock URL.
  */
 
-import { spawn } from 'child_process';
-import { promises as fsp, existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { promises as fsp, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import * as path from 'path';
 
@@ -38,6 +37,7 @@ import * as path from 'path';
  * @property {string} [serial]       Inverter serial number (default empty)
  * @property {number} httpPort       HTTP server port
  * @property {number} [pollInterval] Poll interval seconds (default 5)
+ * @property {number} [writePacingMs] Milliseconds between queued Modbus writes (default 1500; simulator suites use a low value)
  * @property {string} [tag]          Optional override tag appended to temp dir name
  */
 
@@ -74,6 +74,7 @@ export async function writeTestSettings(overrides) {
     port: overrides.port,
     serial: overrides.serial ?? '',
     poll_interval: overrides.pollInterval ?? 5,
+    write_pacing_ms: overrides.writePacingMs ?? 1500,
     http_port: overrides.httpPort,
     auto_connect: true,
     // CRITICAL: never let the test backend scan the user's LAN if the

@@ -2,19 +2,22 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiGet, apiPut } from '../lib/api';
 
 interface LogEntry {
+  id: number;
   timestamp: string;
   level: string;
   message: string;
   raw: string;
 }
 
+const LOG_RING_CAPACITY = 2_000;
 const LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'] as const;
 
-function parseLogLine(line: string): LogEntry {
+function parseLogLine(line: string, id: number): LogEntry {
   // Format: "HH:MM:SS.mmm LEVEL [module] message"
   const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2}\.\d+)\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+\[([^\]]*)\]\s*(.*)/);
   if (timeMatch) {
     return {
+      id,
       timestamp: timeMatch[1],
       level: timeMatch[2].trim(),
       message: timeMatch[4],
@@ -22,6 +25,7 @@ function parseLogLine(line: string): LogEntry {
     };
   }
   return {
+    id,
     timestamp: '',
     level: '',
     message: line,
@@ -47,7 +51,9 @@ export default function LogsPage() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
-  const prevCountRef = useRef(0);
+  const logCursorRef = useRef<number | null>(null);
+  const logsFetchInFlightRef = useRef(false);
+  const previousNewestLogIdRef = useRef<number | null>(null);
 
   // Fetch the current backend capture level on mount
   useEffect(() => {
@@ -62,12 +68,37 @@ export default function LogsPage() {
   }, []);
 
   const fetchLogs = useCallback(async () => {
+    if (logsFetchInFlightRef.current) return;
+    logsFetchInFlightRef.current = true;
+    const after = logCursorRef.current;
     try {
-      const res = await apiGet<{ ok: boolean; lines: string[]; count: number }>('/api/logs');
-      const parsed = res.lines.map(parseLogLine);
-      setLogs(parsed);
+      const path = after == null ? '/api/logs' : `/api/logs?after=${after}`;
+      const res = await apiGet<{
+        ok: boolean;
+        lines: string[];
+        count: number;
+        /** Highest log ID included in this response. */
+        next?: number;
+      }>(path);
+      const next = typeof res.next === 'number' && Number.isFinite(res.next)
+        ? res.next
+        : null;
+      const firstId = next != null
+        ? next - res.lines.length + 1
+        : (after ?? 0) + 1;
+      const parsed = res.lines.map((line, index) => parseLogLine(line, firstId + index));
+      if (after == null) {
+        setLogs(parsed.slice(-LOG_RING_CAPACITY));
+      } else if (parsed.length > 0) {
+        setLogs((previous) => [...previous, ...parsed].slice(-LOG_RING_CAPACITY));
+      }
+      if (next != null) {
+        logCursorRef.current = next;
+      }
     } catch {
       // ignore — backend might not be running
+    } finally {
+      logsFetchInFlightRef.current = false;
     }
   }, []);
 
@@ -83,12 +114,18 @@ export default function LogsPage() {
   }, [fetchLogs]);
 
   // Auto-scroll to bottom when new logs arrive
+  const newestLogId = logs.length > 0 ? logs[logs.length - 1].id : null;
   useEffect(() => {
-    if (autoScroll && containerRef.current && logs.length > prevCountRef.current) {
+    if (
+      autoScroll
+      && containerRef.current
+      && newestLogId != null
+      && newestLogId !== previousNewestLogIdRef.current
+    ) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-    prevCountRef.current = logs.length;
-  }, [logs, autoScroll]);
+    previousNewestLogIdRef.current = newestLogId;
+  }, [newestLogId, autoScroll]);
 
   // Change the backend capture level
   const changeCaptureLevel = async (level: string) => {
@@ -195,8 +232,8 @@ export default function LogsPage() {
           </div>
         ) : (
           <div className="px-2 py-1 font-mono text-xs leading-5 whitespace-pre-wrap">
-            {filteredLogs.map((log, i) => (
-              <div key={i} className="flex gap-1 hover:bg-white/[0.02] rounded">
+            {filteredLogs.map((log) => (
+              <div key={log.id} className="flex gap-1 hover:bg-white/[0.02] rounded">
                 <span className="text-text-secondary/60 shrink-0 w-[5.5rem]">{log.timestamp}</span>
                 <span className={`shrink-0 w-12 ${levelColor(log.level)}`}>{log.level || '    '}</span>
                 <span className="text-text-primary break-all">{log.message}</span>

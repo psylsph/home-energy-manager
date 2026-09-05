@@ -99,6 +99,11 @@ async function getBackup(baseUrl: string): Promise<unknown[] | null> {
 }
 
 test.describe('Issue #137 — discharge slot backup & restore', () => {
+  // The Timed-entry restore awaits real write confirmation: restoring a full
+  // 10-slot schedule means 30+ registers at the poll loop's 1.5 s inter-write
+  // pacing, so the round-trip POSTs legitimately hold well past the default
+  // 30 s test timeout.
+  test.describe.configure({ timeout: 180_000 });
   test('eco response carries captured backup so frontend can stage pending edits', async ({
     baseUrl,
   }) => {
@@ -291,6 +296,14 @@ test.describe('Issue #137 — discharge slot backup & restore', () => {
     if (diskBackup !== null) {
       expect(diskBackup.length).toBe(10);
     }
+
+    // Resume discharge so the pause doesn't outlive this test: the
+    // discharge-control arbiter gives an active pause priority over
+    // ManualMode/TimedExport-owned writes for as long as the inverter
+    // reports Eco Paused, which would starve every later mode switch and
+    // slot save on this shared simulator.
+    const resume = await fetch(`${baseUrl}/api/control/unpause`, { method: 'POST' });
+    expect((await resume.json()).ok).toBe(true);
   });
 
   test('full round-trip: Eco→Timed→Eco→Timed clears the backup on disk', async ({

@@ -24,12 +24,15 @@
  */
 
 import { test, expect } from './local-fixture.js';
-import { execSync, spawn, type ChildProcess } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { writeTestSettings, type TestSettingsFixture } from './test-settings.js';
 import { simulatorBinaryPath } from './binary-path.js';
+import { attachErrorHandler } from './process-errors.js';
+import { stopChildProcess } from './process-lifecycle.js';
+import { killPort } from './port-cleanup.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,12 +72,6 @@ function verifyArtifacts() {
   }
 }
 
-function killPort(port: number) {
-  try {
-    execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'ignore' });
-  } catch { /* ignore */ }
-}
-
 /** Spawn a simulator with the given EVC args; returns the process handle. */
 function spawnSim(
   modbusPort: number,
@@ -91,6 +88,7 @@ function spawnSim(
     ...evcArgs,
   ];
   const sim = spawn(SIMULATOR_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  attachErrorHandler(sim, `simulator:${logTag}`);
   const log = (d: Buffer) => {
     for (const line of d.toString().trim().split('\n')) {
       if (line.trim()) console.log(`[sim:${logTag}] ${line}`);
@@ -103,13 +101,9 @@ function spawnSim(
 
 /** Kill a child process gracefully (SIGTERM → SIGKILL after 3s). */
 async function killProc(proc: ChildProcess | null, tag: string) {
-  if (!proc || proc.exitCode !== null) return;
+  if (!proc) return;
   console.log(`[cleanup] Stopping ${tag}...`);
-  proc.kill('SIGTERM');
-  await new Promise<void>((resolve) => {
-    const t = setTimeout(() => { proc.kill('SIGKILL'); resolve(); }, 3000);
-    proc.on('exit', () => { clearTimeout(t); resolve(); });
-  });
+  await stopChildProcess(proc, tag, 3000);
 }
 
 interface EvcInfra {
@@ -146,6 +140,7 @@ async function startEvcInfra(
     port: modbusPort,
     httpPort,
     pollInterval: 2,
+      writePacingMs: 25,
     evcHost: '127.0.0.1',
     evcPort,
   });
@@ -155,6 +150,7 @@ async function startEvcInfra(
     ['--headless', '--port', String(httpPort), '--dist', DIST_DIR],
     { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...settingsFixture.env } },
   );
+  attachErrorHandler(backend, `backend:${tag}`);
   const blog = (d: Buffer) => {
     for (const line of d.toString().trim().split('\n')) {
       if (line.trim()) console.log(`[backend:${tag}] ${line}`);

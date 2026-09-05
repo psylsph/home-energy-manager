@@ -69,6 +69,9 @@ export function finiteAbs(v: number | null | undefined): number {
 }
 
 export function formatPercent(pct: number): string {
+  if (!Number.isFinite(pct)) {
+    return '—';
+  }
   return `${Math.round(pct)}%`;
 }
 
@@ -176,11 +179,13 @@ export function formatOperatingHours(hours: number): string {
  */
 /**
  * Format an epoch-millis timestamp to a locale time string (HH:MM:SS).
- * Returns '—' for falsy / non-finite values.
+ * Returns '—' for nullish or non-finite values.
  */
 export function formatTimestamp(epochMs: number | null | undefined): string {
   if (epochMs == null || !Number.isFinite(epochMs)) return '—';
-  return new Date(epochMs).toLocaleTimeString([], {
+  const date = new Date(epochMs);
+  if (!Number.isFinite(date.getTime())) return '—';
+  return date.toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
