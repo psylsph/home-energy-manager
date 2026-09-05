@@ -38,6 +38,10 @@ describe('E2E Modbus request validation', () => {
     expect(() => validateRequestFrame(readRequest(0x40))).toThrow(/slave/i);
   });
 
+  test.each([0x50, 0x70, 0x7f, 0x8f, 0xa0])('accepts an HV slave ID 0x%s', (slave) => {
+    expect(validateRequestFrame(readRequest(slave))).toMatchObject({ slave });
+  });
+
   test('rejects a short read payload', () => {
     expect(() => validateRequestFrame(
       buildFrame('SA12345678', 0x11, 0x04, Buffer.from([0, 0, 0])),

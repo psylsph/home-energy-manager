@@ -648,9 +648,10 @@ impl HistoryWindow {
 const RESET_NEAR_ZERO_FRACTION: f64 = 0.10;
 const RESET_FLOOR_KWH: f64 = 0.5;
 
-/// Daily counters reset at most once per local day. A second near-zero drop
-/// within this interval is a transient/phantom segment, not another day's
-/// energy.
+/// A second near-zero drop within this interval is normally a
+/// transient/phantom segment, not another day's energy. A counter that has
+/// recovered to a meaningful level is allowed to reset again for a genuine
+/// same-day inverter reboot.
 const MIN_DAILY_RESET_INTERVAL_SECS: i64 = 20 * 60 * 60;
 
 /// After a real reset the counter starts a fresh slow ramp from ~0, whereas a
@@ -674,6 +675,32 @@ fn is_genuine_reset(peak: f64, value: f64, next: Option<f64>) -> bool {
     }
 }
 
+/// Apply the repeated-reset gate shared by energy and cost walkers.
+fn accept_daily_counter_reset(
+    last_reset_ts: &mut Option<i64>,
+    recovery_peak: &mut f64,
+    timestamp: i64,
+    baseline: f64,
+    raw: f64,
+    next: Option<f64>,
+) -> bool {
+    if !is_genuine_reset(baseline, raw, next) {
+        return false;
+    }
+    let interval_elapsed = last_reset_ts
+        .map(|last| timestamp.saturating_sub(last) >= MIN_DAILY_RESET_INTERVAL_SECS)
+        .unwrap_or(true);
+    let recovered_after_reset =
+        *recovery_peak >= RESET_FLOOR_KWH && baseline >= *recovery_peak * RESET_RECOVERY_FRACTION;
+    if interval_elapsed || recovered_after_reset {
+        *last_reset_ts = Some(timestamp);
+        *recovery_peak = raw;
+        true
+    } else {
+        false
+    }
+}
+
 /// Sum the increments of one daily-resetting counter inside an exact window.
 ///
 /// `samples` includes at most one reading on either side of the window. Those
@@ -689,6 +716,7 @@ fn counter_total_in_window(samples: &[(i64, f64)], start_ts: i64, end_ts: i64) -
     let mut baseline = samples[0].1.max(0.0);
     let mut total = 0.0;
     let mut last_reset_ts: Option<i64> = None;
+    let mut recovery_peak = baseline;
 
     for index in 1..samples.len() {
         let (previous_ts, _) = samples[index - 1];
@@ -701,13 +729,15 @@ fn counter_total_in_window(samples: &[(i64, f64)], start_ts: i64, end_ts: i64) -
 
         let (delta, next_baseline) = if raw >= baseline {
             (raw - baseline, raw)
-        } else if is_genuine_reset(baseline, raw, next)
-            && last_reset_ts
-                .map(|last| timestamp.saturating_sub(last) >= MIN_DAILY_RESET_INTERVAL_SECS)
-                .unwrap_or(true)
-        {
+        } else if accept_daily_counter_reset(
+            &mut last_reset_ts,
+            &mut recovery_peak,
+            timestamp,
+            baseline,
+            raw,
+            next,
+        ) {
             // Everything in the fresh counter accumulated after the reset.
-            last_reset_ts = Some(timestamp);
             (raw, raw)
         } else {
             // A transient downward dip: keep the old peak so recovery does
@@ -726,6 +756,7 @@ fn counter_total_in_window(samples: &[(i64, f64)], start_ts: i64, end_ts: i64) -
                 total += delta * overlap_fraction;
             }
             baseline = next_baseline;
+            recovery_peak = recovery_peak.max(baseline);
         }
         // Implausible increases are discarded while retaining the prior
         // baseline, matching the cost-series corruption defence.
@@ -2067,6 +2098,8 @@ impl HistoryDb {
         // local-day reset check and the plausibility window).
         let mut baseline: Option<f64> = None;
         let mut last_ts: Option<i64> = None;
+        let mut last_reset_ts: Option<i64> = None;
+        let mut recovery_peak = 0.0_f64;
         // Issue #131: number of full days of Standing Charge credited at the
         // current reading's time. Starts at 1 for the window-open day's
         // debit (UK billing convention: a partial first day still incurs
@@ -2130,6 +2163,7 @@ impl HistoryDb {
                         }
                     }
                     baseline = Some(raw);
+                    recovery_peak = raw;
                 }
                 Some(base) => {
                     let day_changed =
@@ -2151,14 +2185,24 @@ impl HistoryDb {
                         // Long gaps still get zero credit to avoid pricing a
                         // large unknown chunk at a single rate.
                         let gap_secs = ts - last_ts.unwrap_or(ts);
+                        last_reset_ts = Some(ts);
+                        recovery_peak = raw;
                         if gap_secs <= MIDNIGHT_GAP_CREDIT_THRESHOLD_SECS {
                             (raw.max(0.0), raw)
                         } else {
                             (0.0, raw)
                         }
                     } else if raw >= base {
+                        recovery_peak = recovery_peak.max(raw);
                         (raw - base, raw) // normal same-day increase
-                    } else if is_genuine_reset(base, raw, next_raw) {
+                    } else if accept_daily_counter_reset(
+                        &mut last_reset_ts,
+                        &mut recovery_peak,
+                        ts,
+                        base,
+                        raw,
+                        next_raw,
+                    ) {
                         // Same-day collapse to near zero: this is the inverter's
                         // daily counter reset landing shortly after the query
                         // window opened. Treat it as a reset rather than holding
@@ -2191,6 +2235,7 @@ impl HistoryDb {
                         // Zero (or reset-to-zero) delta: still advance the
                         // baseline so the day re-syncs after a reset.
                         baseline = Some(new_baseline);
+                        recovery_peak = recovery_peak.max(new_baseline);
                     }
                     // delta > ceiling: implausible spike. Drop it and keep the
                     // baseline so a single corrupt reading doesn't inflate the
@@ -7510,6 +7555,52 @@ mod tests {
             (total - 8.0).abs() < 1e-6,
             "dip recovery double-counted: got {total}"
         );
+    }
+
+    #[test]
+    fn cost_series_ignores_repeated_near_zero_reset_within_the_day() {
+        let db = test_db();
+        let m = local_midnight_secs(0);
+        for (offset, value) in [
+            (-60, 10.0),
+            (0, 0.0),
+            (300, 0.4),
+            (600, 0.0),
+            (900, 0.0),
+            (3600, 10.7),
+        ] {
+            db.insert_reading(&make_snapshot_with_kwh(m + offset, 0.0, value));
+        }
+        let flat = crate::settings::TariffConfig::flat(1.0);
+        let total = series_total(
+            &db.query_cost_series(
+                &window(m - 60, m + 3601),
+                300,
+                "today_export_kwh",
+                &flat,
+                1.0,
+                0.0,
+            )
+            .unwrap(),
+        );
+        assert!(
+            (total - 10.7).abs() < 1e-6,
+            "phantom reset was billed: {total}"
+        );
+    }
+
+    #[test]
+    fn energy_summary_accepts_a_recovered_same_day_reboot_reset() {
+        let samples = [
+            (0, 10.0),
+            (3600, 0.0),
+            (7200, 4.0),
+            (10_800, 0.0),
+            (14_400, 1.5),
+        ];
+        // The second reset is only four hours after the first, but the
+        // counter recovered to 4 kWh first, so it is a genuine reboot reset.
+        assert!((counter_total_in_window(&samples, 0, 14_401) - 5.5).abs() < 1e-6);
     }
 
     #[test]

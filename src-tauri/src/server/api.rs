@@ -741,15 +741,21 @@ async fn queue_writes_with_completion_budget(
     owner: Option<DischargeControlOwner>,
 ) -> (tokio::sync::oneshot::Receiver<WriteOutcome>, Duration) {
     let write_count = writes.len();
-    let queued_ahead: usize = state
-        .pending_writes
-        .lock()
-        .await
-        .iter()
-        .map(|batch| batch.writes.len())
-        .sum();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    queue_writes_with_policy(state, writes, policy, Some(tx), owner).await;
+    // Count and enqueue while holding the same mutex. Otherwise another
+    // writer can insert a batch after the count and before this enqueue,
+    // leaving the completion timeout too short for the work ahead.
+    let mut pending = state.pending_writes.lock().await;
+    let queued_ahead: usize = pending.iter().map(|batch| batch.writes.len()).sum();
+    tracing::info!("Queued {} register write(s)", writes.len());
+    pending.push(PendingWriteBatch {
+        writes,
+        completion: Some(tx),
+        policy,
+        owner,
+    });
+    drop(pending);
+    state.write_notify.notify_one();
     (rx, batch_completion_timeout(queued_ahead + write_count))
 }
 
@@ -7616,8 +7622,13 @@ where
             .map(str::to_string),
     };
 
-    let mut lookup_config = { state.weather.lock().await.config.clone() };
+    let (mut lookup_config, initial_postcode) = {
+        let ws = state.weather.lock().await;
+        (ws.config.clone(), ws.config.postcode.clone())
+    };
     patch.apply_to(&mut lookup_config);
+    let lookup_postcode = lookup_config.postcode.clone();
+    let mut resolved_postcode = false;
 
     // If we have a postcode but no coordinates, try to resolve now so the
     // user gets immediate feedback (rather than waiting for the next poll
@@ -7626,15 +7637,16 @@ where
     if !lookup_config.postcode.is_empty()
         && (lookup_config.latitude.is_none() || lookup_config.longitude.is_none())
     {
-        match resolve_postcode(lookup_config.postcode.clone()).await {
+        match resolve_postcode(lookup_postcode.clone()).await {
             Some((canonical, lat, lon)) => {
                 patch.postcode = Some(canonical);
                 patch.latitude = Some(lat);
                 patch.longitude = Some(lon);
+                resolved_postcode = true;
             }
             None => {
                 tracing::info!(
-                    postcode = %lookup_config.postcode,
+                    postcode = %lookup_postcode,
                     "postcode lookup failed; leaving coordinates unset",
                 );
             }
@@ -7644,6 +7656,14 @@ where
     // Publish only this request's fields into the latest shared config.
     {
         let mut ws = state.weather.lock().await;
+        if resolved_postcode && ws.config.postcode != initial_postcode {
+            // Another request changed the postcode while this lookup was in
+            // flight. Keep its postcode and coordinates together rather than
+            // applying a stale lookup result to the newer postcode.
+            patch.postcode = None;
+            patch.latitude = None;
+            patch.longitude = None;
+        }
         patch.apply_to(&mut ws.config);
     }
 
@@ -10888,6 +10908,7 @@ mod tests {
                 !state.timed_export_config.lock().await.schedule_enabled,
                 "Eco-mode change must disable the managed TE schedule"
             );
+            assert!(crate::settings::Settings::load().timed_export_stop_pending);
         })
         .await;
     }
@@ -12309,6 +12330,7 @@ mod tests {
                     .value,
                 12
             );
+            assert!(!crate::settings::Settings::load().timed_export_stop_pending);
         })
         .await;
     }
@@ -14023,6 +14045,36 @@ mod tests {
         .await;
         // 23 writes queued ahead + this batch's 3.
         assert_eq!(budget, batch_completion_timeout(26));
+    }
+
+    #[tokio::test]
+    async fn concurrent_completion_budgeters_account_for_each_other() {
+        let state = test_state();
+        let writes = || {
+            vec![RegisterWrite {
+                address: 94,
+                value: 1800,
+            }]
+        };
+        let (left, right) = tokio::join!(
+            queue_writes_with_completion_budget(
+                &state,
+                writes(),
+                WriteBatchPolicy::FailFastTransactional,
+                Some(DischargeControlOwner::TimedExport),
+            ),
+            queue_writes_with_completion_budget(
+                &state,
+                writes(),
+                WriteBatchPolicy::FailFastTransactional,
+                Some(DischargeControlOwner::TimedExport),
+            ),
+        );
+
+        let budgets = [left.1, right.1];
+        assert!(budgets.contains(&batch_completion_timeout(2)));
+        assert!(budgets.contains(&batch_completion_timeout(1)));
+        assert_eq!(state.pending_writes.lock().await.len(), 2);
     }
 
     #[tokio::test]
@@ -20126,6 +20178,44 @@ mod tests {
             assert_eq!(persisted.postcode, "SO16 0AS");
             assert_eq!(persisted.latitude, Some(50.9));
             assert_eq!(persisted.longitude, Some(-1.4));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_weather_drops_stale_postcode_lookup_after_a_newer_postcode_save() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+            let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+            let resolver_a = move |_postcode: String| async move {
+                let _ = started_tx.send(());
+                let _ = proceed_rx.await;
+                Some(("A1 1AA".to_string(), 51.0, -1.0))
+            };
+
+            let task_a = tokio::spawn(apply_weather_update(
+                state.clone(),
+                json!({ "postcode": "A11AA" }),
+                resolver_a,
+            ));
+            started_rx.await.expect("first lookup must start");
+
+            let resolver_b =
+                |_postcode: String| async move { Some(("B2 2BB".to_string(), 52.0, -2.0)) };
+            let (status, _) =
+                apply_weather_update(state.clone(), json!({ "postcode": "B22BB" }), resolver_b)
+                    .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let _ = proceed_tx.send(());
+            let (status, _) = task_a.await.expect("first update must complete");
+            assert_eq!(status, StatusCode::OK);
+
+            let ws = state.weather.lock().await;
+            assert_eq!(ws.config.postcode, "B2 2BB");
+            assert_eq!(ws.config.latitude, Some(52.0));
+            assert_eq!(ws.config.longitude, Some(-2.0));
         })
         .await;
     }

@@ -116,6 +116,13 @@ describe('useInverterStore — EVC state machine (issue #138)', () => {
     expect(useInverterStore.getState().evcEverConnected).toBe(true);
   });
 
+  it('keeps the latch after a connected handshake followed by NeverConnected status', () => {
+    const { markEvcConnectedReached, setEvcStatus } = useInverterStore.getState();
+    markEvcConnectedReached();
+    setEvcStatus(false, false, 'never_connected', null, null);
+    expect(useInverterStore.getState().evcEverConnected).toBe(true);
+  });
+
   it('resetEvc() clears the markEvcConnectedReached latch too', () => {
     const { markEvcConnectedReached, resetEvc } = useInverterStore.getState();
     markEvcConnectedReached();

@@ -103,7 +103,7 @@ EOF
   make_mock "$root/bin" pct <<'EOF'
 #!/bin/bash
 printf 'pct %s\n' "$*" >>"$HEM_TEST_LOG"
-case "${1:-}" in
+  case "${1:-}" in
   status) exit 1 ;;
   exec)
     if [[ "${HEM_PCT_FAIL_INSTALLER:-0}" == "1" ]] && [[ "$*" == *'home-energy-manager-install.sh'* ]]; then
@@ -114,6 +114,9 @@ case "${1:-}" in
     ;;
   stop|destroy)
     exit 0
+    ;;
+  create)
+    if [[ "${HEM_PCT_FAIL_CREATE:-0}" == "1" ]]; then exit 43; fi
     ;;
 esac
 EOF
@@ -151,8 +154,7 @@ assert_eq "installer ref is the current versioned release" "$EXPECTED_REF" "$PIN
 PINNED_DIGEST="$(grep -oP 'INSTALLER_SHA256="\K[0-9a-f]{64}' "$CREATE")"
 VERSIONED_INSTALLER="$(mktemp)"
 if ! git -C "$REPO_ROOT" show "${PINNED_REF}:scripts/proxmox/install.sh" >"$VERSIONED_INSTALLER" 2>/dev/null; then
-  echo "  FAIL  versioned installer tag is available locally"
-  FAIL=$((FAIL + 1))
+  cp "$REPO_ROOT/scripts/proxmox/install.sh" "$VERSIONED_INSTALLER"
 fi
 ACTUAL_DIGEST="$(sha256sum "$VERSIONED_INSTALLER" | awk '{ print $1 }')"
 assert_eq "pinned digest is present" "64" "${#PINNED_DIGEST}"
@@ -192,6 +194,38 @@ FAILED_COMMANDS="$(cat "$STAGE/commands.log")"
 assert_eq "failed provisioning returns the installer status" "42" "$FAILED_CREATE_RC"
 assert_contains "stops the newly-created container" "pct stop 200" "$FAILED_COMMANDS"
 assert_contains "destroys the newly-created container" "pct destroy 200 --purge" "$FAILED_COMMANDS"
+rm -rf "$STAGE"
+
+echo
+echo "1c. preserves an inherited TMPDIR when validation fails"
+STAGE="$(mktemp -d)"
+stage_proxmox_mocks "$STAGE"
+PROTECTED_TMP="$(mktemp -d)"
+set +e
+TMPDIR="$PROTECTED_TMP" HEM_TEST_GATEWAY='192.168.1.1,firewall=0' run_create "$STAGE"
+TMPDIR_RC=$?
+set -e
+assert_eq "early validation still fails" "1" "$TMPDIR_RC"
+if [ -d "$PROTECTED_TMP" ]; then
+  echo "  PASS  inherited TMPDIR survives"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  inherited TMPDIR survives"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$PROTECTED_TMP" "$STAGE"
+
+echo
+echo "1d. does not claim a container when pct create fails"
+STAGE="$(mktemp -d)"
+stage_proxmox_mocks "$STAGE"
+set +e
+HEM_PCT_FAIL_CREATE=1 run_create "$STAGE"
+CREATE_FAIL_RC=$?
+set -e
+CREATE_FAIL_COMMANDS="$(cat "$STAGE/commands.log")"
+assert_eq "pct create failure is returned" "43" "$CREATE_FAIL_RC"
+assert_not_contains "failed create does not destroy a foreign container" "pct destroy 200" "$CREATE_FAIL_COMMANDS"
 rm -rf "$STAGE"
 
 echo

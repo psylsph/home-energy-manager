@@ -140,7 +140,7 @@ async function startEvcInfra(
     port: modbusPort,
     httpPort,
     pollInterval: 2,
-      writePacingMs: 25,
+    writePacingMs: 25,
     evcHost: '127.0.0.1',
     evcPort,
   });

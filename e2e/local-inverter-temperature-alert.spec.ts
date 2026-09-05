@@ -66,7 +66,7 @@ async function startHighTemperatureInfrastructure(): Promise<{ baseUrl: string; 
     port: modbusPort,
     httpPort,
     pollInterval: 2,
-      writePacingMs: 25,
+    writePacingMs: 25,
   });
 
   backend = spawn(

@@ -24,6 +24,7 @@ use crate::settings::Settings;
 const OFFICIAL_BASE_URL: &str = "https://api.octopus.energy";
 const RECENT_INITIAL_DAYS: i64 = 90;
 const RECENT_REFRESH_DAYS: i64 = 7;
+const MAX_FORWARD_REFETCH_DAYS: i64 = 90;
 const BACKFILL_CHUNK_DAYS: i64 = 90;
 const SYNC_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -680,9 +681,7 @@ async fn sync_recent(
             .await?
         }
     };
-    let fetch_start = forward_cursor
-        .map(|cursor| cursor.min(recent_start))
-        .unwrap_or(recent_start);
+    let fetch_start = bounded_forward_fetch_start(forward_cursor, recent_start, now);
     let rows = fetch_window(settings, stream, fetch_start, now).await?;
     let imported = history_db_blocking(db.clone(), move |db| {
         db.upsert_octopus_consumption(&rows, Utc::now().timestamp())
@@ -722,6 +721,13 @@ async fn sync_recent(
     })
     .await??;
     Ok(imported)
+}
+
+fn bounded_forward_fetch_start(forward_cursor: Option<i64>, recent_start: i64, now: i64) -> i64 {
+    let oldest_allowed = now - MAX_FORWARD_REFETCH_DAYS * 86400;
+    forward_cursor
+        .map(|cursor| cursor.min(recent_start).max(oldest_allowed))
+        .unwrap_or(recent_start)
 }
 
 async fn backfill_stream(
@@ -1291,6 +1297,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(too_many.contains("maximum"), "got: {too_many}");
+    }
+
+    #[test]
+    fn forward_refetch_is_bounded_to_the_last_ninety_days() {
+        let now = 1_800_000_000;
+        let recent_start = now - RECENT_REFRESH_DAYS * 86400;
+        assert_eq!(
+            bounded_forward_fetch_start(Some(now - 365 * 86400), recent_start, now),
+            now - MAX_FORWARD_REFETCH_DAYS * 86400
+        );
+        assert_eq!(
+            bounded_forward_fetch_start(Some(now - 2 * 86400), recent_start, now),
+            now - 7 * 86400
+        );
+        assert_eq!(
+            bounded_forward_fetch_start(None, recent_start, now),
+            recent_start
+        );
     }
 
     #[test]

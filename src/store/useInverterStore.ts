@@ -460,7 +460,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   evcCharging: false,
   evcConnected: false,
   evcCableConnected: false,
-    evcSessionEnergyKwh: 0,
+  evcSessionEnergyKwh: 0,
   evcEverConnected: false,
   evcConnectionState: 'never_connected',
   evcStale: false,
@@ -619,10 +619,7 @@ export const useInverterStore = create<InverterState>((set) => ({
             evcCableConnected: false,
             evcSessionEnergyKwh: 0,
           }),
-      evcEverConnected:
-        connectionState === 'never_connected' && lastSuccessAtEpochMs == null
-          ? false
-          : prev.evcEverConnected || reachable,
+      evcEverConnected: prev.evcEverConnected || reachable,
     })),
   markEvcConnectedReached: () =>
     set({

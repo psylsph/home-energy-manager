@@ -667,7 +667,13 @@ impl AppState {
 
 fn valid_lv_battery_response(data: &[u16]) -> bool {
     let soc = data.get(100 - 60).copied().unwrap_or(0);
-    (1..=100).contains(&soc) && validate_battery_bms(data)
+    // SOC 0 is a valid BMS reading at the battery cutoff; the BMS identity
+    // and voltage/capacity checks below distinguish an absent module.
+    (0..=100).contains(&soc) && validate_battery_bms(data)
+}
+
+fn request_cosy_writes(writes: &[RegisterWrite], arbiter: &mut DischargeControlArbiter) -> bool {
+    !writes.is_empty() && arbiter.request(DischargeControlOwner::TimedCharge)
 }
 
 /// Feed one battery BMS-read outcome into the alert debounce and fire the
@@ -841,6 +847,18 @@ fn merge_external_meters(
     }
 
     merged
+}
+
+fn record_external_meter_failure(
+    failures: &mut std::collections::BTreeMap<u8, u8>,
+    cached: &mut std::collections::BTreeMap<u8, crate::inverter::model::MeterData>,
+    address: u8,
+) {
+    let count = failures.entry(address).or_insert(0);
+    *count = count.saturating_add(1);
+    if *count >= METER_MAX_RETRIES {
+        cached.remove(&address);
+    }
 }
 
 /// Maximum number of meter discovery retries after the initial scan fails
@@ -1808,6 +1826,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     u8,
                     crate::inverter::model::MeterData,
                 > = std::collections::BTreeMap::new();
+                let mut external_meter_failures: std::collections::BTreeMap<u8, u8> =
+                    std::collections::BTreeMap::new();
                 // Meter discovery retry state: when enable_ammeter or EM115 is
                 // configured but the initial scan finds nothing, we retry every
                 // METER_RETRY_INTERVAL cycles up to METER_MAX_RETRIES times.
@@ -2802,8 +2822,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             let meter =
                                                 crate::inverter::decoder::decode_meter_data(&data, addr);
                                             cached_external_meters.insert(addr, meter);
+                                            external_meter_failures.remove(&addr);
                                         }
                                         Err(e) => {
+                                            record_external_meter_failure(
+                                                &mut external_meter_failures,
+                                                &mut cached_external_meters,
+                                                addr,
+                                            );
                                             tracing::debug!(
                                                 "Meter addr 0x{addr:02X}: read failed: {e}",
                                             );
@@ -4149,9 +4175,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         let writes = cosy_slot_register_writes(
                                             cosy_slot, snapshot.device_type, true,
                                         );
-                                        if discharge_arbiter
-                                            .request(DischargeControlOwner::TimedCharge)
-                                        {
+                                        if request_cosy_writes(&writes, &mut discharge_arbiter) {
                                             let ok = write_registers_to_inverter(
                                                 &mut client, &writes, "Cosy enter",
                                             )
@@ -4288,9 +4312,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                     let writes = cosy_slot_register_writes(
                                                         next_slot, snapshot.device_type, false,
                                                     );
-                                                    if discharge_arbiter
-                                                        .request(DischargeControlOwner::TimedCharge)
-                                                    {
+                                                    if request_cosy_writes(
+                                                        &writes,
+                                                        &mut discharge_arbiter,
+                                                    ) {
                                                         let ok = write_registers_to_inverter(
                                                             &mut client, &writes, "Cosy preload",
                                                         )
@@ -6105,7 +6130,7 @@ mod tests {
 
         let mut zero_soc = valid.clone();
         zero_soc[40] = 0;
-        assert!(!valid_lv_battery_response(&zero_soc));
+        assert!(valid_lv_battery_response(&zero_soc));
 
         let mut absent = valid.clone();
         absent[43] = 0xF556;
@@ -6113,6 +6138,30 @@ mod tests {
 
         assert!(!valid_lv_battery_response(&[0; 60]));
         assert!(!valid_lv_battery_response(&[0; 20]));
+    }
+
+    #[test]
+    fn invalid_cosy_slot_cannot_create_an_applyable_write_batch() {
+        let slot = crate::settings::CosySlot {
+            enabled: true,
+            start_hour: 25,
+            start_minute: 0,
+            end_hour: 2,
+            end_minute: 0,
+            target_soc: 80,
+        };
+        let writes = cosy_slot_register_writes(&slot, DeviceType::Gen2Hybrid, true);
+        assert!(writes.is_empty());
+        let mut arbiter = DischargeControlArbiter::default();
+        let mut cosy_active = false;
+        let mut cosy_last_preloaded_slot = None;
+        if request_cosy_writes(&writes, &mut arbiter) {
+            cosy_active = true;
+            cosy_last_preloaded_slot = Some(0);
+        }
+        assert!(!cosy_active);
+        assert_eq!(cosy_last_preloaded_slot, None);
+        assert_eq!(arbiter.selected_owner(), None);
     }
 
     /// CODE_REVIEW.md BLOCKER: the durable stop-pending marker drives
@@ -7767,6 +7816,21 @@ mod tests {
                 .p_active_total,
             4200
         );
+    }
+
+    #[test]
+    fn external_meter_cache_is_evicted_after_repeated_failures() {
+        let mut cached = std::collections::BTreeMap::new();
+        cached.insert(1, meter(1, 4200));
+        let mut failures = std::collections::BTreeMap::new();
+
+        for _ in 0..METER_MAX_RETRIES {
+            record_external_meter_failure(&mut failures, &mut cached, 1);
+        }
+
+        assert!(!cached.contains_key(&1));
+        assert_eq!(failures.get(&1), Some(&METER_MAX_RETRIES));
+        assert!(merge_external_meters(Vec::new(), &[1], &cached).is_empty());
     }
 
     #[test]

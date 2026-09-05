@@ -199,10 +199,10 @@ export const test = base.extend<ModbusFixtures>({
         testError = error;
       }
 
-      const protocolErrors = await adminGet('/protocol-errors');
       if (testFailed) {
         throw testError;
       }
+      const protocolErrors = await adminGet('/protocol-errors');
       if (protocolErrors?.ok !== true || !Array.isArray(protocolErrors.errors)) {
         throw new Error(`harness protocol-error endpoint returned an invalid response: ${JSON.stringify(protocolErrors)}`);
       }

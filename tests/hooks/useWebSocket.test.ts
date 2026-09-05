@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, cleanup } from '@testing-library/react';
+import { renderHook, cleanup, act } from '@testing-library/react';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
+import { apiGet } from '../../src/lib/api';
 
 // Mock the api module
 vi.mock('../../src/lib/api', () => ({
@@ -53,6 +54,7 @@ vi.stubGlobal('WebSocket', MockWebSocket);
 vi.useFakeTimers();
 
 const { SNAPSHOT_STALE_AFTER_MS, useWebSocket } = await import('../../src/hooks/useWebSocket');
+const apiGetMock = vi.mocked(apiGet);
 
 function resetStore() {
   useInverterStore.setState({
@@ -80,6 +82,7 @@ describe('useWebSocket', () => {
     resetStore();
     mockWsInstances.length = 0;
     vi.useFakeTimers();
+    apiGetMock.mockReset();
   });
 
   afterEach(() => {
@@ -212,6 +215,63 @@ describe('useWebSocket', () => {
     expect(state.evcCharging).toBe(true);
     expect(state.evcConnected).toBe(true);
     expect(state.evcChargingState).toBe('Charging');
+  });
+
+  it('does not let a slow initial EVC REST response overwrite a newer WS frame', async () => {
+    let resolveInitial!: (value: unknown) => void;
+    const initialResponse = new Promise((resolve) => {
+      resolveInitial = resolve;
+    });
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/status') {
+        return { ok: true, connection: 'connected', host: '', connected_since_epoch_ms: null, connect_failures: 0 };
+      }
+      return initialResponse;
+    });
+
+    renderHook(() => useWebSocket());
+    const ws = mockWsInstances[0];
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: 'evc',
+        charging_state: 'Charging',
+        connection_status: 'Connected',
+        active_power: 3500,
+      }),
+    });
+
+    await act(async () => {
+      resolveInitial({
+        ok: true,
+        evc_host: '127.0.0.1',
+        evc_port: 502,
+        reachable: true,
+        stale: false,
+        connection_state: 'connected',
+        last_success_at_epoch_ms: 1,
+        age_seconds: 0,
+        snapshot: {
+          charging_state: 'Idle',
+          connection_status: 'Connected',
+          active_power: 0,
+          current_l1: 0,
+          current_l2: 0,
+          current_l3: 0,
+          voltage_l1: 230,
+          voltage_l2: 0,
+          voltage_l3: 0,
+          meter_energy_kwh: 0,
+          session_energy_kwh: 0,
+          session_duration_secs: 0,
+          charge_limit_a: 0,
+          serial_number: 'EVC',
+        },
+      });
+      await initialResponse;
+    });
+
+    expect(useInverterStore.getState().evcPower).toBe(3500);
+    expect(useInverterStore.getState().evcCharging).toBe(true);
   });
 
   it('sets evcEverConnected on evc_connected message', () => {

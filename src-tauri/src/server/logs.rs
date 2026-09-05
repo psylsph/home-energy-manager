@@ -173,10 +173,7 @@ pub async fn get_logs(
 ) -> Json<Value> {
     let (lines, next_index) = match query.after {
         Some(after) => state.log_ring.read_from(after),
-        None => {
-            let lines = state.log_ring.read_all();
-            (lines, state.log_ring.newest_id())
-        }
+        None => state.log_ring.read_from(0),
     };
     Json(json!({
         "ok": true,

@@ -116,7 +116,7 @@ async function startInfrastructure(
     port: modbusPort,
     httpPort,
     pollInterval: 2,
-      writePacingMs: 25,
+    writePacingMs: 25,
   });
 
   // Start the headless backend

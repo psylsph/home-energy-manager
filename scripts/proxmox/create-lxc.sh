@@ -22,6 +22,7 @@ TEMPLATE_STORAGE="${HEM_TEMPLATE_STORAGE:-}"
 ROOTFS_STORAGE="${HEM_ROOTFS_STORAGE:-}"
 KEEP_INSTALLER="${HEM_KEEP_INSTALLER:-0}"
 CREATED_CTID=""
+HEM_TMP=""
 
 fail() {
   printf 'Error: %s\n' "$*" >&2
@@ -36,8 +37,8 @@ cleanup_on_exit() {
     pct stop "$CREATED_CTID" || true
     pct destroy "$CREATED_CTID" --purge || true
   fi
-  if [ -n "${TMPDIR:-}" ]; then
-    rm -rf "$TMPDIR"
+  if [ -n "$HEM_TMP" ]; then
+    rm -rf "$HEM_TMP"
   fi
   exit "$status"
 }
@@ -134,8 +135,6 @@ if [ -n "$GATEWAY" ]; then
 fi
 
 printf 'Creating unprivileged LXC %s...\n' "$CTID"
-# Mark the CT before creation so the EXIT trap handles partial allocations.
-CREATED_CTID="$CTID"
 pct create "$CTID" "$TEMPLATE_VOLUME" \
   --arch amd64 \
   --ostype debian \
@@ -148,6 +147,10 @@ pct create "$CTID" "$TEMPLATE_VOLUME" \
   --unprivileged 1 \
   --onboot 1 \
   --start 1
+# Only the successful creator owns cleanup of this CTID. This avoids
+# destroying a container another concurrent provisioning process created
+# after a failed `pct create`.
+CREATED_CTID="$CTID"
 
 printf 'Waiting for network connectivity...\n'
 network_ready=0
@@ -160,8 +163,8 @@ for _ in $(seq 1 30); do
 done
 [ "$network_ready" -eq 1 ] || fail "container started but could not reach github.com"
 
-TMPDIR="$(mktemp -d)"
-INSTALLER="$TMPDIR/home-energy-manager-install.sh"
+HEM_TMP="$(mktemp -d)"
+INSTALLER="$HEM_TMP/home-energy-manager-install.sh"
 INSTALLER_URL="https://raw.githubusercontent.com/${REPO}/${SCRIPT_REF}/scripts/proxmox/install.sh"
 printf 'Downloading the in-container installer...\n'
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \

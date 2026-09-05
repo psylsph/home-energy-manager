@@ -110,13 +110,10 @@ test.describe('Real simulator — Timed Export/discharge-slot guard', () => {
     // the same latest_snapshot, so this is deterministic (no broadcast can
     // land between the read and the POST).
     const snapshotBefore = await getSnapshot(baseUrl);
-    const hasConfiguredSlot = ((snapshotBefore.discharge_slots ?? []) as Array<{ enabled: boolean }>)
-      .some((s) => s.enabled);
+    expect(((snapshotBefore.discharge_slots ?? []) as Array<{ enabled: boolean }>).some(
+      (s) => s.enabled,
+    )).toBe(false);
 
-    // The backend also restores a persisted discharge_slots_backup (issue
-    // #137) when no live slot exists — an earlier spec's Eco entry can have
-    // captured one. Account for it so the expectation matches the backend's
-    // actual arm decision.
     const settingsResp = await fetch(`${baseUrl}/api/settings`);
     const settings = (await settingsResp.json()).data as {
       discharge_slots_backup?: unknown[] | null;
@@ -124,20 +121,16 @@ test.describe('Real simulator — Timed Export/discharge-slot guard', () => {
     const hasBackup =
       Array.isArray(settings.discharge_slots_backup) &&
       settings.discharge_slots_backup.length > 0;
+    expect(hasBackup).toBe(false);
 
     const result = await postTimedExport(baseUrl, true);
 
     // The invariant: Timed Export may only arm when a discharge slot is
     // configured (live or restored from the #137 backup). If neither
     // exists, the backend must refuse.
-    if (hasConfiguredSlot || hasBackup) {
-      expect(result.status).toBe(200);
-      expect(result.body.ok).toBe(true);
-    } else {
-      expect(result.status).toBe(409);
-      expect(result.body.ok).toBe(false);
-      expect(result.body.error).toContain('Configure at least one discharge slot');
-    }
+    expect(result.status).toBe(409);
+    expect(result.body.ok).toBe(false);
+    expect(result.body.error).toContain('Configure at least one discharge slot');
   });
 
   test('keeps the browser control aligned with the simulator no-slot state', async ({
@@ -155,7 +148,7 @@ test.describe('Real simulator — Timed Export/discharge-slot guard', () => {
     ).toBeVisible();
   });
 
-  test('a slot write alone cannot make the simulator report Timed Export armed', async ({ baseUrl }) => {
+  test('arms Timed Export when a configured slot is confirmed in the snapshot', async ({ baseUrl }) => {
     await resetToEco(baseUrl);
     const slotResponse = await fetch(`${baseUrl}/api/control/discharge-slot`, {
       method: 'POST',
@@ -172,22 +165,20 @@ test.describe('Real simulator — Timed Export/discharge-slot guard', () => {
     });
     expect(slotResponse.ok).toBe(true);
 
-    // The simulator may re-project its own empty Schedule after the FC06
-    // write (pacing-dependent), so decide from the polled state exactly like
-    // the backend does: HEM may only arm when a configured slot is visible,
-    // and must refuse when there is none.
-    await new Promise((resolve) => setTimeout(resolve, 7_000));
-    const snapshot = await getSnapshot(baseUrl);
-    const slotVisible = ((snapshot.discharge_slots ?? []) as Array<{ enabled: boolean }>).some(
-      (s) => s.enabled,
-    );
+    await expect
+      .poll(
+        async () => {
+          const snapshot = await getSnapshot(baseUrl);
+          return ((snapshot.discharge_slots ?? []) as Array<{ enabled: boolean }>).some(
+            (s) => s.enabled,
+          );
+        },
+        { timeout: 20_000, intervals: [500] },
+      )
+      .toBe(true);
+
     const result = await postTimedExport(baseUrl, true);
-    if (slotVisible) {
-      expect(result.status).toBe(200);
-      expect(result.body.ok).toBe(true);
-    } else {
-      expect(result.status).toBe(409);
-      expect(result.body.ok).toBe(false);
-    }
+    expect(result.status).toBe(200);
+    expect(result.body.ok).toBe(true);
   });
 });

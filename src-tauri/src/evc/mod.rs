@@ -614,12 +614,37 @@ async fn publish_evc_snapshot(state: &Arc<AppState>, mut snapshot: EvcSnapshot) 
     snapshot.session_energy_kwh = effective_kwh;
     snapshot.session_duration_secs = effective_duration_secs;
 
+    publish_evc_cached(state, snapshot).await;
+}
+
+/// Publish a snapshot whose session fields have already been passed through
+/// the latch. Block-2 carry-forward uses this path so an already-unwrapped
+/// duration is never fed back into the raw u16 counter state.
+async fn publish_evc_cached(state: &Arc<AppState>, snapshot: EvcSnapshot) {
     {
         let mut evc = state.latest_evc.lock().await;
         *evc = Some(snapshot.clone());
     }
     let _ = state.tx.send(PollMessage::Evc(Box::new(snapshot)));
     record_evc_success(state).await;
+}
+
+fn carry_forward_evc_block2(
+    mut snapshot: EvcSnapshot,
+    previous: Option<&EvcSnapshot>,
+) -> EvcSnapshot {
+    let Some(previous) = previous else {
+        return snapshot;
+    };
+    snapshot.session_energy_kwh = previous.session_energy_kwh;
+    snapshot.session_duration_secs = previous.session_duration_secs;
+    snapshot.voltage_l1 = previous.voltage_l1;
+    snapshot.voltage_l2 = previous.voltage_l2;
+    snapshot.voltage_l3 = previous.voltage_l3;
+    if snapshot.serial_number.len() < previous.serial_number.len() {
+        snapshot.serial_number = previous.serial_number.clone();
+    }
+    snapshot
 }
 
 pub(crate) async fn reset_evc_state(state: &Arc<AppState>) {
@@ -804,26 +829,15 @@ pub(crate) async fn run_evc_poll_loop_with_timeouts(
                 // Block 1 is the mandatory live-state block. Keep its valid
                 // snapshot visible when supplementary block 2 is unavailable
                 // and retry the optional read on the next poll.
-                let mut snapshot = decode_evc_block1(&regs1);
-                // Preserve supplementary values while the optional block is
-                // temporarily unavailable; otherwise a charging session
-                // flashes back to zero for one poll.
-                if let Some(previous) = state.latest_evc.lock().await.clone() {
-                    snapshot.session_energy_kwh = previous.session_energy_kwh;
-                    snapshot.session_duration_secs = previous.session_duration_secs;
-                    snapshot.voltage_l1 = previous.voltage_l1;
-                    snapshot.voltage_l2 = previous.voltage_l2;
-                    snapshot.voltage_l3 = previous.voltage_l3;
-                    if snapshot.serial_number.len() < previous.serial_number.len() {
-                        snapshot.serial_number = previous.serial_number;
-                    }
-                }
+                let previous = state.latest_evc.lock().await.clone();
+                let snapshot =
+                    carry_forward_evc_block2(decode_evc_block1(&regs1), previous.as_ref());
                 tracing::debug!(
                     power = snapshot.active_power,
                     state = %snapshot.charging_state,
                     "EVC: retaining valid block-1 snapshot after block-2 failure"
                 );
-                publish_evc_snapshot(&state, snapshot).await;
+                publish_evc_cached(&state, snapshot).await;
                 sleep(poll_interval).await;
                 continue;
             }
@@ -1289,6 +1303,21 @@ mod tests {
         after_wrap.session_duration_secs = 3;
         let (_, duration_after_wrap) = latch.observe_with_duration(&after_wrap);
         assert_eq!(duration_after_wrap, 65_539);
+    }
+
+    #[test]
+    fn block2_carry_forward_keeps_already_unwrapped_duration_raw() {
+        let mut previous = snap("Charging", "Connected", 12.3);
+        previous.session_duration_secs = 65_539;
+        previous.voltage_l1 = 230.0;
+        previous.serial_number = "GEVC123".to_string();
+        let current = snap("Charging", "Connected", 0.0);
+
+        let carried = carry_forward_evc_block2(current, Some(&previous));
+        assert_eq!(carried.session_duration_secs, 65_539);
+        assert!((carried.session_energy_kwh - 12.3).abs() < 0.001);
+        assert_eq!(carried.voltage_l1, 230.0);
+        assert_eq!(carried.serial_number, "GEVC123");
     }
 
     // -----------------------------------------------------------------

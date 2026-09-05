@@ -15,17 +15,21 @@ export function killPort(port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return;
 
   const pids = new Set();
-  try {
-    const output = execFileSync('lsof', ['-ti', `tcp:${port}`], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    for (const value of output.trim().split(/\s+/)) {
-      const pid = Number(value);
-      if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
+  const lsofArgs = [['-sTCP:LISTEN', '-ti', `tcp:${port}`], ['-ti', `tcp:${port}`]];
+  for (const args of lsofArgs) {
+    try {
+      const output = execFileSync('lsof', args, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      for (const value of output.trim().split(/\s+/)) {
+        const pid = Number(value);
+        if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
+      }
+      break;
+    } catch {
+      // Retry without the filter for older lsof builds, then use /proc.
     }
-  } catch {
-    // lsof is optional; use the Linux fallback below.
   }
 
   for (const pid of listeningPidsFromProc(port)) pids.add(pid);

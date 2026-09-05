@@ -32,6 +32,7 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<number>(0);
   const lastSnapshotReceivedAt = useRef<number | null>(null);
+  const evcGenerationRef = useRef(0);
   const connectRef = useRef<() => void>(() => {});
   const { setSnapshot, clearSnapshot, setConnection, setEvcData, setEvcStatus } = useInverterStore();
 
@@ -69,6 +70,7 @@ export function useWebSocket() {
   // the latch fire. We ask the backend directly for the cached snapshot
   // and seed the store accordingly.
   const fetchInitialEvcStatus = useCallback(async () => {
+    const generationAtStart = evcGenerationRef.current;
     try {
       const res = await apiGet<{
         ok: boolean;
@@ -96,6 +98,7 @@ export function useWebSocket() {
           serial_number: string;
         } | null;
       }>('/api/evc/status');
+      if (generationAtStart !== evcGenerationRef.current) return;
       if (!res.ok) return;
       if (res.reachable && res.snapshot) {
         const snap = res.snapshot;
@@ -181,6 +184,7 @@ export function useWebSocket() {
             clearSnapshot();
           }
         } else if (data.type === 'evc') {
+          evcGenerationRef.current += 1;
           const evc = data as EvcSnapshot;
           const charging = evc.charging_state === 'Charging' || evc.active_power > 0;
           // Decoupled: an arriving `evc` frame proves the host is reachable
@@ -205,6 +209,7 @@ export function useWebSocket() {
             0,
           );
         } else if (data.type === 'evc_connected') {
+          evcGenerationRef.current += 1;
           // Backend just established the TCP/Modbus connection to the
           // configured EVC host (issue #138). Latch `evcEverConnected`
           // immediately so the UI drops out of the misleading "Not
@@ -215,6 +220,7 @@ export function useWebSocket() {
           // the flag if the first read fails.
           useInverterStore.getState().markEvcConnectedReached();
         } else if (data.type === 'evc_disconnected') {
+          evcGenerationRef.current += 1;
           const current = useInverterStore.getState();
           if (current.evcLastSuccessAtEpochMs == null) {
             setEvcData(0, false, false);
@@ -230,6 +236,7 @@ export function useWebSocket() {
             });
           }
         } else if (data.type === 'evc_status') {
+          evcGenerationRef.current += 1;
           setEvcStatus(
             Boolean(data.reachable),
             Boolean(data.stale),

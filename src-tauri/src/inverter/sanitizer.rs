@@ -1531,7 +1531,7 @@ fn is_within_daily_reset_window(
             .and_then(parse_inverter_time)
             .map(|previous| inverter_dt.signed_duration_since(previous).num_seconds())
             .is_some_and(|advance| {
-                (0..=INVERTER_CLOCK_MAX_PLAUSIBLE_ADVANCE_SECS).contains(&advance)
+                (1..=INVERTER_CLOCK_MAX_PLAUSIBLE_ADVANCE_SECS).contains(&advance)
             });
 
         if close_to_host || advances_plausibly {
@@ -4613,6 +4613,47 @@ mod tests {
         );
 
         assert!(sanitized, "stale inverter midnight must be rejected");
+        assert_eq!(snap.today_pv2_kwh, prev.today_pv2_kwh);
+    }
+
+    #[test]
+    fn frozen_inverter_midnight_does_not_open_reset_gate_at_host_midday() {
+        let prev = InverterSnapshot {
+            timestamp: fixed_local_timestamp("2026-09-03 12:00:00"),
+            inverter_time: "2026-09-03 00:00:00".to_string(),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 9.5,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: fixed_local_timestamp("2026-09-03 12:05:00"),
+            inverter_time: "2026-09-03 00:00:00".to_string(),
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            battery_reserve: 4,
+            today_pv2_kwh: 0.0,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        let sanitized = sanitize_snapshot(
+            &mut snap,
+            Some(&prev),
+            false,
+            &mut pending_mode,
+            &mut delta_corrections,
+            &mut suspect_counts,
+            &mut rate_release_counts,
+        );
+
+        assert!(sanitized);
         assert_eq!(snap.today_pv2_kwh, prev.today_pv2_kwh);
     }
 

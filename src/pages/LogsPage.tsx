@@ -89,6 +89,11 @@ export default function LogsPage() {
       const parsed = res.lines.map((line, index) => parseLogLine(line, firstId + index));
       if (after == null) {
         setLogs(parsed.slice(-LOG_RING_CAPACITY));
+      } else if (next != null && next < after) {
+        // Log IDs restart when the backend restarts. Replace the old ring
+        // rather than appending the new, re-numbered lines under duplicate
+        // React keys.
+        setLogs(parsed.slice(-LOG_RING_CAPACITY));
       } else if (parsed.length > 0) {
         setLogs((previous) => [...previous, ...parsed].slice(-LOG_RING_CAPACITY));
       }

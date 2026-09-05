@@ -133,7 +133,7 @@ export default async function globalSetup(_config: FullConfig) {
     port: MODBUS_PORT,
     httpPort: HTTP_PORT,
     pollInterval: 5,
-      writePacingMs: 25,
+    writePacingMs: 25,
   });
 
   // Start the headless backend

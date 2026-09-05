@@ -331,6 +331,42 @@ fn try_acquire_backfill_guard(state: &Arc<AppState>) -> Option<BackfillGuard> {
     state.weather_backfill_lock.clone().try_lock_owned().ok()
 }
 
+struct BackfillProgressGuard {
+    state: Arc<AppState>,
+    finished: bool,
+}
+
+impl BackfillProgressGuard {
+    fn new(state: Arc<AppState>) -> Self {
+        Self {
+            state,
+            finished: false,
+        }
+    }
+
+    async fn finish(mut self) {
+        let mut ws = self.state.weather.lock().await;
+        ws.backfill_in_progress = false;
+        self.finished = true;
+    }
+}
+
+impl Drop for BackfillProgressGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let state = self.state.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let mut ws = state.weather.lock().await;
+            ws.backfill_in_progress = false;
+        });
+    }
+}
+
 /// Persist a completed chunk through the settings update lock. Updating the
 /// full settings object from a stale `load()` would allow another settings
 /// writer to be overwritten while a backfill is in progress.
@@ -500,15 +536,14 @@ async fn run_backfill_tick(state: Arc<AppState>) {
 }
 
 async fn run_backfill_guarded(state: Arc<AppState>, _guard: BackfillGuard) {
+    let progress_guard = BackfillProgressGuard::new(state.clone());
     {
         let mut ws = state.weather.lock().await;
         ws.backfill_in_progress = true;
     }
 
     run_backfill_tick(state.clone()).await;
-
-    let mut ws = state.weather.lock().await;
-    ws.backfill_in_progress = false;
+    progress_guard.finish().await;
 }
 
 // ---------------------------------------------------------------------------

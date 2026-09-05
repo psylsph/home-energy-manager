@@ -28,7 +28,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-autostart = "2"
 
 # Async runtime
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { version = "1", features = ["full"] }
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
@@ -80,6 +80,8 @@ proptest = "1"
 # Real-socket WebSocket integration tests for the keepalive probe (issue
 # #274) — axum's oneshot router tests can't perform the HTTP upgrade.
 tokio-tungstenite = "0.30"
+# Tokio's clock controls are test-only; keep `test-util` out of release builds.
+tokio = { version = "1", features = ["test-util"] }
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }

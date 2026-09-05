@@ -235,4 +235,25 @@ describe('<LogsPage/>', () => {
     expect(screen.queryByText('↓ Scroll to bottom')).not.toBeInTheDocument();
     expect(container.textContent).toContain('2000/2000 lines');
   });
+
+  it('replaces the displayed ring when the backend cursor regresses after restart', async () => {
+    let initialFetches = 0;
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/log-level') return { ok: true, level: 'INFO' };
+      if (path === '/api/logs' && initialFetches++ === 0) {
+        return { ok: true, lines: ['10:30:00.000 INFO [old] before restart'], count: 1, next: 2_000 };
+      }
+      if (path === '/api/logs?after=2000') {
+        return { ok: true, lines: ['10:30:00.000 INFO [new] after restart'], count: 1, next: 1 };
+      }
+      throw new Error(`unexpected log request: ${path}`);
+    });
+
+    render(<LogsPage />);
+    await screen.findByText(/before restart/);
+    fireEvent.click(screen.getByText('Refresh'));
+
+    await screen.findByText(/after restart/);
+    expect(screen.queryByText(/before restart/)).not.toBeInTheDocument();
+  });
 });
