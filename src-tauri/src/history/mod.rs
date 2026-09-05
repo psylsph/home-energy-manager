@@ -4208,6 +4208,39 @@ mod tests {
     }
 
     #[test]
+    fn energy_summary_ignores_a_repeated_near_zero_reset_within_the_day() {
+        let db = test_db();
+        let start = 1_700_100_000i64;
+        for (offset, value) in [
+            (-60, 10.0),  // Yesterday's final counter.
+            (0, 0.0),     // The real daily reset.
+            (300, 0.4),   // A phantom segment after the reset.
+            (600, 0.0),   // False second reset.
+            (900, 0.0),   // Keep the false reset looking genuine.
+            (3600, 10.7), // Real generation later in the day.
+        ] {
+            db.insert_reading(&InverterSnapshot {
+                timestamp: start + offset,
+                today_solar_kwh: value,
+                ..Default::default()
+            });
+        }
+
+        let summary = db
+            .query_energy_summary(&HistoryWindow {
+                range_secs: 0,
+                offset: 0,
+                explicit_window: Some((start, start + 3601)),
+            })
+            .unwrap();
+
+        assert!(
+            (summary.solar_generated_kwh - 10.7).abs() < 1e-5,
+            "a repeated near-zero reset must not add the phantom segment: {summary:?}"
+        );
+    }
+
+    #[test]
     fn energy_summary_rejects_counter_spikes_without_recounting_recovery() {
         let db = test_db();
         let start = 1_700_100_000i64;
