@@ -582,6 +582,11 @@ impl HistoryWindow {
 const RESET_NEAR_ZERO_FRACTION: f64 = 0.10;
 const RESET_FLOOR_KWH: f64 = 0.5;
 
+/// Daily counters reset at most once per local day. A second near-zero drop
+/// within this interval is a transient/phantom segment, not another day's
+/// energy.
+const MIN_DAILY_RESET_INTERVAL_SECS: i64 = 20 * 60 * 60;
+
 /// After a real reset the counter starts a fresh slow ramp from ~0, whereas a
 /// transient comms glitch that momentarily reads ~0 snaps straight back toward
 /// the prior level on the next sample. So a near-zero drop is only treated as a
@@ -617,6 +622,7 @@ fn counter_total_in_window(samples: &[(i64, f64)], start_ts: i64, end_ts: i64) -
 
     let mut baseline = samples[0].1.max(0.0);
     let mut total = 0.0;
+    let mut last_reset_ts: Option<i64> = None;
 
     for index in 1..samples.len() {
         let (previous_ts, _) = samples[index - 1];
@@ -629,8 +635,13 @@ fn counter_total_in_window(samples: &[(i64, f64)], start_ts: i64, end_ts: i64) -
 
         let (delta, next_baseline) = if raw >= baseline {
             (raw - baseline, raw)
-        } else if is_genuine_reset(baseline, raw, next) {
+        } else if is_genuine_reset(baseline, raw, next)
+            && last_reset_ts
+                .map(|last| timestamp.saturating_sub(last) >= MIN_DAILY_RESET_INTERVAL_SECS)
+                .unwrap_or(true)
+        {
             // Everything in the fresh counter accumulated after the reset.
+            last_reset_ts = Some(timestamp);
             (raw, raw)
         } else {
             // A transient downward dip: keep the old peak so recovery does
@@ -4238,6 +4249,35 @@ mod tests {
             (summary.solar_generated_kwh - 10.7).abs() < 1e-5,
             "a repeated near-zero reset must not add the phantom segment: {summary:?}"
         );
+    }
+
+    #[test]
+    fn energy_summary_counts_resets_on_separate_days() {
+        let db = test_db();
+        let start = 1_700_200_000i64;
+        for (offset, value) in [
+            (-60, 10.0),
+            (0, 0.0),
+            (3600, 4.0),
+            (24 * 3600, 0.0),
+            (25 * 3600, 1.5),
+        ] {
+            db.insert_reading(&InverterSnapshot {
+                timestamp: start + offset,
+                today_solar_kwh: value,
+                ..Default::default()
+            });
+        }
+
+        let summary = db
+            .query_energy_summary(&HistoryWindow {
+                range_secs: 0,
+                offset: 0,
+                explicit_window: Some((start, start + 25 * 3600 + 1)),
+            })
+            .unwrap();
+
+        assert!((summary.solar_generated_kwh - 5.5).abs() < 1e-5);
     }
 
     #[test]
