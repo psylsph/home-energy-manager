@@ -83,6 +83,24 @@ jobs:
           restore-keys: |
             cargo-deps-v2-${{ runner.os }}-
 
+      - uses: actions/setup-node@v6
+        if: matrix.os != 'ubuntu-22.04'
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install frontend dependencies for native platform tests
+        if: matrix.os != 'ubuntu-22.04'
+        run: npm install
+
+      - name: Run frontend tests on native platform
+        if: matrix.os != 'ubuntu-22.04'
+        run: npm exec vitest run
+
+      - name: Test macOS launcher
+        if: matrix.os == 'macos-latest'
+        run: bash tests/scripts/macos-launcher.test.sh
+
       - name: Run tests
         working-directory: src-tauri
         run: cargo test

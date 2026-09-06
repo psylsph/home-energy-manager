@@ -28,10 +28,19 @@ describe('simulatorBinaryCandidates', () => {
 
   it('uses the .exe suffix on Windows', () => {
     expect(
-      simulatorBinaryCandidates('/x/r/e2e', {}, 'win32'),
+      simulatorBinaryCandidates('C:\\x\\r\\e2e', {}, 'win32'),
     ).toEqual([
-      '/x/givenergy-simulator/target/release/sim-api.exe',
-      '/givenergy-simulator/target/release/sim-api.exe',
+      'C:\\x\\givenergy-simulator\\target\\release\\sim-api.exe',
+      'C:\\givenergy-simulator\\target\\release\\sim-api.exe',
+    ]);
+  });
+
+  it('uses POSIX path rules for macOS', () => {
+    expect(
+      simulatorBinaryCandidates('/Users/stuart/repos/home-energy-manager/e2e', {}, 'darwin'),
+    ).toEqual([
+      '/Users/stuart/repos/givenergy-simulator/target/release/sim-api',
+      '/Users/stuart/givenergy-simulator/target/release/sim-api',
     ]);
   });
 

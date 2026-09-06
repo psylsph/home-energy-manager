@@ -24,5 +24,18 @@ require(
 )
 require("run: cargo test", "execute the Rust suite on every matrix platform")
 require("run: npm test", "execute frontend and repository contract tests")
+require(
+    "if: matrix.os != 'ubuntu-22.04'",
+    "run frontend tests natively on Windows and macOS",
+)
+require("run: npm exec vitest run", "execute native frontend tests")
+require(
+    "if: matrix.os == 'macos-latest'",
+    "run the macOS launcher test only on macOS",
+)
+require(
+    "run: bash tests/scripts/macos-launcher.test.sh",
+    "exercise the macOS launcher on a macOS host",
+)
 
 print("Platform CI coverage checks passed")
