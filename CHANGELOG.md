@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.80.1] - 2026-09-06
+
+### Fixed
+
+- **Settings can be saved on Windows again.** Version 0.80.0 could show an “Access is denied” error when saving Timed Export or any other settings on Windows. Saves now complete normally, and the platform-specific path is covered by the Windows test suite. (fixes #300)
+- **Platform-specific behaviour is checked on its native operating system.** The full backend and frontend test suites now run on Windows and macOS as well as Linux, including the macOS launcher and Windows test-process cleanup, so operating-system regressions are caught before release.
+- **New Proxmox installs use the current release installer.** The LXC bootstrap had remained pinned to an older release; it now starts from the matching release tag again.
+
 ## [0.80.0] - 2026-09-05
 
 ### Added
