@@ -6,8 +6,8 @@ set -Eeuo pipefail
 REPO="psylsph/home-energy-manager"
 # Keep the bootstrap installer on the latest released tag. The tag is
 # immutable, so this digest cannot silently drift when master changes.
-SCRIPT_REF="${HEM_SCRIPT_REF:-v0.79.0}"
-INSTALLER_SHA256="342bfc94cddbcf6fd2304db13322378af60aeedd848229f6df1986ea87b98631"
+SCRIPT_REF="${HEM_SCRIPT_REF:-v0.80.0}"
+INSTALLER_SHA256="6d152c92c1fa1dcb61731066c70bac1c32935d1441402dd7beb5b364beb16409"
 CTID="${HEM_CTID:-}"
 HOSTNAME="${HEM_HOSTNAME:-home-energy-manager}"
 CORES="${HEM_CORES:-1}"
