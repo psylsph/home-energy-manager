@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -1988,10 +1989,19 @@ impl Settings {
         let tmp_path = path.with_extension("json.tmp");
         // Clean up any orphaned temp file from a previous crash.
         let _ = std::fs::remove_file(&tmp_path);
-        fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write temp settings: {}", e))?;
-        fs::File::open(&tmp_path)
-            .and_then(|file| file.sync_all())
+        // Keep the write-capable handle through the durability flush. On
+        // Windows, File::open() creates a read-only handle and sync_all()
+        // maps to FlushFileBuffers, which rejects handles without write
+        // access with ERROR_ACCESS_DENIED (issue #300).
+        let mut tmp_file = fs::File::create(&tmp_path)
+            .map_err(|e| format!("Failed to write temp settings: {e}"))?;
+        tmp_file
+            .write_all(json.as_bytes())
+            .map_err(|e| format!("Failed to write temp settings: {e}"))?;
+        tmp_file
+            .sync_all()
             .map_err(|e| format!("Failed to sync temp settings: {e}"))?;
+        drop(tmp_file);
         fs::rename(&tmp_path, &path)
             .map_err(|e| format!("Failed to rename settings file: {}", e))?;
         if let Some(parent) = path.parent() {
