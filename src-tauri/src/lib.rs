@@ -1397,37 +1397,27 @@ mod tests {
     /// On non-Windows, `autostart_fallback` must return an error since the
     /// Startup folder fallback is Windows-only. On Windows the function
     /// delegates to `windows_autostart`, which is tested in that module.
+    #[cfg(not(windows))]
     #[test]
     fn autostart_fallback_returns_error_on_non_windows() {
-        #[cfg(not(windows))]
-        {
-            let result = super::autostart_fallback(true);
-            assert!(
-                result.is_err(),
-                "autostart_fallback should error on non-Windows: {:?}",
-                result
-            );
-            let err = result.unwrap_err();
-            assert!(
-                err.contains("only supported on Windows"),
-                "error should mention Windows-only: {err}"
-            );
+        let result = super::autostart_fallback(true);
+        assert!(
+            result.is_err(),
+            "autostart_fallback should error on non-Windows: {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("only supported on Windows"),
+            "error should mention Windows-only: {err}"
+        );
 
-            let result = super::autostart_fallback(false);
-            assert!(
-                result.is_err(),
-                "autostart_fallback(false) should also error on non-Windows: {:?}",
-                result
-            );
-        }
-        // On Windows, the test would create/remove an actual shortcut.
-        // That's covered by the windows_autostart module tests.
-        #[cfg(windows)]
-        {
-            // Just verify the function exists and can be called.
-            let _ = super::autostart_fallback(true);
-            let _ = super::autostart_fallback(false);
-        }
+        let result = super::autostart_fallback(false);
+        assert!(
+            result.is_err(),
+            "autostart_fallback(false) should also error on non-Windows: {:?}",
+            result
+        );
     }
 
     // -------------------------------------------------------------------

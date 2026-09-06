@@ -30,6 +30,8 @@ jobs:
         run: bash scripts/check-versions.sh
       - run: npm run lint
       - run: npm run build
+      - name: Run frontend and repository tests
+        run: npm test
 
       - name: Upload frontend dist for Rust tests
         uses: actions/upload-artifact@v7
@@ -39,9 +41,13 @@ jobs:
           retention-days: 1
 
   test-backend:
-    name: Rust tests
+    name: Rust tests (${{ matrix.os }})
     needs: lint-frontend
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
     env:
       CARGO_NET_RETRY: "10"
       RUSTUP_MAX_RETRIES: "10"
@@ -57,6 +63,7 @@ jobs:
           path: dist
 
       - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \

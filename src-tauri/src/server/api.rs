@@ -7814,16 +7814,7 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let state = test_state();
             let config_before = state.discharge_floor_config.lock().await.clone();
-
-            // Make the settings save fail by making the config dir read-only
-            // (the temp-file write inside `Settings::save` needs write access).
-            let dir = crate::settings::Settings::settings_dir();
-            let perms = std::fs::metadata(&dir)
-                .expect("isolated config dir exists")
-                .permissions();
-            let mut readonly = perms.clone();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o500);
-            std::fs::set_permissions(&dir, readonly).expect("make config dir read-only");
+            let _fail_update = crate::settings::InjectUpdateFailures::arm(1);
 
             let (status, body) = set_discharge_floor(
                 State(state.clone()),
@@ -7831,11 +7822,9 @@ mod tests {
             )
             .await;
 
-            // Restore write access so the isolation guard can clean up.
-            std::fs::set_permissions(&dir, perms).expect("restore config dir permissions");
-
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(body["ok"], false);
+            assert_eq!(crate::settings::InjectUpdateFailures::remaining(), 0);
             // The live config must NOT have diverged from the persisted settings.
             let config_after = state.discharge_floor_config.lock().await.clone();
             assert_eq!(config_after.enabled, config_before.enabled);
@@ -14400,11 +14389,7 @@ mod tests {
                     };
             }
 
-            let dir = crate::settings::Settings::settings_dir();
-            let permissions = std::fs::metadata(&dir).unwrap().permissions();
-            let mut readonly = permissions.clone();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o500);
-            std::fs::set_permissions(&dir, readonly).unwrap();
+            let _fail_update = crate::settings::InjectUpdateFailures::arm(1);
 
             let (status, response) = drive_set_timed_export_completion_with(
                 &state,
@@ -14412,9 +14397,9 @@ mod tests {
                 WriteOutcome::Ok,
             )
             .await;
-            std::fs::set_permissions(&dir, permissions).unwrap();
 
             assert_eq!(status, StatusCode::BAD_REQUEST, "got {response:?}");
+            assert_eq!(crate::settings::InjectUpdateFailures::remaining(), 0);
             let writes = drain_pending_writes(&state).await;
             assert!(
                 !writes

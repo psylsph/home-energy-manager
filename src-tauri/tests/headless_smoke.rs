@@ -418,8 +418,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let debug = root.join("target/debug/givenergy-local");
-        let release = root.join("target/release/givenergy-local");
+        let executable = format!("givenergy-local{}", std::env::consts::EXE_SUFFIX);
+        let debug = root.join("target/debug").join(&executable);
+        let release = root.join("target/release").join(executable);
         std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
         std::fs::create_dir_all(release.parent().unwrap()).unwrap();
         std::fs::write(&debug, b"debug sentinel").unwrap();
