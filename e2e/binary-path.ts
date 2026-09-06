@@ -26,11 +26,15 @@ export function simulatorBinaryCandidates(
   platform: NodeJS.Platform = process.platform,
 ): string[] {
   const executable = platform === 'win32' ? 'sim-api.exe' : 'sim-api';
-  const repoRoot = path.resolve(e2eDir, '..');
+  // Resolve using the target platform rather than the host running the test.
+  // Besides making the helper honestly unit-testable, this matters when a
+  // Windows path is supplied by a cross-platform launcher or CI fixture.
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  const repoRoot = platformPath.resolve(e2eDir, '..');
   return [
     env.GIVENERGY_SIMULATOR_BIN,
-    path.resolve(repoRoot, '..', 'givenergy-simulator', 'target', 'release', executable),
-    path.resolve(repoRoot, '..', '..', 'givenergy-simulator', 'target', 'release', executable),
+    platformPath.resolve(repoRoot, '..', 'givenergy-simulator', 'target', 'release', executable),
+    platformPath.resolve(repoRoot, '..', '..', 'givenergy-simulator', 'target', 'release', executable),
   ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 }
 

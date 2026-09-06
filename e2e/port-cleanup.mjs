@@ -15,24 +15,36 @@ export function killPort(port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return;
 
   const pids = new Set();
-  const lsofArgs = [['-sTCP:LISTEN', '-ti', `tcp:${port}`], ['-ti', `tcp:${port}`]];
-  for (const args of lsofArgs) {
+  if (process.platform === 'win32') {
     try {
-      const output = execFileSync('lsof', args, {
+      const output = execFileSync('netstat', ['-ano', '-p', 'tcp'], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       });
-      for (const value of output.trim().split(/\s+/)) {
-        const pid = Number(value);
-        if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
-      }
-      break;
+      for (const pid of listeningPidsFromWindowsNetstat(output, port)) pids.add(pid);
     } catch {
-      // Retry without the filter for older lsof builds, then use /proc.
+      // Nothing to clean when Windows cannot enumerate TCP listeners.
     }
+  } else {
+    const lsofArgs = [['-sTCP:LISTEN', '-ti', `tcp:${port}`], ['-ti', `tcp:${port}`]];
+    for (const args of lsofArgs) {
+      try {
+        const output = execFileSync('lsof', args, {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        for (const value of output.trim().split(/\s+/)) {
+          const pid = Number(value);
+          if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
+        }
+        break;
+      } catch {
+        // Retry without the filter for older lsof builds, then use /proc.
+      }
+    }
+    for (const pid of listeningPidsFromProc(port)) pids.add(pid);
   }
 
-  for (const pid of listeningPidsFromProc(port)) pids.add(pid);
   pids.delete(process.pid);
   for (const pid of pids) {
     try {
@@ -41,6 +53,30 @@ export function killPort(port) {
       // The process may have exited between discovery and cleanup.
     }
   }
+}
+
+/**
+ * Parse Windows `netstat -ano -p tcp` output for listeners on `port`.
+ *
+ * @param {string} output
+ * @param {number} port
+ * @returns {number[]}
+ */
+export function listeningPidsFromWindowsNetstat(output, port) {
+  const pids = new Set();
+  for (const line of output.split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 5 || fields[0]?.toUpperCase() !== 'TCP') continue;
+    if (fields[3]?.toUpperCase() !== 'LISTENING') continue;
+
+    const localAddress = fields[1] ?? '';
+    const separator = localAddress.lastIndexOf(':');
+    if (separator < 0 || Number(localAddress.slice(separator + 1)) !== port) continue;
+
+    const pid = Number(fields[4]);
+    if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
+  }
+  return [...pids];
 }
 
 /**
