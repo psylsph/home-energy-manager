@@ -99,7 +99,7 @@ mod tests {
     use crate::{
         inverter::{
             model::{DeviceType, InverterSnapshot},
-            poll::AppState,
+            poll::{AppState, ConnectionState},
         },
         settings::Settings,
     };
@@ -481,6 +481,76 @@ mod tests {
                     assert_eq!(actual, expected);
                 }
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn status_reports_hem_owned_force_actions_through_the_route() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(false).await;
+            let read_status = || async {
+                let req = Request::builder()
+                    .uri("/api/control/status")
+                    .header("Authorization", "Bearer integration-key")
+                    .body(Body::empty())
+                    .unwrap();
+                let response = create_authenticated_router(state.clone())
+                    .oneshot(req)
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                serde_json::from_slice::<Value>(&bytes).unwrap()
+            };
+            // get_status freshness-checks against the real clock, so anchor
+            // the reading just in the past rather than a fixed epoch.
+            let now_secs = chrono::Utc::now().timestamp();
+            *state.connection_state.lock().await = ConnectionState::Connected;
+            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+                timestamp: now_secs - 1,
+                device_type: DeviceType::ACCoupled,
+                ..Default::default()
+            });
+            // Both closure branches of the handler's force-window read.
+            *state.force_charge_revert.lock().await =
+                Some(crate::inverter::poll::ForceChargeRevert {
+                    started_at_ms: (now_secs - 5) * 1000,
+                    force_charge_slot_end_ms: Some((now_secs + 3600) * 1000),
+                    enable_charge: true,
+                    enable_discharge: false,
+                    target_soc: 100,
+                    battery_power_mode: 1,
+                    charge_rate: None,
+                    charge_slot_1_start: None,
+                    charge_slot_1_end: None,
+                    three_phase_force_charge_enable: None,
+                    three_phase_ac_charge_enable: None,
+                    battery_pause_mode: None,
+                });
+            let value = read_status().await;
+            assert_eq!(value["control_source"], "force_charge");
+            assert_eq!(value["quick_action"]["action"], "force_charge");
+            *state.force_charge_revert.lock().await = None;
+            *state.force_discharge_revert.lock().await =
+                Some(crate::inverter::poll::ForceDischargeRevert {
+                    started_at_ms: (now_secs - 5) * 1000,
+                    enable_charge: false,
+                    enable_discharge: true,
+                    discharge_rate: None,
+                    discharge_slot_1_start: None,
+                    discharge_slot_1_end: None,
+                    discharge_slot_2_start: None,
+                    discharge_slot_2_end: None,
+                    three_phase_force_discharge_enable: None,
+                    three_phase_force_charge_enable: None,
+                    force_discharge_slot_end_ms: None,
+                    battery_pause_mode: 0,
+                    battery_pause_slot: Default::default(),
+                });
+            let value = read_status().await;
+            assert_eq!(value["control_source"], "force_discharge");
+            assert_eq!(value["quick_action"]["action"], "force_discharge");
         })
         .await;
     }
