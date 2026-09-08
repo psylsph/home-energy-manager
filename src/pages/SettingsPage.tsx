@@ -601,6 +601,29 @@ export default function SettingsPage() {
     }
   };
 
+  // Issue #301: the control-permission toggle persists immediately like the
+  // other toggles on this page, so a user flipping it and navigating away is
+  // never silently left with the unsaved (still-off) state. On failure we
+  // revert the optimistic toggle so the UI never shows a state that didn't
+  // save. Disabling does not stop an action already accepted.
+  const handleApiControlToggle = async (next: boolean) => {
+    const previous = apiControlEnabled;
+    setApiControlEnabled(next);
+    try {
+      await apiPost('/api/settings', { api_control_enabled: next });
+      flash(
+        next
+          ? 'Battery control enabled for authenticated API clients'
+          : 'Battery control disabled for authenticated API clients',
+        true,
+      );
+    } catch (e) {
+      setApiControlEnabled(previous);
+      const msg = e instanceof Error ? e.message : String(e);
+      flash(`Failed to update battery control permission: ${msg}`, false);
+    }
+  };
+
   // Save the optional authenticated API configuration without losing the draft on
   // failure, so a transient server error can be retried.
   const handleApiKeySave = async (clear = false) => {
@@ -1370,11 +1393,11 @@ export default function SettingsPage() {
           </label>
           <div className="flex items-center justify-between gap-3">
             <span className="text-text-primary text-sm font-sans">Allow battery control through the authenticated API</span>
-            <Toggle checked={apiControlEnabled} onChange={setApiControlEnabled}
+            <Toggle checked={apiControlEnabled} onChange={(v) => { void handleApiControlToggle(v); }}
               ariaLabel="Allow battery control through the authenticated API" />
           </div>
           <p className="text-text-secondary text-xs font-sans">
-            Off by default. When enabled and saved, anyone with this API key can use Force Charge,
+            Off by default and applied immediately when toggled. When enabled, anyone with this API key can use Force Charge,
             Force Discharge and their Stop actions. Turning it off does not stop an action already accepted.
           </p>
           <button

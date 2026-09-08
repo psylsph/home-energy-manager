@@ -18,7 +18,7 @@ use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};
 use server::logs::{LogCaptureLayer, LogRing};
 use server::{
-    start_readonly_server, start_server, start_server_with_frontend,
+    start_authenticated_server, start_server, start_server_with_frontend,
     start_server_with_frontend_on_port,
 };
 use settings::Settings;
@@ -646,7 +646,7 @@ pub fn run() {
             let ro_state = state.clone();
             if !api_key.is_empty() && api_port > 0 {
                 tauri::async_runtime::spawn(async move {
-                    start_readonly_server(ro_state, "0.0.0.0", api_port).await;
+                    start_authenticated_server(ro_state, "0.0.0.0", api_port).await;
                 });
             }
 
@@ -912,7 +912,7 @@ pub fn run_headless(args: &[String]) {
         let ro_state = state.clone();
         if !api_key.is_empty() && api_port > 0 {
             tokio::spawn(async move {
-                start_readonly_server(ro_state, "0.0.0.0", api_port).await;
+                start_authenticated_server(ro_state, "0.0.0.0", api_port).await;
             });
         }
 

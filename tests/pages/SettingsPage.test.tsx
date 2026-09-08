@@ -556,6 +556,11 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       useInverterStore.setState({ developerMode: true });
       render(<SettingsPage />);
       expect(await screen.findByText(/SolarWatch/)).toBeDefined();
+      // The API configuration itself must stay in Remote / Mobile Network
+      // Access even when developer mode is on — no copies back in Developer.
+      const developer = screen.getByText('Developer').closest('section')!;
+      expect(developer.textContent).not.toContain('Authenticated API');
+      expect(developer.querySelector('input')).toBeNull();
     });
   });
 });

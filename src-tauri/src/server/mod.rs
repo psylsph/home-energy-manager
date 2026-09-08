@@ -371,7 +371,7 @@ async fn api_key_auth(req: Request, next: Next) -> Response {
 /// Separate integration router: snapshots and summary status are read-only;
 /// four Quick Actions additionally require explicit write permission.
 /// Retains the original function name for compatibility. No settings or WS.
-pub fn create_readonly_router(state: Arc<AppState>) -> Router {
+pub fn create_authenticated_router(state: Arc<AppState>) -> Router {
     use axum::response::IntoResponse;
 
     async fn not_found_404() -> impl IntoResponse {
@@ -420,8 +420,8 @@ pub fn create_readonly_router(state: Arc<AppState>) -> Router {
 
 /// Start the authenticated integration API on a separate port.
 /// The main server on `http_port` is unaffected.
-pub async fn start_readonly_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
-    let app = create_readonly_router(state).into_make_service();
+pub async fn start_authenticated_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
+    let app = create_authenticated_router(state).into_make_service();
     let addr = format!("{}:{}", bind_addr, port);
     tracing::info!("Authenticated API server starting on {}", addr);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -527,23 +527,23 @@ mod tests {
     }
 
     // ======================================================================
-    // Read-only API server (external access with Bearer-token auth)
+    // Authenticated API server (external access with Bearer-token auth)
     // ======================================================================
 
     /// Seed the isolated config dir with a Settings that has the given
-    /// api_key and port, then return the read-only router.
-    async fn make_readonly_router_with_key(key: &str, port: u16) -> Router {
+    /// api_key and port, then return the authenticated router.
+    async fn make_authenticated_router_with_key(key: &str, port: u16) -> Router {
         let mut s = crate::settings::Settings::load();
         s.api_key = key.to_string();
         s.api_port = port;
         s.save().expect("settings save");
-        create_readonly_router(Arc::new(AppState::new()))
+        create_authenticated_router(Arc::new(AppState::new()))
     }
 
     #[tokio::test]
-    async fn readonly_router_requires_bearer_token() {
+    async fn authenticated_router_requires_bearer_token() {
         crate::test_util::with_isolated_config_dir_async(|| async {
-            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+            let app = make_authenticated_router_with_key("secret-xyz", 7338).await;
 
             // No Authorization header at all → 401.
             let request = Request::builder()
@@ -564,9 +564,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_router_rejects_wrong_bearer_token() {
+    async fn authenticated_router_rejects_wrong_bearer_token() {
         crate::test_util::with_isolated_config_dir_async(|| async {
-            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+            let app = make_authenticated_router_with_key("secret-xyz", 7338).await;
 
             // Wrong token → 401.
             let request = Request::builder()
@@ -581,9 +581,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_router_accepts_valid_bearer_token() {
+    async fn authenticated_router_accepts_valid_bearer_token() {
         crate::test_util::with_isolated_config_dir_async(|| async {
-            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+            let app = make_authenticated_router_with_key("secret-xyz", 7338).await;
 
             // Valid token → 200 (snapshot may be empty, but not 401).
             let request = Request::builder()
@@ -607,9 +607,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_router_rejects_non_snapshot_paths() {
+    async fn authenticated_router_rejects_non_snapshot_paths() {
         crate::test_util::with_isolated_config_dir_async(|| async {
-            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+            let app = make_authenticated_router_with_key("secret-xyz", 7338).await;
 
             // Even with a valid token, /api/settings is not exposed → 404.
             let request = Request::builder()
@@ -629,7 +629,7 @@ mod tests {
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-            // /ws (WebSocket) not exposed on the read-only server.
+            // /ws (WebSocket) not exposed on the authenticated server.
             let request = Request::builder()
                 .uri("/ws")
                 .header("Authorization", "Bearer secret-xyz")
@@ -642,9 +642,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_router_is_get_only() {
+    async fn authenticated_router_is_get_only() {
         crate::test_util::with_isolated_config_dir_async(|| async {
-            let app = make_readonly_router_with_key("secret-xyz", 7338).await;
+            let app = make_authenticated_router_with_key("secret-xyz", 7338).await;
 
             // POST to /api/snapshot is not allowed (GET only).
             let request = Request::builder()
@@ -660,9 +660,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_router_no_key_configured_returns_401() {
+    async fn authenticated_router_no_key_configured_returns_401() {
         crate::test_util::with_isolated_config_dir_async(|| async {
-            let app = make_readonly_router_with_key("", 7338).await;
+            let app = make_authenticated_router_with_key("", 7338).await;
             let request = Request::builder()
                 .uri("/api/snapshot")
                 .body(axum::body::Body::empty())

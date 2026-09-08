@@ -81,7 +81,9 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
     let export_state = state.timed_export_state.lock().await.clone();
     let conn = state.connection_state.lock().await.clone();
     let interval = state.settings.lock().await.interval_secs;
-    let snapshot = state.latest_snapshot.lock().await.clone();
+    // Build under the guard (mirroring mini_status) instead of cloning the
+    // whole snapshot; build_status is synchronous and never awaits.
+    let snapshot = state.latest_snapshot.lock().await;
     let value = build_status(
         snapshot.as_ref(),
         conn,
@@ -93,6 +95,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
         },
         Utc::now().timestamp_millis(),
     );
+    drop(snapshot);
     let mut response = Json(value).into_response();
     response
         .headers_mut()
@@ -196,7 +199,9 @@ fn build_status(
         .map(|t| t.to_rfc3339());
     let age_s = snapshot.map(|s| (now_ms / 1000).saturating_sub(s.timestamp));
     let stale_after_s = interval_secs.saturating_mul(3).max(60).min(i64::MAX as u64) as i64;
-    let stale = age_s.is_none_or(|age| age > stale_after_s || age < -5);
+    // "Stale" is only about a reading's age; "never observed" is carried by
+    // observed_at: null / ok: false rather than a misleading stale flag.
+    let stale = age_s.is_some_and(|age| age > stale_after_s || age < -5);
     let available = conn == ConnectionState::Connected && !stale && snapshot.is_some();
     let mut value = json!({
         "ok":available, "summary":"Awaiting first inverter reading", "mode":"unknown", "activity":"unavailable",
@@ -409,10 +414,16 @@ fn build_status(
         let readback_after_request = s.timestamp.saturating_mul(1000) > force.started_at_ms;
         let observed = match force.kind {
             ForceKind::Charge => {
-                s.enable_charge && s.battery_power_mode == 1 && charge_window == Some(true)
+                s.enable_charge
+                    && s.battery_power_mode == 1
+                    && charge_window == Some(true)
+                    && !charge_paused
             }
             ForceKind::Discharge => {
-                s.enable_discharge && s.battery_power_mode == 0 && discharge_window == Some(true)
+                s.enable_discharge
+                    && s.battery_power_mode == 0
+                    && discharge_window == Some(true)
+                    && !discharge_paused
             }
         };
         let phase = if expired {
@@ -469,7 +480,12 @@ fn build_status(
     if s.temperature_limiter_active || s.load_limiter_active {
         source = "safety";
         phase = "restricted";
-        title = format!("Discharge restricted ({title})");
+        // The limiters hold discharge; a Charge action is not itself
+        // restricted, so do not claim it is.
+        title = match ctx.force.as_ref().map(|f| f.kind) {
+            Some(ForceKind::Charge) => format!("Safety limit active ({title})"),
+            _ => format!("Discharge restricted ({title})"),
+        };
     }
     let detail = match phase {
         "pending" => format!("awaiting inverter readback; battery {activity}"),
@@ -581,6 +597,8 @@ mod tests {
             let v = build_status(None, conn.clone(), 20, &Context::default(), NOW);
             assert_eq!(v["activity"], "unavailable");
             assert_eq!(v["observed_at"], Value::Null);
+            assert_eq!(v["stale"], false, "never-observed is not stale");
+            assert_eq!(v["age_seconds"], Value::Null);
             if conn != ConnectionState::Connected {
                 let v = build_status(Some(&snapshot()), conn, 20, &Context::default(), NOW);
                 assert_eq!(v["activity"], "unavailable");
@@ -829,6 +847,103 @@ mod tests {
                 assert_eq!(v["control_source"], "timed_export");
             }
         }
+    }
+
+    #[test]
+    fn scheduled_pauses_hold_force_actions_in_pending_until_released() {
+        for (kind, pause_mode) in [(ForceKind::Charge, 1u8), (ForceKind::Discharge, 2)] {
+            let ctx = Context {
+                force: Some(ForceWindow {
+                    kind,
+                    started_at_ms: NOW - 1000,
+                    end_ms: Some(NOW + 3_600_000),
+                }),
+                ..Default::default()
+            };
+            let mut s = snapshot();
+            s.enable_charge = kind == ForceKind::Charge;
+            s.enable_discharge = kind == ForceKind::Discharge;
+            s.battery_power_mode = if kind == ForceKind::Charge { 1 } else { 0 };
+            s.charge_slots[0] = slot(11, 13);
+            s.discharge_slots[0] = slot(11, 13);
+            // Pause window overlapping the action window: the inverter cannot
+            // be performing the action, so the phase must stay pending.
+            s.battery_pause_mode = pause_mode;
+            s.battery_pause_slot = slot(11, 13);
+            let v = build_status(Some(&s), ConnectionState::Connected, 20, &ctx, NOW);
+            assert_eq!(v["control_phase"], "pending");
+            let expected = if kind == ForceKind::Charge {
+                "charge_pause"
+            } else {
+                "discharge_pause"
+            };
+            assert!(v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["code"] == expected));
+            // With the pause released, the same readback confirms the action.
+            s.battery_pause_mode = 0;
+            assert_eq!(
+                build_status(Some(&s), ConnectionState::Connected, 20, &ctx, NOW)["control_phase"],
+                "active"
+            );
+        }
+    }
+
+    #[test]
+    fn safety_limit_wording_matches_the_restricted_direction() {
+        let mut s = InverterSnapshot {
+            temperature_limiter_active: true,
+            ..snapshot()
+        };
+        s.enable_charge = true;
+        s.battery_power_mode = 1;
+        s.charge_slots[0] = slot(11, 13);
+        s.battery_state = BatteryState::Charging;
+        let charge_ctx = Context {
+            force: Some(ForceWindow {
+                kind: ForceKind::Charge,
+                started_at_ms: NOW - 1000,
+                end_ms: Some(NOW + 3_600_000),
+            }),
+            ..Default::default()
+        };
+        let v = build_status(Some(&s), ConnectionState::Connected, 20, &charge_ctx, NOW);
+        let summary = v["summary"].as_str().unwrap();
+        // The active condition legitimately prefixes the title (summary rules),
+        // so assert on containment rather than the exact start.
+        assert!(
+            summary.contains("Safety limit active (Force Charge)"),
+            "{summary}"
+        );
+        assert!(!summary.contains("Discharge restricted"), "{summary}");
+
+        let discharge_ctx = Context {
+            force: Some(ForceWindow {
+                kind: ForceKind::Discharge,
+                started_at_ms: NOW - 1000,
+                end_ms: Some(NOW + 3_600_000),
+            }),
+            ..Default::default()
+        };
+        s.battery_state = BatteryState::Discharging;
+        s.enable_charge = false;
+        s.enable_discharge = true;
+        s.battery_power_mode = 0;
+        s.discharge_slots[0] = slot(11, 13);
+        let v = build_status(
+            Some(&s),
+            ConnectionState::Connected,
+            20,
+            &discharge_ctx,
+            NOW,
+        );
+        let summary = v["summary"].as_str().unwrap();
+        assert!(
+            summary.contains("Discharge restricted (Force Discharge)"),
+            "{summary}"
+        );
     }
 
     #[test]

@@ -233,7 +233,7 @@ A separate HTTP server (default port **7338**, Bearer-token authenticated) lets 
 ### Setup
 
 1. **Settings → Remote / Mobile Network Access → Authenticated API**: set an API key (long and random) and port, then save and restart HEM to start the server.
-2. Reading data needs only the key. To allow battery writes, enable **Allow battery control through the authenticated API** and save (off by default, including after upgrades; applies to a running server immediately; does not stop an action already accepted).
+2. Reading data needs only the key. To allow battery writes, toggle on **Allow battery control through the authenticated API** — it applies immediately (off by default, including after upgrades; disabling does not stop an action already accepted).
 3. Bearer tokens are not encrypted over plain HTTP — use a trusted network, VPN, or TLS-terminating reverse proxy.
 
 ### Endpoints
