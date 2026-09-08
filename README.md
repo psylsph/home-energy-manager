@@ -222,7 +222,91 @@ Home Energy Manager works with all known GivEnergy inverter models. Real-time mo
 
 The app also runs as a **headless server** — a background service with no window, serving the full UI to any browser on your network. Great for Raspberry Pi or an always-on server. See [INSTALL.md](./INSTALL.md) for setup instructions.
 
-External software can use the [authenticated integration API](./docs/authenticated-api.md) for battery status and optional Quick Actions. Configure its key, separate port and default-off battery-control permission under **Settings → Remote / Mobile Network Access**.
+External software can use an authenticated integration API for battery status and optional Quick Actions — see [Authenticated API](#-authenticated-api-integration) below. Configure its key, separate port and default-off battery-control permission under **Settings → Remote / Mobile Network Access** (Developer Mode not required).
+
+---
+
+## 🔌 Authenticated API Integration
+
+A separate HTTP server (default port **7338**, Bearer-token authenticated) lets external software read inverter data and — with explicit permission — use the same four battery Quick Actions as the app's buttons. The main dashboard server is unchanged by any of this.
+
+### Setup
+
+1. **Settings → Remote / Mobile Network Access → Authenticated API**: set an API key (long and random) and port, then save and restart HEM to start the server.
+2. Reading data needs only the key. To allow battery writes, enable **Allow battery control through the authenticated API** and save (off by default, including after upgrades; applies to a running server immediately; does not stop an action already accepted).
+3. Bearer tokens are not encrypted over plain HTTP — use a trusted network, VPN, or TLS-terminating reverse proxy.
+
+### Endpoints
+
+| Method | Path | Body | Write permission |
+|---|---|---|---|
+| GET | `/api/snapshot` | None | No |
+| GET | `/api/control/status` | None | No |
+| POST | `/api/control/force-charge` | `{"minutes":60}` | Yes |
+| POST | `/api/control/force-charge/stop` | None | Yes |
+| POST | `/api/control/force-discharge` | `{"minutes":60}` | Yes |
+| POST | `/api/control/force-discharge/stop` | None | Yes |
+
+Starts act immediately (duration 1–1439 minutes; extra fields are rejected). Stop requests need no body. The actions reuse the Quick Action handlers exactly: same model-aware registers, restore behaviour, configured power limits, and mutual exclusion (stop one direction before starting the other). A `200` response means **accepted and queued**, not confirmed by the inverter. Other errors: `400` invalid input or refused action, `401` bad key, `403` control disabled, `409` no inverter snapshot yet.
+
+```bash
+HEM_API='http://192.168.1.100:7338'
+HEM_KEY='replace-with-your-key'
+
+curl --fail-with-body "$HEM_API/api/control/force-charge" \
+  -H "Authorization: Bearer $HEM_KEY" -H 'Content-Type: application/json' \
+  --data '{"minutes":60}'
+
+curl --fail-with-body -X POST "$HEM_API/api/control/force-charge/stop" \
+  -H "Authorization: Bearer $HEM_KEY"
+
+curl --fail-with-body "$HEM_API/api/control/force-discharge" \
+  -H "Authorization: Bearer $HEM_KEY" -H 'Content-Type: application/json' \
+  --data '{"minutes":30}'
+
+curl --fail-with-body -X POST "$HEM_API/api/control/force-discharge/stop" \
+  -H "Authorization: Bearer $HEM_KEY"
+
+curl --fail-with-body "$HEM_API/api/control/status" \
+  -H "Authorization: Bearer $HEM_KEY"
+```
+
+### Summary status
+
+`GET /api/control/status` reports cached state only (no Modbus reads, no writes; `Cache-Control: no-store`). Mode, measured activity, controlling automation, schedules and restrictions are reported independently because they coexist — a force-charge window can be active while the battery is idle, and discharging is not necessarily grid export:
+
+```json
+{
+  "ok": true,
+  "summary": "Force Charge — charging; 58 minutes remaining",
+  "mode": "eco",
+  "activity": "charging",
+  "control_source": "force_charge",
+  "control_phase": "active",
+  "remaining_minutes": 58,
+  "schedules": {"charge": "active", "export": "off", "demand_discharge": "off"},
+  "conditions": [],
+  "connection": "connected",
+  "stale": false,
+  "observed_at": "2027-01-15T12:00:00+00:00"
+}
+```
+
+- `summary` is for display; integrate against the structured fields (wording may change).
+- `mode`: `eco`, `eco_paused`, `timed_demand`, `timed_export`, `export_paused`, `unknown`. `activity`: `charging`, `discharging`, `idle`, `unavailable` — observed operation, not requested action or inferred cause.
+- `control_source` / `control_phase`: HEM's best-known controller (Quick Action, safety limiter, Timed Export, Cosy/Agile/Adaptive/winter automation, or the inverter's own schedule) and its phase. A Quick Action reads `pending` until a newer snapshot confirms it, then `active` for the window duration even if the battery is idle; `expired` when the recorded deadline passes.
+- `remaining_minutes`: time left in a known Quick Action window (rounded up), otherwise `null` — the window, not time-to-full.
+- `schedules`: each of charge / export / demand-discharge is `off`, `armed` (outside its window), `active`, or `unknown`, evaluated on the inverter's clock. A HEM-managed export schedule stays `armed` outside windows even when physical slots are temporarily cleared.
+- `automation`, `calibration`, `maintenance`, `limits`: configuration and phase detail for Cosy, Agile, Adaptive Charge, winter automation, managed Timed Export, battery calibration/maintenance, and configured SOC/rate limits.
+- `conditions`: all simultaneous faults, protections, pauses and unknown states as `{code, label}` — never collapsed into one label.
+- Readings older than three poll intervals (minimum 60s), implausibly future-dated readings, and disconnected/reconnecting states set `stale`/`ok: false` and refuse to present a current mode or activity; `conditions` is then not a health statement.
+
+### Known limitations (shared with the buttons)
+
+- Repeating a start resets its duration and can replace the original restore point — don't build blind automatic retries.
+- Timed charging does not auto-restore the previous schedule when its window ends; the slot stays configured until changed.
+- Restore state doesn't survive a HEM restart; a repeated Stop can't always replay failed restore writes.
+- Stop restores per existing Quick Action logic (Stop Charge may restore a pre-action non-Eco mode); it is not a separate integration-specific default.
 
 ---
 
