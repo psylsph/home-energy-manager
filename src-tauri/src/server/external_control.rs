@@ -94,7 +94,7 @@ mod tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::server::{api, create_readonly_router};
+    use crate::server::{api, create_authenticated_router};
     use crate::test_util::with_isolated_config_dir_async;
     use crate::{
         inverter::{
@@ -143,7 +143,7 @@ mod tests {
         if let Some(token) = token {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
-        let response = create_readonly_router(state)
+        let response = create_authenticated_router(state)
             .oneshot(request.body(Body::from(body.to_string())).unwrap())
             .await
             .unwrap();
@@ -235,7 +235,7 @@ mod tests {
                         .body(Body::from(body))
                         .unwrap();
                     assert_eq!(
-                        create_readonly_router(state.clone())
+                        create_authenticated_router(state.clone())
                             .oneshot(req)
                             .await
                             .unwrap()
@@ -257,7 +257,7 @@ mod tests {
                     .body(Body::empty())
                     .unwrap();
                 assert_eq!(
-                    create_readonly_router(state.clone())
+                    create_authenticated_router(state.clone())
                         .oneshot(req)
                         .await
                         .unwrap()
@@ -497,7 +497,7 @@ mod tests {
                 if let Some(token) = token {
                     request = request.header("Authorization", format!("Bearer {token}"));
                 }
-                let response = create_readonly_router(state.clone())
+                let response = create_authenticated_router(state.clone())
                     .oneshot(request.body(Body::empty()).unwrap())
                     .await
                     .unwrap();

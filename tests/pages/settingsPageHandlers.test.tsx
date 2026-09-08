@@ -278,25 +278,36 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     });
   });
 
-  describe('authenticated API key save', () => {
-    it('saves external control permission without replacing a redacted key', async () => {
+  describe('authenticated API control permission toggle', () => {
+    it('persists immediately without touching a saved key or the port', async () => {
       mountApiMocks({ api_key_configured: true, api_key_last4: '-key', api_control_enabled: false });
       render(<SettingsPage />);
       const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
       await waitFor(() => expect(screen.getByLabelText('API Key')).toHaveAttribute('placeholder', expect.stringContaining('-key')));
       fireEvent.click(toggle);
-      fireEvent.click(screen.getByRole('button', { name: 'Save API Key' }));
-      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_port: 7338, api_control_enabled: true }));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_control_enabled: true }));
+      await waitFor(() => expect(screen.getByText('Battery control enabled for authenticated API clients')).toBeDefined());
+      // The immediate persist is the only write; the key/port are untouched.
+      expect(apiPostMock).toHaveBeenCalledTimes(1);
     });
 
-    it('hydrates enabled permission and can save it disabled', async () => {
+    it('persists immediately when disabling, starting from hydrated state', async () => {
       mountApiMocks({ api_control_enabled: true, api_key_configured: true });
       render(<SettingsPage />);
       const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
       await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
       fireEvent.click(toggle);
-      fireEvent.click(screen.getByRole('button', { name: 'Save API Key' }));
-      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_port: 7338, api_control_enabled: false }));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_control_enabled: false }));
+    });
+
+    it('reverts the optimistic toggle and reports the failure when the save fails', async () => {
+      mountApiMocks({ api_control_enabled: false });
+      render(<SettingsPage />);
+      const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
+      apiPostMock.mockRejectedValueOnce(new Error('settings unavailable'));
+      fireEvent.click(toggle);
+      await waitFor(() => expect(screen.getByText(/Failed to update battery control permission: settings unavailable/)).toBeDefined());
+      expect(toggle).toHaveAttribute('aria-checked', 'false');
     });
 
     it('clears the saved key without losing the API port or permission', async () => {
