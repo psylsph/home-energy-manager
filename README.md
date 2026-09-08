@@ -228,6 +228,8 @@ External software can use an authenticated integration API for battery status an
 
 ## 🔌 Authenticated API Integration
 
+For detailed setup, status-field explanations, curl commands, JavaScript/Python examples and troubleshooting, see the [Remote Battery Control API guide](REMOTE_CONTROL.md).
+
 A separate HTTP server (default port **7338**, Bearer-token authenticated) lets external software read inverter data and — with explicit permission — use the same four battery Quick Actions as the app's buttons. The main dashboard server is unchanged by any of this.
 
 ### Setup

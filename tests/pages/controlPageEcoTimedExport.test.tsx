@@ -487,6 +487,9 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             });
 
             await renderWithSnapshot(makeSnapshot({
+                // Keep this stale-GET test outside its export windows, regardless
+                // of the host clock or timezone when the suite runs.
+                inverter_time: '2026-09-08 12:00:00',
                 battery_power_mode: 1,
                 enable_discharge: false,
                 discharge_slots: [

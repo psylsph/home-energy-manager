@@ -370,7 +370,7 @@ async fn api_key_auth(req: Request, next: Next) -> Response {
 
 /// Separate integration router: snapshots and summary status are read-only;
 /// four Quick Actions additionally require explicit write permission.
-/// Retains the original function name for compatibility. No settings or WS.
+/// No settings or WebSocket endpoints are exposed.
 pub fn create_authenticated_router(state: Arc<AppState>) -> Router {
     use axum::response::IntoResponse;
 
