@@ -321,7 +321,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('shows a failure and re-enables the button when saving the key fails', async () => {
       mountApiMocks();
       useInverterStore.setState({ developerMode: false });
-      apiPostMock.mockRejectedValueOnce(new Error('read-only server unavailable'));
+      apiPostMock.mockRejectedValueOnce(new Error('authenticated API unavailable'));
       render(<SettingsPage />);
 
       const keyInput = await screen.findByLabelText('API Key');
@@ -330,7 +330,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       fireEvent.click(saveButton);
 
       await waitFor(() => {
-        expect(screen.getByText('read-only server unavailable')).toBeDefined();
+        expect(screen.getByText('authenticated API unavailable')).toBeDefined();
       });
       expect(saveButton).not.toBeDisabled();
       expect((keyInput as HTMLInputElement).value).toBe('secret-key');
@@ -394,7 +394,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     });
   });
 
-  describe('read-only API port save', () => {
+  describe('authenticated API port save', () => {
     it('rejects a blank API port without posting zero', async () => {
       mountApiMocks({ api_port: 7338 });
       useInverterStore.setState({ developerMode: true });

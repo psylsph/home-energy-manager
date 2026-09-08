@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.81.0] - 2026-09-08
+
+### Added
+
+- **Control battery Quick Actions from your own software.** The authenticated API can now start and stop Force Charge and Force Discharge, using the same behaviour as the app's buttons. Battery control is off by default and requires a separate permission toggle alongside your API key.
+- **See what the battery is doing and why.** A new status endpoint reports its operating mode, measured activity, schedules, automation and restrictions, with a countdown for known Quick Action windows and clear flags when readings are unavailable or stale.
+- **Set up remote integrations without Developer Mode.** API key, port and battery-control permission now live under Remote / Mobile Network Access. The new [remote-control guide](REMOTE_CONTROL.md) includes curl commands, JavaScript and Python examples, and advice on checking results and restoring normal operation.
+
 ## [0.80.1] - 2026-09-06
 
 ### Fixed
