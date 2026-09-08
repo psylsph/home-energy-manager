@@ -539,16 +539,19 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       expect(await screen.findByText('Developer')).toBeDefined();
     });
 
-    it('hides the read-only API guidance text when developer mode is off', async () => {
+    it('shows API configuration in Remote / Mobile Network Access without developer mode', async () => {
       mountApiMocks();
       useInverterStore.setState({ developerMode: false });
       render(<SettingsPage />);
       await screen.findByText('Developer');
-      // The API-port guidance only renders inside the developerMode block.
-      expect(screen.queryByText(/SolarWatch/)).toBeNull();
+      const remote = screen.getByText('Remote / Mobile Network Access').closest('section')!;
+      const developer = screen.getByText('Developer').closest('section')!;
+      expect(remote.contains(screen.getByLabelText('API Key'))).toBe(true);
+      expect(developer.querySelector('input')).toBeNull();
+      expect(screen.getByRole('switch', { name: 'Allow battery control through the authenticated API' })).toHaveAttribute('aria-checked', 'false');
     });
 
-    it('shows the read-only API guidance text when developer mode is on', async () => {
+    it('shows authenticated API guidance when developer mode is on', async () => {
       mountApiMocks();
       useInverterStore.setState({ developerMode: true });
       render(<SettingsPage />);

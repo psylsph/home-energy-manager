@@ -278,10 +278,36 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     });
   });
 
-  describe('read-only API key save', () => {
+  describe('authenticated API key save', () => {
+    it('saves external control permission without replacing a redacted key', async () => {
+      mountApiMocks({ api_key_configured: true, api_key_last4: '-key', api_control_enabled: false });
+      render(<SettingsPage />);
+      const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
+      await waitFor(() => expect(screen.getByLabelText('API Key')).toHaveAttribute('placeholder', expect.stringContaining('-key')));
+      fireEvent.click(toggle);
+      fireEvent.click(screen.getByRole('button', { name: 'Save API Key' }));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_port: 7338, api_control_enabled: true }));
+    });
+
+    it('hydrates enabled permission and can save it disabled', async () => {
+      mountApiMocks({ api_control_enabled: true, api_key_configured: true });
+      render(<SettingsPage />);
+      const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
+      await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+      fireEvent.click(toggle);
+      fireEvent.click(screen.getByRole('button', { name: 'Save API Key' }));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_port: 7338, api_control_enabled: false }));
+    });
+
+    it('clears the saved key without losing the API port or permission', async () => {
+      mountApiMocks({ api_key_configured: true, api_port: 8443, api_control_enabled: true });
+      render(<SettingsPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear saved key' }));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key: '', api_port: 8443, api_control_enabled: true }));
+    });
     it('shows a failure and re-enables the button when saving the key fails', async () => {
       mountApiMocks();
-      useInverterStore.setState({ developerMode: true });
+      useInverterStore.setState({ developerMode: false });
       apiPostMock.mockRejectedValueOnce(new Error('read-only server unavailable'));
       render(<SettingsPage />);
 
