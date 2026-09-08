@@ -4,6 +4,7 @@
 //! HTTP API and a WebSocket real-time data stream.
 
 pub mod api;
+mod control_status;
 mod external_control;
 pub mod logs;
 pub mod mini;
@@ -328,7 +329,7 @@ pub async fn start_server_with_frontend_on_port(
 }
 
 // ---------------------------------------------------------------------------
-// Read-only API server (external access with API key auth)
+// Authenticated API server (read-only by default, optional Quick Actions)
 // ---------------------------------------------------------------------------
 
 /// API key authentication middleware.
@@ -367,11 +368,9 @@ async fn api_key_auth(req: Request, next: Next) -> Response {
         .into_response()
 }
 
-/// Create a minimal read-only router with API key authentication.
-///
-/// Serves only `GET /api/snapshot` — no control endpoints, no settings,
-/// no WebSocket. All requests require a valid `Authorization: Bearer <key>`
-/// header matching the configured `api_key`.
+/// Separate integration router: snapshots and summary status are read-only;
+/// four Quick Actions additionally require explicit write permission.
+/// Retains the original function name for compatibility. No settings or WS.
 pub fn create_readonly_router(state: Arc<AppState>) -> Router {
     use axum::response::IntoResponse;
 
@@ -387,31 +386,53 @@ pub fn create_readonly_router(state: Arc<AppState>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let controls = Router::new()
+        .route(
+            "/api/control/force-charge",
+            post(external_control::force_charge),
+        )
+        .route(
+            "/api/control/force-charge/stop",
+            post(api::force_charge_stop),
+        )
+        .route(
+            "/api/control/force-discharge",
+            post(external_control::force_discharge),
+        )
+        .route(
+            "/api/control/force-discharge/stop",
+            post(api::force_discharge_stop),
+        )
+        .route_layer(middleware::from_fn(
+            external_control::require_control_permission,
+        ));
+
     Router::new()
+        .merge(controls)
         .route("/api/snapshot", get(api::get_snapshot))
+        .route("/api/control/status", get(control_status::get_status))
+        // Added last so authentication runs before permission/body validation.
         .route_layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
         .layer(cors)
         .with_state(state)
         .route("/api/{*rest}", get(not_found_404))
 }
 
-/// Start the read-only API server on a separate port.
-///
-/// Only serves `GET /api/snapshot` with Bearer-token authentication.
+/// Start the authenticated integration API on a separate port.
 /// The main server on `http_port` is unaffected.
 pub async fn start_readonly_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
     let app = create_readonly_router(state).into_make_service();
     let addr = format!("{}:{}", bind_addr, port);
-    tracing::info!("Read-only API server starting on {}", addr);
+    tracing::info!("Authenticated API server starting on {}", addr);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("Failed to bind read-only API server on {}: {e}", addr);
+            tracing::error!("Failed to bind authenticated API server on {}: {e}", addr);
             return;
         }
     };
     if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!("Read-only API server error: {e}");
+        tracing::error!("Authenticated API server error: {e}");
     }
 }
 

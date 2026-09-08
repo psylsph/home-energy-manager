@@ -292,11 +292,12 @@ export default function SettingsPage() {
   const [startMinimised, setStartMinimised] = useState(false);
   // "New version available" banner gate (defaults on).
   const [checkForUpdates, setCheckForUpdates] = useState(true);
-  // Read-only API key and port (developer mode, external access).
+  // Authenticated external API configuration (Remote / Mobile Network Access).
   const [apiKey, setApiKey] = useState('');
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKeyLast4, setApiKeyLast4] = useState('');
   const [apiPort, setApiPort] = useState<number | ''>(7338);
+  const [apiControlEnabled, setApiControlEnabled] = useState(false);
   const [apiKeySaving, setApiKeySaving] = useState(false);
   // `null` while we haven't asked the OS yet — we only show the toggle's
   // actual state if the plugin was reachable. The toggle is hidden
@@ -479,6 +480,7 @@ export default function SettingsPage() {
         setApiKeyConfigured(Boolean(s.api_key_configured));
         setApiKeyLast4(s.api_key_last4 ?? '');
         setApiPort(s.api_port ?? 7338);
+        setApiControlEnabled(s.api_control_enabled ?? false);
         setSettingsLoaded(true);
       } catch (e: unknown) {
         console.warn('Failed to load settings:', e);
@@ -599,7 +601,7 @@ export default function SettingsPage() {
     }
   };
 
-  // Save the optional read-only API credentials without losing the draft on
+  // Save the optional authenticated API configuration without losing the draft on
   // failure, so a transient server error can be retried.
   const handleApiKeySave = async (clear = false) => {
     if (apiPort === '') {
@@ -608,14 +610,22 @@ export default function SettingsPage() {
     }
     setApiKeySaving(true);
     try {
-      const payload: { api_port: number | ''; api_key?: string } = { api_port: apiPort };
+      const payload: { api_port: number | ''; api_key?: string; api_control_enabled: boolean } = {
+        api_port: apiPort,
+        api_control_enabled: apiControlEnabled,
+      };
       // The server redacts configured keys on GET. An empty draft therefore
       // means "leave the saved key alone" unless the user explicitly clears it.
       if (clear || apiKey.trim() || !apiKeyConfigured) {
         payload.api_key = clear ? '' : apiKey;
       }
       await apiPost('/api/settings', payload);
-      setMessage({ text: 'API key saved. Restart the app for the read-only server to start.', ok: true });
+      if (payload.api_key !== undefined) {
+        setApiKeyConfigured(payload.api_key.length > 0);
+        setApiKeyLast4(payload.api_key.slice(-4));
+        setApiKey('');
+      }
+      setMessage({ text: 'API settings saved. Key and control permission changes apply immediately to a running API server; starting it or changing its port requires an app restart.', ok: true });
     } catch (error) {
       setMessage({
         text: error instanceof Error ? error.message : 'Failed to save API key',
@@ -1327,6 +1337,61 @@ export default function SettingsPage() {
         <p className="text-text-secondary text-xs font-sans">
           Apple Watch / mini display — open this URL in a browser for a tiny glance view (or fetch /api/mini/status from a Shortcut; see INSTALL.md)
         </p>
+
+        <div className="flex flex-col gap-3 pt-3 border-t border-bg-elevated">
+          <h3 className="text-text-primary text-sm font-semibold">Authenticated API</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            External integrations (e.g. SolarWatch) use a separate API port with Bearer-token authentication,
+            not the dashboard port above. GET /api/snapshot and GET /api/control/status are read-only.
+            Battery Quick Actions require the permission below. Starting this server or changing its port requires a restart.
+          </p>
+          <label className="flex flex-col gap-1">
+            <span className="text-text-secondary text-xs font-sans">API Key</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={apiKeyConfigured
+                ? `Saved${apiKeyLast4 ? ` (ends ${apiKeyLast4})` : ''} — enter a new key to replace`
+                : 'Leave empty to disable'}
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-text-secondary text-xs font-sans">Port</span>
+            <input
+              type="number"
+              value={apiPort || ''}
+              onChange={(e) => setApiPort(e.target.value === '' ? '' : Number(e.target.value))}
+              placeholder="e.g. 7338"
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors w-32"
+            />
+          </label>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-text-primary text-sm font-sans">Allow battery control through the authenticated API</span>
+            <Toggle checked={apiControlEnabled} onChange={setApiControlEnabled}
+              ariaLabel="Allow battery control through the authenticated API" />
+          </div>
+          <p className="text-text-secondary text-xs font-sans">
+            Off by default. When enabled and saved, anyone with this API key can use Force Charge,
+            Force Discharge and their Stop actions. Turning it off does not stop an action already accepted.
+          </p>
+          <button
+            onClick={() => { void handleApiKeySave(); }}
+            disabled={apiKeySaving}
+            className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+          >
+            {apiKeySaving ? 'Saving…' : 'Save API Key'}
+          </button>
+          {apiKeyConfigured && (
+            <button
+              onClick={() => { void handleApiKeySave(true); }}
+              disabled={apiKeySaving}
+              className="self-start text-red-300 text-sm px-2 py-2 hover:text-red-200 transition-colors disabled:opacity-50"
+            >Clear saved key</button>
+          )}
+        </div>
 
         {clients.length > 0 && (
           <div className="flex flex-col gap-1.5 mt-1">
@@ -2589,53 +2654,7 @@ export default function SettingsPage() {
           </div>
           <Toggle checked={developerMode} onChange={setDeveloperMode} />
         </div>
-        {developerMode && (
-          <div className="flex flex-col gap-3 pt-2 border-t border-bg-elevated">
-            <p className="text-text-secondary text-xs font-sans">
-              Read-only API for external access (e.g. SolarWatch). Starts a
-              second HTTP server on a separate port with Bearer-token auth.
-              Only <code className="text-text-primary">GET /api/snapshot</code> is exposed.
-            </p>
-            <label className="flex flex-col gap-1">
-              <span className="text-text-secondary text-xs font-sans">API Key</span>
-              <input
-                type="text"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={apiKeyConfigured
-                  ? `Saved${apiKeyLast4 ? ` (ends ${apiKeyLast4})` : ''} — enter a new key to replace`
-                  : 'Leave empty to disable'}
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-text-secondary text-xs font-sans">Port</span>
-              <input
-                type="number"
-                value={apiPort || ''}
-                onChange={(e) => setApiPort(e.target.value === '' ? '' : Number(e.target.value))}
-                placeholder="e.g. 7338"
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors w-32"
-              />
-            </label>
-            <button
-              onClick={() => { void handleApiKeySave(); }}
-              disabled={apiKeySaving}
-              className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
-            >
-              {apiKeySaving ? 'Saving…' : 'Save API Key'}
-            </button>
-            {apiKeyConfigured && (
-              <button
-                onClick={() => handleApiKeySave(true)}
-                disabled={apiKeySaving}
-                className="self-start text-red-300 text-sm px-2 py-2 hover:text-red-200 transition-colors disabled:opacity-50"
-              >
-                Clear saved key
-              </button>
-            )}
-          </div>
-        )}
+
       </section>
 
       {/* ── Update checking ("new version available" banner) ── */}
