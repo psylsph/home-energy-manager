@@ -1361,17 +1361,21 @@ pub struct Settings {
     #[serde(default)]
     pub start_minimised: bool,
 
-    // -- Read-only API (external access) --
-    /// API key for the read-only external API server.
-    /// When non-empty, a second HTTP server is started on `api_port` that
-    /// serves only `GET /api/snapshot` with Bearer-token authentication.
+    // -- Authenticated API (external access) --
+    /// API key for the external API server.
+    /// When non-empty, a second HTTP server is started on `api_port` with
+    /// Bearer-token authentication. Battery writes require explicit opt-in.
     /// The main server on `http_port` is unaffected (full access, no auth).
     #[serde(default)]
     pub api_key: String,
-    /// Port for the read-only external API server (default 7338).
+    /// Port for the authenticated external API server (default 7338).
     /// Only started when `api_key` is also non-empty. Set to 0 to disable.
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    /// Allow external Quick Actions. Existing API credentials remain read-only
+    /// unless the owner explicitly enables this permission.
+    #[serde(default)]
+    pub api_control_enabled: bool,
 
     /// Persisted copy of the user's discharge schedule captured on the way
     /// into Eco / Pause / Export Paused. The backend needs to zero the
@@ -1805,6 +1809,7 @@ impl Default for Settings {
             start_minimised: false,
             api_key: String::new(),
             api_port: 7338,
+            api_control_enabled: false,
             discharge_slots_backup: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
@@ -2306,6 +2311,7 @@ mod tests {
             start_minimised: false,
             api_key: String::new(),
             api_port: 0,
+            api_control_enabled: false,
             discharge_slots_backup: Some(vec![
                 DischargeSlotBackup {
                     enabled: true,
@@ -2809,6 +2815,10 @@ mod tests {
             decoded.api_port, 7338,
             "api_port should default to 7338 (not 0) for legacy settings files"
         );
+        assert!(
+            !decoded.api_control_enabled,
+            "external battery control must default to disabled for legacy settings files"
+        );
     }
 
     #[test]
@@ -2892,6 +2902,7 @@ mod tests {
             start_minimised: false,
             api_key: String::new(),
             api_port: 0,
+            api_control_enabled: false,
             discharge_slots_backup: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),

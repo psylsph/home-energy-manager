@@ -222,6 +222,8 @@ Home Energy Manager works with all known GivEnergy inverter models. Real-time mo
 
 The app also runs as a **headless server** — a background service with no window, serving the full UI to any browser on your network. Great for Raspberry Pi or an always-on server. See [INSTALL.md](./INSTALL.md) for setup instructions.
 
+External software can use the [authenticated integration API](./docs/authenticated-api.md) for battery status and optional Quick Actions. Configure its key, separate port and default-off battery-control permission under **Settings → Remote / Mobile Network Access**.
+
 ---
 
 ## 📱 Using on Your Phone Away From Home

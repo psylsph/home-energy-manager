@@ -220,6 +220,10 @@ fn next_poll_delay_secs(configured_interval_secs: u64, timed_export_boundary_pen
 /// corresponding write is skipped.
 #[derive(Debug, Clone)]
 pub struct ForceChargeRevert {
+    /// Observational metadata shared by UI and authenticated API actions.
+    /// It does not introduce automatic charge restoration at expiry.
+    pub started_at_ms: i64,
+    pub force_charge_slot_end_ms: Option<i64>,
     /// Whether the schedule charge flag (HR 20) was enabled before force charge.
     pub enable_charge: bool,
     /// Whether the schedule discharge flag (HR 59) was enabled before force
@@ -264,6 +268,8 @@ pub struct ForceChargeRevert {
 /// and the corresponding write is skipped.
 #[derive(Debug, Clone)]
 pub struct ForceDischargeRevert {
+    /// Request timestamp; summary status must not treat older readback as confirmation.
+    pub started_at_ms: i64,
     /// Whether the schedule charge flag (HR 20) was enabled before force discharge.
     pub enable_charge: bool,
     /// Whether the schedule discharge flag (HR 59) was enabled before force discharge.

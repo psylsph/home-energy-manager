@@ -641,7 +641,8 @@ pub fn run() {
                 update::run_update_loop(update_state).await;
             });
 
-            // Start the read-only API server if configured.
+            // Start the authenticated external API server if configured.
+            // Read-only unless the user opts in to external battery control.
             let ro_state = state.clone();
             if !api_key.is_empty() && api_port > 0 {
                 tauri::async_runtime::spawn(async move {
@@ -857,7 +858,7 @@ pub fn run_headless(args: &[String]) {
     // Create tokio runtime
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
-    // Capture read-only API config before app_settings is moved.
+    // Capture authenticated API config before app_settings is moved.
     let api_key = app_settings.api_key.clone();
     let api_port = app_settings.api_port;
 
@@ -906,7 +907,8 @@ pub fn run_headless(args: &[String]) {
             update::run_update_loop(update_state).await;
         });
 
-        // Start the read-only API server if configured.
+        // Start the authenticated external API server if configured.
+        // Read-only unless the user opts in to external battery control.
         let ro_state = state.clone();
         if !api_key.is_empty() && api_port > 0 {
             tokio::spawn(async move {

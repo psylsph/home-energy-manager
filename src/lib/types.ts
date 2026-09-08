@@ -304,12 +304,14 @@ export interface PollSettings {
    *  and the frontend shows a dismissible "new version available" banner.
    *  Defaults to on; the only data sent is the user's IP to api.github.com. */
   check_for_updates?: boolean;
-  /** Whether a read-only external API key is configured. */
+  /** Whether an authenticated external API key is configured. */
   api_key_configured?: boolean;
-  /** Last four characters of the configured read-only API key, if any. */
+  /** Last four characters of the configured external API key, if any. */
   api_key_last4?: string;
-  /** Port for the read-only external API server (0 = disabled). */
+  /** Port for the authenticated external API server (0 = disabled). */
   api_port: number;
+  /** Explicit opt-in for Quick Actions on the authenticated integration API. */
+  api_control_enabled?: boolean;
   // -- Solar array capacities (issue #110) --
   /** Rated peak capacity (kWp) of the PV1 DC string (hybrid). 0 = unset. */
   pv1_rated_kw?: number;

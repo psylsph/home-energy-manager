@@ -540,9 +540,9 @@ fn reserve_writes_for_device(
 fn force_charge_slot_writes(
     device_type: DeviceType,
     minutes: u64,
+    start: DateTime<Local>,
 ) -> Result<Vec<RegisterWrite>, String> {
     let minutes = minutes.clamp(1, 1439);
-    let start = Local::now();
     let end = start + ChronoDuration::minutes(minutes as i64);
     let start_hhmm = encode_hhmm_for_write(start.hour() as u8, start.minute() as u8)?;
     let end_hhmm = encode_hhmm_for_write(end.hour() as u8, end.minute() as u8)?;
@@ -875,6 +875,8 @@ async fn capture_force_charge_revert(
         };
 
     Some(ForceChargeRevert {
+        started_at_ms: 0,
+        force_charge_slot_end_ms: None,
         enable_charge: snap.enable_charge,
         enable_discharge: snap.enable_discharge,
         target_soc: snap.target_soc,
@@ -1035,6 +1037,7 @@ async fn capture_force_discharge_revert(
         };
 
     Some(ForceDischargeRevert {
+        started_at_ms: 0,
         enable_charge: snap.enable_charge,
         enable_discharge: snap.enable_discharge,
         discharge_rate: Some(snap.discharge_rate),
@@ -1309,6 +1312,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "api_key_configured": api_key_configured,
             "api_key_last4": api_key_last4,
             "api_port": settings.api_port,
+            "api_control_enabled": settings.api_control_enabled,
             // Issue #137: surface the discharge-slot backup so the frontend
             // can stage it as pending edits after a Timed→Eco round-trip.
             // `None` on first install / before any capture; otherwise the
@@ -1521,14 +1525,18 @@ pub async fn update_settings(
         if let Some(s) = body.get("start_minimised").and_then(|v| v.as_bool()) {
             persist.start_minimised = s;
         }
-        // Persist the read-only API key and port. The read-only server is
-        // started/stopped on the next app launch (no hot-reload of the
-        // second server). An empty key disables the read-only server.
+        // The separate authenticated listener starts on launch; key and
+        // control permission changes are checked live on each request.
         if let Some(k) = body.get("api_key").and_then(|v| v.as_str()) {
             persist.api_key = k.to_string();
         }
         if let Some(value) = body.get("api_port") {
             persist.api_port = parse_u16_json(value, "api_port")?;
+        }
+        if let Some(value) = body.get("api_control_enabled") {
+            persist.api_control_enabled = value
+                .as_bool()
+                .ok_or_else(|| "api_control_enabled must be a boolean".to_string())?;
         }
         // Issue #110: solar array capacities for "% of max" display. Negative
         // ratings are clamped to 0 (a negative array size is nonsensical and
@@ -1841,6 +1849,12 @@ fn settings_log_fields(
     }
     if is_present("api_port") {
         out.push(format!("api_port={}", persist.api_port));
+    }
+    if is_present("api_control_enabled") {
+        out.push(format!(
+            "api_control_enabled={}",
+            persist.api_control_enabled
+        ));
     }
     out
 }
@@ -4626,6 +4640,64 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
     ok_response(&message)
 }
 
+#[cfg(test)]
+mod force_action_timing_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn charge_deadline_matches_slot_and_stop_clears_metadata() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+                device_type: DeviceType::ACCoupled,
+                ..Default::default()
+            });
+            let now = Local.with_ymd_and_hms(2027, 1, 15, 23, 45, 0).unwrap();
+            for (minutes, clamped) in [(0u64, 1i64), (30, 30), (1439, 1439), (u64::MAX, 1439)] {
+                let (status, _) =
+                    force_charge_at(state.clone(), Some(Json(json!({"minutes":minutes}))), now)
+                        .await;
+                assert_eq!(status, StatusCode::OK);
+                let revert = state.force_charge_revert.lock().await.clone().unwrap();
+                let end = now + ChronoDuration::minutes(clamped);
+                assert_eq!(revert.started_at_ms, now.timestamp_millis());
+                assert_eq!(
+                    revert.force_charge_slot_end_ms,
+                    Some(end.timestamp_millis())
+                );
+                let writes: Vec<_> = state
+                    .pending_writes
+                    .lock()
+                    .await
+                    .drain(..)
+                    .flat_map(|b| b.writes)
+                    .collect();
+                assert!(writes.iter().any(|w| w.address
+                    == crate::modbus::registers::HR_CHARGE_SLOT_1_END
+                    && w.value == (end.hour() * 100 + end.minute()) as u16));
+                let (status, _) = force_charge_stop(State(state.clone())).await;
+                assert_eq!(status, StatusCode::OK);
+                assert!(state.force_charge_revert.lock().await.is_none());
+                state.pending_writes.lock().await.clear();
+            }
+            let (status, _) = force_charge_at(state.clone(), None, now).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                state
+                    .force_charge_revert
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .force_charge_slot_end_ms,
+                None
+            );
+        })
+        .await;
+    }
+}
+
 /// POST /api/control/force-charge — enable charging with target SOC.
 ///
 /// Uses three-phase registers (HR 1123/1111) for three-phase, commercial,
@@ -4642,6 +4714,14 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
 pub async fn force_charge(
     State(state): State<Arc<AppState>>,
     body: Option<Json<serde_json::Value>>,
+) -> (StatusCode, Json<Value>) {
+    force_charge_at(state, body, Local::now()).await
+}
+
+async fn force_charge_at(
+    state: Arc<AppState>,
+    body: Option<Json<serde_json::Value>>,
+    now: DateTime<Local>,
 ) -> (StatusCode, Json<Value>) {
     let _force_action_guard = state.force_action_lock.lock().await;
     if state.force_discharge_revert.lock().await.is_some() {
@@ -4664,14 +4744,22 @@ pub async fn force_charge(
     // Capture the pre-force-charge state BEFORE queuing the force-charge
     // writes, so the stop endpoint can restore the inverter to this point.
     // This is the Rust equivalent of GivTCP's `revert` dict (write.py:1148).
-    let revert = capture_force_charge_revert(&state, device_type).await;
+    let mut revert = capture_force_charge_revert(&state, device_type).await;
+    if let Some(r) = revert.as_mut() {
+        r.started_at_ms = now.timestamp_millis();
+    }
 
     // If minutes provided, write a charge slot first (now → now+minutes).
     let minutes = body
         .as_ref()
         .and_then(|j| j.0.get("minutes").and_then(|v| v.as_u64()));
     if let Some(minutes) = minutes {
-        match force_charge_slot_writes(device_type, minutes) {
+        if let Some(r) = revert.as_mut() {
+            r.force_charge_slot_end_ms = Some(
+                (now + ChronoDuration::minutes(minutes.clamp(1, 1439) as i64)).timestamp_millis(),
+            );
+        }
+        match force_charge_slot_writes(device_type, minutes, now) {
             Ok(mut slot_writes) => writes.append(&mut slot_writes),
             Err(e) => return error_response(&format!("Failed to encode charge slot: {}", e)),
         }
@@ -4776,6 +4864,9 @@ async fn force_discharge_at(
 
     // Capture the pre-force-discharge state BEFORE queuing writes.
     let mut revert = capture_force_discharge_revert(&state, device_type).await;
+    if let Some(r) = revert.as_mut() {
+        r.started_at_ms = now.timestamp_millis();
+    }
 
     // If minutes provided, write the duration slot first (slot 1 =
     // now → now+minutes, slot 2 = cleared). The poll loop processes
