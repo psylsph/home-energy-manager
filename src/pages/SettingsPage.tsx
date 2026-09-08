@@ -633,9 +633,11 @@ export default function SettingsPage() {
     }
     setApiKeySaving(true);
     try {
-      const payload: { api_port: number | ''; api_key?: string; api_control_enabled: boolean } = {
+      // api_control_enabled is intentionally omitted: the toggle persists
+      // immediately on change, and this partial save must not re-send (or
+      // race) a value the user may have flipped with a failed auto-save.
+      const payload: { api_port: number | ''; api_key?: string } = {
         api_port: apiPort,
-        api_control_enabled: apiControlEnabled,
       };
       // The server redacts configured keys on GET. An empty draft therefore
       // means "leave the saved key alone" unless the user explicitly clears it.

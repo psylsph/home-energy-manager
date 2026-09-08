@@ -314,7 +314,9 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       mountApiMocks({ api_key_configured: true, api_port: 8443, api_control_enabled: true });
       render(<SettingsPage />);
       fireEvent.click(await screen.findByRole('button', { name: 'Clear saved key' }));
-      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key: '', api_port: 8443, api_control_enabled: true }));
+      // The key save is a partial update: it must not re-send (and race) the
+      // separately auto-saved control permission.
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key: '', api_port: 8443 }));
     });
     it('shows a failure and re-enables the button when saving the key fails', async () => {
       mountApiMocks();

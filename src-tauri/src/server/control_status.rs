@@ -1010,6 +1010,49 @@ mod tests {
     }
 
     #[test]
+    fn automation_control_source_precedence_follows_configuration() {
+        // Cosy enabled-but-waiting outranks Agile and Adaptive in the chain.
+        let s = InverterSnapshot {
+            cosy_enabled: true,
+            agile_enabled: true,
+            adaptive_charge_enabled: true,
+            agile_state: "idle".into(),
+            ..snapshot()
+        };
+        let v = status(&s);
+        assert_eq!(v["control_source"], "cosy");
+        assert_eq!(v["control_phase"], "waiting");
+        let s = InverterSnapshot {
+            cosy_enabled: true,
+            cosy_active: true,
+            agile_enabled: true,
+            agile_state: "charging".into(),
+            ..snapshot()
+        };
+        let v = status(&s);
+        assert_eq!(v["control_source"], "cosy");
+        assert_eq!(v["control_phase"], "active");
+        // Agile without Cosy; Adaptive only when Agile is off.
+        let s = InverterSnapshot {
+            agile_enabled: true,
+            adaptive_charge_enabled: true,
+            agile_state: "discharging".into(),
+            ..snapshot()
+        };
+        let v = status(&s);
+        assert_eq!(v["control_source"], "agile");
+        assert_eq!(v["control_phase"], "discharging");
+        let s = InverterSnapshot {
+            adaptive_charge_enabled: true,
+            adaptive_charge_state: "preferred".into(),
+            ..snapshot()
+        };
+        let v = status(&s);
+        assert_eq!(v["control_source"], "adaptive");
+        assert_eq!(v["control_phase"], "preferred");
+    }
+
+    #[test]
     fn calibration_stages_unknown_devices_and_fault_details_are_explicit() {
         for (stage, phase) in [
             (0, "off"),
