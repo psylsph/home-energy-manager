@@ -4,6 +4,7 @@
 //! HTTP API and a WebSocket real-time data stream.
 
 pub mod api;
+mod external_control;
 pub mod logs;
 pub mod mini;
 pub mod ws;
