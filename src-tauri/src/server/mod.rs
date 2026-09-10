@@ -4,6 +4,7 @@
 //! HTTP API and a WebSocket real-time data stream.
 
 pub mod api;
+pub mod authenticated_lifecycle;
 mod control_status;
 mod external_control;
 pub mod logs;
@@ -20,6 +21,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
+use tokio::sync::watch;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -484,7 +486,15 @@ async fn api_key_auth(req: Request, next: Next) -> Response {
 /// Separate integration router: snapshots and summary status are read-only;
 /// four Quick Actions additionally require explicit write permission.
 /// No settings or WebSocket endpoints are exposed.
-pub fn create_authenticated_router(state: Arc<AppState>) -> Router {
+///
+/// `allowed_origins` is the exact-origin CORS allow-list (U2): an empty list
+/// means no CORS headers at all, which is the safe default for
+/// machine-to-machine integrations. Machine clients never send `Origin` and
+/// are unaffected; only deliberate browser integrations need entries here.
+pub fn create_authenticated_router_with_origins(
+    state: Arc<AppState>,
+    allowed_origins: &[String],
+) -> Router {
     use axum::response::IntoResponse;
 
     async fn not_found_404() -> impl IntoResponse {
@@ -493,11 +503,6 @@ pub fn create_authenticated_router(state: Arc<AppState>) -> Router {
             Json(json!({"ok": false, "error": "Not found"})),
         )
     }
-
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
 
     let controls = Router::new()
         .route(
@@ -520,31 +525,79 @@ pub fn create_authenticated_router(state: Arc<AppState>) -> Router {
             external_control::require_control_permission,
         ));
 
-    Router::new()
+    let router = Router::new()
         .merge(controls)
         .route("/api/snapshot", get(api::get_snapshot))
-        .route("/api/control/status", get(control_status::get_status))
+        .route("/api/control/status", get(control_status::get_status));
+
+    let router = if allowed_origins.is_empty() {
+        router
+    } else {
+        let origins: Vec<HeaderValue> = allowed_origins
+            .iter()
+            .filter_map(|origin| HeaderValue::from_str(origin).ok())
+            .collect();
+        router.layer(
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
+        )
+    };
+
+    router
         // Added last so authentication runs before permission/body validation.
         .route_layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
-        .layer(cors)
         .with_state(state)
         .route("/api/{*rest}", get(not_found_404))
 }
 
-/// Start the authenticated integration API on a separate port.
-/// The main server on `http_port` is unaffected.
-pub async fn start_authenticated_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
-    let app = create_authenticated_router(state).into_make_service();
-    let addr = format!("{}:{}", bind_addr, port);
+/// Compatibility wrapper for existing callers and tests: no CORS origins.
+pub fn create_authenticated_router(state: Arc<AppState>) -> Router {
+    create_authenticated_router_with_origins(state, &[])
+}
+
+/// Serve the authenticated integration API until `shutdown` flips to `true`.
+///
+/// Reports bind success/failure through `bound_tx` before serving begins so
+/// [`authenticated_lifecycle::AuthenticatedLifecycle`] can commit or roll
+/// back its transaction. The make-service carries `ConnectInfo` so source
+/// identity is available to middleware (U3 rate limits/audit).
+pub async fn start_authenticated_server(
+    state: Arc<AppState>,
+    bind_ip: String,
+    port: u16,
+    allowed_origins: Vec<String>,
+    mut shutdown: watch::Receiver<bool>,
+    bound_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+) {
+    let app = create_authenticated_router_with_origins(state, &allowed_origins)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let addr = format!("{bind_ip}:{port}");
     tracing::info!("Authenticated API server starting on {}", addr);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("Failed to bind authenticated API server on {}: {e}", addr);
+            let message = format!("Failed to bind authenticated API server on {addr}: {e}");
+            tracing::error!("{}", message);
+            let _ = bound_tx.send(Err(message));
             return;
         }
     };
-    if let Err(e) = axum::serve(listener, app).await {
+    tracing::info!("Authenticated API server bound on {}", addr);
+    let _ = bound_tx.send(Ok(()));
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let _ = shutdown.changed().await;
+        tracing::info!("Authenticated API server shutting down");
+    });
+    if let Err(e) = server.await {
         tracing::error!("Authenticated API server error: {e}");
     }
 }

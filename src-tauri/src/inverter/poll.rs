@@ -406,6 +406,11 @@ pub struct AppState {
     pub timed_export_action_lock: Arc<Mutex<()>>,
     /// SQLite history database (set after startup).
     pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
+    /// Owned lifecycle of the authenticated external API listener (U2
+    /// hardening): lets settings changes stop/rebind the listener without a
+    /// process restart, with transactional rollback on bind failure.
+    pub authenticated_lifecycle:
+        Arc<crate::server::authenticated_lifecycle::AuthenticatedLifecycle>,
     /// Ring buffer of recent log lines for the developer console.
     pub log_ring: Arc<LogRing>,
     /// Connected WebSocket clients (for Network Access display).
@@ -574,6 +579,9 @@ impl AppState {
             force_action_lock: Arc::new(Mutex::new(())),
             timed_export_action_lock: Arc::new(Mutex::new(())),
             history: Arc::new(Mutex::new(None)),
+            authenticated_lifecycle: Arc::new(
+                crate::server::authenticated_lifecycle::AuthenticatedLifecycle::new(),
+            ),
             log_ring,
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
