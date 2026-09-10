@@ -22,8 +22,20 @@ Disabling write permission prevents subsequent external actions; it does not can
 - `localhost` always means the machine executing the request, not necessarily the machine running HEM. Containers also have their own network context.
 - Use your configured port if it differs from 7338. The main dashboard/API normally uses **7337**; these examples target the separate authenticated server.
 - Every request needs `Authorization: Bearer <your-key>`. Do not put the key in a URL or query string.
+- The authenticated listener intentionally binds to **all network interfaces** (`0.0.0.0`), not only localhost. A firewall, router, container port mapping or VPN determines who can reach it; do not assume that an address is private just because it is on your LAN.
 - Plain HTTP does not encrypt the key. Use a trusted network, VPN such as Tailscale, or a TLS-terminating reverse proxy. Do not directly expose this HTTP port to the public internet.
 - Use a strong key, not the demonstration value `TEST`. Keep keys out of source control, screenshots, public webpages and shared logs.
+
+### Known weaknesses and limits
+
+Treat this API as a small, single-owner integration surface, not as a general identity or security system:
+
+- There is one shared bearer key, and HEM does not enforce its length or entropy. There are no users, per-client permissions, key expiry, IP allow-lists, rate limiting or built-in request/audit history. Anyone who obtains the key has the same read access, and—when the global control toggle is enabled—the same access to all four Quick Actions.
+- The key is stored as ordinary text in HEM's `settings.json`. A key rotation can also leave the previous value in `settings.json.bak`; protect the HEM config directory and its backups like the key itself. Filesystem access to the HEM machine is therefore also credential access.
+- The server permits cross-origin requests. CORS is not a substitute for the bearer key, but it means a browser-based integration that contains the key can be called from other origins. Never put a real key in public frontend code or a webpage you do not fully control.
+- `GET /api/snapshot` returns the full inverter snapshot, not a deliberately minimised public view. It can reveal detailed household energy measurements, so grant read access only to systems that need it.
+- Saving or clearing the key changes which requests authenticate, but an already-running listener is not shut down until HEM restarts. Restart after clearing the key if the port itself must stop listening; changing or starting the configured port also requires a restart.
+- These endpoints have no idempotency key, per-request completion ID or emergency-stop guarantee. A successful response means HEM accepted or queued the handler's work, not that the inverter has applied it. Use the bounded readback procedure below and do not retry a timed-out start automatically.
 
 The separate API does not expose settings or WebSocket endpoints. Enabling it does not change access to the main HEM server.
 
