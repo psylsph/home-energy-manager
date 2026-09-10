@@ -458,7 +458,11 @@ function Layout() {
     if (hideable && hiddenPanels.includes(path.replace(/^\//, ''))) {
       return <Route path={path} element={<Navigate to="/" replace />} />;
     }
-    return <Route path={path} element={<ErrorBoundary>{element}</ErrorBoundary>} />;
+    // Keying the boundary by path gives each route its own boundary instance:
+    // without the key React reuses the errored boundary across route changes
+    // and a crashed page would keep the fallback (plus its 30s retry timer)
+    // on screen even after the user navigates to a healthy tab.
+    return <Route path={path} element={<ErrorBoundary key={path}>{element}</ErrorBoundary>} />;
   }
 
   return (
