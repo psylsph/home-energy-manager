@@ -298,6 +298,11 @@ export default function SettingsPage() {
   const [generatedApiKey, setGeneratedApiKey] = useState<string | null>(null);
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKeyLast4, setApiKeyLast4] = useState('');
+  // Listener exposure (U2 hardening). Blank bind = legacy all-interfaces;
+  // blank origins = no CORS headers (machine-to-machine default).
+  const [apiBindAddress, setApiBindAddress] = useState('');
+  const [apiAllowedOrigins, setApiAllowedOrigins] = useState('');
+  const [apiNetworkSaving, setApiNetworkSaving] = useState(false);
   const [apiPort, setApiPort] = useState<number | ''>(7338);
   const [apiControlEnabled, setApiControlEnabled] = useState(false);
   const [apiKeySaving, setApiKeySaving] = useState(false);
@@ -479,6 +484,8 @@ export default function SettingsPage() {
         // (configured flag + last4) identifies an existing credential.
         setApiKeyConfigured(Boolean(s.api_key_configured));
         setApiKeyLast4(s.api_key_last4 ?? '');
+        setApiBindAddress(s.api_bind_address ?? '');
+        setApiAllowedOrigins((s.api_allowed_origins ?? []).join(', '));
         setApiPort(s.api_port ?? 7338);
         setApiControlEnabled(s.api_control_enabled ?? false);
         setSettingsLoaded(true);
@@ -659,6 +666,39 @@ export default function SettingsPage() {
       });
     } finally {
       setApiKeySaving(false);
+    }
+  };
+
+  // Apply listener exposure changes (bind address + CORS origins). The
+  // lifecycle manager rebinds the live listener; on bind failure the
+  // backend restores the previous settings and returns the error.
+  const handleApiNetworkSave = async () => {
+    if (apiPort === '') {
+      setMessage({ text: 'API port cannot be blank', ok: false });
+      return;
+    }
+    setApiNetworkSaving(true);
+    try {
+      const origins = apiAllowedOrigins
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+      await apiPost('/api/settings', {
+        api_port: apiPort,
+        api_bind_address: apiBindAddress.trim() === '' ? null : apiBindAddress.trim(),
+        api_allowed_origins: origins.length > 0 ? origins : null,
+      });
+      setMessage({
+        text: 'Authenticated API network settings applied to the running listener.',
+        ok: true,
+      });
+    } catch (error) {
+      setMessage({
+        text: error instanceof Error ? error.message : 'Failed to save API network settings',
+        ok: false,
+      });
+    } finally {
+      setApiNetworkSaving(false);
     }
   };
 
@@ -1424,6 +1464,40 @@ export default function SettingsPage() {
               className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors w-32"
             />
           </label>
+          {apiKeyConfigured && apiBindAddress.trim() === '' && (
+            <p className="text-amber-300 text-xs font-sans">
+              This server currently accepts connections on every network interface. Set a listen
+              address (127.0.0.1 keeps it local-only) if you only need machine-local or VPN/proxy
+              access.
+            </p>
+          )}
+          <label className="flex flex-col gap-1">
+            <span className="text-text-secondary text-xs font-sans">Listen address</span>
+            <input
+              type="text"
+              value={apiBindAddress}
+              onChange={(e) => setApiBindAddress(e.target.value)}
+              placeholder="127.0.0.1 (local only) — blank = all interfaces"
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-text-secondary text-xs font-sans">Allowed browser origins (CORS, comma-separated)</span>
+            <input
+              type="text"
+              value={apiAllowedOrigins}
+              onChange={(e) => setApiAllowedOrigins(e.target.value)}
+              placeholder="https://dashboard.example.com — blank = no browser access"
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
+            />
+          </label>
+          <button
+            onClick={() => { void handleApiNetworkSave(); }}
+            disabled={apiNetworkSaving}
+            className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+          >
+            {apiNetworkSaving ? 'Applying…' : 'Apply network settings'}
+          </button>
           <div className="flex items-center justify-between gap-3">
             <span className="text-text-primary text-sm font-sans">Allow battery control through the authenticated API</span>
             <Toggle checked={apiControlEnabled} onChange={(v) => { void handleApiControlToggle(v); }}

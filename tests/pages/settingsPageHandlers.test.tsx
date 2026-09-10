@@ -390,6 +390,28 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       });
     });
 
+    it('posts the normalized bind address and origins when applying network settings', async () => {
+      mountApiMocks({ api_port: 7338, api_bind_address: '127.0.0.1', api_allowed_origins: ['https://a.example'] });
+      render(<SettingsPage />);
+      const applyButton = await screen.findByRole('button', { name: 'Apply network settings' });
+      // Normalise whitespace and drop empty entries before posting.
+      fireEvent.click(applyButton);
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', {
+        api_port: 7338,
+        api_bind_address: '127.0.0.1',
+        api_allowed_origins: ['https://a.example'],
+      }));
+    });
+
+    it('surfaces listener reconfiguration failures from the backend', async () => {
+      mountApiMocks({ api_port: 7338, api_bind_address: '127.0.0.1' });
+      apiPostMock.mockRejectedValueOnce(new Error('The authenticated API listener could not be reconfigured: bind failed. The previous settings were restored.'));
+      render(<SettingsPage />);
+      const applyButton = await screen.findByRole('button', { name: 'Apply network settings' });
+      fireEvent.click(applyButton);
+      await waitFor(() => expect(screen.getByText(/could not be reconfigured/)).toBeDefined());
+    });
+
     it('rejects a blank HTTP port without posting zero', async () => {
       mountApiMocks({ http_port: 7337 });
       render(<SettingsPage />);

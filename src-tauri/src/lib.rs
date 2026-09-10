@@ -1,3 +1,7 @@
+// The get_settings payload builds a large serde_json literal whose macro
+// expansion needs headroom beyond the default recursion limit.
+#![recursion_limit = "512"]
+
 pub mod alerts;
 pub mod evc;
 pub mod forecast;
@@ -16,12 +20,11 @@ pub mod windows_autostart;
 
 use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};
+use server::authenticated_lifecycle::AuthenticatedConfig;
 use server::logs::{LogCaptureLayer, LogRing};
-use server::{
-    start_authenticated_server, start_server, start_server_with_frontend,
-    start_server_with_frontend_on_port,
-};
+use server::{start_server, start_server_with_frontend, start_server_with_frontend_on_port};
 use settings::Settings;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 fn show_startup_error(window: &tauri::WebviewWindow, message: &str) {
@@ -329,8 +332,7 @@ pub fn run() {
             // the Builder-level `on_window_event` handler so the toggle
             // applies immediately without a restart. (#217)
             let start_minimised = app_settings.start_minimised;
-            let api_key = app_settings.api_key.clone();
-            let api_port = app_settings.api_port;
+            let api_config = authenticated_config(&app_settings);
             let state = match tauri::async_runtime::block_on(initialize_app_state(
                 app_settings,
                 log_ring,
@@ -641,12 +643,21 @@ pub fn run() {
                 update::run_update_loop(update_state).await;
             });
 
-            // Start the authenticated external API server if configured.
-            // Read-only unless the user opts in to external battery control.
-            let ro_state = state.clone();
-            if !api_key.is_empty() && api_port > 0 {
+            // Start the authenticated external API listener through its
+            // lifecycle manager so settings changes can rebind/stop it live
+            // (U2 hardening). Read-only unless the user opts in to external
+            // battery control. An empty key means no credential configured.
+            {
+                let ro_state = state.clone();
+                let desired = api_config.clone();
                 tauri::async_runtime::spawn(async move {
-                    start_authenticated_server(ro_state, "0.0.0.0", api_port).await;
+                    if let Err(e) = ro_state
+                        .authenticated_lifecycle
+                        .apply(ro_state.clone(), desired)
+                        .await
+                    {
+                        tracing::error!("Authenticated API startup failed: {e}");
+                    }
                 });
             }
 
@@ -676,6 +687,25 @@ pub fn run() {
 // ---------------------------------------------------------------------------
 
 /// Parse a `--port <N>` argument from the CLI args.
+/// Build the desired authenticated-listener configuration from settings.
+/// `None` = the listener should not run (no credential, or port disabled).
+/// The bind address falls back to the legacy all-interfaces default when no
+/// explicit value has been recorded (`api_bind_address: None`).
+fn authenticated_config(settings: &Settings) -> Option<AuthenticatedConfig> {
+    if !settings.has_api_auth() || settings.api_port == 0 {
+        return None;
+    }
+    let bind_ip: IpAddr = settings
+        .effective_api_bind_address()
+        .parse()
+        .unwrap_or(IpAddr::from([0, 0, 0, 0]));
+    Some(AuthenticatedConfig {
+        bind_ip,
+        port: settings.api_port,
+        allowed_origins: settings.api_allowed_origins.clone().unwrap_or_default(),
+    })
+}
+
 fn parse_port(args: &[String]) -> u16 {
     for i in 0..args.len() {
         if args[i] == "--port" && i + 1 < args.len() {
@@ -859,8 +889,7 @@ pub fn run_headless(args: &[String]) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
     // Capture authenticated API config before app_settings is moved.
-    let api_key = app_settings.api_key.clone();
-    let api_port = app_settings.api_port;
+    let api_config = authenticated_config(&app_settings);
 
     rt.block_on(async {
         // Initialise shared app state: identical to the Tauri-windowed path
@@ -907,12 +936,19 @@ pub fn run_headless(args: &[String]) {
             update::run_update_loop(update_state).await;
         });
 
-        // Start the authenticated external API server if configured.
-        // Read-only unless the user opts in to external battery control.
-        let ro_state = state.clone();
-        if !api_key.is_empty() && api_port > 0 {
+        // Start the authenticated external API listener through its
+        // lifecycle manager (see the Tauri path above).
+        {
+            let ro_state = state.clone();
+            let desired = api_config.clone();
             tokio::spawn(async move {
-                start_authenticated_server(ro_state, "0.0.0.0", api_port).await;
+                if let Err(e) = ro_state
+                    .authenticated_lifecycle
+                    .apply(ro_state.clone(), desired)
+                    .await
+                {
+                    tracing::error!("Authenticated API startup failed: {e}");
+                }
             });
         }
 

@@ -312,6 +312,10 @@ export interface PollSettings {
   api_key_legacy_pending?: boolean;
   /** Port for the authenticated external API server (0 = disabled). */
   api_port: number;
+  /** Explicit bind address; null = legacy all-interfaces default. */
+  api_bind_address?: string | null;
+  /** Exact browser origins allowed by CORS; null = no CORS headers. */
+  api_allowed_origins?: string[] | null;
   /** Explicit opt-in for Quick Actions on the authenticated integration API. */
   api_control_enabled?: boolean;
   // -- Solar array capacities (issue #110) --

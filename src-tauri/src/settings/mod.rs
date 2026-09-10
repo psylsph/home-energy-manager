@@ -1513,6 +1513,23 @@ pub struct Settings {
     /// unless the owner explicitly enables this permission.
     #[serde(default)]
     pub api_control_enabled: bool,
+    /// Explicit bind address for the authenticated external API listener.
+    ///
+    /// `None` deliberately means "legacy all-interfaces": installations that
+    /// predate this field keep their working remote integrations after the
+    /// upgrade. New installations receive `Some("127.0.0.1")` when their
+    /// first credential is generated, so fresh setups never expose the
+    /// listener beyond the local machine by accident. An explicit
+    /// `Some("0.0.0.0")` records the owner's acknowledgement that every
+    /// reachable network interface may reach the API.
+    #[serde(default)]
+    pub api_bind_address: Option<String>,
+    /// Exact browser origins allowed to call the authenticated API from a
+    /// browser (`CorsLayer` allow-list). `None` or an empty list means no
+    /// CORS headers at all — the default for machine-to-machine integrations,
+    /// which never send `Origin` and are unaffected by CORS.
+    #[serde(default)]
+    pub api_allowed_origins: Option<Vec<String>>,
 
     /// Persisted copy of the user's discharge schedule captured on the way
     /// into Eco / Pause / Export Paused. The backend needs to zero the
@@ -1948,6 +1965,8 @@ impl Default for Settings {
             api_credential: None,
             api_port: 7338,
             api_control_enabled: false,
+            api_bind_address: None,
+            api_allowed_origins: None,
             discharge_slots_backup: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
@@ -1964,7 +1983,41 @@ impl Default for Settings {
     }
 }
 
+/// Validate one entry of `api_allowed_origins`: an exact `http(s)` origin
+/// (`scheme://host[:port]`) with no path, query, credentials or wildcard.
+/// Browsers send `Origin` in this canonical form, so anything else is either
+/// a typo or an attempt to smuggle a wildcard reflector into the allow-list.
+pub fn validate_api_origin(origin: &str) -> Result<(), String> {
+    let (scheme, rest) = origin
+        .split_once("://")
+        .ok_or_else(|| format!("origin {origin:?} must start with http:// or https://"))?;
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("origin {origin:?} must use http or https"));
+    }
+    if rest.is_empty() {
+        return Err(format!("origin {origin:?} is missing a host"));
+    }
+    if rest.contains('/')
+        || rest.contains('?')
+        || rest.contains('#')
+        || rest.contains('@')
+        || rest.contains('*')
+        || rest.eq_ignore_ascii_case("localhost.")
+    {
+        return Err(format!(
+            "origin {origin:?} must be an exact scheme://host[:port] origin"
+        ));
+    }
+    Ok(())
+}
+
 impl Settings {
+    /// The bind address the authenticated listener actually uses with the
+    /// current settings (`None` = legacy all-interfaces).
+    pub fn effective_api_bind_address(&self) -> &str {
+        self.api_bind_address.as_deref().unwrap_or("0.0.0.0")
+    }
+
     /// Get the settings directory path.
     /// Uses `GIVENERGY_LOCAL_CONFIG_DIR` env var if set, otherwise `~/.givenergy-local/`
     /// (or `%USERPROFILE%\.givenergy-local\` on Windows).
@@ -2563,6 +2616,8 @@ mod tests {
             api_credential: None,
             api_port: 0,
             api_control_enabled: false,
+            api_bind_address: None,
+            api_allowed_origins: None,
             discharge_slots_backup: Some(vec![
                 DischargeSlotBackup {
                     enabled: true,
@@ -3044,6 +3099,54 @@ mod tests {
     /// read-only server on every upgrade until the user manually re-entered
     /// the port.
     #[test]
+    fn api_network_settings_default_to_legacy_exposure() {
+        let s = Settings::default();
+        // `None` deliberately means "legacy all-interfaces": existing
+        // deployments keep working after the upgrade, and new installs get
+        // loopback at the moment their first credential is generated (the
+        // settings handler writes the explicit value then).
+        assert_eq!(s.api_bind_address, None);
+        assert_eq!(s.api_allowed_origins, None);
+        assert_eq!(s.effective_api_bind_address(), "0.0.0.0");
+    }
+
+    #[test]
+    fn effective_api_bind_address_reflects_explicit_choice() {
+        let s = Settings {
+            api_bind_address: Some("127.0.0.1".to_string()),
+            ..Settings::default()
+        };
+        assert_eq!(s.effective_api_bind_address(), "127.0.0.1");
+        let s = Settings {
+            api_bind_address: Some("0.0.0.0".to_string()),
+            ..Settings::default()
+        };
+        assert_eq!(s.effective_api_bind_address(), "0.0.0.0");
+    }
+
+    #[test]
+    fn api_origin_validation_accepts_exact_origins_and_rejects_paths() {
+        assert!(validate_api_origin("https://solarwatch.example.com").is_ok());
+        assert!(validate_api_origin("http://localhost:5173").is_ok());
+        assert!(validate_api_origin("https://home.example.net:8443").is_ok());
+        for bad in [
+            "",
+            "https://",
+            "ftp://example.com",
+            "https://example.com/path",
+            "https://user:pass@example.com",
+            "example.com",
+            "*",
+            "null",
+        ] {
+            assert!(
+                validate_api_origin(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_settings_without_api_fields_loads_with_default_port() {
         let legacy = r#"{
             "host": "192.168.1.50",
@@ -3155,6 +3258,8 @@ mod tests {
             api_credential: None,
             api_port: 0,
             api_control_enabled: false,
+            api_bind_address: None,
+            api_allowed_origins: None,
             discharge_slots_backup: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
