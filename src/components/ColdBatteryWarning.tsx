@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { useInverterStore } from '../store/useInverterStore';
 import { apiGet } from '../lib/api';
 

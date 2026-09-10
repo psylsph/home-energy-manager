@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import MetersPage from './pages/MetersPage';
-import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router-dom';
+import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
 import { useReconnect } from './hooks/useReconnect';
