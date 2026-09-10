@@ -546,7 +546,10 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       await screen.findByText('Developer');
       const remote = screen.getByText('Remote / Mobile Network Access').closest('section')!;
       const developer = screen.getByText('Developer').closest('section')!;
-      expect(remote.contains(screen.getByLabelText('API Key'))).toBe(true);
+      // Keys are generated (no free-text input); the section exposes the
+      // generate action, the port field and the control-permission toggle.
+      expect(remote.contains(screen.getByRole('button', { name: 'Generate API key' }))).toBe(true);
+      expect(screen.getByLabelText('Port')).toBeTruthy();
       expect(developer.querySelector('input')).toBeNull();
       expect(screen.getByRole('switch', { name: 'Allow battery control through the authenticated API' })).toHaveAttribute('aria-checked', 'false');
     });

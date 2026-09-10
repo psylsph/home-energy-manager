@@ -308,6 +308,8 @@ export interface PollSettings {
   api_key_configured?: boolean;
   /** Last four characters of the configured external API key, if any. */
   api_key_last4?: string;
+  /** True while a legacy plaintext key still awaits its one-time migration. */
+  api_key_legacy_pending?: boolean;
   /** Port for the authenticated external API server (0 = disabled). */
   api_port: number;
   /** Explicit opt-in for Quick Actions on the authenticated integration API. */
