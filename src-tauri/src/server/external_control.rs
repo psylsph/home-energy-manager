@@ -585,8 +585,14 @@ mod tests {
     async fn external_key_rotation_and_permission_revocation_take_effect_live() {
         with_isolated_config_dir_async(|| async {
             let state = setup(true).await;
-            let _ = api::update_settings(State(state.clone()), Json(json!({"api_key":"new-key"})))
-                .await;
+            // Rotate the credential via the generate flow; the response
+            // carries the one-time secret.
+            let (_, response) = api::update_settings(
+                State(state.clone()),
+                Json(json!({"api_key_generate": true})),
+            )
+            .await;
+            let new_key = response["data"]["api_key"].as_str().unwrap().to_string();
             assert_eq!(
                 request(
                     state.clone(),
@@ -596,13 +602,14 @@ mod tests {
                 )
                 .await
                 .0,
-                StatusCode::UNAUTHORIZED
+                StatusCode::UNAUTHORIZED,
+                "the previous credential must be invalidated by rotation"
             );
             assert_eq!(
                 request(
                     state.clone(),
                     "force-charge",
-                    Some("new-key"),
+                    Some(&new_key),
                     json!({"minutes":30})
                 )
                 .await
@@ -618,7 +625,7 @@ mod tests {
                 request(
                     state.clone(),
                     "force-charge/stop",
-                    Some("new-key"),
+                    Some(&new_key),
                     Value::Null
                 )
                 .await
@@ -631,7 +638,7 @@ mod tests {
             );
             let _ = api::update_settings(State(state.clone()), Json(json!({"api_key":""}))).await;
             assert_eq!(
-                request(state, "force-charge/stop", Some("new-key"), Value::Null)
+                request(state, "force-charge/stop", Some(&new_key), Value::Null)
                     .await
                     .0,
                 StatusCode::UNAUTHORIZED

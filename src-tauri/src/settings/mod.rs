@@ -1101,7 +1101,7 @@ fn generate_api_secret() -> String {
 }
 
 /// Constant-time equality for secret material.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     if a.len() != b.len() {
         return false;
@@ -2037,17 +2037,29 @@ impl Settings {
     /// rollback point survives without the secret, and `.corrupt`/`.tmp`
     /// copies are deleted.
     pub fn migrate_legacy_api_key(&mut self) -> Result<(), String> {
-        let Some(legacy) = self.authenticating_secret() else {
-            // Nothing to migrate (already verifier-backed or no credential):
-            // still ensure the plaintext field is empty.
-            self.api_key.clear();
-            return self.save();
-        };
-        self.api_credential = Some(ApiCredential::from_secret(&legacy));
-        self.api_key.clear();
+        let legacy = self.authenticating_secret();
+        self.apply_legacy_migration();
         self.save()?;
-        self.scrub_plaintext_artifacts(&legacy);
+        if let Some(legacy) = legacy {
+            self.scrub_plaintext_artifacts(&legacy);
+        }
         Ok(())
+    }
+
+    /// In-memory half of [`Self::migrate_legacy_api_key`]: convert a legacy
+    /// plaintext credential into a verifier and clear the plaintext field.
+    /// Performs no I/O, so it is safe to call inside `Settings::update` —
+    /// the surrounding transaction owns the save. A no-op when HEM is not
+    /// in the legacy migration state (verifier-backed or unconfigured),
+    /// which keeps the transaction from rewriting the file on unrelated
+    /// requests.
+    pub fn apply_legacy_migration(&mut self) {
+        if self.authenticating_secret().is_none() {
+            return;
+        }
+        let credential = ApiCredential::from_secret(&self.api_key);
+        self.api_credential = Some(credential);
+        self.api_key.clear();
     }
 
     /// Scrub HEM-owned settings artifacts that may retain the migrated
