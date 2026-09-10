@@ -47,6 +47,13 @@ ureq = { version = "3", features = ["json"] }
 percent-encoding = "2"
 base64 = "0.23"
 
+# Authenticated API credential storage: CSPRNG key generation, SHA-256
+# verifier hashing and constant-time comparison. All three already sit in
+# the dependency tree; these entries only make them direct dependencies.
+getrandom = "0.2"
+sha2 = "0.10"
+subtle = "2"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
