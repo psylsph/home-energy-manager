@@ -4,16 +4,18 @@
 //! HTTP API and a WebSocket real-time data stream.
 
 pub mod api;
+pub mod audit;
 pub mod authenticated_lifecycle;
 mod control_status;
 mod external_control;
 pub mod logs;
 pub mod mini;
+pub mod ratelimit;
 pub mod ws;
 
 use std::sync::Arc;
 
-use axum::extract::Request;
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::CACHE_CONTROL;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -27,6 +29,38 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
 use crate::inverter::poll::AppState;
+use audit::AuditEvent;
+
+// ---------------------------------------------------------------------------
+// Authenticated API abuse-resistance constants (U3)
+// ---------------------------------------------------------------------------
+
+/// Failed authentications accepted per source address per minute before the
+/// source is locked out of the authenticated API.
+pub const FAILED_AUTH_LIMIT: u32 = 10;
+/// Authenticated reads per source address per minute.
+pub const READ_LIMIT: u32 = 120;
+/// External control starts per credential identity per minute.
+pub const ACTION_START_LIMIT: u32 = 2;
+/// External control stops (incl. recovery stops) per credential identity per
+/// minute — deliberately higher than starts so recovery is never starved.
+pub const ACTION_STOP_LIMIT: u32 = 10;
+/// Upper bound on distinct keys per limiter map (memory bound under address
+/// or token flooding).
+pub const RATE_LIMITER_MAX_ENTRIES: usize = 4096;
+/// Hard wall-clock budget for any single request on the authenticated API.
+pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Route-level cap on control request bodies. The external contract is a
+/// single `minutes` field; anything beyond a few bytes is noise or abuse.
+pub const CONTROL_BODY_LIMIT_BYTES: usize = 16 * 1024;
+
+/// The verified credential identity for a request, inserted by the auth
+/// middleware and consumed by the action limiters / audit records.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedIdentity {
+    /// One-way fingerprint of the presented token.
+    pub fingerprint: String,
+}
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     use axum::response::IntoResponse;
@@ -420,6 +454,19 @@ fn unauthorized_response() -> Response {
         .into_response()
 }
 
+fn too_many_requests_response(retry_after_secs: u64) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({"ok": false,
+        "error": "Too many requests; retry later"})),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+        response.headers_mut().insert("retry-after", value);
+    }
+    response
+}
+
 fn bearer_token(req: &Request) -> Option<&str> {
     let auth_header = req
         .headers()
@@ -428,59 +475,276 @@ fn bearer_token(req: &Request) -> Option<&str> {
     auth_header.strip_prefix("Bearer ")
 }
 
+/// Resolve the client address for rate limiting and audit records: the
+/// direct socket peer, or — only when the peer is an explicitly trusted
+/// proxy — the first address in `X-Forwarded-For`. Forwarded headers from
+/// untrusted peers are ignored, so a direct client cannot spoof its source.
+fn client_ip(req: &Request, trusted: &[std::net::IpAddr]) -> Option<std::net::IpAddr> {
+    use axum::extract::connect_info::MockConnectInfo;
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0.ip())
+        // Mirrors the ConnectInfo extractor's test fallback.
+        .or_else(|| {
+            req.extensions()
+                .get::<MockConnectInfo<std::net::SocketAddr>>()
+                .map(|mock| mock.0.ip())
+        })?;
+    if trusted.contains(&peer) {
+        if let Some(forwarded) = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(first) = forwarded.split(',').next() {
+                if let Ok(ip) = first.trim().parse::<std::net::IpAddr>() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    Some(peer)
+}
+
+/// Bounded wall-clock budget for every request on the authenticated API.
+async fn request_timeout(req: Request, next: Next) -> Response {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS),
+        next.run(req),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({"ok": false, "error": "Request timed out"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Per-source limit on authenticated reads (snapshot + status).
+async fn limit_authenticated_reads(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let settings = crate::settings::Settings::load_async().await;
+    let trusted = parse_trusted_proxies(&settings.api_trusted_proxies);
+    let source = client_ip(&req, &trusted);
+    if let Some(ip) = source {
+        let limited = state.read_limiter.lock().is_limited(&ip);
+        if !limited.allowed {
+            tracing::warn!("Authenticated read rate limit hit for {ip}");
+            audit_event(
+                &state,
+                AuditEvent {
+                    kind: "read_rate_limited",
+                    actor: bearer_token(&req).map(audit::token_fingerprint),
+                    source: Some(ip.to_string()),
+                    method: Some(req.method().to_string()),
+                    path: Some(req.uri().path().to_string()),
+                    outcome: "rate_limited",
+                    detail: None,
+                },
+            );
+            return too_many_requests_response(limited.retry_after_secs);
+        }
+        let _ = state.read_limiter.lock().check(ip);
+    }
+    next.run(req).await
+}
+
+/// Parse the trusted-proxy list, skipping invalid entries with a warning.
+fn parse_trusted_proxies(entries: &[String]) -> Vec<std::net::IpAddr> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry.trim().parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                tracing::warn!("Ignoring invalid api_trusted_proxies entry {entry:?}");
+                None
+            }
+        })
+        .collect()
+}
+
 /// API key authentication middleware.
 ///
 /// Verifies the `Bearer <key>` token against the configured credential:
 /// a generated verifier in constant time, or the legacy plaintext during
 /// its one-time migration state. Returns 401 Unauthorized if the key is
-/// missing or doesn't match.
-async fn api_key_auth(req: Request, next: Next) -> Response {
+/// missing or doesn't match, and throttles sources that repeatedly fail
+/// (U3): failed attempts charge a per-source budget that returns 429 with
+/// `Retry-After` once exhausted. Every result is recorded in the audit
+/// trail with a token fingerprint — never the token.
+async fn api_key_auth(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
     let settings = crate::settings::Settings::load_async().await;
+    let trusted = parse_trusted_proxies(&settings.api_trusted_proxies);
+    let source = client_ip(&req, &trusted);
 
-    // Generated credential: constant-time verifier check.
-    if let Some(credential) = settings.api_credential.as_ref() {
-        return match bearer_token(&req) {
-            Some(token) if credential.verify(token) => next.run(req).await,
-            _ => unauthorized_response(),
-        };
-    }
-
-    // Legacy plaintext migration state: authenticate the presented token,
-    // then atomically replace the plaintext with a verifier. If the
-    // migration cannot commit, fail closed — the request is refused so a
-    // plaintext credential cannot keep working indefinitely without ever
-    // being upgraded.
-    if let Some(expected) = settings.authenticating_secret() {
-        let Some(token) = bearer_token(&req) else {
-            return unauthorized_response();
-        };
-        if !crate::settings::constant_time_eq(token.as_bytes(), expected.as_bytes()) {
-            return unauthorized_response();
-        }
-        let migration =
-            crate::settings::Settings::update_async(|persist| persist.apply_legacy_migration())
-                .await;
-        if migration.is_err() {
-            tracing::error!(
-                "API credential migration could not be persisted; refusing request (fail closed)"
+    // Lockout pre-check: once a source exhausts its failed-auth budget it
+    // is refused outright (even with a valid credential) until the window
+    // resets. The pre-check does not consume budget.
+    if let Some(ip) = source {
+        let limited = state.auth_limiter.lock().is_limited(&ip);
+        if !limited.allowed {
+            audit_event(
+                &state,
+                AuditEvent {
+                    kind: "auth_rate_limited",
+                    actor: bearer_token(&req).map(audit::token_fingerprint),
+                    source: Some(ip.to_string()),
+                    method: Some(req.method().to_string()),
+                    path: Some(req.uri().path().to_string()),
+                    outcome: "rate_limited",
+                    detail: None,
+                },
             );
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"ok": false,
-                "error": "API credential migration failed; fix settings persistence and retry"})),
-            )
-                .into_response();
+            return too_many_requests_response(limited.retry_after_secs);
         }
-        return next.run(req).await;
     }
 
-    // No credential configured — deny all requests (shouldn't happen since
-    // the server isn't started without a credential, but defend anyway).
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({"ok": false, "error": "API key not configured"})),
-    )
-        .into_response()
+    let verify = |token: &str| -> bool {
+        // Generated credential: constant-time verifier check.
+        if let Some(credential) = settings.api_credential.as_ref() {
+            return credential.verify(token);
+        }
+        // Legacy plaintext migration state.
+        settings.authenticating_secret().is_some_and(|expected| {
+            crate::settings::constant_time_eq(token.as_bytes(), expected.as_bytes())
+        })
+    };
+
+    let decision = match bearer_token(&req) {
+        Some(token) if verify(token) => {
+            let fingerprint = audit::token_fingerprint(token);
+            req.extensions_mut().insert(AuthenticatedIdentity {
+                fingerprint: fingerprint.clone(),
+            });
+            Some(fingerprint)
+        }
+        _ => None,
+    };
+
+    match decision {
+        Some(fingerprint) => {
+            // Charge nothing extra on success, but record the event.
+            audit_event(
+                &state,
+                AuditEvent {
+                    kind: "auth_success",
+                    actor: Some(fingerprint),
+                    source: source.map(|ip| ip.to_string()),
+                    method: Some(req.method().to_string()),
+                    path: Some(req.uri().path().to_string()),
+                    outcome: "ok",
+                    detail: None,
+                },
+            );
+
+            // Legacy plaintext: after a successful authentication, atomically
+            // replace the plaintext with a verifier. If the migration cannot
+            // commit, fail closed — the request is refused so a plaintext
+            // credential cannot keep working indefinitely without ever being
+            // upgraded.
+            if settings.api_credential.is_none() {
+                let migration = crate::settings::Settings::update_async(|persist| {
+                    persist.apply_legacy_migration()
+                })
+                .await;
+                if migration.is_err() {
+                    tracing::error!(
+                        "API credential migration could not be persisted; refusing request (fail closed)"
+                    );
+                    audit_event(
+                        &state,
+                        AuditEvent {
+                            kind: "credential_migration_failed",
+                            actor: None,
+                            source: source.map(|ip| ip.to_string()),
+                            method: Some(req.method().to_string()),
+                            path: Some(req.uri().path().to_string()),
+                            outcome: "error",
+                            detail: None,
+                        },
+                    );
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"ok": false,
+                        "error": "API credential migration failed; fix settings persistence and retry"})),
+                    )
+                        .into_response();
+                }
+            }
+            next.run(req).await
+        }
+        None => {
+            // Charge the failed-auth budget for this source.
+            if let Some(ip) = source {
+                let decision = state.auth_limiter.lock().check(ip);
+                if !decision.allowed {
+                    audit_event(
+                        &state,
+                        AuditEvent {
+                            kind: "auth_rate_limited",
+                            actor: bearer_token(&req).map(audit::token_fingerprint),
+                            source: Some(ip.to_string()),
+                            method: Some(req.method().to_string()),
+                            path: Some(req.uri().path().to_string()),
+                            outcome: "rate_limited",
+                            detail: None,
+                        },
+                    );
+                    return too_many_requests_response(decision.retry_after_secs);
+                }
+            }
+            audit_event(
+                &state,
+                AuditEvent {
+                    kind: "auth_failure",
+                    actor: bearer_token(&req).map(audit::token_fingerprint),
+                    source: source.map(|ip| ip.to_string()),
+                    method: Some(req.method().to_string()),
+                    path: Some(req.uri().path().to_string()),
+                    outcome: "denied",
+                    detail: None,
+                },
+            );
+            unauthorized_response()
+        }
+    }
+}
+
+/// Record an audit event, failing open (the HTTP outcome is unchanged) with
+/// a local warning when the audit write itself fails. Control mutations use
+/// the fail-closed helper instead.
+fn audit_event(state: &Arc<AppState>, event: AuditEvent) {
+    if let Err(e) = state.audit.record(event) {
+        tracing::warn!("Audit write failed: {e}");
+    }
+}
+
+/// Fail-closed audit for control mutations: the command must not be queued
+/// unless its audit record was durably written.
+pub(crate) fn audit_control_event_or_block(
+    state: &Arc<AppState>,
+    event: AuditEvent,
+) -> Option<Response> {
+    state.audit.record(event).err().map(|e| {
+        tracing::error!("Control mutation refused; audit write failed: {e}");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"ok": false,
+            "error": "Audit logging unavailable; control request refused for safety"})),
+        )
+            .into_response()
+    })
 }
 
 /// Separate integration router: snapshots and summary status are read-only;
@@ -511,7 +775,7 @@ pub fn create_authenticated_router_with_origins(
         )
         .route(
             "/api/control/force-charge/stop",
-            post(api::force_charge_stop),
+            post(external_control::force_charge_stop),
         )
         .route(
             "/api/control/force-discharge",
@@ -519,16 +783,30 @@ pub fn create_authenticated_router_with_origins(
         )
         .route(
             "/api/control/force-discharge/stop",
-            post(api::force_discharge_stop),
+            post(external_control::force_discharge_stop),
         )
-        .route_layer(middleware::from_fn(
+        .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
             external_control::require_control_permission,
         ));
 
     let router = Router::new()
         .merge(controls)
-        .route("/api/snapshot", get(api::get_snapshot))
-        .route("/api/control/status", get(control_status::get_status));
+        .route(
+            "/api/snapshot",
+            get(api::get_snapshot).layer(middleware::from_fn_with_state(
+                state.clone(),
+                limit_authenticated_reads,
+            )),
+        )
+        .route(
+            "/api/control/status",
+            get(control_status::get_status).layer(middleware::from_fn_with_state(
+                state.clone(),
+                limit_authenticated_reads,
+            )),
+        );
 
     let router = if allowed_origins.is_empty() {
         router
@@ -555,6 +833,7 @@ pub fn create_authenticated_router_with_origins(
     router
         // Added last so authentication runs before permission/body validation.
         .route_layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
+        .layer(middleware::from_fn(request_timeout))
         .with_state(state)
         .route("/api/{*rest}", get(not_found_404))
 }
@@ -770,6 +1049,88 @@ mod tests {
             assert_eq!(body["ok"], false);
         })
         .await;
+    }
+
+    /// A source that exhausts its failed-auth budget is locked out with
+    /// 429 + Retry-After — even when presenting a valid credential.
+    #[tokio::test]
+    async fn authenticated_router_locks_out_source_after_failed_auth_budget() {
+        use axum::extract::connect_info::MockConnectInfo;
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_authenticated_router_with_key("secret-xyz", 7338)
+                .await
+                .layer(MockConnectInfo(
+                    "203.0.113.9:40000".parse::<std::net::SocketAddr>().unwrap(),
+                ));
+
+            let attempt = |token: &'static str| {
+                let app = app.clone();
+                async move {
+                    let request = Request::builder()
+                        .uri("/api/snapshot")
+                        .header("Authorization", format!("Bearer {token}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap();
+                    let response = app.oneshot(request).await.unwrap();
+                    let retry_after = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.to_string());
+                    (response.status(), retry_after)
+                }
+            };
+
+            // 10 failed attempts exhaust the default budget…
+            for _ in 0..FAILED_AUTH_LIMIT {
+                assert_eq!(attempt("wrong-token").await.0, StatusCode::UNAUTHORIZED);
+            }
+            // …then even a valid credential is refused with 429.
+            let (status, retry_after) = attempt("secret-xyz").await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert!(retry_after.is_some());
+        })
+        .await;
+    }
+
+    /// Forwarded identity is honoured only from explicitly trusted proxies;
+    /// direct clients cannot spoof their source via X-Forwarded-For.
+    #[test]
+    fn client_ip_honours_forwarded_header_only_from_trusted_proxies() {
+        let trusted: Vec<std::net::IpAddr> = vec!["10.0.0.2".parse().unwrap()];
+        let build_request = |peer: &str, forwarded: Option<&str>| {
+            let mut builder =
+                Request::builder()
+                    .uri("/api/snapshot")
+                    .extension(axum::extract::ConnectInfo(
+                        peer.parse::<std::net::SocketAddr>().unwrap(),
+                    ));
+            if let Some(forwarded) = forwarded {
+                builder = builder.header("x-forwarded-for", forwarded);
+            }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+
+        // Direct client: peer address wins; spoofed header ignored.
+        let request = build_request("203.0.113.5:4444", Some("1.2.3.4"));
+        assert_eq!(
+            client_ip(&request, &trusted).unwrap().to_string(),
+            "203.0.113.5"
+        );
+
+        // Trusted proxy peer: forwarded identity is used.
+        let request = build_request("10.0.0.2:5555", Some("198.51.100.7, 10.0.0.2"));
+        assert_eq!(
+            client_ip(&request, &trusted).unwrap().to_string(),
+            "198.51.100.7"
+        );
+
+        // Trusted proxy without a forwarded header falls back to the peer.
+        let request = build_request("10.0.0.2:5555", None);
+        assert_eq!(
+            client_ip(&request, &trusted).unwrap().to_string(),
+            "10.0.0.2"
+        );
     }
 
     #[tokio::test]

@@ -1332,6 +1332,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // all-interfaces; `null` origins = no CORS headers.
             "api_bind_address": api_bind_address,
             "api_allowed_origins": api_allowed_origins,
+            "api_trusted_proxies": settings.api_trusted_proxies,
             // U2: explicit listener exposure. `null` bind = legacy
             // all-interfaces; `null` origins = no CORS headers.
             "api_bind_address": settings.api_bind_address,
@@ -1632,6 +1633,30 @@ pub async fn update_settings(
                 }
             }
         }
+        // U3: trusted proxy addresses (for forwarded client identity).
+        if let Some(value) = body.get("api_trusted_proxies") {
+            match value {
+                Value::Null => persist.api_trusted_proxies = Vec::new(),
+                Value::Array(items) => {
+                    let mut proxies = Vec::new();
+                    for item in items {
+                        let entry = item.as_str().ok_or_else(|| {
+                            "api_trusted_proxies entries must be strings".to_string()
+                        })?;
+                        let ip: std::net::IpAddr = entry.trim().parse().map_err(|_| {
+                            format!("api_trusted_proxies entry {entry:?} must be an IP address")
+                        })?;
+                        proxies.push(ip.to_string());
+                    }
+                    persist.api_trusted_proxies = proxies;
+                }
+                _ => {
+                    return Err(
+                        "api_trusted_proxies must be an array of IP addresses or null".to_string(),
+                    )
+                }
+            }
+        }
         // First credential for a previously unconfigured install: default
         // the listener to loopback so a fresh setup never exposes the API
         // beyond this machine by accident. Existing installs (credential
@@ -1821,6 +1846,45 @@ pub async fn update_settings(
                 s.api_allowed_origins = prev_api_identity.3.clone();
             });
             listener_error = Some(e);
+        }
+    }
+
+    // Audit credential/configuration changes (fail-open: local
+    // administration must not be blocked by audit-disk failures).
+    {
+        let mut audit_kind: Option<&'static str> = None;
+        if body_for_response
+            .get("api_key_generate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            audit_kind = Some("api_key_rotated");
+        } else if body_for_response.get("api_key").and_then(|v| v.as_str()) == Some("") {
+            audit_kind = Some("api_key_cleared");
+        } else if body_for_response.get("api_bind_address").is_some()
+            || body_for_response.get("api_allowed_origins").is_some()
+            || body_for_response.get("api_port").is_some()
+            || body_for_response.get("api_control_enabled").is_some()
+            || body_for_response.get("api_trusted_proxies").is_some()
+        {
+            audit_kind = Some("api_config_changed");
+        }
+        if let Some(kind) = audit_kind {
+            let actor = persist_for_log
+                .api_credential
+                .as_ref()
+                .map(|c| c.last4.clone());
+            if let Err(e) = state.audit.record(crate::server::audit::AuditEvent {
+                kind,
+                actor,
+                source: Some("local".to_string()),
+                method: Some("POST".to_string()),
+                path: Some("/api/settings".to_string()),
+                outcome: "ok",
+                detail: None,
+            }) {
+                tracing::warn!("Audit write failed: {e}");
+            }
         }
     }
 

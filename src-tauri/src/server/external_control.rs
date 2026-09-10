@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{rejection::JsonRejection, Request, State},
+    extract::{Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -16,10 +16,47 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api;
+use super::{audit_control_event_or_block, AuthenticatedIdentity};
+use crate::server::audit::AuditEvent;
 use crate::{inverter::poll::AppState, settings::Settings};
 
-pub async fn require_control_permission(request: Request, next: Next) -> Response {
+/// The authenticated identity attached by the auth middleware (present on
+/// every request that reached permission validation).
+fn identity(request: &Request) -> String {
+    request
+        .extensions()
+        .get::<AuthenticatedIdentity>()
+        .map(|identity| identity.fingerprint.clone())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Fail-open audit for denials (no mutation happens, so a failed audit
+/// write cannot make the system unsafe — it is logged locally instead).
+fn audit_denial(state: &Arc<AppState>, mut event: AuditEvent) {
+    event.outcome = "denied";
+    if let Err(e) = state.audit.record(event) {
+        tracing::warn!("Audit write failed: {e}");
+    }
+}
+
+pub async fn require_control_permission(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
     if !Settings::load_async().await.api_control_enabled {
+        audit_denial(
+            &state,
+            AuditEvent {
+                kind: "authz_denied",
+                actor: Some(identity(&request)),
+                source: None,
+                method: Some(request.method().to_string()),
+                path: Some(request.uri().path().to_string()),
+                outcome: "denied",
+                detail: None,
+            },
+        );
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"ok":false,
@@ -30,40 +67,143 @@ pub async fn require_control_permission(request: Request, next: Next) -> Respons
     next.run(request).await
 }
 
+/// Enforce the per-identity start budget. Starts are deliberately tighter
+/// than stops: a flood of starts must not be able to thrash the battery.
+fn check_start_limit(state: &Arc<AppState>, fingerprint: &str) -> Option<Response> {
+    let decision = state
+        .action_start_limiter
+        .lock()
+        .check(fingerprint.to_string());
+    if decision.allowed {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"ok":false,
+        "error":"Too many start requests; retry later"})),
+        )
+            .into_response(),
+    )
+}
+
+/// Enforce the per-identity stop budget (wider than starts so recovery is
+/// never starved by read traffic or retries).
+fn check_stop_limit(state: &Arc<AppState>, fingerprint: &str) -> Option<Response> {
+    let decision = state
+        .action_stop_limiter
+        .lock()
+        .check(fingerprint.to_string());
+    if decision.allowed {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"ok":false,
+        "error":"Too many stop requests; retry later"})),
+        )
+            .into_response(),
+    )
+}
+
+/// Fail-closed audit record for an accepted control action: the command is
+/// not queued unless this write succeeds.
+fn audit_action(
+    state: &Arc<AppState>,
+    fingerprint: &str,
+    kind: &'static str,
+    detail: Option<String>,
+) -> Option<Response> {
+    audit_control_event_or_block(
+        state,
+        AuditEvent {
+            kind,
+            actor: Some(fingerprint.to_string()),
+            source: None,
+            method: Some("POST".to_string()),
+            path: None,
+            outcome: "accepted",
+            detail,
+        },
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DurationRequest {
     minutes: u64,
 }
 
-fn duration(
-    body: Result<Json<DurationRequest>, JsonRejection>,
-) -> Result<Value, (StatusCode, Json<Value>)> {
+fn bad_duration_request() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"ok":false,
+        "error":"Expected only an integer minutes field between 1 and 1439"})),
+    )
+}
+
+/// Parse and validate an external start body. Manual parsing (instead of
+/// the `Json` extractor) because these handlers also need the request for
+/// the authenticated-identity extension, and `Request` must be the last
+/// extractor. serde's derived visitor still rejects duplicate fields, and
+/// `deny_unknown_fields` still rejects anything beyond `minutes`.
+async fn duration_body(
+    request: Request,
+) -> (Option<String>, Result<Value, (StatusCode, Json<Value>)>) {
+    let content_type = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !content_type.starts_with("application/json") {
+        return (None, Err(bad_duration_request()));
+    }
+    let bytes = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => return (None, Err(bad_duration_request())),
+    };
+    match serde_json::from_slice::<DurationRequest>(&bytes) {
+        Ok(body) if (1..=1439).contains(&body.minutes) => (
+            Some(body.minutes.to_string()),
+            Ok(json!({"minutes": body.minutes})),
+        ),
+        _ => (None, Err(bad_duration_request())),
+    }
+}
+
+pub async fn force_charge(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let fingerprint = identity(&request);
+    let (minutes, body) = duration_body(request).await;
     match body {
-        Ok(Json(body)) if (1..=1439).contains(&body.minutes) => Ok(json!({"minutes":body.minutes})),
-        _ => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"ok":false,
-            "error":"Expected only an integer minutes field between 1 and 1439"})),
-        )),
+        Ok(body) => {
+            if let Some(response) = check_start_limit(&state, &fingerprint) {
+                return response;
+            }
+            if let Some(response) = audit_action(
+                &state,
+                &fingerprint,
+                "action_start",
+                Some(format!(
+                    "force_charge minutes={}",
+                    minutes.unwrap_or_default()
+                )),
+            ) {
+                return response;
+            }
+            api::force_charge(State(state), Some(Json(body)))
+                .await
+                .into_response()
+        }
+        Err(error) => error.into_response(),
     }
 }
 
-pub async fn force_charge(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<DurationRequest>, JsonRejection>,
-) -> (StatusCode, Json<Value>) {
-    match duration(body) {
-        Ok(body) => api::force_charge(State(state), Some(Json(body))).await,
-        Err(error) => error,
-    }
-}
-
-pub async fn force_discharge(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<DurationRequest>, JsonRejection>,
-) -> (StatusCode, Json<Value>) {
-    match duration(body) {
+pub async fn force_discharge(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let fingerprint = identity(&request);
+    let (minutes, body) = duration_body(request).await;
+    match body {
         Ok(body) => {
             // The UI cannot offer Quick Actions before its first snapshot.
             // External callers have no UI guard, so refuse an unknown restore
@@ -73,12 +213,69 @@ pub async fn force_discharge(
                     StatusCode::CONFLICT,
                     Json(json!({"ok":false,
                     "error":"Force Discharge requires an inverter snapshot before it can start"})),
-                );
+                )
+                    .into_response();
             }
-            api::force_discharge(State(state), Some(Json(body))).await
+            if let Some(response) = check_start_limit(&state, &fingerprint) {
+                return response;
+            }
+            if let Some(response) = audit_action(
+                &state,
+                &fingerprint,
+                "action_start",
+                Some(format!(
+                    "force_discharge minutes={}",
+                    minutes.unwrap_or_default()
+                )),
+            ) {
+                return response;
+            }
+            api::force_discharge(State(state), Some(Json(body)))
+                .await
+                .into_response()
         }
-        Err(error) => error,
+        Err(error) => error.into_response(),
     }
+}
+
+/// External stop adapter: per-identity stop budget plus fail-closed audit.
+/// The underlying handler is the shared Quick Action stop.
+pub async fn force_charge_stop(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let fingerprint = identity(&request);
+    if let Some(response) = check_stop_limit(&state, &fingerprint) {
+        return response;
+    }
+    if let Some(response) = audit_action(
+        &state,
+        &fingerprint,
+        "action_stop",
+        Some("force_charge".to_string()),
+    ) {
+        return response;
+    }
+    api::force_charge_stop(State(state)).await.into_response()
+}
+
+/// See [`force_charge_stop`].
+pub async fn force_discharge_stop(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+) -> Response {
+    let fingerprint = identity(&request);
+    if let Some(response) = check_stop_limit(&state, &fingerprint) {
+        return response;
+    }
+    if let Some(response) = audit_action(
+        &state,
+        &fingerprint,
+        "action_stop",
+        Some("force_discharge".to_string()),
+    ) {
+        return response;
+    }
+    api::force_discharge_stop(State(state))
+        .await
+        .into_response()
 }
 
 #[cfg(test)]
@@ -405,6 +602,7 @@ mod tests {
                     ("force-charge", "force-charge/stop", "force-discharge"),
                     ("force-discharge", "force-discharge/stop", "force-charge"),
                 ] {
+                    state.action_start_limiter.lock().clear();
                     assert_eq!(
                         request(
                             state.clone(),
@@ -643,6 +841,68 @@ mod tests {
                     .0,
                 StatusCode::UNAUTHORIZED
             );
+        })
+        .await;
+    }
+
+    /// Control mutations fail closed when the audit write fails: no command
+    /// may be queued without its durable audit record.
+    #[tokio::test]
+    async fn external_actions_fail_closed_when_audit_write_fails() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(true).await;
+            // Point the audit log at an unusable path (a directory where the
+            // database file must go).
+            let dir = crate::test_util::make_unique_test_dir("audit-broken");
+            std::fs::create_dir_all(dir.join("audit.db")).unwrap();
+            state.audit.override_path(dir.join("audit.db"));
+
+            let (status, body) = request(
+                state.clone(),
+                "force-charge",
+                Some("integration-key"),
+                json!({"minutes":30}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                body["error"].as_str().unwrap().contains("Audit"),
+                "{body:?}"
+            );
+            assert!(
+                state.pending_writes.lock().await.is_empty(),
+                "no write may be queued without its audit record"
+            );
+        })
+        .await;
+    }
+
+    /// Starts are budgeted per credential identity (2/min by default): the
+    /// third start inside the same window must be refused with 429 before
+    /// reaching the Quick Action handler.
+    #[tokio::test]
+    async fn external_starts_enforce_per_identity_budget() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(true).await;
+            state.pending_writes.lock().await.clear();
+            // Requests 1-2 enqueue (a repeated start legitimately resets its
+            // duration) and each charges the budget; request 3 exceeds the
+            // budget and is refused with 429 before reaching the handler.
+            for expected in [
+                StatusCode::OK,
+                StatusCode::OK,
+                StatusCode::TOO_MANY_REQUESTS,
+            ] {
+                let (status, _) = request(
+                    state.clone(),
+                    "force-charge",
+                    Some("integration-key"),
+                    json!({"minutes":30}),
+                )
+                .await;
+                assert_eq!(status, expected);
+                state.pending_writes.lock().await.clear();
+            }
         })
         .await;
     }

@@ -411,6 +411,20 @@ pub struct AppState {
     /// process restart, with transactional rollback on bind failure.
     pub authenticated_lifecycle:
         Arc<crate::server::authenticated_lifecycle::AuthenticatedLifecycle>,
+    /// Security/control audit trail (U3). Never exposed over HTTP.
+    pub audit: Arc<crate::server::audit::AuditLog>,
+    /// Rate limiters for the authenticated API (U3): failed authentications
+    /// and reads per source address, starts and stops per credential
+    /// identity. Fixed windows over purely synchronous access — the guard
+    /// is never held across an await point (same class as
+    /// `connected_clients`).
+    pub auth_limiter:
+        Arc<parking_lot::Mutex<crate::server::ratelimit::RateLimiter<std::net::IpAddr>>>,
+    pub read_limiter:
+        Arc<parking_lot::Mutex<crate::server::ratelimit::RateLimiter<std::net::IpAddr>>>,
+    pub action_start_limiter:
+        Arc<parking_lot::Mutex<crate::server::ratelimit::RateLimiter<String>>>,
+    pub action_stop_limiter: Arc<parking_lot::Mutex<crate::server::ratelimit::RateLimiter<String>>>,
     /// Ring buffer of recent log lines for the developer console.
     pub log_ring: Arc<LogRing>,
     /// Connected WebSocket clients (for Network Access display).
@@ -582,6 +596,35 @@ impl AppState {
             authenticated_lifecycle: Arc::new(
                 crate::server::authenticated_lifecycle::AuthenticatedLifecycle::new(),
             ),
+            audit: Arc::new(crate::server::audit::AuditLog::new()),
+            auth_limiter: Arc::new(parking_lot::Mutex::new(
+                crate::server::ratelimit::RateLimiter::new(
+                    crate::server::FAILED_AUTH_LIMIT,
+                    std::time::Duration::from_secs(60),
+                    crate::server::RATE_LIMITER_MAX_ENTRIES,
+                ),
+            )),
+            read_limiter: Arc::new(parking_lot::Mutex::new(
+                crate::server::ratelimit::RateLimiter::new(
+                    crate::server::READ_LIMIT,
+                    std::time::Duration::from_secs(60),
+                    crate::server::RATE_LIMITER_MAX_ENTRIES,
+                ),
+            )),
+            action_start_limiter: Arc::new(parking_lot::Mutex::new(
+                crate::server::ratelimit::RateLimiter::new(
+                    crate::server::ACTION_START_LIMIT,
+                    std::time::Duration::from_secs(60),
+                    crate::server::RATE_LIMITER_MAX_ENTRIES,
+                ),
+            )),
+            action_stop_limiter: Arc::new(parking_lot::Mutex::new(
+                crate::server::ratelimit::RateLimiter::new(
+                    crate::server::ACTION_STOP_LIMIT,
+                    std::time::Duration::from_secs(60),
+                    crate::server::RATE_LIMITER_MAX_ENTRIES,
+                ),
+            )),
             log_ring,
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
