@@ -50,6 +50,22 @@ pub fn ensure_fallback_config_dir() -> std::path::PathBuf {
     FALLBACK.with(|fallback| fallback.0.clone())
 }
 
+/// Create a unique throwaway directory for test artifacts (e.g. audit
+/// databases). Removed only by the caller when practical; the OS temp
+/// cleaner is the backstop.
+pub fn make_unique_test_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "hem-test-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create unique test dir");
+    dir
+}
+
 /// Run a synchronous test body with an isolated config directory.
 pub fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
     let _isolation = IsolationGuard::enter();

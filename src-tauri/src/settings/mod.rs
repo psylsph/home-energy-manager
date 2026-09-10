@@ -1530,6 +1530,12 @@ pub struct Settings {
     /// which never send `Origin` and are unaffected by CORS.
     #[serde(default)]
     pub api_allowed_origins: Option<Vec<String>>,
+    /// Proxy addresses trusted to forward the real client IP via
+    /// `X-Forwarded-For` on the authenticated API. Empty = no proxy: source
+    /// identity is always the direct peer, and forwarded headers from
+    /// untrusted peers are ignored for rate limiting and audit records.
+    #[serde(default)]
+    pub api_trusted_proxies: Vec<String>,
 
     /// Persisted copy of the user's discharge schedule captured on the way
     /// into Eco / Pause / Export Paused. The backend needs to zero the
@@ -1967,6 +1973,7 @@ impl Default for Settings {
             api_control_enabled: false,
             api_bind_address: None,
             api_allowed_origins: None,
+            api_trusted_proxies: Vec::new(),
             discharge_slots_backup: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
@@ -2618,6 +2625,7 @@ mod tests {
             api_control_enabled: false,
             api_bind_address: None,
             api_allowed_origins: None,
+            api_trusted_proxies: Vec::new(),
             discharge_slots_backup: Some(vec![
                 DischargeSlotBackup {
                     enabled: true,
@@ -3260,6 +3268,7 @@ mod tests {
             api_control_enabled: false,
             api_bind_address: None,
             api_allowed_origins: None,
+            api_trusted_proxies: Vec::new(),
             discharge_slots_backup: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),

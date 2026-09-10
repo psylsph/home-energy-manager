@@ -69,14 +69,54 @@ impl AuthenticatedLifecycle {
         // Always stop the old listener first: if the port is unchanged the
         // new bind could never succeed while the old task holds the socket.
         let previous = self.stop_current().await;
+        if previous.is_some() {
+            Self::record(
+                &state,
+                crate::server::audit::AuditEvent {
+                    kind: "listener_stopped",
+                    actor: None,
+                    source: None,
+                    method: None,
+                    path: None,
+                    outcome: "ok",
+                    detail: None,
+                },
+            );
+        }
 
         let Some(config) = desired else {
             return Ok(());
         };
 
         match self.start(state.clone(), &config).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                Self::record(
+                    &state,
+                    crate::server::audit::AuditEvent {
+                        kind: "listener_started",
+                        actor: None,
+                        source: Some(config.bind_ip.to_string()),
+                        method: None,
+                        path: None,
+                        outcome: "ok",
+                        detail: Some(format!("port {}", config.port)),
+                    },
+                );
+                Ok(())
+            }
             Err(bind_error) => {
+                Self::record(
+                    &state,
+                    crate::server::audit::AuditEvent {
+                        kind: "listener_bind_failed",
+                        actor: None,
+                        source: Some(config.bind_ip.to_string()),
+                        method: None,
+                        path: None,
+                        outcome: "error",
+                        detail: Some(bind_error.clone()),
+                    },
+                );
                 // Roll back: the previous configuration was healthy, so the
                 // owner's integrations keep working while settings show the
                 // failure. (If even the rollback bind fails — e.g. the port
@@ -91,6 +131,13 @@ impl AuthenticatedLifecycle {
                 }
                 Err(bind_error)
             }
+        }
+    }
+
+    /// Fail-open audit for listener transitions.
+    fn record(state: &Arc<AppState>, event: crate::server::audit::AuditEvent) {
+        if let Err(e) = state.audit.record(event) {
+            tracing::warn!("Audit write failed: {e}");
         }
     }
 
