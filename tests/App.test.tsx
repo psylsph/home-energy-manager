@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, act, cleanup } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -147,6 +147,25 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
       useInverterStore.setState({ developerMode: false });
     });
     expect(await screen.findByText('Status exploded')).toBeDefined();
+  });
+
+  it('navigates through the bottom-bar links on click', async () => {
+    // The hash-navigation tests above seed `location.hash` before render;
+    // this one drives the router the way users do — clicking a NavLink — so
+    // the click → history → route pipeline stays covered across router
+    // upgrades, not just the declarative route table. It also starts on the
+    // crashed Status route, proving navigation escapes the ErrorBoundary
+    // fallback (the route-keyed boundary must remount fresh per route)
+    // instead of keeping the broken page's fallback on screen.
+    render(<App />);
+    const batteryLink = screen.getByRole('link', { name: 'Battery' });
+    await act(async () => {
+      fireEvent.click(batteryLink);
+    });
+    expect(screen.getByTestId('mock-Battery')).toBeDefined();
+    expect(window.location.hash).toBe('#/battery');
+    expect(batteryLink.getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('link', { name: 'Status' }).getAttribute('aria-current')).toBeNull();
   });
 
   // Each core route renders its (mocked) page. This also guards the structural
