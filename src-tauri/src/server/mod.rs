@@ -59,7 +59,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/mini", get(mini::mini_page))
         .route(
             "/api/settings",
-            get(api::get_settings).post(api::update_settings),
+            get(api::get_settings)
+                .post(api::update_settings)
+                .layer(middleware::from_fn(require_local_for_api_security_fields)),
         )
         .route("/api/history", get(api::get_history))
         .route("/api/history/summary", get(api::get_history_summary))
@@ -332,38 +334,149 @@ pub async fn start_server_with_frontend_on_port(
 // Authenticated API server (read-only by default, optional Quick Actions)
 // ---------------------------------------------------------------------------
 
-/// API key authentication middleware.
-///
-/// Checks for a `Bearer <key>` token in the `Authorization` header.
-/// Returns 401 Unauthorized if the key is missing or doesn't match.
-async fn api_key_auth(req: Request, next: Next) -> Response {
-    let expected_key = crate::settings::Settings::load_async().await.api_key;
+/// Settings fields that change the authenticated external API's security
+/// posture: its credential, control permission, and network exposure. The
+/// main server stays permissive for ordinary dashboard settings, but this
+/// control-plane subset may only be changed from the machine running HEM —
+/// a remote, tokenless caller must not be able to grant itself an API
+/// credential or switch on external battery control. (`api_bind_address`
+/// and `api_allowed_origins` are introduced by the listener hardening.)
+const API_SECURITY_SETTINGS_FIELDS: &[&str] = &[
+    "api_key",
+    "api_key_generate",
+    "api_port",
+    "api_control_enabled",
+    "api_bind_address",
+    "api_allowed_origins",
+];
 
-    if expected_key.is_empty() {
-        // No key configured — deny all requests (shouldn't happen since
-        // the server isn't started without a key, but defend anyway).
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"ok": false, "error": "API key not configured"})),
-        )
-            .into_response();
-    }
-
-    let auth_header = req
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if let Some(token) = auth_header.strip_prefix("Bearer ") {
-        if token == expected_key {
-            return next.run(req).await;
+/// POST /api/settings on the main server, gated to local callers for the
+/// API-security field subset. Requests arriving from a non-loopback peer
+/// that touch any of [`API_SECURITY_SETTINGS_FIELDS`] are rejected with 403;
+/// every other settings write keeps its existing tokenless behaviour.
+/// In-process callers without connection info (unit-test oneshots) are
+/// treated as local: production servers always build the make-service with
+/// `with_connect_info`, so real requests always carry a peer address.
+async fn require_local_for_api_security_fields(req: Request, next: Next) -> Response {
+    // Buffer the (small) settings JSON so field names can be inspected and
+    // the body re-attached for the handler.
+    const MAX_SETTINGS_BODY_BYTES: usize = 1024 * 1024;
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, MAX_SETTINGS_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": "Invalid request body"})),
+            )
+                .into_response();
+        }
+    };
+    let touches_security = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .map(|value| {
+            API_SECURITY_SETTINGS_FIELDS
+                .iter()
+                .any(|field| value.get(field).is_some())
+        })
+        .unwrap_or(false);
+    if touches_security {
+        use axum::extract::connect_info::MockConnectInfo;
+        let peer_ip = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| info.0.ip())
+            .or_else(|| {
+                // Mirrors the ConnectInfo extractor's test fallback.
+                parts
+                    .extensions
+                    .get::<MockConnectInfo<std::net::SocketAddr>>()
+                    .map(|mock| mock.0.ip())
+            });
+        let is_local = peer_ip.map(|ip| ip.is_loopback()).unwrap_or(true);
+        if !is_local {
+            tracing::warn!(
+                "Rejected non-local settings write to authenticated API security fields"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"ok": false,
+                "error": "Authenticated API settings can only be changed from the machine running Home Energy Manager"})),
+            )
+                .into_response();
         }
     }
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+        .await
+}
 
+fn unauthorized_response() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({"ok": false, "error": "Unauthorized: invalid or missing API key"})),
+    )
+        .into_response()
+}
+
+fn bearer_token(req: &Request) -> Option<&str> {
+    let auth_header = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())?;
+    auth_header.strip_prefix("Bearer ")
+}
+
+/// API key authentication middleware.
+///
+/// Verifies the `Bearer <key>` token against the configured credential:
+/// a generated verifier in constant time, or the legacy plaintext during
+/// its one-time migration state. Returns 401 Unauthorized if the key is
+/// missing or doesn't match.
+async fn api_key_auth(req: Request, next: Next) -> Response {
+    let settings = crate::settings::Settings::load_async().await;
+
+    // Generated credential: constant-time verifier check.
+    if let Some(credential) = settings.api_credential.as_ref() {
+        return match bearer_token(&req) {
+            Some(token) if credential.verify(token) => next.run(req).await,
+            _ => unauthorized_response(),
+        };
+    }
+
+    // Legacy plaintext migration state: authenticate the presented token,
+    // then atomically replace the plaintext with a verifier. If the
+    // migration cannot commit, fail closed — the request is refused so a
+    // plaintext credential cannot keep working indefinitely without ever
+    // being upgraded.
+    if let Some(expected) = settings.authenticating_secret() {
+        let Some(token) = bearer_token(&req) else {
+            return unauthorized_response();
+        };
+        if !crate::settings::constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+            return unauthorized_response();
+        }
+        let migration =
+            crate::settings::Settings::update_async(|persist| persist.apply_legacy_migration())
+                .await;
+        if migration.is_err() {
+            tracing::error!(
+                "API credential migration could not be persisted; refusing request (fail closed)"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"ok": false,
+                "error": "API credential migration failed; fix settings persistence and retry"})),
+            )
+                .into_response();
+        }
+        return next.run(req).await;
+    }
+
+    // No credential configured — deny all requests (shouldn't happen since
+    // the server isn't started without a credential, but defend anyway).
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"ok": false, "error": "API key not configured"})),
     )
         .into_response()
 }
@@ -602,6 +715,151 @@ mod tests {
             // No snapshot available yet, but the response is {ok: false, error: "..."}
             // rather than 401.
             assert_eq!(body["ok"], false);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn authenticated_router_migrates_legacy_key_to_verifier_on_first_use() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_authenticated_router_with_key("legacy-key", 7338).await;
+
+            // First valid request: authenticated via the legacy plaintext…
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer legacy-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::OK
+            );
+
+            // …and the plaintext has been replaced by a verifier.
+            let settings = crate::settings::Settings::load();
+            assert!(settings.api_key.is_empty(), "plaintext must be cleared");
+            let credential = settings.api_credential.as_ref().expect("verifier created");
+            assert!(credential.verify("legacy-key"));
+            assert!(!credential.verify("wrong-key"));
+
+            // A second request now authenticates via the verifier.
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer legacy-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn authenticated_router_fails_closed_when_legacy_migration_cannot_persist() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let app = make_authenticated_router_with_key("legacy-key", 7338).await;
+
+            // Inject a settings-save failure for exactly one update.
+            let _guard = crate::settings::InjectUpdateFailures::arm(1);
+
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer legacy-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            // The plaintext was NOT migrated and stays authoritative —
+            // nothing is half-committed.
+            let settings = crate::settings::Settings::load();
+            assert_eq!(settings.api_key, "legacy-key");
+            assert!(settings.api_credential.is_none());
+
+            // Once persistence works again the same request succeeds.
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer legacy-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+            let settings = crate::settings::Settings::load();
+            assert!(settings.api_credential.is_some());
+        })
+        .await;
+    }
+
+    /// A remote (non-loopback) tokenless caller must not be able to grant
+    /// itself an API credential or flip external-control permission through
+    /// the main settings route.
+    #[tokio::test]
+    async fn remote_settings_calls_cannot_change_api_security_fields() {
+        use axum::extract::connect_info::MockConnectInfo;
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let remote: std::net::SocketAddr = "192.168.1.77:51000".parse().unwrap();
+            let app = create_router(state).layer(MockConnectInfo(remote));
+
+            for field in [
+                serde_json::json!({"api_key_generate": true}),
+                serde_json::json!({"api_key": "attacker-key"}),
+                serde_json::json!({"api_control_enabled": true}),
+                serde_json::json!({"api_port": 1234}),
+            ] {
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(field.to_string()))
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{field}");
+            }
+
+            // Nothing persisted.
+            let saved = crate::settings::Settings::load();
+            assert!(!saved.has_api_auth());
+            assert!(!saved.api_control_enabled);
+        })
+        .await;
+    }
+
+    /// Local callers keep full access to the security fields, and remote
+    /// callers keep access to ordinary dashboard settings.
+    #[tokio::test]
+    async fn local_settings_calls_keep_api_security_access() {
+        use axum::extract::connect_info::MockConnectInfo;
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let local: std::net::SocketAddr = "127.0.0.1:51001".parse().unwrap();
+
+            // Loopback caller: generate works and returns the one-time secret.
+            let app = create_router(Arc::new(AppState::new())).layer(MockConnectInfo(local));
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"api_key_generate": true}"#))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["data"]["api_key"].as_str().map(str::len), Some(43));
+
+            // Remote caller: ordinary settings still work.
+            let remote: std::net::SocketAddr = "192.168.1.77:51002".parse().unwrap();
+            let app = create_router(Arc::new(AppState::new())).layer(MockConnectInfo(remote));
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/settings")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"hidden_panels": ["battery"]}"#))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
         })
         .await;
     }
