@@ -283,7 +283,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       mountApiMocks({ api_key_configured: true, api_key_last4: '-key', api_control_enabled: false });
       render(<SettingsPage />);
       const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
-      await waitFor(() => expect(screen.getByLabelText('API Key')).toHaveAttribute('placeholder', expect.stringContaining('-key')));
+      await waitFor(() => expect(screen.getByText(/ends -key/)).toBeDefined());
       fireEvent.click(toggle);
       await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_control_enabled: true }));
       await waitFor(() => expect(screen.getByText('Battery control enabled for authenticated API clients')).toBeDefined());
@@ -318,23 +318,39 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       // separately auto-saved control permission.
       await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key: '', api_port: 8443 }));
     });
-    it('shows a failure and re-enables the button when saving the key fails', async () => {
+    it('shows a failure and re-enables the button when generating a key fails', async () => {
       mountApiMocks();
       useInverterStore.setState({ developerMode: false });
       apiPostMock.mockRejectedValueOnce(new Error('authenticated API unavailable'));
       render(<SettingsPage />);
 
-      const keyInput = await screen.findByLabelText('API Key');
-      fireEvent.change(keyInput, { target: { value: 'secret-key' } });
-      const saveButton = screen.getByRole('button', { name: 'Save API Key' });
-      fireEvent.click(saveButton);
+      const generateButton = await screen.findByRole('button', { name: 'Generate API key' });
+      fireEvent.click(generateButton);
 
       await waitFor(() => {
         expect(screen.getByText('authenticated API unavailable')).toBeDefined();
       });
-      expect(saveButton).not.toBeDisabled();
-      expect((keyInput as HTMLInputElement).value).toBe('secret-key');
-      expect(screen.queryByText('API key saved. Restart the app for the read-only server to start.')).toBeNull();
+      expect(generateButton).not.toBeDisabled();
+      expect(screen.queryByText(/copy it now/i)).toBeNull();
+    });
+
+    it('generates a key, posts the generate action, and shows the one-time secret', async () => {
+      mountApiMocks({ api_port: 7338 });
+      useInverterStore.setState({ developerMode: false });
+      apiPostMock.mockResolvedValueOnce({ ok: true, data: { api_key: 'GENERATED-SECRET-0123456789abcdefghij' } });
+      render(<SettingsPage />);
+
+      const generateButton = await screen.findByRole('button', { name: 'Generate API key' });
+      fireEvent.click(generateButton);
+
+      // The generate action carries the configured port, as the old
+      // key+port save did.
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key_generate: true, api_port: 7338 }));
+      // The secret is shown exactly once with its copy action…
+      await waitFor(() => expect(screen.getByText('New API key — copy it now, it will not be shown again:')).toBeDefined());
+      expect(screen.getByText('GENERATED-SECRET-0123456789abcdefghij')).toBeDefined();
+      // …and the configured metadata updates from the returned secret.
+      await waitFor(() => expect(screen.getByText(/ends ghij/)).toBeDefined());
     });
   });
 
@@ -401,9 +417,9 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       render(<SettingsPage />);
 
       const portInput = await screen.findByLabelText('Port');
-      const saveButton = screen.getByRole('button', { name: 'Save API Key' });
+      const generateButton = screen.getByRole('button', { name: /Generate (new )?API key/ });
       fireEvent.change(portInput, { target: { value: '' } });
-      fireEvent.click(saveButton);
+      fireEvent.click(generateButton);
 
       await waitFor(() => {
         expect(screen.getByText('API port cannot be blank')).toBeDefined();
