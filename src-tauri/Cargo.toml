@@ -70,7 +70,7 @@ parking_lot = "0.12"
 
 # TCP socket options (keepalive)
 socket2 = { version = "0.6.4", features = ["all"] }
-dirs = "6"
+dirs = "7"
 tokio-modbus = "0.17.0"
 
 [dev-dependencies]
