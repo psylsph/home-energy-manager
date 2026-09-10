@@ -1047,6 +1047,136 @@ pub struct SolarMeterBaseline {
     pub e_export_kwh: f64,
 }
 
+// ===========================================================================
+// Authenticated API credential verifier (remote-API hardening U1)
+// ===========================================================================
+
+/// Stored verifier for the authenticated external API bearer key.
+///
+/// The secret itself is never persisted: the owner generates it once in the
+/// UI (or via the local settings API), copies it into their integration, and
+/// HEM keeps only a salted SHA-256 verifier plus non-secret metadata.
+///
+/// `version` exists so the hash scheme can be upgraded later without
+/// misparsing older records; version 1 is `SHA-256(salt || secret)` hex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiCredential {
+    /// Verifier scheme version. Currently always 1.
+    pub version: u8,
+    /// Random per-credential salt, hex encoded.
+    pub salt_hex: String,
+    /// `SHA-256(salt || secret)`, hex encoded.
+    pub hash_hex: String,
+    /// Last four characters of the secret, so the UI can show
+    /// "ends 4f2a" without holding the credential.
+    pub last4: String,
+    /// Creation timestamp (unix seconds). Metadata only.
+    pub created_at: i64,
+}
+
+/// Length in bytes of the generated secret's random material. Encoded as
+/// unpadded base64url this yields the standard 43-character secret.
+const API_SECRET_BYTES: usize = 32;
+
+/// Length in bytes of the per-credential salt.
+const API_SALT_BYTES: usize = 16;
+
+/// Generate a fresh bearer secret and its stored verifier.
+///
+/// The first element is the one-time secret to show the user; the second is
+/// what HEM persists. The secret uses the platform CSPRNG via `getrandom`.
+pub fn generate_api_credential() -> (String, ApiCredential) {
+    let secret = generate_api_secret();
+    let credential = ApiCredential::from_secret(&secret);
+    (secret, credential)
+}
+
+/// Generate a fresh 43-character base64url secret from the CSPRNG.
+fn generate_api_secret() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let mut bytes = [0u8; API_SECRET_BYTES];
+    getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Constant-time equality for secret material.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
+impl ApiCredential {
+    /// Generate a fresh secret + verifier pair.
+    pub fn generate() -> (String, Self) {
+        generate_api_credential()
+    }
+
+    /// Build the verifier record for an existing secret.
+    pub fn from_secret(secret: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut salt = [0u8; API_SALT_BYTES];
+        getrandom::getrandom(&mut salt).expect("OS CSPRNG must be available");
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(secret.as_bytes());
+        let hash = hasher.finalize();
+        Self {
+            version: 1,
+            salt_hex: hex_encode(&salt),
+            hash_hex: hex_encode(&hash),
+            last4: last4_of(secret),
+            created_at: chrono::Utc::now().timestamp(),
+        }
+    }
+
+    /// Check a presented bearer token against this verifier in constant time.
+    pub fn verify(&self, presented: &str) -> bool {
+        use sha2::{Digest, Sha256};
+        if self.version != 1 {
+            return false;
+        }
+        let Ok(salt) = hex_decode(&self.salt_hex) else {
+            return false;
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(presented.as_bytes());
+        let candidate = hasher.finalize();
+        let Ok(expected) = hex_decode(&self.hash_hex) else {
+            return false;
+        };
+        constant_time_eq(&candidate, &expected)
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+    if !s.len().is_multiple_of(2) {
+        return Err(());
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| ()))
+        .collect()
+}
+
+fn last4_of(secret: &str) -> String {
+    secret
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -1362,14 +1492,21 @@ pub struct Settings {
     pub start_minimised: bool,
 
     // -- Authenticated API (external access) --
-    /// API key for the external API server.
-    /// When non-empty, a second HTTP server is started on `api_port` with
-    /// Bearer-token authentication. Battery writes require explicit opt-in.
-    /// The main server on `http_port` is unaffected (full access, no auth).
+    /// Legacy plaintext API key for the external API server.
+    ///
+    /// This field is a one-time migration state only: it authenticates until
+    /// the first successful request (or an explicit local rotation) converts
+    /// it into [`Self::api_credential`], after which it is cleared and the
+    /// plaintext is scrubbed from HEM-owned backup artifacts. New credentials
+    /// are always generated and stored as a verifier — never as text here.
     #[serde(default)]
     pub api_key: String,
+    /// Stored verifier for the generated external API credential.
+    /// When present this is authoritative and `api_key` must be empty.
+    #[serde(default)]
+    pub api_credential: Option<ApiCredential>,
     /// Port for the authenticated external API server (default 7338).
-    /// Only started when `api_key` is also non-empty. Set to 0 to disable.
+    /// Only started when a credential is also configured. Set to 0 to disable.
     #[serde(default = "default_api_port")]
     pub api_port: u16,
     /// Allow external Quick Actions. Existing API credentials remain read-only
@@ -1808,6 +1945,7 @@ impl Default for Settings {
             minimise_to_tray: false,
             start_minimised: false,
             api_key: String::new(),
+            api_credential: None,
             api_port: 7338,
             api_control_enabled: false,
             discharge_slots_backup: None,
@@ -1868,6 +2006,104 @@ impl Settings {
     fn settings_path() -> PathBuf {
         Self::settings_dir().join("settings.json")
     }
+
+    /// Whether any external API credential is configured (legacy plaintext
+    /// migration state or a generated verifier).
+    pub fn has_api_auth(&self) -> bool {
+        self.api_credential.is_some() || !self.api_key.is_empty()
+    }
+
+    /// The legacy plaintext secret that authenticates requests, if HEM is in
+    /// the one-time migration state. `None` once a verifier exists (verifier
+    /// precedence: the stale plaintext must never authenticate again) or when
+    /// no credential is configured.
+    pub fn authenticating_secret(&self) -> Option<String> {
+        if self.api_credential.is_some() {
+            return None;
+        }
+        if self.api_key.is_empty() {
+            return None;
+        }
+        Some(self.api_key.clone())
+    }
+
+    /// Replace the legacy plaintext API key with a generated verifier.
+    ///
+    /// Commits atomically through the normal settings save; if persistence
+    /// fails the caller must fail closed (the plaintext stays authoritative
+    /// on disk and nothing is half-migrated). On success the HEM-owned
+    /// backup/quarantine artifacts that still carry the old plaintext are
+    /// scrubbed: `.bak` is rewritten with the migrated content so the
+    /// rollback point survives without the secret, and `.corrupt`/`.tmp`
+    /// copies are deleted.
+    pub fn migrate_legacy_api_key(&mut self) -> Result<(), String> {
+        let Some(legacy) = self.authenticating_secret() else {
+            // Nothing to migrate (already verifier-backed or no credential):
+            // still ensure the plaintext field is empty.
+            self.api_key.clear();
+            return self.save();
+        };
+        self.api_credential = Some(ApiCredential::from_secret(&legacy));
+        self.api_key.clear();
+        self.save()?;
+        self.scrub_plaintext_artifacts(&legacy);
+        Ok(())
+    }
+
+    /// Scrub HEM-owned settings artifacts that may retain the migrated
+    /// plaintext. Deliberately deterministic: this is part of the migration
+    /// transaction, not best-effort cleanup. Only HEM-owned files in the
+    /// settings directory are touched — arbitrary user copies/backups are
+    /// the owner's responsibility and are never deleted here.
+    fn scrub_plaintext_artifacts(&self, legacy: &str) {
+        let dir = Self::settings_dir();
+        let bak = dir.join("settings.json.bak");
+        if let Ok(content) = std::fs::read_to_string(&bak) {
+            if content.contains(legacy) {
+                // Rewrite the rollback copy with the migrated content so the
+                // backup survives without retaining the credential.
+                match serde_json::to_string_pretty(self) {
+                    Ok(json) => {
+                        if let Err(e) = std::fs::write(&bak, json) {
+                            tracing::warn!("Failed to scrub plaintext from settings backup: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to serialize scrubbed backup: {e}"),
+                }
+            }
+        }
+        for name in ["settings.json.corrupt", "settings.json.tmp"] {
+            let path = dir.join(name);
+            match std::fs::read_to_string(&path) {
+                Ok(content) if content.contains(legacy) => {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!("Failed to remove plaintext-bearing {name}: {e}");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Apply owner-only permissions to a settings artifact (unix). Windows
+    /// ACLs are deliberately not manipulated: the profile directory already
+    /// restricts access to the user on supported Windows setups.
+    #[cfg(unix)]
+    fn restrict_permissions(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mut permissions = metadata.permissions();
+            if permissions.mode() & 0o777 != 0o600 {
+                permissions.set_mode(0o600);
+                if let Err(e) = std::fs::set_permissions(path, permissions) {
+                    tracing::warn!("Failed to restrict permissions on {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &Path) {}
 
     /// Copy an unparseable settings file aside so the user can recover their
     /// configuration by hand.
@@ -2012,6 +2248,8 @@ impl Settings {
         if let Some(parent) = path.parent() {
             sync_directory(parent)?;
         }
+        Self::restrict_permissions(&path);
+        Self::restrict_permissions(&bak_path);
 
         tracing::debug!("Settings saved to {}", path.display());
         Ok(())
@@ -2310,6 +2548,7 @@ mod tests {
             minimise_to_tray: false,
             start_minimised: false,
             api_key: String::new(),
+            api_credential: None,
             api_port: 0,
             api_control_enabled: false,
             discharge_slots_backup: Some(vec![
@@ -2901,6 +3140,7 @@ mod tests {
             minimise_to_tray: false,
             start_minimised: false,
             api_key: String::new(),
+            api_credential: None,
             api_port: 0,
             api_control_enabled: false,
             discharge_slots_backup: None,
@@ -4347,5 +4587,160 @@ mod tests {
         assert!(!cfg.daily_report_enabled);
         assert_eq!(cfg.daily_report_hour, 8);
         assert_eq!(cfg.daily_report_minute, 0);
+    }
+
+    // -- Authenticated API credential lifecycle (remote-API hardening U1) --
+
+    #[test]
+    fn api_credential_defaults_to_none() {
+        let s = Settings::default();
+        assert!(s.api_credential.is_none());
+        assert_eq!(s.api_key, "");
+        assert!(!s.has_api_auth());
+    }
+
+    #[test]
+    fn api_credential_generate_produces_strong_secret_and_working_verifier() {
+        let (secret, credential) = ApiCredential::generate();
+        // 32 random bytes as unpadded base64url → 43 chars, no whitespace.
+        assert_eq!(secret.len(), 43, "secret: {secret}");
+        assert!(!secret.contains(char::is_whitespace));
+        assert_eq!(credential.version, 1);
+        assert_eq!(credential.last4, secret[secret.len() - 4..]);
+        assert!(!credential.salt_hex.is_empty());
+        assert_ne!(credential.hash_hex, secret);
+        // The verifier accepts the exact secret and rejects everything else.
+        assert!(credential.verify(&secret));
+        assert!(!credential.verify("wrong-key"));
+        assert!(!credential.verify(&secret[..secret.len() - 1]));
+        // Two generations never share a salt or hash (CSPRNG).
+        let (_secret2, credential2) = ApiCredential::generate();
+        assert_ne!(credential.salt_hex, credential2.salt_hex);
+        assert_ne!(credential.hash_hex, credential2.hash_hex);
+    }
+
+    #[test]
+    fn api_credential_round_trips_through_settings_json_without_plaintext() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let (secret, credential) = ApiCredential::generate();
+            let settings = Settings {
+                api_credential: Some(credential),
+                ..Settings::default()
+            };
+            settings.save().expect("isolated settings save");
+            let loaded = Settings::load();
+            let stored = loaded.api_credential.expect("verifier persisted");
+            assert_eq!(stored.version, 1);
+            assert!(stored.verify(&secret));
+            assert!(!stored.verify("wrong-key"));
+            // The persisted file must not contain the secret material.
+            let on_disk =
+                std::fs::read_to_string(Settings::settings_dir().join("settings.json")).unwrap();
+            assert!(
+                !on_disk.contains(&secret),
+                "settings.json must never contain the generated secret"
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_plaintext_key_loads_as_migration_state() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let dir = Settings::settings_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            // Start from a fully-serialized default so no required field is
+            // missing, then inject the legacy plaintext key.
+            let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+            legacy["api_key"] = serde_json::json!("old-plaintext-key");
+            std::fs::write(dir.join("settings.json"), legacy.to_string()).unwrap();
+            let loaded = Settings::load();
+            assert!(loaded.api_credential.is_none());
+            assert_eq!(loaded.api_key, "old-plaintext-key");
+            assert!(loaded.has_api_auth());
+        });
+    }
+
+    #[test]
+    fn legacy_migration_replaces_plaintext_and_scrubs_hem_artifacts() {
+        crate::test_util::with_isolated_config_dir(|| {
+            let dir = Settings::settings_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            // Seed the migration state: live plaintext plus a stale .bak and
+            // a .corrupt quarantine that both carry the same plaintext.
+            let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+            legacy["api_key"] = serde_json::json!("old-plaintext-key");
+            std::fs::write(dir.join("settings.json"), legacy.to_string()).unwrap();
+            std::fs::write(dir.join("settings.json.bak"), legacy.to_string()).unwrap();
+            std::fs::write(dir.join("settings.json.corrupt"), legacy.to_string()).unwrap();
+
+            let mut loaded = Settings::load();
+            loaded
+                .migrate_legacy_api_key()
+                .expect("legacy migration must succeed");
+
+            assert!(loaded.api_key.is_empty(), "plaintext must be cleared");
+            let credential = loaded.api_credential.as_ref().expect("verifier created");
+            assert!(credential.verify("old-plaintext-key"));
+            assert!(!credential.verify("wrong-key"));
+
+            // Reload from disk: verifier authoritative, no plaintext anywhere
+            // in HEM-owned artifacts.
+            let reloaded = Settings::load();
+            assert!(reloaded.api_key.is_empty());
+            let stored = reloaded
+                .api_credential
+                .as_ref()
+                .expect("verifier persisted");
+            assert!(stored.verify("old-plaintext-key"));
+            for artifact in ["settings.json", "settings.json.bak"] {
+                let content = std::fs::read_to_string(dir.join(artifact)).unwrap();
+                assert!(
+                    !content.contains("old-plaintext-key"),
+                    "{artifact} must not retain the migrated plaintext"
+                );
+            }
+            assert!(!dir.join("settings.json.corrupt").exists());
+        });
+    }
+
+    #[test]
+    fn verifier_takes_precedence_over_stale_plaintext() {
+        let (_secret, credential) = ApiCredential::generate();
+        let settings = Settings {
+            api_key: "stale-plaintext".to_string(),
+            api_credential: Some(credential),
+            ..Settings::default()
+        };
+        // Auth state is verifier-only: the stale plaintext must be ignored.
+        assert!(settings.api_credential.is_some());
+        assert_eq!(settings.authenticating_secret(), None);
+    }
+
+    #[test]
+    fn authenticating_secret_returns_legacy_plaintext_before_migration() {
+        let settings = Settings {
+            api_key: "old-plaintext-key".to_string(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.authenticating_secret().as_deref(),
+            Some("old-plaintext-key")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_files_get_restrictive_permissions_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        crate::test_util::with_isolated_config_dir(|| {
+            let settings = Settings::default();
+            settings.save().expect("isolated settings save");
+            let dir = Settings::settings_dir();
+            let mode = std::fs::metadata(dir.join("settings.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "settings.json must be owner-only");
+        });
     }
 }
