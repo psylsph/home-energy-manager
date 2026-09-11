@@ -2260,15 +2260,23 @@ async fn forecast_plan_endpoint_degrades_to_no_plan() {
 /// exact Apply payload the UI posts to the existing control endpoints.
 #[tokio::test]
 async fn forecast_plan_endpoint_recommends_overnight_charge() {
+    use chrono::TimeZone;
     use givenergy_local::history::{ForecastValueRow, HistoryDb};
     use givenergy_local::inverter::model::InverterSnapshot;
+    use givenergy_local::server::create_router_with_forecast_now;
 
     let config = IsolatedConfig::enter();
     let state = Arc::new(AppState::new());
 
+    // Pin the request before the overnight window. Both forecast routes use
+    // this instant through the test router, while production still reads
+    // Local::now() once per request.
+    let now = chrono::Local
+        .with_ymd_and_hms(2024, 6, 15, 22, 0, 0)
+        .earliest()
+        .expect("valid fixed local forecast instant");
     // Cloudy forward forecast: 100 W/m² for tomorrow's daylight.
     let db = HistoryDb::open(&config.dir.join("history.db")).unwrap();
-    let now = chrono::Local::now();
     let now_ts = now.timestamp();
     let hour_start = now_ts - now_ts.rem_euclid(3600);
     // The full 72 h planning horizon, so the forward series always holds
@@ -2327,7 +2335,7 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
         ws.config.longitude = Some(-0.13);
     }
 
-    let router = create_router(state.clone());
+    let router = create_router_with_forecast_now(state.clone(), now);
 
     // Flux-like tariff via the existing settings endpoint.
     let (status, body) = post_json(
@@ -2358,10 +2366,9 @@ async fn forecast_plan_endpoint_recommends_overnight_charge() {
     // One-cycle sizing: the slot is the SHORTEST max-rate window that
     // holds the 20% floor until the next cheap-period start, so the end
     // sits inside the cheap period (strictly after its start, at or
-    // before its end). The exact minute is hour-of-day dependent — the
-    // handler reads the real clock against the seeded forward series —
-    // so the deterministic exact-minute minimality is pinned by the
-    // planner unit tests instead (fixed fixtures, injectable `now_ts`).
+    // before its end). The handler and its forward series share the fixed
+    // clock above; exact-minute minimality remains covered by the focused
+    // planner unit tests.
     let end = window["end"].as_str().expect("window end string");
     let (end_h, end_m) = {
         let parts: Vec<u32> = end.split(':').map(|p| p.parse().expect("HH:MM")).collect();

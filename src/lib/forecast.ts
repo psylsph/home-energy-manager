@@ -455,10 +455,10 @@ export type PlanRecommendation =
        *  nothing to offer (no_plan / no_charge_needed). */
       with_charge_series: [number, number][];
       /** Tomorrow's grid import under the recommended plan, kWh — the
-       *  window's grid draw plus the residual import of tomorrow's
-       *  what-if hours. Drives the Tomorrow "Expected import" tile so
-       *  the tile agrees with the plan instead of the uncharged
-       *  simulation. */
+       *  selected window's draw that falls tomorrow plus the residual
+       *  import of tomorrow's what-if hours. Drives the Tomorrow
+       *  "Expected import" tile so the tile agrees with the plan instead
+       *  of the uncharged simulation. */
       import_tomorrow_with_charge_kwh: number;
       /** Tomorrow's grid export under the recommended plan, kWh. */
       export_tomorrow_with_charge_kwh: number;

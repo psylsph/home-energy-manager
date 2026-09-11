@@ -65,6 +65,27 @@ pub struct AuthenticatedIdentity {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    create_router_at(state, None)
+}
+
+/// Build the normal router surface with a fixed forecast clock.
+///
+/// This is a deterministic integration-test seam: production callers use
+/// [`create_router`], whose forecast handlers read `Local::now()` once per
+/// request. Both forecast routes share the supplied instant so tests exercise
+/// the real HTTP/JSON surface without depending on wall-clock time.
+#[doc(hidden)]
+pub fn create_router_with_forecast_now(
+    state: Arc<AppState>,
+    now: chrono::DateTime<chrono::Local>,
+) -> Router {
+    create_router_at(state, Some(now))
+}
+
+fn create_router_at(
+    state: Arc<AppState>,
+    forecast_now: Option<chrono::DateTime<chrono::Local>>,
+) -> Router {
     use axum::response::IntoResponse;
 
     async fn not_found_404() -> impl IntoResponse {
@@ -77,6 +98,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+    let forecast_route = match forecast_now {
+        Some(now) => get(move |State(state): State<Arc<AppState>>| async move {
+            api::get_forecast_at(state, now).await
+        }),
+        None => get(api::get_forecast),
+    };
+    let forecast_plan_route = match forecast_now {
+        Some(now) => get(move |State(state): State<Arc<AppState>>| async move {
+            api::get_forecast_plan_at(state, now).await
+        }),
+        None => get(api::get_forecast_plan),
+    };
 
     Router::new()
         // Data endpoints
@@ -199,8 +232,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Weather (Open-Meteo integration)
         .route("/api/weather", get(api::get_weather).post(api::set_weather))
         .route("/api/weather/backfill", post(api::backfill_weather))
-        .route("/api/forecast", get(api::get_forecast))
-        .route("/api/forecast/plan", get(api::get_forecast_plan))
+        .route("/api/forecast", forecast_route)
+        .route("/api/forecast/plan", forecast_plan_route)
         // Reconnect control
         .route("/api/reconnect", post(api::post_reconnect))
         // Discovery
