@@ -131,9 +131,9 @@ curl --silent --show-error --fail-with-body --max-time 10 \
   "$HEM_API/api/control/force-discharge/stop"
 ```
 
-### Read the full inverter snapshot
+### Read the inverter snapshot
 
-Use this when you need detailed inverter measurements rather than the battery operating summary:
+Use this when you need detailed measurements beyond the battery operating summary. The response is a deliberately limited projection of live operating data — power flows, state of charge, temperatures, grid readings and today's energy counters — with `Cache-Control: no-store`. Internal identifiers, firmware details and per-module battery telemetry are never exposed; the response carries `observed_at` and `age_seconds` so you can reject stale data:
 
 ```bash
 curl --silent --show-error --fail-with-body --max-time 10 \
