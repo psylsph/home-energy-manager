@@ -66,6 +66,43 @@ pub(crate) fn window_overlap_segments<Tz: TimeZone>(
     segments
 }
 
+/// Return the portion of the absolute hour beginning at `timestamp` that
+/// falls on `date` in `timezone`. The result is a half-open interval in
+/// `[0.0, 1.0]` relative to the real 3,600-second bucket.
+///
+/// Local calendar days are converted at both midnight boundaries rather than
+/// treated as 24 elapsed hours, so the interval remains correct across DST and
+/// in zones whose UTC offset includes a fraction of an hour.
+pub(crate) fn local_day_overlap_segments<Tz: TimeZone>(
+    timestamp: i64,
+    date: NaiveDate,
+    timezone: &Tz,
+) -> Vec<(f64, f64)> {
+    let Some(hour_end) = timestamp.checked_add(3_600) else {
+        return Vec::new();
+    };
+    let Some(next_date) = date.checked_add_signed(Duration::days(1)) else {
+        return Vec::new();
+    };
+    let Some(day_start) = local_boundary_timestamp(timezone, date, 0, false) else {
+        return Vec::new();
+    };
+    let Some(day_end) = local_boundary_timestamp(timezone, next_date, 0, false) else {
+        return Vec::new();
+    };
+
+    let start = timestamp.max(day_start);
+    let end = hour_end.min(day_end);
+    if end > start {
+        vec![(
+            (start - timestamp) as f64 / 3_600.0,
+            (end - timestamp) as f64 / 3_600.0,
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Split an hourly bucket at the supplied active-window boundaries. The
 /// returned flag identifies intervals whose midpoint is inside an active
 /// segment. Endpoints are clamped because callers may combine absolute
@@ -156,7 +193,7 @@ mod tests {
     use chrono::{TimeZone, Timelike, Utc};
     use chrono_tz::{America::New_York, Australia::Adelaide, Europe::London};
 
-    use super::{local_boundary_timestamp, window_overlap_hours};
+    use super::{local_boundary_timestamp, local_day_overlap_segments, window_overlap_hours};
 
     #[test]
     fn overlap_handles_half_hour_bucket_crossing_local_midnight() {
@@ -185,6 +222,30 @@ mod tests {
         let overlap = window_overlap_hours(timestamp, 30, 150, &London);
 
         assert!((overlap - 0.5).abs() < f64::EPSILON, "overlap = {overlap}");
+    }
+
+    #[test]
+    fn local_day_overlap_uses_elapsed_dst_day_duration() {
+        let date = chrono::NaiveDate::from_ymd_opt(2025, 3, 30).unwrap();
+        let start = London
+            .with_ymd_and_hms(2025, 3, 30, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let end = London
+            .with_ymd_and_hms(2025, 3, 31, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+
+        let overlap_hours: f64 = (start..end)
+            .step_by(3_600)
+            .flat_map(|timestamp| local_day_overlap_segments(timestamp, date, &London))
+            .map(|(segment_start, segment_end)| segment_end - segment_start)
+            .sum();
+
+        assert_eq!(end - start, 23 * 3_600);
+        assert!((overlap_hours - 23.0).abs() < f64::EPSILON);
     }
 
     #[test]
