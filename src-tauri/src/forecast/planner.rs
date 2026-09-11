@@ -818,14 +818,25 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             chrono::DateTime::from_timestamp(ts, 0)
                 .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
         };
-        // "Tomorrow" is the calendar day after the PLANNING MOMENT, not
-        // `series.first() + 1 day`: when the plan runs in the last hour of
-        // the day the forward series starts at 00:00 tomorrow, so the old
-        // heuristic labelled the day-after-tomorrow as "tomorrow" and the
-        // window draw (on tomorrow) was never counted in tomorrow's import
-        // (flaky e2e `forecast_plan_endpoint_recommends_overnight_charge`
-        // after 23:00).
-        let tomorrow_date = local_date(inputs.now_ts).map(|d| d + chrono::Duration::days(1));
+        // The summary covers the calendar day the recommended charge runs
+        // on: "tomorrow" when planning in the evening, but the planning
+        // moment's own day when the plan runs between midnight and the
+        // window start (the strictly forward series then begins inside the
+        // night, so the window is "tonight"). The first occurrence's draw
+        // is counted in full — it is exactly the kWh the plan asks for,
+        // regardless of which calendar side of midnight the window's tail
+        // lands on — and the residual reads that same day from the full
+        // what-if horizon. Anchoring on the planning moment + 1 day
+        // instead dropped the draw whenever the plan ran after midnight
+        // but before the window start (flaky e2e
+        // `forecast_plan_endpoint_recommends_overnight_charge` shortly
+        // after midnight), just as the older `series.first() + 1 day`
+        // heuristic dropped it when the plan ran after 23:00.
+        let first_occurrence = first_reachable_occurrence(sim_hours, &window, inputs.now_ts).0;
+        let tomorrow_date = first_occurrence
+            .as_ref()
+            .and_then(|occ| local_date(occ.start_ts))
+            .or_else(|| local_date(inputs.now_ts).map(|d| d + chrono::Duration::days(1)));
         let (import_tw, export_tw) = match tomorrow_date {
             Some(td) => {
                 let is_t = |ts: i64| local_date(ts).is_some_and(|d| d == td);
@@ -841,18 +852,19 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
                     .filter(|h| is_t(h.timestamp))
                     .map(|h| h.export_kwh)
                     .sum();
-                let first_run = first_reachable_occurrence(sim_hours, &window, inputs.now_ts)
-                    .0
-                    .map(|occ| occ.run)
-                    .unwrap_or_default();
-                let first_charge_import: f64 = sim_hours
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, h)| first_run.contains(i) && is_t(h.timestamp))
-                    .map(|(_, h)| {
-                        inputs.params.max_charge_kw * window_overlap_hours(h.timestamp, &window)
+                let first_charge_import: f64 = first_occurrence
+                    .as_ref()
+                    .map(|occ| {
+                        occ.run
+                            .iter()
+                            .filter_map(|&i| sim_hours.get(i))
+                            .map(|h| {
+                                inputs.params.max_charge_kw
+                                    * window_overlap_hours(h.timestamp, &window)
+                            })
+                            .sum()
                     })
-                    .sum();
+                    .unwrap_or(0.0);
                 (first_charge_import + residual, export)
             }
             None => (0.0, 0.0),
