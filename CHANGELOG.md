@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.82.0] - 2026-09-11
+
+### Added
+
+- **API keys are generated for you and shown once.** The Remote / Mobile Network Access screen now creates a long random key instead of asking you to invent one, and HEM stores only a verifier, so the key cannot be read back from settings or backups. Existing keys keep working until you generate a replacement.
+- **Remote access settings take effect immediately.** Changing the port, listen address or allowed browser origins rebinds the running authenticated API without a restart, and fresh installs listen on this machine only until you explicitly widen them — installs configured before listen addresses existed keep their current behaviour, with a warning on the settings screen.
+- **The authenticated API resists abuse.** Failed sign-in attempts are rate limited, oversized requests are rejected, battery-control starts are budgeted per key, and security events and battery commands are recorded to a local audit trail without ever logging your key.
+- **Battery commands from integrations are reliable and honest.** Every start or stop returns a `command_id` you can poll until the inverter confirms it, a timed-out retry with the same idempotency key can no longer queue a second charge, and if the connection drops mid-command HEM stops the action when it recovers instead of leaving the battery forced.
+
+### Changed
+
+- **The external snapshot returns less.** `GET /api/snapshot` on the authenticated API now returns a deliberately limited operating view — power flows, battery state, temperatures and today's counters — instead of the full internal snapshot.
+- **Security-sensitive settings can only be changed on the machine running HEM.** The API key, port, listen address, browser origins and battery-control toggle are no longer writable through the unauthenticated network settings endpoint, so a visitor to your dashboard cannot grant themselves a key or switch on remote control.
+- **Integrations that start battery actions must send an idempotency key.** Every control POST now needs an `Idempotency-Key` header; see the [remote-control guide](REMOTE_CONTROL.md) for the exact format and retry semantics.
+
+### Fixed
+
+- **The Forecast page's Tomorrow numbers stay right after midnight.** Planning a charge window shortly after midnight no longer leaves that window's energy out of Tomorrow's import and export tiles, and the totals are also correct in time zones offset by half an hour and across daylight-saving changes.
+
 ## [0.81.0] - 2026-09-08
 
 ### Added
