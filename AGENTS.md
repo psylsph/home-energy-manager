@@ -199,9 +199,10 @@ Optional blocks are conditionally polled by device type: `EXTENDED_SLOTS_BLOCK` 
 ## Release process
 
 1. Bump version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` — `npm run check:versions` (gating step in CI and `npm test`) fails if the three drift.
-2. Update `CHANGELOG.md` with a new heading.
-3. Commit, then **immediately tag** (`vX.Y.Z`) matching the changelog heading exactly; push both. The `v*` tag triggers `.github/workflows/build.yml`, which runs `check-versions` as a gating job.
-4. GitHub Actions builds macOS (ARM + x64), Linux, Windows; platform jobs upload to a **draft** and a final `publish-release` job verifies every installer is present before publishing (issue #291). If it fails, fix and re-run — don't publish by hand.
+2. Re-pin the Proxmox bootstrap: update `SCRIPT_REF` in `scripts/proxmox/create-lxc.sh` to the new `vX.Y.Z`; bump `INSTALLER_SHA256` too (digest of `git show vX.Y.Z:scripts/proxmox/install.sh`) when `install.sh` changed. `tests/scripts/proxmox-lxc.test.sh` fails CI if the pin trails the version.
+3. Update `CHANGELOG.md` with a new heading.
+4. Commit, then **immediately tag** (`vX.Y.Z`) matching the changelog heading exactly; push both. The `v*` tag triggers `.github/workflows/build.yml`, which runs `check-versions` as a gating job.
+5. GitHub Actions builds macOS (ARM + x64), Linux, Windows; platform jobs upload to a **draft** and a final `publish-release` job verifies every installer is present before publishing (issue #291). If it fails, fix and re-run — don't publish by hand.
 
 ### Changelog style
 
