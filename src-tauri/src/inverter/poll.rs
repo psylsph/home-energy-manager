@@ -218,11 +218,15 @@ fn next_poll_delay_secs(configured_interval_secs: u64, timed_export_boundary_pen
 /// writes are applied. Restoration writes these values back. A value of
 /// `None` in an `Option<_>` field means "no previous value known" and the
 /// corresponding write is skipped.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ForceChargeRevert {
     /// Observational metadata shared by UI and authenticated API actions.
     /// It does not introduce automatic charge restoration at expiry.
     pub started_at_ms: i64,
+    /// Set when the action was started through the authenticated external
+    /// API (token fingerprint); drives recovery-stop permission (U5).
+    #[serde(default)]
+    pub external_owner: Option<String>,
     pub force_charge_slot_end_ms: Option<i64>,
     /// Whether the schedule charge flag (HR 20) was enabled before force charge.
     pub enable_charge: bool,
@@ -266,10 +270,14 @@ pub struct ForceChargeRevert {
 /// force-discharge writes are applied. Restoration writes these values back.
 /// A value of `None` in an `Option<_>` field means "no previous value known"
 /// and the corresponding write is skipped.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ForceDischargeRevert {
     /// Request timestamp; summary status must not treat older readback as confirmation.
     pub started_at_ms: i64,
+    /// Set when the action was started through the authenticated external
+    /// API (token fingerprint); drives recovery-stop permission (U5).
+    #[serde(default)]
+    pub external_owner: Option<String>,
     /// Whether the schedule charge flag (HR 20) was enabled before force discharge.
     pub enable_charge: bool,
     /// Whether the schedule discharge flag (HR 59) was enabled before force discharge.
@@ -413,6 +421,8 @@ pub struct AppState {
         Arc<crate::server::authenticated_lifecycle::AuthenticatedLifecycle>,
     /// Security/control audit trail (U3). Never exposed over HTTP.
     pub audit: Arc<crate::server::audit::AuditLog>,
+    /// Durable command/idempotency ledger for external Quick Actions (U5).
+    pub command_ledger: Arc<crate::server::external_commands::CommandLedger>,
     /// Rate limiters for the authenticated API (U3): failed authentications
     /// and reads per source address, starts and stops per credential
     /// identity. Fixed windows over purely synchronous access — the guard
@@ -597,6 +607,7 @@ impl AppState {
                 crate::server::authenticated_lifecycle::AuthenticatedLifecycle::new(),
             ),
             audit: Arc::new(crate::server::audit::AuditLog::new()),
+            command_ledger: Arc::new(crate::server::external_commands::CommandLedger::new()),
             auth_limiter: Arc::new(parking_lot::Mutex::new(
                 crate::server::ratelimit::RateLimiter::new(
                     crate::server::FAILED_AUTH_LIMIT,
@@ -1270,10 +1281,18 @@ fn take_pending_writes_for_owner(
 }
 
 async fn drain_write_batches(
+    state: &Arc<AppState>,
     client: &mut ModbusClient,
     pending: Vec<PendingWriteBatch>,
     inter_write_gap: Duration,
 ) {
+    // U5: the queued writes are being dispatched now — surface that to the
+    // command ledger so status never lags reality more than one drain pass.
+    // Failures surface later as missing readback (failed/unknown), which is
+    // the honest outcome for fire-and-forget batches.
+    if let Err(e) = state.command_ledger.mark_dispatched() {
+        tracing::warn!("Command ledger dispatch mark failed: {e}");
+    }
     drain_write_batches_with_gap(client, pending, inter_write_gap).await
 }
 
@@ -1604,6 +1623,22 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
     } else {
         None
     };
+
+    // U5: advance external command states from this fresh readback. The
+    // predicates mirror what a force action writes (Eco-mode charge /
+    // maximum-power discharge flags); evidence from before a command was
+    // created can never confirm it.
+    {
+        let evidence = crate::server::external_commands::ReadbackEvidence {
+            snapshot_ts_ms: snapshot.timestamp.saturating_mul(1000),
+            charge_active: snapshot.enable_charge && snapshot.battery_power_mode == 1,
+            discharge_active: snapshot.enable_discharge && snapshot.battery_power_mode == 0,
+            now_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        if let Err(e) = state.command_ledger.advance_readback(&evidence) {
+            tracing::warn!("Command ledger advance failed: {e}");
+        }
+    }
 
     // Broadcast to WebSocket subscribers (move, no clone).
     let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot)));
@@ -2016,7 +2051,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                         )
                     };
                     if !pending.is_empty() {
-                        drain_write_batches(&mut client, pending, write_gap).await;
+                        drain_write_batches(&state, &mut client, pending, write_gap).await;
                     }
 
                     // The consumer task handles stale frames - unmatched

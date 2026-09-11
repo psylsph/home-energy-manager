@@ -7,6 +7,7 @@ pub mod api;
 pub mod audit;
 pub mod authenticated_lifecycle;
 mod control_status;
+pub mod external_commands;
 mod external_control;
 pub mod external_snapshot;
 pub mod logs;
@@ -769,32 +770,40 @@ pub fn create_authenticated_router_with_origins(
         )
     }
 
-    let controls = Router::new()
+    // Starts require the explicit control-permission toggle (403 without).
+    let starts = Router::new()
         .route(
             "/api/control/force-charge",
             post(external_control::force_charge),
         )
         .route(
-            "/api/control/force-charge/stop",
-            post(external_control::force_charge_stop),
-        )
-        .route(
             "/api/control/force-discharge",
             post(external_control::force_discharge),
-        )
-        .route(
-            "/api/control/force-discharge/stop",
-            post(external_control::force_discharge_stop),
         )
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             external_control::require_control_permission,
         ));
+    // Stops are NOT permission-gated at the route layer: the adapters allow
+    // recovery of a HEM-owned external action even after the permission was
+    // revoked (U5/R10), while refusing everything else exactly like starts.
+    let stops = Router::new()
+        .route(
+            "/api/control/force-charge/stop",
+            post(external_control::force_charge_stop),
+        )
+        .route(
+            "/api/control/force-discharge/stop",
+            post(external_control::force_discharge_stop),
+        )
+        .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES));
 
     let router = Router::new()
-        .merge(controls)
+        .merge(starts)
+        .merge(stops)
         // U4: the external route serves the least-data projection, not the
+        // internal snapshot serializer used by the dashboard.
         // internal snapshot serializer used by the dashboard.
         .route(
             "/api/snapshot",
@@ -806,6 +815,14 @@ pub fn create_authenticated_router_with_origins(
         .route(
             "/api/control/status",
             get(control_status::get_status).layer(middleware::from_fn_with_state(
+                state.clone(),
+                limit_authenticated_reads,
+            )),
+        )
+        // U5: per-command status (accepted/queued/dispatched/confirmed/…).
+        .route(
+            "/api/commands/{command_id}",
+            get(external_commands::command_status).layer(middleware::from_fn_with_state(
                 state.clone(),
                 limit_authenticated_reads,
             )),

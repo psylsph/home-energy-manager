@@ -876,6 +876,7 @@ async fn capture_force_charge_revert(
 
     Some(ForceChargeRevert {
         started_at_ms: 0,
+        external_owner: None,
         force_charge_slot_end_ms: None,
         enable_charge: snap.enable_charge,
         enable_discharge: snap.enable_discharge,
@@ -1038,6 +1039,7 @@ async fn capture_force_discharge_revert(
 
     Some(ForceDischargeRevert {
         started_at_ms: 0,
+        external_owner: None,
         enable_charge: snap.enable_charge,
         enable_discharge: snap.enable_discharge,
         discharge_rate: Some(snap.discharge_rate),

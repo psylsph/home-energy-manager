@@ -647,6 +647,7 @@ pub fn run() {
             // lifecycle manager so settings changes can rebind/stop it live
             // (U2 hardening). Read-only unless the user opts in to external
             // battery control. An empty key means no credential configured.
+            reconcile_external_commands(&state);
             {
                 let ro_state = state.clone();
                 let desired = api_config.clone();
@@ -687,6 +688,34 @@ pub fn run() {
 // ---------------------------------------------------------------------------
 
 /// Parse a `--port <N>` argument from the CLI args.
+/// Startup reconciliation for external commands (U5): commands still
+/// in-progress from a previous process can never be auto-resumed — they are
+/// marked `unknown` and surfaced loudly so the operator can inspect the
+/// inverter through the app's own UI.
+fn reconcile_external_commands(state: &Arc<AppState>) {
+    match state.command_ledger.reconcile_startup() {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::error!(
+                "{n} external command(s) were left in progress by the previous session; \
+                 they are now marked unknown. Inspect the inverter state in the app."
+            );
+            if let Err(e) = state.audit.record(crate::server::audit::AuditEvent {
+                kind: "startup_reconciliation",
+                actor: None,
+                source: None,
+                method: None,
+                path: None,
+                outcome: "unknown",
+                detail: Some(format!("{n} command(s) stranded by restart")),
+            }) {
+                tracing::warn!("Audit write failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Command ledger startup reconciliation failed: {e}"),
+    }
+}
+
 /// Build the desired authenticated-listener configuration from settings.
 /// `None` = the listener should not run (no credential, or port disabled).
 /// The bind address falls back to the legacy all-interfaces default when no
@@ -938,6 +967,7 @@ pub fn run_headless(args: &[String]) {
 
         // Start the authenticated external API listener through its
         // lifecycle manager (see the Tauri path above).
+        reconcile_external_commands(&state);
         {
             let ro_state = state.clone();
             let desired = api_config.clone();
