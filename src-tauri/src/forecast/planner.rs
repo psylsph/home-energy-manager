@@ -2030,6 +2030,83 @@ mod tests {
         );
     }
 
+    /// Mirror of the late-evening regression for the other boundary: when
+    /// the plan runs between midnight and the window start, the forward
+    /// series starts mid-night and the recommended window falls on the
+    /// PLANNING MOMENT'S OWN calendar day ("tonight", not "tomorrow").
+    /// Anchoring the tile on the planning moment + 1 day then drops the
+    /// window draw entirely (flaky e2e
+    /// `forecast_plan_endpoint_recommends_overnight_charge` shortly after
+    /// midnight): the tile read the following day's residual only. The
+    /// summary must cover the day the charge actually runs on, with the
+    /// window draw counted in full exactly once.
+    #[test]
+    fn tomorrow_import_counts_the_window_draw_when_planning_after_midnight() {
+        let p = params();
+        let solar = {
+            let mut s = [0.0; 24];
+            for slot in s.iter_mut().take(17).skip(9) {
+                *slot = 1.4;
+            }
+            s
+        };
+        let cons: [f64; 24] =
+            std::array::from_fn(|h| if (17..=21).contains(&h) { 1.0 } else { 0.45 });
+        let (_sim_full, sim_hours_full) = fixed_72h(46.0, solar, cons, &p);
+        // Strictly forward from 00:14: the payload drops the current hour,
+        // so the series begins at 01:00 — exactly the shape the e2e suite
+        // hits just after midnight.
+        let sim_hours = &sim_hours_full[1..];
+        let sim = simulate_battery(sim_hours, &p);
+        let flux = flux_tariff();
+        let now_ts = pinned_now_ts(sim_hours, 0, 14);
+        let inputs = PlanInputs {
+            simulation: &sim,
+            sim_hours: Some(sim_hours),
+            params: &p,
+            import_tariff: Some(&flux),
+            target_soc_pct: 20.0,
+            consumption_tomorrow_kwh: 12.0,
+            consumption_sufficient: true,
+            now_ts,
+            current_soc_pct: 46.0,
+        };
+        let rec = plan_overnight_charge(&inputs);
+        let PlanRecommendation::Charge {
+            kwh,
+            window,
+            import_tomorrow_with_charge_kwh,
+            ..
+        } = rec
+        else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert!(kwh > 0.0);
+        // The recommended window is TONIGHT: its start lies on the
+        // planning moment's own calendar day.
+        let planning_date = chrono::DateTime::from_timestamp(now_ts, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        let selected = first_reachable_occurrence(sim_hours, &window, now_ts)
+            .0
+            .expect("a reachable window occurrence after midnight");
+        let window_start_date = chrono::DateTime::from_timestamp(selected.start_ts, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        assert_eq!(
+            window_start_date, planning_date,
+            "fixture must pin the window on the planning moment's own day"
+        );
+        assert!(
+            import_tomorrow_with_charge_kwh >= kwh - 1e-6,
+            "tomorrow import ({import_tomorrow_with_charge_kwh}) must include the window draw ({kwh}) even when planning after midnight"
+        );
+        // ... and exactly once — not once per night.
+        assert!(import_tomorrow_with_charge_kwh < 2.0 * kwh);
+    }
+
     #[test]
     fn charge_recommendation_exposes_with_charge_series() {
         let p = params();
