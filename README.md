@@ -234,9 +234,9 @@ A separate HTTP server (default port **7338**, Bearer-token authenticated) lets 
 
 ### Setup
 
-1. **Settings → Remote / Mobile Network Access → Authenticated API**: set an API key (long and random) and port, then save and restart HEM to start the server.
-2. Reading data needs only the key. To allow battery writes, toggle on **Allow battery control through the authenticated API** — it applies immediately (off by default, including after upgrades; disabling does not stop an action already accepted).
-3. Bearer tokens are not encrypted over plain HTTP — use a trusted network, VPN, or TLS-terminating reverse proxy.
+1. **Settings → Remote / Mobile Network Access → Authenticated API**: click **Generate API key** (shown once — copy it), choose a port and listen address. New installs listen on `127.0.0.1` only; **Apply network settings** rebinds the running listener without a restart (only *starting* the API for the first time on an older install needs an app restart).
+2. Reading data needs only the key. To allow battery writes, toggle on **Allow battery control through the authenticated API** — it applies immediately (off by default, including after upgrades). A started action can still be stopped remotely after revocation; revocation never strands the inverter in a forced mode.
+3. These settings can only be changed from the machine running HEM, and Bearer tokens are not encrypted over plain HTTP — prefer a listen address of `127.0.0.1` behind a trusted reverse proxy or VPN; direct LAN exposure is an explicit compatibility choice.
 
 ### Endpoints
 
@@ -244,30 +244,36 @@ A separate HTTP server (default port **7338**, Bearer-token authenticated) lets 
 |---|---|---|---|
 | GET | `/api/snapshot` | None | No |
 | GET | `/api/control/status` | None | No |
+| GET | `/api/commands/{command_id}` | None | No |
 | POST | `/api/control/force-charge` | `{"minutes":60}` | Yes |
-| POST | `/api/control/force-charge/stop` | None | Yes |
+| POST | `/api/control/force-charge/stop` | None | Recovery always allowed; otherwise yes |
 | POST | `/api/control/force-discharge` | `{"minutes":60}` | Yes |
-| POST | `/api/control/force-discharge/stop` | None | Yes |
+| POST | `/api/control/force-discharge/stop` | None | Recovery always allowed; otherwise yes |
 
-Starts act immediately (duration 1–1439 minutes; extra fields are rejected). Stop requests need no body. The actions reuse the Quick Action handlers exactly: same model-aware registers, restore behaviour, configured power limits, and mutual exclusion (stop one direction before starting the other). A `200` response means **accepted and queued**, not confirmed by the inverter. Other errors: `400` invalid input or refused action, `401` bad key, `403` control disabled, `409` no inverter snapshot yet.
+Every POST needs an `Idempotency-Key` header (16–128 characters; a UUID is ideal). **Retries must reuse the same key** — HEM replays the original response instead of queuing anything; the same key with a different payload is rejected with `409`. Starts act immediately (duration 1–1439 minutes; extra fields are rejected), and a start while the same action is already running returns `409` with the running command's id. The actions reuse the Quick Action handlers exactly: same model-aware registers, restore behaviour, configured power limits, and mutual exclusion (stop one direction before starting the other).
+
+A mutation response carries a `command_id` meaning **accepted and queued** — not confirmed by the inverter. Poll `GET /api/commands/{command_id}` until the state is `readback_confirmed` (`failed`, `expired` and `unknown` are the honest alternatives). Other errors: `400` invalid input, `401` bad key, `403` control disabled, `409` no inverter snapshot yet or idempotency conflict, `429` rate limited (with `Retry-After`).
 
 ```bash
-HEM_API='http://192.168.1.100:7338'
+HEM_API='http://localhost:7338'
 HEM_KEY='replace-with-your-key'
+IDEM_KEY="$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
 
 curl --fail-with-body "$HEM_API/api/control/force-charge" \
-  -H "Authorization: Bearer $HEM_KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $HEM_KEY" -H "Idempotency-Key: $IDEM_KEY" \
+  -H 'Content-Type: application/json' \
   --data '{"minutes":60}'
 
 curl --fail-with-body -X POST "$HEM_API/api/control/force-charge/stop" \
-  -H "Authorization: Bearer $HEM_KEY"
+  -H "Authorization: Bearer $HEM_KEY" -H "Idempotency-Key: $IDEM_KEY"
 
 curl --fail-with-body "$HEM_API/api/control/force-discharge" \
-  -H "Authorization: Bearer $HEM_KEY" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $HEM_KEY" -H "Idempotency-Key: $IDEM_KEY" \
+  -H 'Content-Type: application/json' \
   --data '{"minutes":30}'
 
 curl --fail-with-body -X POST "$HEM_API/api/control/force-discharge/stop" \
-  -H "Authorization: Bearer $HEM_KEY"
+  -H "Authorization: Bearer $HEM_KEY" -H "Idempotency-Key: $IDEM_KEY"
 
 curl --fail-with-body "$HEM_API/api/control/status" \
   -H "Authorization: Bearer $HEM_KEY"

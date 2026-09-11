@@ -1022,6 +1022,7 @@ async fn test_reset_clears_schedule_state_and_force_reverts() {
     *state.force_charge_revert.lock().await =
         Some(givenergy_local::inverter::poll::ForceChargeRevert {
             started_at_ms: 0,
+            external_owner: None,
             force_charge_slot_end_ms: None,
             enable_charge: true,
             enable_discharge: false,
@@ -1037,6 +1038,7 @@ async fn test_reset_clears_schedule_state_and_force_reverts() {
     *state.force_discharge_revert.lock().await =
         Some(givenergy_local::inverter::poll::ForceDischargeRevert {
             started_at_ms: 0,
+            external_owner: None,
             enable_charge: false,
             enable_discharge: true,
             discharge_rate: Some(100),

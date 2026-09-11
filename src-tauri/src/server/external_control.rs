@@ -16,12 +16,41 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api;
+use super::external_commands::Reservation;
 use super::{audit_control_event_or_block, AuthenticatedIdentity};
 use crate::server::audit::AuditEvent;
 use crate::{inverter::poll::AppState, settings::Settings};
 
 /// The authenticated identity attached by the auth middleware (present on
 /// every request that reached permission validation).
+/// The required `Idempotency-Key` header value (U6). Every external
+/// mutation must carry one: retries reuse the same key and are replayed or
+/// resolved against the running command; a missing key is refused before
+/// any state changes.
+fn idempotency_key(request: &Request) -> Result<String, Box<Response>> {
+    match request
+        .headers()
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(key) if (16..=128).contains(&key.len()) && !key.contains(char::is_whitespace) => {
+            Ok(key.to_string())
+        }
+        Some(_) => Err(Box::new((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false,
+            "error": "Idempotency-Key must be 16-128 characters without whitespace (a UUID is ideal)"})),
+        )
+            .into_response())),
+        None => Err(Box::new((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false,
+            "error": "An Idempotency-Key header is required for control actions; reuse the same key to retry safely"})),
+        )
+            .into_response())),
+    }
+}
+
 fn identity(request: &Request) -> String {
     request
         .extensions()
@@ -173,87 +202,243 @@ async fn duration_body(
     }
 }
 
-pub async fn force_charge(State(state): State<Arc<AppState>>, request: Request) -> Response {
-    let fingerprint = identity(&request);
-    let (minutes, body) = duration_body(request).await;
-    match body {
-        Ok(body) => {
-            if let Some(response) = check_start_limit(&state, &fingerprint) {
-                return response;
-            }
-            if let Some(response) = audit_action(
-                &state,
-                &fingerprint,
-                "action_start",
-                Some(format!(
-                    "force_charge minutes={}",
-                    minutes.unwrap_or_default()
-                )),
-            ) {
-                return response;
-            }
-            api::force_charge(State(state), Some(Json(body)))
-                .await
+/// Shared start-adapter body: limits, reservation, fail-closed audit,
+/// handler delegation, command state bookkeeping and recovery baseline.
+async fn run_start(
+    state: Arc<AppState>,
+    fingerprint: String,
+    idem_key: String,
+    action: &'static str,
+    minutes: u64,
+) -> Response {
+    if let Some(response) = check_start_limit(&state, &fingerprint) {
+        return response;
+    }
+    let reservation = match state.command_ledger.reserve_start(
+        &fingerprint,
+        action,
+        minutes,
+        idem_key.as_str(),
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(reservation) => reservation,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": e})),
+            )
                 .into_response()
         }
-        Err(error) => error.into_response(),
+    };
+    let command_id = match reservation {
+        Reservation::Accepted { command_id } => command_id,
+        Reservation::Replayed { response } => return replay_response(response),
+        Reservation::InProgress { command_id } => return in_progress_response(command_id),
+        Reservation::Conflict {
+            existing_command_id,
+        } => return conflict_response(existing_command_id),
+    };
+    if let Some(response) = audit_action(
+        &state,
+        &fingerprint,
+        "action_start",
+        Some(format!("{action} minutes={minutes}")),
+    ) {
+        let _ = state.command_ledger.mark_state(&command_id, "failed");
+        return response;
     }
+    // Force Discharge owns the no-snapshot guard for external callers: the
+    // UI cannot offer Quick Actions before its first snapshot, and an
+    // unknown restore baseline must never be created.
+    if action == "force_discharge" && state.latest_snapshot.lock().await.is_none() {
+        let _ = state.command_ledger.mark_state(&command_id, "failed");
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok":false,
+            "error":"Force Discharge requires an inverter snapshot before it can start"})),
+        )
+            .into_response();
+    }
+    let (status, Json(mut response_body)) = if action == "force_discharge" {
+        api::force_discharge(
+            State(state.clone()),
+            Some(Json(json!({"minutes": minutes}))),
+        )
+        .await
+    } else {
+        api::force_charge(
+            State(state.clone()),
+            Some(Json(json!({"minutes": minutes}))),
+        )
+        .await
+    };
+    response_body["command_id"] = Value::String(command_id.clone());
+    if status.is_success() {
+        let _ = state.command_ledger.mark_state(&command_id, "queued");
+        // Mark the in-memory action as externally owned: a revoked start
+        // permission still allows recovery of this action (U5 recovery
+        // stops), while a read-only credential gains nothing.
+        if action == "force_charge" {
+            if let Some(revert) = state.force_charge_revert.lock().await.as_mut() {
+                revert.external_owner = Some(fingerprint.clone());
+            }
+        } else if let Some(revert) = state.force_discharge_revert.lock().await.as_mut() {
+            revert.external_owner = Some(fingerprint.clone());
+        }
+        record_recovery_baseline(&state, &command_id, action).await;
+        store_envelope(&state, &command_id, status, &response_body);
+    } else {
+        let _ = state.command_ledger.finish(
+            &command_id,
+            "failed",
+            &json!({"status": status.as_u16(), "body": response_body.clone()}).to_string(),
+        );
+    }
+    (status, Json(response_body)).into_response()
+}
+
+pub async fn force_charge(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let fingerprint = identity(&request);
+    let idem_key = match idempotency_key(&request) {
+        Ok(key) => key,
+        Err(response) => return *response,
+    };
+    let (minutes, body) = duration_body(request).await;
+    // The validated body is rebuilt inside run_start; here we only need the
+    // parse/validation side effect.
+    if let Err(error) = body {
+        return error.into_response();
+    }
+    let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
+    run_start(state, fingerprint, idem_key, "force_charge", minutes_u64).await
 }
 
 pub async fn force_discharge(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let fingerprint = identity(&request);
+    let idem_key = match idempotency_key(&request) {
+        Ok(key) => key,
+        Err(response) => return *response,
+    };
     let (minutes, body) = duration_body(request).await;
-    match body {
-        Ok(body) => {
-            // The UI cannot offer Quick Actions before its first snapshot.
-            // External callers have no UI guard, so refuse an unknown restore
-            // baseline here rather than using the handler's legacy fallback.
-            if state.latest_snapshot.lock().await.is_none() {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({"ok":false,
-                    "error":"Force Discharge requires an inverter snapshot before it can start"})),
-                )
-                    .into_response();
-            }
-            if let Some(response) = check_start_limit(&state, &fingerprint) {
-                return response;
-            }
-            if let Some(response) = audit_action(
-                &state,
-                &fingerprint,
-                "action_start",
-                Some(format!(
-                    "force_discharge minutes={}",
-                    minutes.unwrap_or_default()
-                )),
-            ) {
-                return response;
-            }
-            api::force_discharge(State(state), Some(Json(body)))
-                .await
-                .into_response()
-        }
-        Err(error) => error.into_response(),
+    // The validated body is rebuilt inside run_start; here we only need the
+    // parse/validation side effect.
+    if let Err(error) = body {
+        return error.into_response();
     }
+    let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
+    run_start(state, fingerprint, idem_key, "force_discharge", minutes_u64).await
 }
 
-/// External stop adapter: per-identity stop budget plus fail-closed audit.
-/// The underlying handler is the shared Quick Action stop.
-pub async fn force_charge_stop(State(state): State<Arc<AppState>>, request: Request) -> Response {
-    let fingerprint = identity(&request);
+/// Stops are conditional on permission: with the control toggle on they
+/// behave exactly as before (idempotent stop of whatever is active). With
+/// the toggle off they are allowed ONLY as recovery of a HEM-owned external
+/// action — a compromised read-only credential cannot stop arbitrary local
+/// actions, but a revoked external action always has a remote recovery path.
+async fn run_stop(
+    state: Arc<AppState>,
+    fingerprint: String,
+    idem_key: String,
+    action: &'static str,
+) -> Response {
+    let settings = Settings::load_async().await;
+    if !settings.api_control_enabled {
+        let externally_owned = match action {
+            "force_charge" => state
+                .force_charge_revert
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|revert| revert.external_owner.clone()),
+            _ => state
+                .force_discharge_revert
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|revert| revert.external_owner.clone()),
+        };
+        if externally_owned.is_none() {
+            audit_denial(
+                &state,
+                AuditEvent {
+                    kind: "authz_denied",
+                    actor: Some(fingerprint.clone()),
+                    source: None,
+                    method: Some("POST".to_string()),
+                    path: Some(format!("/api/control/{action}/stop")),
+                    outcome: "denied",
+                    detail: Some("control permission off; no external action owned".into()),
+                },
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"ok":false,
+                "error":"External battery control is disabled"})),
+            )
+                .into_response();
+        }
+    }
     if let Some(response) = check_stop_limit(&state, &fingerprint) {
         return response;
     }
+    let reservation = match state.command_ledger.reserve_stop(
+        &fingerprint,
+        action,
+        idem_key.as_str(),
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(reservation) => reservation,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": e})),
+            )
+                .into_response()
+        }
+    };
+    let command_id = match reservation {
+        Reservation::Accepted { command_id } => command_id,
+        Reservation::Replayed { response } => return replay_response(response),
+        Reservation::InProgress { command_id } => return in_progress_response(command_id),
+        Reservation::Conflict {
+            existing_command_id,
+        } => return conflict_response(existing_command_id),
+    };
     if let Some(response) = audit_action(
         &state,
         &fingerprint,
         "action_stop",
-        Some("force_charge".to_string()),
+        Some(action.to_string()),
     ) {
+        let _ = state.command_ledger.mark_state(&command_id, "failed");
         return response;
     }
-    api::force_charge_stop(State(state)).await.into_response()
+    let (status, Json(mut response_body)) = if action == "force_charge" {
+        api::force_charge_stop(State(state.clone())).await
+    } else {
+        api::force_discharge_stop(State(state.clone())).await
+    };
+    response_body["command_id"] = Value::String(command_id.clone());
+    if status.is_success() {
+        let _ = state.command_ledger.mark_state(&command_id, "queued");
+        store_envelope(&state, &command_id, status, &response_body);
+    } else {
+        let _ = state.command_ledger.finish(
+            &command_id,
+            "failed",
+            &json!({"status": status.as_u16(), "body": response_body.clone()}).to_string(),
+        );
+    }
+    (status, Json(response_body)).into_response()
+}
+
+/// External stop adapter: per-identity stop budget plus fail-closed audit.
+pub async fn force_charge_stop(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let fingerprint = identity(&request);
+    let idem_key = match idempotency_key(&request) {
+        Ok(key) => key,
+        Err(response) => return *response,
+    };
+    run_stop(state, fingerprint, idem_key, "force_charge").await
 }
 
 /// See [`force_charge_stop`].
@@ -262,20 +447,71 @@ pub async fn force_discharge_stop(
     request: Request,
 ) -> Response {
     let fingerprint = identity(&request);
-    if let Some(response) = check_stop_limit(&state, &fingerprint) {
-        return response;
-    }
-    if let Some(response) = audit_action(
-        &state,
-        &fingerprint,
-        "action_stop",
-        Some("force_discharge".to_string()),
-    ) {
-        return response;
-    }
-    api::force_discharge_stop(State(state))
-        .await
+    let idem_key = match idempotency_key(&request) {
+        Ok(key) => key,
+        Err(response) => return *response,
+    };
+    run_stop(state, fingerprint, idem_key, "force_discharge").await
+}
+
+fn replay_response(response: Value) -> Response {
+    let status = response
+        .get("status")
+        .and_then(|v| v.as_u64())
+        .and_then(|code| StatusCode::from_u16(code as u16).ok())
+        .unwrap_or(StatusCode::OK);
+    let body = response.get("body").cloned().unwrap_or(Value::Null);
+    (status, Json(body)).into_response()
+}
+
+fn in_progress_response(command_id: String) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"ok": false,
+        "error": "A request with this Idempotency-Key is still in progress",
+        "command_id": command_id})),
+    )
         .into_response()
+}
+
+fn conflict_response(existing_command_id: String) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"ok": false,
+        "error": "Idempotency key already used with a different request",
+        "command_id": existing_command_id})),
+    )
+        .into_response()
+}
+
+/// Snapshot the in-memory revert as the durable recovery baseline for a
+/// start command, so a restart can reconcile instead of guessing.
+async fn record_recovery_baseline(state: &Arc<AppState>, command_id: &str, action: &str) {
+    let recovery = if action == "force_charge" {
+        state
+            .force_charge_revert
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|revert| serde_json::to_string(revert).ok())
+    } else {
+        state
+            .force_discharge_revert
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|revert| serde_json::to_string(revert).ok())
+    };
+    if let Some(recovery) = recovery {
+        let _ = state.command_ledger.record_recovery(command_id, &recovery);
+    }
+}
+
+fn store_envelope(state: &Arc<AppState>, command_id: &str, status: StatusCode, body: &Value) {
+    let envelope = json!({"status": status.as_u16(), "body": body});
+    let _ = state
+        .command_ledger
+        .store_response(command_id, &envelope.to_string());
 }
 
 #[cfg(test)]
@@ -313,6 +549,9 @@ mod tests {
         settings.api_key = "integration-key".into();
         settings.save().unwrap();
         let state = Arc::new(AppState::new());
+        // A new AppState models a fresh session: the durable ledger survives
+        // it by design, so reconcile exactly like a real startup does.
+        state.command_ledger.reconcile_startup().unwrap();
         let (status, _) = api::update_settings(
             State(state.clone()),
             Json(json!({"api_control_enabled": enabled})),
@@ -327,21 +566,45 @@ mod tests {
         state
     }
 
+    /// Sequential key suffix so every request is a fresh idempotency scope
+    /// unless a test supplies an explicit key.
+    fn next_key() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!("test-key-{:016x}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
     async fn request(
         state: Arc<AppState>,
         action: &str,
         token: Option<&str>,
         body: Value,
     ) -> (StatusCode, Value) {
+        request_with_key(state, action, token, &next_key(), body).await
+    }
+
+    async fn request_with_key(
+        state: Arc<AppState>,
+        action: &str,
+        token: Option<&str>,
+        key: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
         let mut request = Request::builder()
             .method("POST")
             .uri(format!("/api/control/{action}"))
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            .header("Idempotency-Key", key);
         if let Some(token) = token {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
+        let payload = if body.is_null() {
+            String::new()
+        } else {
+            body.to_string()
+        };
         let response = create_authenticated_router(state)
-            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .oneshot(request.body(Body::from(payload)).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -725,6 +988,7 @@ mod tests {
                     three_phase_force_charge_enable: None,
                     three_phase_ac_charge_enable: None,
                     battery_pause_mode: None,
+                    external_owner: None,
                 });
             let value = read_status().await;
             assert_eq!(value["control_source"], "force_charge");
@@ -745,6 +1009,7 @@ mod tests {
                     force_discharge_slot_end_ms: None,
                     battery_pause_mode: 0,
                     battery_pause_slot: Default::default(),
+                    external_owner: None,
                 });
             let value = read_status().await;
             assert_eq!(value["control_source"], "force_discharge");
@@ -828,11 +1093,12 @@ mod tests {
                 )
                 .await
                 .0,
-                StatusCode::FORBIDDEN
+                StatusCode::OK,
+                "revoked start permission must still permit recovery of the owned action"
             );
             assert!(
-                state.force_charge_revert.lock().await.is_some(),
-                "revoking access does not stop an accepted action"
+                state.force_charge_revert.lock().await.is_none(),
+                "the recovery stop consumed the accepted action"
             );
             let _ = api::update_settings(State(state.clone()), Json(json!({"api_key":""}))).await;
             assert_eq!(
@@ -840,6 +1106,189 @@ mod tests {
                     .await
                     .0,
                 StatusCode::UNAUTHORIZED
+            );
+        })
+        .await;
+    }
+
+    /// U6: the Idempotency-Key header is mandatory on all four mutations.
+    #[tokio::test]
+    async fn external_mutations_require_an_idempotency_key() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(true).await;
+            for action in ACTIONS {
+                let mut request = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/control/{action}"))
+                    .header("Content-Type", "application/json");
+                if let Some(token) = Some("integration-key") {
+                    request = request.header("Authorization", format!("Bearer {token}"));
+                }
+                let payload = if action.ends_with("stop") {
+                    String::new()
+                } else {
+                    r#"{"minutes":30}"#.to_string()
+                };
+                let response = create_authenticated_router(state.clone())
+                    .oneshot(request.body(Body::from(payload)).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{action}");
+            }
+            assert!(
+                state.pending_writes.lock().await.is_empty(),
+                "no writes without a key"
+            );
+        })
+        .await;
+    }
+
+    /// Retrying with the same key replays the original response and never
+    /// enqueues a second command.
+    #[tokio::test]
+    async fn external_replay_with_same_key_returns_original_response() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(true).await;
+            let first = request_with_key(
+                state.clone(),
+                "force-charge",
+                Some("integration-key"),
+                "retry-key-00000001",
+                json!({"minutes":30}),
+            )
+            .await;
+            assert_eq!(first.0, StatusCode::OK);
+            let command_id = first.1["command_id"].as_str().unwrap().to_string();
+            state.pending_writes.lock().await.clear();
+
+            let second = request_with_key(
+                state.clone(),
+                "force-charge",
+                Some("integration-key"),
+                "retry-key-00000001",
+                json!({"minutes":30}),
+            )
+            .await;
+            assert_eq!(second.0, StatusCode::OK);
+            assert_eq!(
+                second.1["command_id"], command_id,
+                "replay must return the original command"
+            );
+            assert!(
+                state.pending_writes.lock().await.is_empty(),
+                "replay must not enqueue new writes"
+            );
+        })
+        .await;
+    }
+
+    /// The same key with a different payload conflicts without changing
+    /// command state.
+    #[tokio::test]
+    async fn external_conflicting_key_usage_returns_409() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(true).await;
+            let first = request_with_key(
+                state.clone(),
+                "force-charge",
+                Some("integration-key"),
+                "conflict-key-000001",
+                json!({"minutes":30}),
+            )
+            .await;
+            assert_eq!(first.0, StatusCode::OK);
+            state.pending_writes.lock().await.clear();
+
+            let second = request_with_key(
+                state.clone(),
+                "force-charge",
+                Some("integration-key"),
+                "conflict-key-000001",
+                json!({"minutes":90}),
+            )
+            .await;
+            assert_eq!(second.0, StatusCode::CONFLICT);
+            assert!(
+                second.1["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("different request"),
+                "{second:?}"
+            );
+        })
+        .await;
+    }
+
+    /// The command status endpoint reports lifecycle state and 404s unknown
+    /// ids.
+    #[tokio::test]
+    async fn command_status_endpoint_reports_lifecycle_state() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(true).await;
+            let first = request_with_key(
+                state.clone(),
+                "force-charge",
+                Some("integration-key"),
+                "status-key-000001",
+                json!({"minutes":30}),
+            )
+            .await;
+            let command_id = first.1["command_id"].as_str().unwrap().to_string();
+
+            let get = |command_id: &str| {
+                let state = state.clone();
+                let uri = format!("/api/commands/{command_id}");
+                async move {
+                    let req = Request::builder()
+                        .uri(uri)
+                        .header("Authorization", "Bearer integration-key")
+                        .body(Body::empty())
+                        .unwrap();
+                    let response = create_authenticated_router(state)
+                        .oneshot(req)
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                    (
+                        status,
+                        serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+                    )
+                }
+            };
+            let (status, body) = get(&command_id).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["command_id"], command_id);
+            assert_eq!(body["data"]["action"], "force_charge");
+            // The writes are queued but no inverter readback has happened in
+            // this test: the state must be an honest intermediate value.
+            assert_eq!(body["data"]["state"], "queued");
+
+            let (status, body) = get("nonexistent").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"], "Unknown command id");
+        })
+        .await;
+    }
+
+    /// Recovery stops are refused when the permission is off AND no external
+    /// action is owned — a revoked read-only credential gains nothing.
+    #[tokio::test]
+    async fn recovery_stop_without_external_action_stays_forbidden() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(false).await;
+            let (status, body) = request_with_key(
+                state,
+                "force-charge/stop",
+                Some("integration-key"),
+                "recovery-key-000001",
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(
+                body["error"].as_str().unwrap().contains("disabled"),
+                "{body:?}"
             );
         })
         .await;
@@ -885,12 +1334,12 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let state = setup(true).await;
             state.pending_writes.lock().await.clear();
-            // Requests 1-2 enqueue (a repeated start legitimately resets its
-            // duration) and each charges the budget; request 3 exceeds the
-            // budget and is refused with 429 before reaching the handler.
+            // Request 1 enqueues; request 2 is a duplicate active start —
+            // the ledger CAS answers 409 with the existing command; request
+            // 3 hits the per-identity budget with 429.
             for expected in [
                 StatusCode::OK,
-                StatusCode::OK,
+                StatusCode::CONFLICT,
                 StatusCode::TOO_MANY_REQUESTS,
             ] {
                 let (status, _) = request(
