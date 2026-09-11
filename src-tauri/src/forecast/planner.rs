@@ -15,7 +15,7 @@ use crate::forecast::time_windows::{
     window_overlap_segments as absolute_window_overlap_segments,
 };
 use crate::settings::TariffConfig;
-use chrono::Timelike;
+use chrono::{NaiveDate, TimeZone, Timelike};
 
 /// One candidate charging window derived from the import tariff slots.
 ///
@@ -322,6 +322,54 @@ fn window_overlap_hours(timestamp: i64, window: &ChargeWindow) -> f64 {
 
 fn window_overlap_segments(timestamp: i64, window: &ChargeWindow) -> Vec<(f64, f64)> {
     absolute_window_overlap_segments(timestamp, window.start_min, window.end_min, &chrono::Local)
+}
+
+fn energy_on_local_day<Tz, F>(
+    series: &[SimHourResult],
+    date: NaiveDate,
+    timezone: &Tz,
+    value: F,
+) -> f64
+where
+    Tz: TimeZone,
+    F: Fn(&SimHourResult) -> f64,
+{
+    series
+        .iter()
+        .filter(|hour| {
+            chrono::DateTime::from_timestamp(hour.timestamp, 0)
+                .is_some_and(|dt| dt.with_timezone(timezone).date_naive() == date)
+        })
+        .map(value)
+        .sum()
+}
+
+fn occurrence_charge_on_local_day<Tz: TimeZone>(
+    sim_hours: &[SimHourInput],
+    occurrence: &WindowOccurrence,
+    window: &ChargeWindow,
+    date: NaiveDate,
+    timezone: &Tz,
+    max_charge_kw: f64,
+) -> f64 {
+    occurrence
+        .run
+        .iter()
+        .filter_map(|&index| sim_hours.get(index))
+        .filter(|hour| {
+            chrono::DateTime::from_timestamp(hour.timestamp, 0)
+                .is_some_and(|dt| dt.with_timezone(timezone).date_naive() == date)
+        })
+        .map(|hour| {
+            max_charge_kw
+                * absolute_window_overlap_hours(
+                    hour.timestamp,
+                    window.start_min,
+                    window.end_min,
+                    timezone,
+                )
+        })
+        .sum()
 }
 
 /// Outcome of re-running the forward simulation with a proposed charge
@@ -827,31 +875,21 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         let tomorrow_date = local_date(inputs.now_ts).map(|d| d + chrono::Duration::days(1));
         let (import_tw, export_tw) = match tomorrow_date {
             Some(td) => {
-                let is_t = |ts: i64| local_date(ts).is_some_and(|d| d == td);
-                let residual: f64 = outcome
-                    .series
-                    .iter()
-                    .filter(|h| is_t(h.timestamp))
-                    .map(|h| h.import_kwh)
-                    .sum();
-                let export: f64 = outcome
-                    .series
-                    .iter()
-                    .filter(|h| is_t(h.timestamp))
-                    .map(|h| h.export_kwh)
-                    .sum();
-                let first_charge_import: f64 = selected
+                let residual =
+                    energy_on_local_day(&outcome.series, td, &chrono::Local, |h| h.import_kwh);
+                let export =
+                    energy_on_local_day(&outcome.series, td, &chrono::Local, |h| h.export_kwh);
+                let first_charge_import = selected
                     .as_ref()
                     .map(|occ| {
-                        occ.run
-                            .iter()
-                            .filter_map(|&i| sim_hours.get(i))
-                            .filter(|h| is_t(h.timestamp))
-                            .map(|h| {
-                                inputs.params.max_charge_kw
-                                    * window_overlap_hours(h.timestamp, &window)
-                            })
-                            .sum()
+                        occurrence_charge_on_local_day(
+                            sim_hours,
+                            occ,
+                            &window,
+                            td,
+                            &chrono::Local,
+                            inputs.params.max_charge_kw,
+                        )
                     })
                     .unwrap_or(0.0);
                 (first_charge_import + residual, export)
@@ -1414,6 +1452,76 @@ mod tests {
             .earliest()
             .expect("valid local datetime")
             .timestamp()
+    }
+
+    #[test]
+    fn tomorrow_energy_prorates_fractional_offset_midnight_bucket() {
+        use chrono::TimeZone;
+        use chrono_tz::Australia::Adelaide;
+
+        let timestamp = Adelaide
+            .with_ymd_and_hms(2025, 6, 15, 23, 30, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let tomorrow = chrono::NaiveDate::from_ymd_opt(2025, 6, 16).unwrap();
+        let series = [SimHourResult {
+            timestamp,
+            soc_pct: 50.0,
+            import_kwh: 2.0,
+            export_kwh: 4.0,
+            charge_kwh: 0.0,
+            discharge_kwh: 0.0,
+        }];
+
+        let import = energy_on_local_day(&series, tomorrow, &Adelaide, |h| h.import_kwh);
+        let export = energy_on_local_day(&series, tomorrow, &Adelaide, |h| h.export_kwh);
+
+        assert!((import - 1.0).abs() < 1e-9, "import = {import}");
+        assert!((export - 2.0).abs() < 1e-9, "export = {export}");
+    }
+
+    #[test]
+    fn tomorrow_charge_intersects_fractional_offset_midnight_bucket() {
+        use chrono::TimeZone;
+        use chrono_tz::Australia::Adelaide;
+
+        let timestamp = Adelaide
+            .with_ymd_and_hms(2025, 6, 15, 23, 30, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let tomorrow = chrono::NaiveDate::from_ymd_opt(2025, 6, 16).unwrap();
+        let sim_hours = [SimHourInput {
+            timestamp,
+            solar_kwh: 0.0,
+            consumption_kwh: 0.0,
+        }];
+        let occurrence = WindowOccurrence {
+            run: vec![0],
+            start_ts: Adelaide
+                .with_ymd_and_hms(2025, 6, 15, 23, 0, 0)
+                .single()
+                .unwrap()
+                .timestamp(),
+        };
+        let window = ChargeWindow {
+            start_min: 23 * 60,
+            end_min: 60,
+            tomorrow: false,
+            rate: 0.1,
+        };
+
+        let charge = occurrence_charge_on_local_day(
+            &sim_hours,
+            &occurrence,
+            &window,
+            tomorrow,
+            &Adelaide,
+            2.0,
+        );
+
+        assert!((charge - 1.0).abs() < 1e-9, "charge = {charge}");
     }
 
     fn plan_inputs<'a>(
