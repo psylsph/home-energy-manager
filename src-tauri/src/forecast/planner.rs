@@ -11,7 +11,8 @@ use crate::forecast::simulate::{
     simulate_battery_segment, SimHourInput, SimHourResult, SimulationOutput, SimulationParams,
 };
 use crate::forecast::time_windows::{
-    split_hour_segments, window_overlap_hours as absolute_window_overlap_hours,
+    local_day_overlap_segments, split_hour_segments,
+    window_overlap_hours as absolute_window_overlap_hours,
     window_overlap_segments as absolute_window_overlap_segments,
 };
 use crate::settings::TariffConfig;
@@ -336,11 +337,25 @@ where
 {
     series
         .iter()
-        .filter(|hour| {
-            chrono::DateTime::from_timestamp(hour.timestamp, 0)
-                .is_some_and(|dt| dt.with_timezone(timezone).date_naive() == date)
+        .map(|hour| {
+            let day_fraction: f64 = local_day_overlap_segments(hour.timestamp, date, timezone)
+                .iter()
+                .map(|(start, end)| end - start)
+                .sum();
+            value(hour) * day_fraction
         })
-        .map(value)
+        .sum()
+}
+
+fn segment_intersection_hours(left: &[(f64, f64)], right: &[(f64, f64)]) -> f64 {
+    left.iter()
+        .flat_map(|(left_start, left_end)| {
+            right.iter().filter_map(move |(right_start, right_end)| {
+                let start = left_start.max(*right_start);
+                let end = left_end.min(*right_end);
+                (end > start).then_some(end - start)
+            })
+        })
         .sum()
 }
 
@@ -356,18 +371,15 @@ fn occurrence_charge_on_local_day<Tz: TimeZone>(
         .run
         .iter()
         .filter_map(|&index| sim_hours.get(index))
-        .filter(|hour| {
-            chrono::DateTime::from_timestamp(hour.timestamp, 0)
-                .is_some_and(|dt| dt.with_timezone(timezone).date_naive() == date)
-        })
         .map(|hour| {
-            max_charge_kw
-                * absolute_window_overlap_hours(
-                    hour.timestamp,
-                    window.start_min,
-                    window.end_min,
-                    timezone,
-                )
+            let day_segments = local_day_overlap_segments(hour.timestamp, date, timezone);
+            let window_segments = absolute_window_overlap_segments(
+                hour.timestamp,
+                window.start_min,
+                window.end_min,
+                timezone,
+            );
+            max_charge_kw * segment_intersection_hours(&day_segments, &window_segments)
         })
         .sum()
 }
@@ -2144,7 +2156,7 @@ mod tests {
     /// tile remains literal: it reports the following local calendar day's
     /// residual and must not relabel tonight's charge as tomorrow's.
     #[test]
-    fn tomorrow_import_excludes_same_day_window_when_planning_after_midnight() {
+    fn tomorrow_tiles_stay_on_following_date_when_planning_after_midnight() {
         let p = params();
         let solar = {
             let mut s = [0.0; 24];
@@ -2155,7 +2167,18 @@ mod tests {
         };
         let cons: [f64; 24] =
             std::array::from_fn(|h| if (17..=21).contains(&h) { 1.0 } else { 0.45 });
-        let (_sim_full, sim_hours_full) = fixed_72h(46.0, solar, cons, &p);
+        let (_sim_full, mut sim_hours_full) = fixed_72h(46.0, solar, cons, &p);
+        // Make the literal following date export while leaving the current
+        // day's charge-sizing horizon (which ends at tomorrow's 02:00 cheap
+        // period) unchanged.
+        for hour in &mut sim_hours_full {
+            let local = chrono::DateTime::from_timestamp(hour.timestamp, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local);
+            if local.date_naive() == fixture_date(1) && (9..17).contains(&local.hour()) {
+                hour.solar_kwh = 4.0;
+            }
+        }
         // Strictly forward from 00:14: the payload drops the current hour,
         // so the series begins at 01:00.
         let sim_hours = &sim_hours_full[1..];
@@ -2177,6 +2200,7 @@ mod tests {
         let PlanRecommendation::Charge {
             window,
             import_tomorrow_with_charge_kwh,
+            export_tomorrow_with_charge_kwh,
             ..
         } = rec
         else {
@@ -2200,21 +2224,33 @@ mod tests {
 
         let tomorrow_date = planning_date + chrono::Duration::days(1);
         let outcome = simulate_with_max_rate(sim_hours, &p, &window, now_ts);
+        let is_tomorrow = |h: &SimHourResult| {
+            chrono::DateTime::from_timestamp(h.timestamp, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .date_naive()
+                == tomorrow_date
+        };
         let expected_residual: f64 = outcome
             .series
             .iter()
-            .filter(|h| {
-                chrono::DateTime::from_timestamp(h.timestamp, 0)
-                    .unwrap()
-                    .with_timezone(&chrono::Local)
-                    .date_naive()
-                    == tomorrow_date
-            })
+            .filter(|h| is_tomorrow(h))
             .map(|h| h.import_kwh)
+            .sum();
+        let expected_export: f64 = outcome
+            .series
+            .iter()
+            .filter(|h| is_tomorrow(h))
+            .map(|h| h.export_kwh)
             .sum();
         assert!(
             (import_tomorrow_with_charge_kwh - expected_residual).abs() < 1e-9,
             "literal Tomorrow import ({import_tomorrow_with_charge_kwh}) must exclude tonight's charge and equal tomorrow's residual ({expected_residual})"
+        );
+        assert!(expected_export > 0.0, "fixture must export tomorrow");
+        assert!(
+            (export_tomorrow_with_charge_kwh - expected_export).abs() < 1e-9,
+            "literal Tomorrow export ({export_tomorrow_with_charge_kwh}) must equal only the following date's export ({expected_export})"
         );
     }
 
