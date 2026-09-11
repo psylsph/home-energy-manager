@@ -7384,6 +7384,13 @@ pub async fn get_weather(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 /// the request path, so the endpoint is cheap to poll and hermetic under
 /// test. Degradations are reported as status codes in the payload.
 pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    get_forecast_at(state, chrono::Local::now()).await
+}
+
+pub(crate) async fn get_forecast_at(
+    state: Arc<AppState>,
+    now: chrono::DateTime<chrono::Local>,
+) -> (StatusCode, Json<Value>) {
     let snapshot = state.latest_snapshot.lock().await.clone();
     let history = state.history.lock().await.clone();
     let (weather_enabled, coords) = {
@@ -7394,7 +7401,6 @@ pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Js
         )
     };
     let settings = crate::settings::Settings::load_async().await;
-    let now = chrono::Local::now();
     let payload = match tokio::task::spawn_blocking(move || {
         crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
@@ -7418,8 +7424,13 @@ pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Js
 /// import-tariff config; never writes any register — Apply happens only
 /// from the UI through the existing control endpoints.
 pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    use chrono::Local;
+    get_forecast_plan_at(state, chrono::Local::now()).await
+}
 
+pub(crate) async fn get_forecast_plan_at(
+    state: Arc<AppState>,
+    now: chrono::DateTime<chrono::Local>,
+) -> (StatusCode, Json<Value>) {
     let snapshot = state.latest_snapshot.lock().await.clone();
     let history = state.history.lock().await.clone();
     let (weather_enabled, coords) = {
@@ -7430,7 +7441,6 @@ pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCod
         )
     };
     let settings = crate::settings::Settings::load_async().await;
-    let now = Local::now();
     let (charge, export_advice) = match tokio::task::spawn_blocking(move || {
         let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
