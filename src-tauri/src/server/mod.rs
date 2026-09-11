@@ -8,6 +8,7 @@ pub mod audit;
 pub mod authenticated_lifecycle;
 mod control_status;
 mod external_control;
+pub mod external_snapshot;
 pub mod logs;
 pub mod mini;
 pub mod ratelimit;
@@ -793,9 +794,11 @@ pub fn create_authenticated_router_with_origins(
 
     let router = Router::new()
         .merge(controls)
+        // U4: the external route serves the least-data projection, not the
+        // internal snapshot serializer used by the dashboard.
         .route(
             "/api/snapshot",
-            get(api::get_snapshot).layer(middleware::from_fn_with_state(
+            get(external_snapshot::get_snapshot).layer(middleware::from_fn_with_state(
                 state.clone(),
                 limit_authenticated_reads,
             )),
@@ -1053,6 +1056,82 @@ mod tests {
 
     /// A source that exhausts its failed-auth budget is locked out with
     /// 429 + Retry-After — even when presenting a valid credential.
+    /// The authenticated snapshot must be the safe projection: documented
+    /// operating fields present, internal identifiers/telemetry absent, and
+    /// no-store caching — while the main router keeps serving the full
+    /// snapshot.
+    #[tokio::test]
+    async fn authenticated_snapshot_serves_safe_projection_only() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            // Configure a credential for the authenticated router.
+            let mut settings = crate::settings::Settings::load();
+            settings.api_credential = Some(crate::settings::ApiCredential::from_secret(
+                "projection-key",
+            ));
+            settings.save().unwrap();
+
+            let state = Arc::new(AppState::new());
+            *state.latest_snapshot.lock().await = Some(crate::inverter::model::InverterSnapshot {
+                timestamp: chrono::Utc::now().timestamp() - 2,
+                device_type: crate::inverter::model::DeviceType::Gen3Hybrid,
+                soc: 71,
+                solar_power: 1800,
+                battery_modules: vec![crate::inverter::model::BatteryModule {
+                    index: 1,
+                    serial: "BG-SECRET-SERIAL".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+            // Authenticated router: safe projection.
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .header("Authorization", "Bearer projection-key")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = create_authenticated_router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["soc"], 71);
+            assert_eq!(body["solar_power"], 1800);
+            assert!(body.get("battery_modules").is_none());
+            assert!(
+                !body.to_string().contains("BG-SECRET-SERIAL"),
+                "module serials must never be exposed"
+            );
+
+            // Main router: unchanged full snapshot contract.
+            let request = Request::builder()
+                .uri("/api/snapshot")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = create_router(state).oneshot(request).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["ok"], true);
+            assert_eq!(
+                body["data"]["battery_modules"][0]["serial"], "BG-SECRET-SERIAL",
+                "the main router contract must remain the full snapshot"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn authenticated_router_locks_out_source_after_failed_auth_budget() {
         use axum::extract::connect_info::MockConnectInfo;
