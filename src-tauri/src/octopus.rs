@@ -1497,6 +1497,40 @@ mod tests {
     const OPEN_AGR: &str = "E-1R-AGILE-24-10-01-A";
 
     #[test]
+    fn tariff_price_with_null_valid_from_starts_at_agreement_boundary() {
+        let page: PricePage = serde_json::from_value(json!({
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [{
+                "value_inc_vat": 15.0255,
+                "valid_from": null,
+                "valid_to": "2026-03-31T23:00:00Z",
+                "payment_method": null
+            }]
+        }))
+        .expect("Octopus open-start tariff response should deserialize");
+
+        let rows = select_tariff_rows(
+            page.results,
+            &agreement(
+                "2025-01-01T00:00:00Z",
+                None,
+                "E-1R-FIX-12M-20-02-12-A",
+            ),
+            &stream_of("electricity_import"),
+            "standard",
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].valid_from,
+            parse_timestamp("2025-01-01T00:00:00Z").unwrap()
+        );
+    }
+
+    #[test]
     fn select_tariff_rows_prefers_direct_debit_on_a_tied_interval() {
         // Two prices for the same interval: DIRECT_DEBIT must win over a
         // cheaper-to-Octopus non-direct-debit method (priority 3 > 1).
