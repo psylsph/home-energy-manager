@@ -139,17 +139,33 @@ jobs:
 
           sources=()
           for digest in "${digests[@]}"; do
+            if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Invalid digest artifact filename: ${digest}"
+              exit 1
+            fi
             sources+=("${IMAGE}@sha256:${digest}")
           done
 
           mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "::error::Docker metadata produced no tags"
+            exit 1
+          fi
           tag_args=()
           for tag in "${tags[@]}"; do
             tag_args+=(--tag "$tag")
           done
 
           docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
-          docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}"
+          manifest="$(docker buildx imagetools inspect --raw "${IMAGE}:${GITHUB_REF_NAME}")"
+          for architecture in amd64 arm64; do
+            if ! jq -e --arg architecture "$architecture" \
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture)' \
+              <<< "$manifest" >/dev/null; then
+              echo "::error::Merged manifest is missing linux/${architecture}"
+              exit 1
+            fi
+          done
 
   build:
     needs: verify-versions
@@ -693,7 +709,14 @@ jobs:
           set -euo pipefail
 
           for attempt in 1 2 3 4 5 6; do
-            release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>/dev/null || true)"
+            if ! release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>release-error.txt)"; then
+              if ! grep -q 'HTTP 404' release-error.txt; then
+                cat release-error.txt >&2
+                echo "::error::GitHub release lookup failed"
+                exit 1
+              fi
+              release_json=""
+            fi
             if [ -z "$release_json" ]; then
               if [ "$attempt" -eq 6 ]; then
                 echo "::error::No release found for ${TAG}; nothing to publish."

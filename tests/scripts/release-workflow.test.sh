@@ -65,6 +65,14 @@ count_matches() {
   grep -c -- "$1" "$WORKFLOW" || true
 }
 
+job_block() {
+  awk -v job="$1" '
+    $0 == "  " job ":" { inblock = 1 }
+    inblock && $0 ~ /^  [a-zA-Z0-9_-]+:/ && $0 != "  " job ":" { exit }
+    inblock { print }
+  ' "$WORKFLOW"
+}
+
 echo "tests/scripts/release-workflow.test.sh"
 echo
 
@@ -82,7 +90,9 @@ assert_contains "publish job waits for all platform builds and the docker manife
 assert_contains "publish job only runs for version tags" "if: startsWith(github.ref, 'refs/tags/v')" "$WORKFLOW_YAML"
 assert_contains "release gate compares the tag with the declared version" '${GITHUB_REF_NAME#v}' "$WORKFLOW_YAML"
 assert_contains "release gate rejects a mismatched tag" 'does not match application version' "$WORKFLOW_YAML"
-assert_contains "manifest merge has least-privilege permissions" "merge-docker-manifest:" "$WORKFLOW_YAML"
+MERGE_JOB_BLOCK="$(job_block 'merge-docker-manifest')"
+assert_contains "manifest merge has an explicit permissions block" "permissions:" "$MERGE_JOB_BLOCK"
+assert_contains "manifest merge has read-only contents permission" "contents: read" "$MERGE_JOB_BLOCK"
 for pattern in \
   'Android-Chromebook-*-${TAG}.apk' \
   'Linux-Debian-ARM64-Home-Energy-Manager-${TAG}.deb' \
@@ -100,6 +110,9 @@ echo "3. the multi-arch Docker manifest merges pushed digests without rebuilding
 assert_contains "manifest merge uses buildx imagetools" "docker buildx imagetools create" "$WORKFLOW_YAML"
 assert_contains "manifest merge reads digest artifact filenames" "find /tmp/digests -type f" "$WORKFLOW_YAML"
 assert_not_contains "manifest merge does not invoke a Dockerfile build" "context: /tmp/digests" "$WORKFLOW_YAML"
+assert_contains "manifest merge validates digest filenames" '^[0-9a-f]{64}$' "$WORKFLOW_YAML"
+assert_contains "manifest merge rejects empty metadata tags" 'Docker metadata produced no tags' "$WORKFLOW_YAML"
+assert_contains "manifest merge verifies both architectures" 'Merged manifest is missing linux/${architecture}' "$WORKFLOW_YAML"
 
 echo
 # Extract one named step's run block so assertions can be scoped to the
