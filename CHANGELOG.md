@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.0] - 2026-09-13
+
+### Added
+
+- **ARM servers can now run the Docker image.** The published container now includes a native linux/arm64 build alongside amd64, so Raspberry Pi, ARM NAS boxes and ARM cloud hosts can `docker pull` it directly instead of hitting a "no matching manifest" error.
+
 ## [0.82.0] - 2026-09-11
 
 ### Added
