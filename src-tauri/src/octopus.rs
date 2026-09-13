@@ -155,7 +155,7 @@ struct PricePage {
 #[derive(Debug, Clone, Deserialize)]
 struct PriceResult {
     value_inc_vat: f64,
-    valid_from: String,
+    valid_from: Option<String>,
     valid_to: Option<String>,
     payment_method: Option<String>,
 }
@@ -516,7 +516,12 @@ fn select_tariff_rows(
         if !price.value_inc_vat.is_finite() {
             continue;
         }
-        let from = parse_timestamp(&price.valid_from)?;
+        let from = price
+            .valid_from
+            .as_deref()
+            .map(parse_timestamp)
+            .transpose()?
+            .unwrap_or(agreement_start);
         let to = price.valid_to.as_deref().map(parse_timestamp).transpose()?;
         let priority = payment_priority(price.payment_method.as_deref());
         let key = (from, to);
@@ -1469,7 +1474,7 @@ mod tests {
     fn price(value: f64, from: &str, to: Option<&str>, method: Option<&str>) -> PriceResult {
         PriceResult {
             value_inc_vat: value,
-            valid_from: from.to_string(),
+            valid_from: Some(from.to_string()),
             valid_to: to.map(|s| s.to_string()),
             payment_method: method.map(|s| s.to_string()),
         }
@@ -1513,11 +1518,7 @@ mod tests {
 
         let rows = select_tariff_rows(
             page.results,
-            &agreement(
-                "2025-01-01T00:00:00Z",
-                None,
-                "E-1R-FIX-12M-20-02-12-A",
-            ),
+            &agreement("2025-01-01T00:00:00Z", None, "E-1R-FIX-12M-20-02-12-A"),
             &stream_of("electricity_import"),
             "standard",
         )
@@ -2163,13 +2164,13 @@ mod tests {
         let prices = vec![
             PriceResult {
                 value_inc_vat: 0.25,
-                valid_from: "2024-06-01T00:00:00Z".to_string(),
+                valid_from: Some("2024-06-01T00:00:00Z".to_string()),
                 valid_to: Some("2024-06-01T00:30:00Z".to_string()),
                 payment_method: Some("OTHER".to_string()),
             },
             PriceResult {
                 value_inc_vat: 0.22,
-                valid_from: "2024-06-01T00:00:00Z".to_string(),
+                valid_from: Some("2024-06-01T00:00:00Z".to_string()),
                 valid_to: Some("2024-06-01T00:30:00Z".to_string()),
                 payment_method: Some("DIRECT_DEBIT".to_string()),
             },
@@ -2188,13 +2189,13 @@ mod tests {
         let prices = vec![
             PriceResult {
                 value_inc_vat: f64::NAN,
-                valid_from: "2024-06-01T00:00:00Z".to_string(),
+                valid_from: Some("2024-06-01T00:00:00Z".to_string()),
                 valid_to: Some("2024-06-01T00:30:00Z".to_string()),
                 payment_method: None,
             },
             PriceResult {
                 value_inc_vat: 0.15,
-                valid_from: "2024-06-01T00:30:00Z".to_string(),
+                valid_from: Some("2024-06-01T00:30:00Z".to_string()),
                 valid_to: Some("2024-06-01T01:00:00Z".to_string()),
                 payment_method: None,
             },
@@ -2209,7 +2210,7 @@ mod tests {
     fn test_select_tariff_rows_allows_negative_agile_rates() {
         let prices = vec![PriceResult {
             value_inc_vat: -5.0,
-            valid_from: "2024-06-01T00:00:00Z".to_string(),
+            valid_from: Some("2024-06-01T00:00:00Z".to_string()),
             valid_to: Some("2024-06-01T00:30:00Z".to_string()),
             payment_method: None,
         }];
@@ -2228,7 +2229,7 @@ mod tests {
         };
         let prices = vec![PriceResult {
             value_inc_vat: 0.30,
-            valid_from: "2024-06-01T00:00:00Z".to_string(),
+            valid_from: Some("2024-06-01T00:00:00Z".to_string()),
             valid_to: Some("2024-06-01T03:00:00Z".to_string()),
             payment_method: None,
         }];
