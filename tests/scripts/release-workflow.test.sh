@@ -78,19 +78,28 @@ assert_not_contains "no upload step publishes the release itself" "draft: false"
 echo
 echo "2. a final job publishes only after every platform asset is verified"
 assert_contains "publish job exists" "publish-release:" "$WORKFLOW_YAML"
-assert_contains "publish job waits for all platform builds" "needs: [build, build-android]" "$WORKFLOW_YAML"
+assert_contains "publish job waits for all platform builds and the docker manifest" "needs: [build, build-android, merge-docker-manifest]" "$WORKFLOW_YAML"
 assert_contains "publish job only runs for version tags" "if: startsWith(github.ref, 'refs/tags/v')" "$WORKFLOW_YAML"
+assert_contains "release gate compares the tag with the declared version" '${GITHUB_REF_NAME#v}' "$WORKFLOW_YAML"
+assert_contains "release gate rejects a mismatched tag" 'does not match application version' "$WORKFLOW_YAML"
+assert_contains "manifest merge has least-privilege permissions" "merge-docker-manifest:" "$WORKFLOW_YAML"
 for pattern in \
-  "Android-Chromebook-*.apk" \
-  "Linux-Debian-ARM64-*.deb" \
-  "Linux-Debian-x86_64-*.deb" \
-  "Linux-RPM-ARM64-*.rpm" \
-  "Linux-RPM-x86_64-*.rpm" \
-  "macOS-Apple-Silicon-*.dmg" \
-  "macOS-Intel-*.dmg" \
-  "Windows-MSI-*.msi"; do
+  'Android-Chromebook-*-${TAG}.apk' \
+  'Linux-Debian-ARM64-Home-Energy-Manager-${TAG}.deb' \
+  'Linux-Debian-x86_64-Home-Energy-Manager-${TAG}.deb' \
+  'Linux-RPM-ARM64-Home-Energy-Manager-${TAG}.rpm' \
+  'Linux-RPM-x86_64-Home-Energy-Manager-${TAG}.rpm' \
+  'macOS-Apple-Silicon-Home-Energy-Manager-${TAG}.dmg' \
+  'macOS-Intel-Home-Energy-Manager-${TAG}.dmg' \
+  'Windows-MSI-Home-Energy-Manager-${TAG}.msi'; do
   assert_contains "publish job requires $pattern" "$pattern" "$WORKFLOW_YAML"
 done
+
+echo
+echo "3. the multi-arch Docker manifest merges pushed digests without rebuilding"
+assert_contains "manifest merge uses buildx imagetools" "docker buildx imagetools create" "$WORKFLOW_YAML"
+assert_contains "manifest merge reads digest artifact filenames" "find /tmp/digests -type f" "$WORKFLOW_YAML"
+assert_not_contains "manifest merge does not invoke a Dockerfile build" "context: /tmp/digests" "$WORKFLOW_YAML"
 
 echo
 # Extract one named step's run block so assertions can be scoped to the
@@ -115,7 +124,11 @@ joined_commands() {
 echo "3. publishing flips the draft once, marks latest separately, and self-heals"
 PUBLISH_BLOCK="$(step_block 'Publish the release')"
 VERIFY_BLOCK="$(step_block 'Verify releases/latest points at this tag')"
+ASSET_VERIFY_BLOCK="$(step_block 'Verify every platform installer is on the release')"
 PUBLISH_CMDS="$(printf '%s\n' "$PUBLISH_BLOCK" | joined_commands)"
+
+assert_contains "asset verification retries GitHub release consistency" "for attempt in 1 2 3 4 5 6" "$ASSET_VERIFY_BLOCK"
+assert_contains "asset verification waits between retries" "sleep 10" "$ASSET_VERIFY_BLOCK"
 
 PUBLISH_COUNT="$(count_matches '-f draft=false')"
 assert_eq "exactly one publish edit flips the draft" "1" "$PUBLISH_COUNT"
@@ -126,14 +139,15 @@ LATEST_PATCH_COUNT="$(printf '%s\n' "$PUBLISH_CMDS" | grep -c -- 'make_latest=tr
 assert_eq "a separate PATCH marks the release latest" "1" "$LATEST_PATCH_COUNT"
 assert_contains "publish is verified against releases/latest" "releases/latest" "$VERIFY_BLOCK"
 assert_contains "verify loop re-asserts make_latest instead of only re-reading" "-F make_latest=true" "$VERIFY_BLOCK"
-assert_contains 're-run against an already-public release exits cleanly' '${RELEASE_ID:-}' "$PUBLISH_BLOCK"
-assert_contains 'verify step guards re-runs too' '${RELEASE_ID:-}' "$VERIFY_BLOCK"
+assert_contains 'release verification always exports the release ID' 'echo "RELEASE_ID=${id}"' "$ASSET_VERIFY_BLOCK"
+assert_not_contains 'publish does not skip already-public release repair' '${RELEASE_ID:-}' "$PUBLISH_BLOCK"
+assert_not_contains 'latest verification does not skip already-public release repair' '${RELEASE_ID:-}' "$VERIFY_BLOCK"
 
 
 echo
 echo "4. asset uploads only run for version tags"
 TAG_GUARD_COUNT="$(count_matches "startsWith(github.ref, 'refs/tags/v')")"
-assert_eq "tag guard on both upload steps, docker and publish jobs" "4" "$TAG_GUARD_COUNT"
+assert_eq "tag guard on upload, docker, version-check and publish jobs" "6" "$TAG_GUARD_COUNT"
 
 echo
 echo "---------------------------------------"

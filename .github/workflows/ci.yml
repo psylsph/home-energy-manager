@@ -25,7 +25,7 @@ jobs:
           node-version: 24
           cache: npm
 
-      - run: npm install
+      - run: npm ci
       - name: Verify release versions are in sync
         run: bash scripts/check-versions.sh
       - run: npm run lint
@@ -91,7 +91,7 @@ jobs:
 
       - name: Install frontend dependencies for native platform tests
         if: matrix.os != 'ubuntu-22.04'
-        run: npm install
+        run: npm ci
 
       - name: Run frontend tests on native platform
         if: matrix.os != 'ubuntu-22.04'
