@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.1] - 2026-09-13
+
+### Fixed
+
+- **Octopus tariff costs sync again when historical rates have no start date.** HEM now accepts the open-ended tariff records returned by Octopus instead of stopping with an “invalid type: null” error.
+
 ## [0.83.0] - 2026-09-13
 
 ### Added
