@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+SETUP_FRONTEND = (ROOT / ".github" / "actions" / "setup-frontend" / "action.yml").read_text()
 
 
 def require(fragment: str, description: str) -> None:
@@ -24,6 +25,10 @@ require(
 )
 require("run: cargo test", "execute the Rust suite on every matrix platform")
 require("run: npm test", "execute frontend and repository contract tests")
+if "npm install" in WORKFLOW or "npm install" in SETUP_FRONTEND:
+    raise AssertionError("CI dependency installs must use npm ci for lockfile reproducibility")
+if "npm ci" not in WORKFLOW or "npm ci" not in SETUP_FRONTEND:
+    raise AssertionError("both CI and setup-frontend must install dependencies with npm ci")
 require(
     "if: matrix.os != 'ubuntu-22.04'",
     "run frontend tests natively on Windows and macOS",

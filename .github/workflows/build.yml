@@ -24,6 +24,17 @@ jobs:
       - name: Check package.json / Cargo.toml / tauri.conf.json agree
         run: bash scripts/check-versions.sh
 
+      - name: Verify release tag matches application version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          declared="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME#v}" != "$declared" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match application version ${declared}"
+            exit 1
+          fi
+
   publish-docker:
     name: Publish Docker image
     needs: verify-versions
@@ -85,6 +96,8 @@ jobs:
     needs: publish-docker
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -114,14 +127,29 @@ jobs:
             type=raw,value=latest
 
       - name: Create and push merged manifest
-        uses: docker/build-push-action@v6
-        with:
-          context: /tmp/digests
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          provenance: false
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/home-energy-manager
+        run: |
+          set -euo pipefail
+          mapfile -t digests < <(find /tmp/digests -type f -printf '%f\n' | sort)
+          if [ "${#digests[@]}" -ne 2 ]; then
+            echo "::error::Expected 2 platform digests, found ${#digests[@]}"
+            exit 1
+          fi
+
+          sources=()
+          for digest in "${digests[@]}"; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}"
 
   build:
     needs: verify-versions
@@ -183,13 +211,13 @@ jobs:
       - name: Install Tauri CLI
         shell: bash
         run: |
-          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/94dc7fe43d6ed7bfa6a6ea24f60f85e3f41dd104/install-from-binstall-release.sh | bash
           # --force bypasses binstall's "already installed" tracking, which
           # can go stale after a partial ~/.cargo cache restore and leave
           # `cargo tauri` unfindable ("no such command: tauri"). Retry to
           # absorb transient GitHub-release download blips.
           for attempt in 1 2 3; do
-            if cargo binstall --force --no-confirm tauri-cli; then exit 0; fi
+            if cargo binstall --force --no-confirm tauri-cli@2.11.2; then exit 0; fi
             echo "tauri-cli install failed on attempt $attempt; retrying in 15s..."
             sleep 15
           done
@@ -555,18 +583,18 @@ jobs:
       - name: Install NDK
         run: |
           sdkmanager --install "ndk;27.0.12077973" > /dev/null 2>&1
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - name: Install Tauri CLI
         shell: bash
         run: |
-          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/94dc7fe43d6ed7bfa6a6ea24f60f85e3f41dd104/install-from-binstall-release.sh | bash
           # --force bypasses binstall's "already installed" tracking, which
           # can go stale after a partial ~/.cargo cache restore and leave
           # `cargo tauri` unfindable ("no such command: tauri"). Retry to
           # absorb transient GitHub-release download blips.
           for attempt in 1 2 3; do
-            if cargo binstall --force --no-confirm tauri-cli; then exit 0; fi
+            if cargo binstall --force --no-confirm tauri-cli@2.11.2; then exit 0; fi
             echo "tauri-cli install failed on attempt $attempt; retrying in 15s..."
             sleep 15
           done
@@ -664,60 +692,72 @@ jobs:
         run: |
           set -euo pipefail
 
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-            --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"' | head -n 1)"
-          if [ -z "$release_id" ]; then
-            echo "::error::No release found for ${TAG}; nothing to publish."
-            exit 1
-          fi
-
-          read -r id is_draft <<<"$release_id"
-          gh api "repos/${GITHUB_REPOSITORY}/releases/${id}" --jq '.assets[].name' > assets.txt
-          echo "Release assets:"
-          cat assets.txt
-
-          missing=""
-          # The unsigned Windows Store MSIX is best-effort (continue-on-error
-          # upstream), so it is deliberately not required here.
-          for pattern in \
-            'Android-Chromebook-*.apk' \
-            'Linux-Debian-ARM64-*.deb' \
-            'Linux-Debian-x86_64-*.deb' \
-            'Linux-RPM-ARM64-*.rpm' \
-            'Linux-RPM-x86_64-*.rpm' \
-            'macOS-Apple-Silicon-*.dmg' \
-            'macOS-Intel-*.dmg' \
-            'Windows-MSI-*.msi'; do
-            matched=no
-            while IFS= read -r asset; do
-              case "$asset" in
-                $pattern) matched=yes; break ;;
-              esac
-            done < assets.txt
-            if [ "$matched" = no ]; then
-              missing="${missing} ${pattern}"
+          for attempt in 1 2 3 4 5 6; do
+            release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>/dev/null || true)"
+            if [ -z "$release_json" ]; then
+              if [ "$attempt" -eq 6 ]; then
+                echo "::error::No release found for ${TAG}; nothing to publish."
+                exit 1
+              fi
+              echo "Release ${TAG} is not visible yet (attempt ${attempt}); retrying in 10s..."
+              sleep 10
+              continue
             fi
+
+            id="$(jq -r '.id' <<< "$release_json")"
+            is_draft="$(jq -r '.draft' <<< "$release_json")"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${id}" --jq '.assets[].name' > assets.txt
+            echo "Release assets (attempt ${attempt}):"
+            cat assets.txt
+
+            missing=""
+            # The unsigned Windows Store MSIX is best-effort (continue-on-error
+            # upstream), so it is deliberately not required here.
+            for pattern in \
+              "Android-Chromebook-*-${TAG}.apk" \
+              "Linux-Debian-ARM64-Home-Energy-Manager-${TAG}.deb" \
+              "Linux-Debian-x86_64-Home-Energy-Manager-${TAG}.deb" \
+              "Linux-RPM-ARM64-Home-Energy-Manager-${TAG}.rpm" \
+              "Linux-RPM-x86_64-Home-Energy-Manager-${TAG}.rpm" \
+              "macOS-Apple-Silicon-Home-Energy-Manager-${TAG}.dmg" \
+              "macOS-Intel-Home-Energy-Manager-${TAG}.dmg" \
+              "Windows-MSI-Home-Energy-Manager-${TAG}.msi"; do
+              matched=no
+              while IFS= read -r asset; do
+                # The unquoted expansion is deliberate: pattern contains a glob.
+                # shellcheck disable=SC2254
+                case "$asset" in
+                  $pattern) matched=yes; break ;;
+                esac
+              done < assets.txt
+              if [ "$matched" = no ]; then
+                missing="${missing} ${pattern}"
+              fi
+            done
+
+            if [ -z "$missing" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "::error::Release ${TAG} is missing assets after ${attempt} attempts:${missing}"
+              echo "The release stays a draft; nothing partial goes public."
+              exit 1
+            fi
+            echo "Release ${TAG} is temporarily missing assets:${missing}; retrying in 10s..."
+            sleep 10
           done
 
-          if [ -n "$missing" ]; then
-            echo "::error::Release ${TAG} is missing assets:${missing}"
-            echo "The release stays a draft; nothing partial goes public."
-            exit 1
-          fi
-
-          if [ "$is_draft" = "false" ]; then
-            echo "Release ${TAG} is already public; nothing to do."
-            exit 0
-          fi
           echo "RELEASE_ID=${id}" >> "$GITHUB_ENV"
+          if [ "$is_draft" = "false" ]; then
+            echo "Release ${TAG} is already public; repairing and verifying its latest marker."
+          fi
 
       - name: Publish the release
         run: |
           set -euo pipefail
-          # The verify step exits early without setting RELEASE_ID when the
-          # release is already public (workflow re-run after a success).
-          [ -n "${RELEASE_ID:-}" ] || { echo "Nothing to publish."; exit 0; }
-          # Flip the draft first, then mark latest in a separate PATCH.
+          # Re-running against an already-public release is intentional: the
+          # first PATCH is idempotent and the second repairs a dropped or
+          # displaced latest marker.
           # GitHub silently drops make_latest when it rides along in the
           # same request that flips draft=false (v0.75.7 and v0.75.8 both
           # published unmarked that way, typed field or not); the marker
@@ -731,10 +771,7 @@ jobs:
       - name: Verify releases/latest points at this tag
         run: |
           set -euo pipefail
-          # Same re-run guard as the publish step: an already-public
-          # release has nothing to re-verify.
-          [ -n "${RELEASE_ID:-}" ] || { echo "Nothing to verify."; exit 0; }
-          # The release API is served with a short cache and GitHub can
+          # Always verify and repair latest, including on workflow re-runs.
           # drop make_latest outright, so re-assert the marker on every
           # retry rather than only re-reading.
           for attempt in 1 2 3 4 5 6; do
