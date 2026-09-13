@@ -709,14 +709,10 @@ jobs:
           set -euo pipefail
 
           for attempt in 1 2 3 4 5 6; do
-            if ! release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>release-error.txt)"; then
-              if ! grep -q 'HTTP 404' release-error.txt; then
-                cat release-error.txt >&2
-                echo "::error::GitHub release lookup failed"
-                exit 1
-              fi
-              release_json=""
-            fi
+            releases_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --slurp)"
+            release_json="$(jq -c --arg tag "$TAG" \
+              '[.[][] | select(.tag_name == $tag)] | sort_by(.assets | length) | last // empty' \
+              <<< "$releases_json")"
             if [ -z "$release_json" ]; then
               if [ "$attempt" -eq 6 ]; then
                 echo "::error::No release found for ${TAG}; nothing to publish."
