@@ -140,6 +140,9 @@ VERIFY_BLOCK="$(step_block 'Verify releases/latest points at this tag')"
 ASSET_VERIFY_BLOCK="$(step_block 'Verify every platform installer is on the release')"
 PUBLISH_CMDS="$(printf '%s\n' "$PUBLISH_BLOCK" | joined_commands)"
 
+assert_contains "asset verification finds draft releases through the release list" 'releases --paginate --slurp' "$ASSET_VERIFY_BLOCK"
+assert_not_contains "asset verification does not use the public-only tag endpoint" 'releases/tags/${TAG}' "$ASSET_VERIFY_BLOCK"
+assert_contains "asset verification chooses the duplicate draft containing the most assets" 'sort_by(.assets | length)' "$ASSET_VERIFY_BLOCK"
 assert_contains "asset verification retries GitHub release consistency" "for attempt in 1 2 3 4 5 6" "$ASSET_VERIFY_BLOCK"
 assert_contains "asset verification waits between retries" "sleep 10" "$ASSET_VERIFY_BLOCK"
 
