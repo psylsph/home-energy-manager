@@ -651,7 +651,7 @@ jobs:
   # the draft, and only then makes the release public.
   publish-release:
     name: Publish release once every asset is uploaded
-    needs: [build, build-android]
+    needs: [build, build-android, merge-docker-manifest]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:
