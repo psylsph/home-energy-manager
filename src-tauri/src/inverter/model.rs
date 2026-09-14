@@ -82,6 +82,22 @@ impl BatteryMode {
 // Device type
 // ---------------------------------------------------------------------------
 
+/// Authenticated battery-control operations whose register safety varies by
+/// inverter family and, for some families, firmware version.
+///
+/// Start and Stop intentionally share an operation: restoration touches the
+/// same model-specific register bank as admission, so neither direction may be
+/// enabled unless that complete path is confirmed for the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalControlOperation {
+    ForceCharge,
+    ForceDischarge,
+    PauseCharge,
+    PauseDischarge,
+    PauseBoth,
+}
+
 /// Inverter hardware variant, read from holding register HR(0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceType {
@@ -601,7 +617,11 @@ impl DeviceType {
     /// feature is enabled there via a dedicated probe in `poll.rs` rather
     /// than the block poll. Older Gen3 firmware (< 312) is gated out until
     /// confirmed.
-    pub fn supports_timed_discharge(&self, arm_fw: u16) -> bool {
+    /// Whether the native pause register set (HR 318-320) is confirmed for
+    /// this exact model and firmware. Keep every consumer on this single
+    /// boundary so polling, dashboard Timed Discharge, and authenticated
+    /// control cannot drift into contradictory safety decisions.
+    pub fn supports_pause_registers(&self, arm_fw: u16) -> bool {
         if matches!(
             self,
             Self::ACThreePhase | Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW
@@ -609,6 +629,37 @@ impl DeviceType {
             return true;
         }
         matches!(self, Self::Gen3Hybrid) && arm_fw >= 312
+    }
+
+    /// Whether an authenticated battery-control operation is confirmed safe
+    /// for this exact inverter family and firmware.
+    ///
+    /// Force actions require both a battery-capable control path and confirmed
+    /// schedule-slot writes because authenticated starts always carry a finite
+    /// duration. Gateway is the deliberate batteryless exception: its standard
+    /// controls are forwarded to the child AIO plant. Native pause modes are
+    /// separate operation variants so evidence can diverge per mode later
+    /// without changing callers or accidentally broadening support.
+    pub fn supports_external_control(
+        &self,
+        operation: ExternalControlOperation,
+        arm_fw: u16,
+    ) -> bool {
+        match operation {
+            ExternalControlOperation::ForceCharge
+            | ExternalControlOperation::ForceDischarge => {
+                self.supports_schedule_slots()
+                    && (!self.is_batteryless() || matches!(self, Self::Gateway))
+                    && !matches!(self, Self::Unknown(_))
+            }
+            ExternalControlOperation::PauseCharge
+            | ExternalControlOperation::PauseDischarge
+            | ExternalControlOperation::PauseBoth => self.supports_pause_registers(arm_fw),
+        }
+    }
+
+    pub fn supports_timed_discharge(&self, arm_fw: u16) -> bool {
+        self.supports_pause_registers(arm_fw)
     }
 }
 
