@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.2] - 2026-09-14
+
+### Fixed
+
+- **CT meter readings no longer lose solar after the counter rolls over.** The Meters page explains that the import and export counters wrap and points to the Inverter page for accurate lifetime totals, while solar generation continues correctly after a rollover.
+
 ## [0.83.1] - 2026-09-13
 
 ### Fixed
