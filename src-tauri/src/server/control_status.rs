@@ -559,6 +559,52 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_model_and_firmware_specific_control_capabilities() {
+        for (device_type, firmware, force, pause_modes) in [
+            (DeviceType::ACCoupled, "", true, json!([])),
+            (DeviceType::PvInverter, "", false, json!([])),
+            (
+                DeviceType::ACThreePhase,
+                "",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            (DeviceType::Gen3Hybrid, "311", true, json!([])),
+            (
+                DeviceType::Gen3Hybrid,
+                "312",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            (DeviceType::Gen3Hybrid, "not-a-version", true, Value::Null),
+        ] {
+            let s = InverterSnapshot {
+                device_type,
+                firmware_version: firmware.into(),
+                ..snapshot()
+            };
+            let capabilities = &status(&s)["control_capabilities"];
+            assert_eq!(capabilities["force_charge"], force, "{device_type:?}");
+            assert_eq!(capabilities["force_discharge"], force, "{device_type:?}");
+            assert_eq!(capabilities["pause_modes"], pause_modes, "{device_type:?}");
+        }
+    }
+
+    #[test]
+    fn unavailable_status_does_not_claim_control_support() {
+        let value = build_status(
+            None,
+            ConnectionState::Connected,
+            20,
+            &Context::default(),
+            NOW,
+        );
+        assert_eq!(value["control_capabilities"]["force_charge"], Value::Null);
+        assert_eq!(value["control_capabilities"]["force_discharge"], Value::Null);
+        assert_eq!(value["control_capabilities"]["pause_modes"], Value::Null);
+    }
+
+    #[test]
     fn summary_covers_every_battery_mode_and_activity() {
         for (mode, code, label) in [
             (BatteryMode::Eco, "eco", "Eco"),
