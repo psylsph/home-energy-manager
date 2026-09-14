@@ -372,7 +372,7 @@ Network failures and timeouts propagate to the caller. A timeout does not prove 
 
 These endpoints deliberately reuse the app's Quick Actions; they do not introduce a separate restore system.
 
-- **Retries are safe only with the same `Idempotency-Key` and identical payload** — HEM replays the original response and never queues a second command. A retry with a new key is a *new* command and can replace the original restore point. Generate a fresh key for each new action.
+- **Retries are safe only with the same `Idempotency-Key` and identical payload** — HEM replays the original response and never queues a second command. A retry with a new key is a *new* command: it replaces the original restore point, even while the original action is still running. Generate a fresh key for each new action.
 - Stop restores according to the existing Quick Action logic, not a universal reset-to-Eco policy. Stop Charge can restore a pre-action non-Eco mode.
 - At Force Charge window expiry, the previous charge schedule is not automatically restored. The configured slot remains until changed and may matter on a later day.
 - Force Discharge retains the existing poll-loop auto-restoration behaviour at expiry; HEM must remain running and communicate with the inverter for restoration writes.
