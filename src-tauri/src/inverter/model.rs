@@ -2118,6 +2118,99 @@ mod tests {
     }
 
     #[test]
+    fn external_control_capabilities_are_explicit_for_every_device_type() {
+        let supported = [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::Gateway,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ];
+        let unsupported = [
+            DeviceType::PvInverter,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+            DeviceType::Gen4Hybrid,
+            DeviceType::Unknown(0),
+        ];
+
+        for device in supported {
+            assert!(
+                device.supports_external_control(ExternalControlOperation::ForceCharge, 400),
+                "{device:?} should support Force Charge"
+            );
+            assert!(
+                device.supports_external_control(ExternalControlOperation::ForceDischarge, 400),
+                "{device:?} should support Force Discharge"
+            );
+        }
+        for device in unsupported {
+            for operation in [
+                ExternalControlOperation::ForceCharge,
+                ExternalControlOperation::ForceDischarge,
+                ExternalControlOperation::PauseCharge,
+                ExternalControlOperation::PauseDischarge,
+                ExternalControlOperation::PauseBoth,
+            ] {
+                assert!(
+                    !device.supports_external_control(operation, 400),
+                    "{device:?} must reject {operation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_pause_capabilities_share_the_timed_discharge_register_boundary() {
+        let always_supported = [
+            DeviceType::ACThreePhase,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+        ];
+        for device in always_supported {
+            for operation in [
+                ExternalControlOperation::PauseCharge,
+                ExternalControlOperation::PauseDischarge,
+                ExternalControlOperation::PauseBoth,
+            ] {
+                assert!(device.supports_external_control(operation, 0));
+            }
+            assert!(device.supports_pause_registers(0));
+            assert_eq!(device.supports_pause_registers(0), device.supports_timed_discharge(0));
+        }
+
+        for firmware in [311, 312] {
+            assert_eq!(
+                DeviceType::Gen3Hybrid.supports_pause_registers(firmware),
+                firmware >= 312
+            );
+            assert_eq!(
+                DeviceType::Gen3Hybrid.supports_external_control(
+                    ExternalControlOperation::PauseBoth,
+                    firmware,
+                ),
+                firmware >= 312
+            );
+            assert_eq!(
+                DeviceType::Gen3Hybrid.supports_pause_registers(firmware),
+                DeviceType::Gen3Hybrid.supports_timed_discharge(firmware)
+            );
+        }
+    }
+
+    #[test]
     fn supports_timed_discharge_gen3_hybrid_gated_on_arm_firmware_312() {
         // Gen3 Hybrid reaches the pause registers via a targeted 3-register
         // probe (not the HR 300-359 block), which only succeeds on newer
