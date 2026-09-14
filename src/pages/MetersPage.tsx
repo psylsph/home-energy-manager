@@ -79,14 +79,16 @@ function MeterCard({ meter }: { meter: MeterData }) {
         </div>
       </div>
 
-      {/* Energy */}
+      {/* Raw meter energy counters are uint16 deci-kWh registers and wrap
+          every 6553.6 kWh. They are intentionally not labelled as lifetime
+          totals; use the Inverter page for those. */}
       <div className="grid grid-cols-2 gap-2 text-center border-t border-white/5 pt-3">
         <div>
-          <div className="text-xs text-text-secondary">Import Total</div>
+          <div className="text-xs text-text-secondary">Meter Import Counter</div>
           <div className="font-mono text-sm text-green-400">{meter.e_import_active_kwh.toFixed(1)} kWh</div>
         </div>
         <div>
-          <div className="text-xs text-text-secondary">Export Total</div>
+          <div className="text-xs text-text-secondary">Meter Export Counter</div>
           <div className="font-mono text-sm text-amber-400">{meter.e_export_active_kwh.toFixed(1)} kWh</div>
         </div>
       </div>
@@ -152,7 +154,6 @@ export default function MetersPage() {
   return (
     <div className="flex flex-col gap-4 max-w-2xl mx-auto px-4 py-6">
       <h2 className="text-text-primary font-semibold text-lg">External CT Meters</h2>
-
       <CtConfigCard snapshot={snapshot} />
 
       {!meters || meters.length === 0 ? (
@@ -168,6 +169,25 @@ export default function MetersPage() {
           ))}
         </div>
       )}
+
+      <aside
+        role="note"
+        aria-label="Meter counter note"
+        className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 shadow-sm"
+      >
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-500">
+            <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 3.5 1.8 20.5h20.4L12 3.5Zm0 4.2 6.5 10.8h-13L12 7.7Zm-1 3.1v4.1h2v-4.1h-2Zm0 5.2v2h2v-2h-2Z" />
+            </svg>
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs leading-relaxed text-text-secondary">
+              The import and export counters values wrap. Check the Inverter page for accurate lifetime Import and Export totals.
+            </p>
+          </div>
+        </div>
+      </aside>
     </div>
   );
 }

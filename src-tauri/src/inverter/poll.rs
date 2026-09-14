@@ -5810,6 +5810,35 @@ pub(crate) fn compute_solar_arrays(
 /// negative "today" energy.
 pub(crate) const SOLAR_METER_BASELINE_RESEED_DELTA_KWH: f64 = 1.0;
 
+/// Modulus of the external meter's uint16 deci-kWh energy counters.
+///
+/// The meter exposes each active-energy counter in one 16-bit register, so
+/// 6553.6 kWh of accumulated energy brings it back to 0.0 kWh.
+pub(crate) const SOLAR_METER_COUNTER_MODULUS_KWH: f64 = 6553.6;
+
+/// High/low window used to distinguish a normal counter rollover from an
+/// arbitrary meter reset. A rollover is only recognised when the old value is
+/// near the top of the uint16 range and the new value is near zero; ordinary
+/// decreases continue to follow the existing reset/recovery path.
+const SOLAR_METER_COUNTER_WRAP_WINDOW_KWH: f64 = 100.0;
+
+fn solar_meter_counter_wrapped(current: f64, previous: f64) -> bool {
+    current < previous
+        && previous >= SOLAR_METER_COUNTER_MODULUS_KWH - SOLAR_METER_COUNTER_WRAP_WINDOW_KWH
+        && current <= SOLAR_METER_COUNTER_WRAP_WINDOW_KWH
+}
+
+/// Return a non-negative counter delta, including one normal uint16 rollover.
+fn solar_meter_counter_delta(current: f64, previous: f64) -> f64 {
+    if current >= previous {
+        current - previous
+    } else if solar_meter_counter_wrapped(current, previous) {
+        current + SOLAR_METER_COUNTER_MODULUS_KWH - previous
+    } else {
+        0.0
+    }
+}
+
 /// Per-clamp plausibility ceiling for the CT "today" delta (issue #294).
 /// Mirrors the history-side 30 kW counter-delta bound: no residential
 /// clamp sees more than ~30 kW sustained, so a day's delta can never
@@ -6007,14 +6036,18 @@ pub(crate) fn apply_ct_solar_authority(
                 // Same day: delta from baseline. Take the larger of the
                 // import/export deltas — the solar CT's generation flows
                 // one way, whichever the clamp orientation records.
-                let d_import = (current_import - b.e_import_kwh).max(0.0);
-                let d_export = (current_export - b.e_export_kwh).max(0.0);
+                let import_wrapped = solar_meter_counter_wrapped(current_import, b.e_import_kwh);
+                let export_wrapped = solar_meter_counter_wrapped(current_export, b.e_export_kwh);
+                let d_import = solar_meter_counter_delta(current_import, b.e_import_kwh);
+                let d_export = solar_meter_counter_delta(current_export, b.e_export_kwh);
                 // Meter swap / counter reset: both counters fell far below
-                // the stored baseline. The deltas read as 0 (clamped), but
-                // keeping the stale baseline would freeze "today" at its
-                // pre-reset value — reseed instead.
+                // the stored baseline. A normal rollover can also make both
+                // raw values smaller, but only when both decreases have the
+                // high-to-low shape of a uint16 wrap; keep that case as a
+                // legitimate delta instead of reseeding.
                 if current_import < b.e_import_kwh - SOLAR_METER_BASELINE_RESEED_DELTA_KWH
                     && current_export < b.e_export_kwh - SOLAR_METER_BASELINE_RESEED_DELTA_KWH
+                    && !(import_wrapped && export_wrapped)
                 {
                     let rec = recovery.entry(key.clone()).or_default();
                     *rec = CtMeterRecovery {
@@ -6063,9 +6096,8 @@ pub(crate) fn apply_ct_solar_authority(
                             / 3600.0)
                             .max(1.0 / 60.0);
                         let poll_ceiling = SOLAR_METER_MAX_PLAUSIBLE_KW * elapsed_hours + 1.0;
-                        let poll_jump = (current_import - last.import_kwh)
-                            .max(0.0)
-                            .max((current_export - last.export_kwh).max(0.0));
+                        let poll_jump = solar_meter_counter_delta(current_import, last.import_kwh)
+                            .max(solar_meter_counter_delta(current_export, last.export_kwh));
                         (poll_jump > poll_ceiling).then_some((poll_jump, poll_ceiling))
                     });
                     let elapsed_hours = (now_local.time().num_seconds_from_midnight() as f64
@@ -6645,6 +6677,48 @@ mod tests {
         assert!((meter_arr.today_kwh.unwrap() - 12.4).abs() < 0.01);
         // Baseline untouched mid-day.
         assert_eq!(baselines["1"].e_export_kwh, 500.0);
+    }
+
+    #[test]
+    fn ct_authority_handles_u16_energy_counter_rollover() {
+        // External meter energy registers are uint16 deci-kWh counters, so
+        // 6553.5 -> 0.5 represents a real 0.6 kWh increment, not a reset.
+        let mut baselines = std::collections::BTreeMap::new();
+        let mut recovery = std::collections::BTreeMap::new();
+        let (mut snap, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 6553.5, 10.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 12, 0),
+        );
+
+        let (mut snap2, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 0.5, 10.0)], 0, 0.0);
+        let reseeded = apply_ct_solar_authority(
+            &mut snap2,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 12, 5),
+        );
+
+        assert!(!reseeded, "a normal counter rollover must not reseed");
+        assert!((snap2.today_solar_kwh - 0.6).abs() < 0.01);
+        assert_eq!(baselines["1"].e_import_kwh, 6553.5);
+
+        let (mut snap3, settings) =
+            ct_snapshot(vec![meter_with_energy(1, 3000, 0.7, 10.0)], 0, 0.0);
+        apply_ct_solar_authority(
+            &mut snap3,
+            &settings,
+            &mut baselines,
+            &mut recovery,
+            at(0, 12, 10),
+        );
+        assert!((snap3.today_solar_kwh - 0.8).abs() < 0.01);
     }
 
     #[test]

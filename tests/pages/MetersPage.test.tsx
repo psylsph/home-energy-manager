@@ -131,6 +131,30 @@ describe('MetersPage', () => {
     });
   });
 
+  it('explains the wrapping meter counters and points to inverter totals', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        total_import_kwh: 6586.2,
+        total_export_kwh: 6596.2,
+        meters: [externalMeter({ e_import_active_kwh: 32.6, e_export_active_kwh: 42.6 })],
+      }),
+      connectionState: 'connected',
+    });
+    render(<MetersPage />);
+
+    expect(screen.queryByText('Grid Energy')).toBeNull();
+    const note = screen.getByRole('note', { name: 'Meter counter note' });
+    const configHeading = screen.getByRole('heading', { name: 'CT Clamp Configuration' });
+    expect(configHeading.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(
+      'The import and export counters values wrap. Check the Inverter page for accurate lifetime Import and Export totals.',
+    )).toBeDefined();
+    expect(screen.queryByText('6586.2kWh')).toBeNull();
+    expect(screen.queryByText('6596.2kWh')).toBeNull();
+    expect(screen.getByText('Meter Import Counter')).toBeDefined();
+    expect(screen.getByText('Meter Export Counter')).toBeDefined();
+  });
+
   describe('synthetic built-in grid CT vs external meter (address 0x00)', () => {
     it('labels the synthetic CT as "Built-in Grid CT", not "Meter 0x00"', () => {
       useInverterStore.setState({
