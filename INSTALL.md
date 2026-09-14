@@ -605,24 +605,30 @@ docker pull psylsph/home-energy-manager:latest
 Then start it:
 
 ```bash
-docker run -d --name home-energy-manager --restart unless-stopped -p 7337:7337 -v home-energy-manager-data:/root/.givenergy-local psylsph/home-energy-manager:latest
+docker run -d --name givenergy-local --restart unless-stopped -p 7337:7337 -v home-energy-manager-data:/root/.givenergy-local psylsph/home-energy-manager:latest
 ```
 
 Open `http://localhost:7337` on the Docker host, or `http://<server-ip>:7337` from another device on your network.
 
+> **Note:** The container is named `givenergy-local` to match the Compose and unRAID setups
+> below. If you originally followed an earlier version of this guide, your container may be
+> named `home-energy-manager` — remove it with `docker rm -f home-energy-manager` before
+> using these commands. Your `home-energy-manager-data` volume and everything in it are
+> untouched and will be picked up by the new container.
+
 Check the container logs with:
 
 ```bash
-docker logs -f home-energy-manager
+docker logs -f givenergy-local
 ```
 
 To update later:
 
 ```bash
 docker pull psylsph/home-energy-manager:latest
-docker stop home-energy-manager
-docker rm home-energy-manager
-docker run -d --name home-energy-manager --restart unless-stopped -p 7337:7337 -v home-energy-manager-data:/root/.givenergy-local psylsph/home-energy-manager:latest
+docker stop givenergy-local
+docker rm givenergy-local
+docker run -d --name givenergy-local --restart unless-stopped -p 7337:7337 -v home-energy-manager-data:/root/.givenergy-local psylsph/home-energy-manager:latest
 ```
 
 Your settings and history are stored in the `home-energy-manager-data` Docker volume and survive container restarts and image updates.
