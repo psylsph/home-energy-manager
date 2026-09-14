@@ -19,7 +19,13 @@ use super::api;
 use super::external_commands::Reservation;
 use super::{audit_control_event_or_block, AuthenticatedIdentity};
 use crate::server::audit::AuditEvent;
-use crate::{inverter::poll::AppState, settings::Settings};
+use crate::{
+    inverter::{
+        model::{DeviceType, ExternalControlOperation},
+        poll::{AppState, ConnectionState},
+    },
+    settings::Settings,
+};
 
 /// The authenticated identity attached by the auth middleware (present on
 /// every request that reached permission validation).
@@ -57,6 +63,84 @@ fn identity(request: &Request) -> String {
         .get::<AuthenticatedIdentity>()
         .map(|identity| identity.fingerprint.clone())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn capability_error(status: StatusCode, code: &'static str, error: &str) -> Response {
+    (status, Json(json!({"ok": false, "code": code, "error": error}))).into_response()
+}
+
+/// Reject an authenticated mutation unless its complete register path is
+/// confirmed for a fresh, connected inverter snapshot. This runs before rate
+/// limiting, command reservation, accepted-action audit, baseline capture, or
+/// queueing, so unsupported hardware cannot leave any command side effects.
+async fn require_operation_capability(
+    state: &Arc<AppState>,
+    operation: ExternalControlOperation,
+) -> Result<(), Box<Response>> {
+    if *state.connection_state.lock().await != ConnectionState::Connected {
+        return Err(Box::new(capability_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "state_unavailable",
+            "Current inverter state is unavailable; control request refused for safety",
+        )));
+    }
+
+    let interval_secs = state.settings.lock().await.interval_secs;
+    let (device_type, firmware_version, timestamp) = {
+        let snapshot = state.latest_snapshot.lock().await;
+        let Some(snapshot) = snapshot.as_ref() else {
+            return Err(Box::new(capability_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "state_unavailable",
+                "No inverter snapshot is available; control request refused for safety",
+            )));
+        };
+        (
+            snapshot.device_type,
+            snapshot.firmware_version.clone(),
+            snapshot.timestamp,
+        )
+    };
+    let age_secs = chrono::Utc::now().timestamp().saturating_sub(timestamp);
+    let stale_after_secs = interval_secs.saturating_mul(3).max(60).min(i64::MAX as u64) as i64;
+    if age_secs > stale_after_secs || age_secs < -5 {
+        return Err(Box::new(capability_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "state_unavailable",
+            "The inverter snapshot is stale; control request refused for safety",
+        )));
+    }
+    if matches!(device_type, DeviceType::Unknown(_)) {
+        return Err(Box::new(capability_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "state_unavailable",
+            "The inverter model has not been identified; control request refused for safety",
+        )));
+    }
+
+    let arm_fw = firmware_version.parse::<u16>().ok();
+    let pause_requires_firmware = matches!(device_type, DeviceType::Gen3Hybrid)
+        && matches!(
+            operation,
+            ExternalControlOperation::PauseCharge
+                | ExternalControlOperation::PauseDischarge
+                | ExternalControlOperation::PauseBoth
+        );
+    if pause_requires_firmware && arm_fw.is_none() {
+        return Err(Box::new(capability_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "state_unavailable",
+            "The inverter firmware is unavailable; control request refused for safety",
+        )));
+    }
+    if !device_type.supports_external_control(operation, arm_fw.unwrap_or(0)) {
+        return Err(Box::new(capability_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_control",
+            "This control operation is not supported on the connected inverter",
+        )));
+    }
+    Ok(())
 }
 
 /// Fail-open audit for denials (no mutation happens, so a failed audit
@@ -310,6 +394,14 @@ pub async fn force_charge(State(state): State<Arc<AppState>>, request: Request) 
         return error.into_response();
     }
     let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
+    if let Err(response) = require_operation_capability(
+        &state,
+        ExternalControlOperation::ForceCharge,
+    )
+    .await
+    {
+        return *response;
+    }
     run_start(state, fingerprint, idem_key, "force_charge", minutes_u64).await
 }
 
@@ -326,6 +418,14 @@ pub async fn force_discharge(State(state): State<Arc<AppState>>, request: Reques
         return error.into_response();
     }
     let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
+    if let Err(response) = require_operation_capability(
+        &state,
+        ExternalControlOperation::ForceDischarge,
+    )
+    .await
+    {
+        return *response;
+    }
     run_start(state, fingerprint, idem_key, "force_discharge", minutes_u64).await
 }
 
@@ -438,6 +538,14 @@ pub async fn force_charge_stop(State(state): State<Arc<AppState>>, request: Requ
         Ok(key) => key,
         Err(response) => return *response,
     };
+    if let Err(response) = require_operation_capability(
+        &state,
+        ExternalControlOperation::ForceCharge,
+    )
+    .await
+    {
+        return *response;
+    }
     run_stop(state, fingerprint, idem_key, "force_charge").await
 }
 
@@ -451,6 +559,14 @@ pub async fn force_discharge_stop(
         Ok(key) => key,
         Err(response) => return *response,
     };
+    if let Err(response) = require_operation_capability(
+        &state,
+        ExternalControlOperation::ForceDischarge,
+    )
+    .await
+    {
+        return *response;
+    }
     run_stop(state, fingerprint, idem_key, "force_discharge").await
 }
 
@@ -712,8 +828,13 @@ mod tests {
                         body,
                     )
                     .await;
-                    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{device:?} {action}");
-                    assert_eq!(response["code"], "unsupported_control");
+                    let (expected_status, expected_code) = if matches!(device, DeviceType::Unknown(_)) {
+                        (StatusCode::SERVICE_UNAVAILABLE, "state_unavailable")
+                    } else {
+                        (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_control")
+                    };
+                    assert_eq!(status, expected_status, "{device:?} {action}");
+                    assert_eq!(response["code"], expected_code);
                 }
 
                 assert!(state.pending_writes.lock().await.is_empty());
