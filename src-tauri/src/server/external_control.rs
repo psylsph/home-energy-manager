@@ -559,10 +559,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         *state.latest_snapshot.lock().await = Some(InverterSnapshot {
-            timestamp: 1_800_000_000,
+            timestamp: chrono::Utc::now().timestamp(),
             device_type: DeviceType::ACCoupled,
             ..Default::default()
         });
+        *state.connection_state.lock().await = ConnectionState::Connected;
         state
     }
 
@@ -664,19 +665,95 @@ mod tests {
             let state = setup(true).await;
             *state.latest_snapshot.lock().await = None;
             for action in ["force-charge", "force-discharge"] {
-                assert_eq!(
-                    request(
+                let (status, body) = request(
+                    state.clone(),
+                    action,
+                    Some("integration-key"),
+                    json!({"minutes":30}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(body["code"], "state_unavailable");
+            }
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unsupported_inverters_reject_every_external_mutation_before_side_effects() {
+        with_isolated_config_dir_async(|| async {
+            for device in [
+                DeviceType::PvInverter,
+                DeviceType::Ems,
+                DeviceType::EmsCommercial,
+                DeviceType::Gen4Hybrid,
+                DeviceType::Unknown(0x9999),
+            ] {
+                let state = setup(true).await;
+                state
+                    .latest_snapshot
+                    .lock()
+                    .await
+                    .as_mut()
+                    .unwrap()
+                    .device_type = device;
+
+                for action in ACTIONS {
+                    let body = if action.ends_with("/stop") {
+                        Value::Null
+                    } else {
+                        json!({"minutes":30})
+                    };
+                    let (status, response) = request(
                         state.clone(),
                         action,
                         Some("integration-key"),
-                        json!({"minutes":30})
+                        body,
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{device:?} {action}");
+                    assert_eq!(response["code"], "unsupported_control");
+                }
+
+                assert!(state.pending_writes.lock().await.is_empty());
+                assert!(state.force_charge_revert.lock().await.is_none());
+                assert!(state.force_discharge_revert.lock().await.is_none());
+                assert!(!state.command_ledger.has_active_start("force_charge").unwrap());
+                assert!(!state
+                    .command_ledger
+                    .has_active_start("force_discharge")
+                    .unwrap());
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unsupported_inverters_keep_authenticated_reads_available() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup(true).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .device_type = DeviceType::PvInverter;
+
+            for path in ["/api/snapshot", "/api/control/status"] {
+                let response = create_authenticated_router(state.clone())
+                    .oneshot(
+                        Request::builder()
+                            .uri(path)
+                            .header("Authorization", "Bearer integration-key")
+                            .body(Body::empty())
+                            .unwrap(),
                     )
                     .await
-                    .0,
-                    StatusCode::CONFLICT
-                );
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{path}");
             }
-            assert!(state.pending_writes.lock().await.is_empty());
         })
         .await;
     }
