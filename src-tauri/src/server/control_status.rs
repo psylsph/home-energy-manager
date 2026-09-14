@@ -6,7 +6,10 @@
 //! window), never the HTTP client's or server's timezone.
 
 use crate::inverter::{
-    model::{BatteryMode, BatteryState, DeviceType, InverterSnapshot, ScheduleSlot},
+    model::{
+        BatteryMode, BatteryState, DeviceType, ExternalControlOperation, InverterSnapshot,
+        ScheduleSlot,
+    },
     poll::{AppState, ConnectionState},
     state_machines::{
         export_window_contains, inverter_minute_of_day, TimedExportConfig, TimedExportState,
@@ -184,6 +187,58 @@ fn schedule(armed: bool, in_window: Option<bool>, performing: bool) -> &'static 
     }
 }
 
+fn control_capabilities(snapshot: Option<&InverterSnapshot>, available: bool) -> Value {
+    let Some(snapshot) = snapshot.filter(|_| available) else {
+        return json!({
+            "force_charge": Value::Null,
+            "force_discharge": Value::Null,
+            "pause_modes": Value::Null,
+        });
+    };
+    if matches!(snapshot.device_type, DeviceType::Unknown(_)) {
+        return json!({
+            "force_charge": Value::Null,
+            "force_discharge": Value::Null,
+            "pause_modes": Value::Null,
+        });
+    }
+
+    let arm_fw = snapshot.firmware_version.parse::<u16>().ok();
+    let pause_modes = if matches!(snapshot.device_type, DeviceType::Gen3Hybrid)
+        && arm_fw.is_none()
+    {
+        Value::Null
+    } else {
+        let firmware = arm_fw.unwrap_or(0);
+        let mut modes = Vec::new();
+        for (operation, label) in [
+            (ExternalControlOperation::PauseCharge, "charge"),
+            (ExternalControlOperation::PauseDischarge, "discharge"),
+            (ExternalControlOperation::PauseBoth, "both"),
+        ] {
+            if snapshot
+                .device_type
+                .supports_external_control(operation, firmware)
+            {
+                modes.push(label);
+            }
+        }
+        json!(modes)
+    };
+
+    json!({
+        "force_charge": snapshot.device_type.supports_external_control(
+            ExternalControlOperation::ForceCharge,
+            arm_fw.unwrap_or(0),
+        ),
+        "force_discharge": snapshot.device_type.supports_external_control(
+            ExternalControlOperation::ForceDischarge,
+            arm_fw.unwrap_or(0),
+        ),
+        "pause_modes": pause_modes,
+    })
+}
+
 /// `now_ms` is injected. Readings older than three polling intervals (minimum
 /// 60s), or >5s in the future, are not presented as live. Countdown rounding is
 /// upwards so an unexpired window never says zero minutes remaining.
@@ -209,6 +264,7 @@ fn build_status(
         "schedules":{"charge":"unknown","export":"unknown","demand_discharge":"unknown"},
         "automation":null, "conditions":[], "calibration":null, "maintenance":null,
         "quick_action":null, "limits":null,
+        "control_capabilities":control_capabilities(snapshot, available),
         "connection":conn, "stale":stale, "observed_at":observed_at,
         "age_seconds":age_s.map(|age| age.max(0)), "stale_after_seconds":stale_after_s,
     });
