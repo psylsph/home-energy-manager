@@ -18,6 +18,31 @@ Disabling write permission prevents new external starts. An action you already s
 
 The API key, port, listen address, browser origins and the control toggle can only be changed **from the machine running HEM**. A visitor to the dashboard from another device cannot grant themselves a key or switch battery control on.
 
+### Generating your first key on a remote/headless install
+
+If you browse HEM from another machine (headless server, Proxmox LXC, VM, Docker container), clicking **Generate API key** returns `403: Authenticated API settings can only be changed from the machine running Home Energy Manager`. That is deliberate: a remote, unauthenticated browser must not be able to mint itself a credential. The settings page accepts these changes only when the connection appears to come from the HEM machine itself (a loopback peer).
+
+You only need this workaround once — to generate the key and set the port/listen address. Two options:
+
+**Option A — SSH port-forward (recommended).** From your desktop, forward a local port to the HEM machine's dashboard port:
+
+```bash
+ssh -L 7337:127.0.0.1:7337 user@hem-machine
+```
+
+Then open `http://localhost:7337` in your local browser. Because the browser now talks to a loopback-forwarded connection, the settings change is accepted. Replace `7337` with your dashboard port if it differs, and `user@hem-machine` with the SSH target for the host or container.
+
+**Option B — temporary loopback forward inside the container/host.** If SSH into the HEM machine isn't practical (e.g. an LXC without SSH), run a short-lived forwarder so your LAN connection appears to originate locally, and stop it when done. With `socat`:
+
+```bash
+apt-get install -y socat
+socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:7337
+```
+
+Browse to `http://<hem-machine>:8080`, generate the key, then stop socat (`Ctrl-C`). Prefer Option A where possible — socat forwards without authentication, so keep it running only as long as needed, and never leave port 8080 exposed.
+
+Subsequent key rotations need the same one-time workaround, since they are also security-field changes.
+
 ### Address and security
 
 - On the machine running HEM: `http://localhost:7338`.
