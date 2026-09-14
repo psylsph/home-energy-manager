@@ -4729,7 +4729,9 @@ mod tests {
     fn api_credential_generate_produces_strong_secret_and_working_verifier() {
         let (secret, credential) = ApiCredential::generate();
         // 32 random bytes as unpadded base64url → 43 chars, no whitespace.
-        assert_eq!(secret.len(), 43, "secret: {secret}");
+        // Never print the secret itself in assertion output (CodeQL
+        // rust/cleartext-logging): the length alone is enough to diagnose.
+        assert_eq!(secret.len(), 43);
         assert!(!secret.contains(char::is_whitespace));
         assert_eq!(credential.version, 1);
         assert_eq!(credential.last4, secret[secret.len() - 4..]);

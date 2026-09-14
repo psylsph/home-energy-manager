@@ -17568,7 +17568,9 @@ mod tests {
             let secret = response["data"]["api_key"]
                 .as_str()
                 .expect("generate response must carry the one-time secret");
-            assert_eq!(secret.len(), 43, "secret: {secret}");
+            // Never print the secret itself in assertion output (CodeQL
+            // rust/cleartext-logging): the length alone is enough to diagnose.
+            assert_eq!(secret.len(), 43);
 
             // Verify on disk from scratch: verifier-backed, no plaintext.
             let saved = crate::settings::Settings::load();
