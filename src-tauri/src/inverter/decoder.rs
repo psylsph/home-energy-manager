@@ -5838,14 +5838,34 @@ mod tests {
     /// targeted `read_registers(Holding, 318, 3)`.
     #[test]
     fn decode_holding_318_320_targeted_probe() {
-        let mut snap = InverterSnapshot::default();
+        let mut snap = InverterSnapshot {
+            timestamp: 1_800_000_000,
+            ..Default::default()
+        };
 
         // HR 318 = pause mode 2 (pause discharge), HR 319 = 22:00, HR 320 = 06:00.
         decode_holding_318_320(&[2, 2200, 600], &mut snap);
         assert_eq!(snap.battery_pause_mode, 2);
+        assert_eq!(snap.battery_pause_mode_raw, Some(2));
+        assert_eq!(snap.battery_pause_slot_start_raw, Some(2200));
+        assert_eq!(snap.battery_pause_slot_end_raw, Some(600));
+        assert_eq!(snap.battery_pause_registers_observed_at, Some(1_800_000_000));
         assert!(snap.battery_pause_slot.enabled);
         assert_eq!(snap.battery_pause_slot.start_hour, 22);
         assert_eq!(snap.battery_pause_slot.end_hour, 6);
+    }
+
+    #[test]
+    fn decode_holding_318_320_preserves_invalid_raw_values_for_exact_restoration() {
+        let mut snap = InverterSnapshot {
+            timestamp: 1_800_000_000,
+            ..Default::default()
+        };
+        decode_holding_318_320(&[7, 2461, 9999], &mut snap);
+        assert_eq!(snap.battery_pause_mode_raw, Some(7));
+        assert_eq!(snap.battery_pause_slot_start_raw, Some(2461));
+        assert_eq!(snap.battery_pause_slot_end_raw, Some(9999));
+        assert!(!snap.battery_pause_slot.enabled);
     }
 
     /// A short read (fewer than 3 registers) must be a no-op rather than
