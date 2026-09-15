@@ -329,6 +329,16 @@ pub(crate) fn carry_forward_optional_block_values(
             snap.battery_pause_slot = prev.battery_pause_slot.clone();
             changed = true;
         }
+        if snap.battery_pause_mode_raw.is_none()
+            || snap.battery_pause_slot_start_raw.is_none()
+            || snap.battery_pause_slot_end_raw.is_none()
+        {
+            snap.battery_pause_mode_raw = prev.battery_pause_mode_raw;
+            snap.battery_pause_slot_start_raw = prev.battery_pause_slot_start_raw;
+            snap.battery_pause_slot_end_raw = prev.battery_pause_slot_end_raw;
+            snap.battery_pause_registers_observed_at = prev.battery_pause_registers_observed_at;
+            changed = true;
+        }
     }
 
     // Three-phase/commercial/HV models get limit/reserve values from optional

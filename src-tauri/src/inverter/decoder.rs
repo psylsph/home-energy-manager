@@ -1332,6 +1332,12 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 
     // HR 319-320: battery pause slot
     snap.battery_pause_slot = decode_timeslot(data, 319 - 300, 320 - 300);
+    record_raw_pause_registers(
+        snap,
+        get_reg(data, 318 - 300),
+        get_reg(data, 319 - 300),
+        get_reg(data, 320 - 300),
+    );
 }
 
 /// Decode the targeted HR 318-320 pause-register probe.
@@ -1347,8 +1353,19 @@ pub fn decode_holding_318_320(data: &[u16], snap: &mut InverterSnapshot) {
     if data.len() < 3 {
         return;
     }
-    snap.battery_pause_mode = get_reg(data, 0) as u8;
+    let mode = get_reg(data, 0);
+    let start = get_reg(data, 1);
+    let end = get_reg(data, 2);
+    snap.battery_pause_mode = mode as u8;
     snap.battery_pause_slot = decode_timeslot(data, 1, 2);
+    record_raw_pause_registers(snap, mode, start, end);
+}
+
+fn record_raw_pause_registers(snap: &mut InverterSnapshot, mode: u16, start: u16, end: u16) {
+    snap.battery_pause_mode_raw = Some(mode);
+    snap.battery_pause_slot_start_raw = Some(start);
+    snap.battery_pause_slot_end_raw = Some(end);
+    snap.battery_pause_registers_observed_at = Some(snap.timestamp);
 }
 
 /// Decode holding registers 1080-1124 (three-phase battery/control block).
