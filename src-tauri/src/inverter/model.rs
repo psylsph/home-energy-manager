@@ -1197,6 +1197,19 @@ pub struct InverterSnapshot {
     /// Battery pause time slot — HR 319-320.
     #[serde(default)]
     pub battery_pause_slot: ScheduleSlot,
+    /// Exact raw HR318 value from the latest complete pause-register read.
+    /// Kept separately from the UI-normalized u8 field for safe restoration.
+    #[serde(default)]
+    pub battery_pause_mode_raw: Option<u16>,
+    /// Exact raw HR319 value from the latest complete pause-register read.
+    #[serde(default)]
+    pub battery_pause_slot_start_raw: Option<u16>,
+    /// Exact raw HR320 value from the latest complete pause-register read.
+    #[serde(default)]
+    pub battery_pause_slot_end_raw: Option<u16>,
+    /// Snapshot timestamp at which HR318-320 were read together.
+    #[serde(default)]
+    pub battery_pause_registers_observed_at: Option<i64>,
 
     // -- External CT configuration (single-phase only) --
     /// Whether the external CT ammeter is enabled — HR(7).
@@ -1391,6 +1404,10 @@ impl InverterSnapshot {
             ac_eps_enabled: false,
             battery_pause_mode: 0,
             battery_pause_slot: ScheduleSlot::default(),
+            battery_pause_mode_raw: None,
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
+            battery_pause_registers_observed_at: None,
             enable_ammeter: false,
             enable_reversed_ct_clamp: false,
             meter_type: 0,
