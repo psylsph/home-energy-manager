@@ -823,6 +823,32 @@ mod tests {
     }
 
     #[test]
+    fn active_recovery_is_available_before_startup_reconciliation() {
+        let ledger = isolated_ledger();
+        let command_id = match ledger
+            .reserve_start("fp", "pause_charge", 30, "key-1", 1_000)
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        ledger.mark_state(&command_id, "queued").unwrap();
+        ledger
+            .record_recovery(&command_id, r#"{"requested_mode":1}"#)
+            .unwrap();
+        assert_eq!(
+            ledger.active_recoveries().unwrap(),
+            vec![(
+                "pause_charge".to_string(),
+                r#"{"requested_mode":1}"#.to_string()
+            )]
+        );
+        assert_eq!(ledger.reconcile_startup().unwrap(), 1);
+        assert!(ledger.active_recoveries().unwrap().is_empty());
+        assert_eq!(ledger.get(&command_id).unwrap().unwrap().state, "unknown");
+    }
+
+    #[test]
     fn startup_reconciliation_marks_in_progress_unknown() {
         let ledger = isolated_ledger();
         let first = ledger
