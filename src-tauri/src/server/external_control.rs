@@ -81,6 +81,21 @@ async fn require_operation_capability(
     state: &Arc<AppState>,
     operation: ExternalControlOperation,
 ) -> Result<(), Box<Response>> {
+    require_operation_capability_inner(state, operation, true).await
+}
+
+async fn require_stop_capability(
+    state: &Arc<AppState>,
+    operation: ExternalControlOperation,
+) -> Result<(), Box<Response>> {
+    require_operation_capability_inner(state, operation, false).await
+}
+
+async fn require_operation_capability_inner(
+    state: &Arc<AppState>,
+    operation: ExternalControlOperation,
+    require_pause_baseline: bool,
+) -> Result<(), Box<Response>> {
     if *state.connection_state.lock().await != ConnectionState::Connected {
         return Err(Box::new(capability_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -138,9 +153,16 @@ async fn require_operation_capability(
         )));
     }
     let firmware = arm_fw.unwrap_or(0);
-    if operation == ExternalControlOperation::ForceDischarge
-        && device_type.supports_pause_registers(firmware)
-        && (snapshot_pause_baseline_unavailable(state).await)
+    let needs_pause_baseline = matches!(
+        operation,
+        ExternalControlOperation::ForceDischarge
+            | ExternalControlOperation::PauseCharge
+            | ExternalControlOperation::PauseDischarge
+            | ExternalControlOperation::PauseBoth
+    ) && device_type.supports_pause_registers(firmware);
+    if require_pause_baseline
+        && needs_pause_baseline
+        && snapshot_pause_baseline_unavailable(state).await
     {
         return Err(Box::new(capability_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -159,6 +181,12 @@ async fn require_operation_capability(
 }
 
 async fn snapshot_pause_baseline_unavailable(state: &Arc<AppState>) -> bool {
+    fn valid_hhmm(value: u16) -> bool {
+        let hour = value / 100;
+        let minute = value % 100;
+        hour < 24 && minute < 60
+    }
+
     let snapshot = state.latest_snapshot.lock().await;
     let Some(snapshot) = snapshot.as_ref() else {
         return true;
@@ -167,6 +195,13 @@ async fn snapshot_pause_baseline_unavailable(state: &Arc<AppState>) -> bool {
         || snapshot.battery_pause_slot_start_raw.is_none()
         || snapshot.battery_pause_slot_end_raw.is_none()
         || snapshot.battery_pause_registers_observed_at != Some(snapshot.timestamp)
+        || snapshot.battery_pause_mode_raw.is_some_and(|mode| mode > 3)
+        || snapshot
+            .battery_pause_slot_start_raw
+            .is_some_and(|value| !valid_hhmm(value))
+        || snapshot
+            .battery_pause_slot_end_raw
+            .is_some_and(|value| !valid_hhmm(value))
 }
 
 /// Fail-open audit for denials (no mutation happens, so a failed audit
@@ -276,11 +311,11 @@ pub struct DurationRequest {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 enum PauseMode {
-    #[serde(rename = "pause_charge")]
+    #[serde(rename = "charge", alias = "pause_charge")]
     Charge,
-    #[serde(rename = "pause_discharge")]
+    #[serde(rename = "discharge", alias = "pause_discharge")]
     Discharge,
-    #[serde(rename = "pause_both")]
+    #[serde(rename = "both", alias = "pause_both")]
     Both,
 }
 
@@ -829,7 +864,7 @@ pub async fn force_charge_stop(State(state): State<Arc<AppState>>, request: Requ
         Err(response) => return *response,
     }
     if let Err(response) =
-        require_operation_capability(&state, ExternalControlOperation::ForceCharge).await
+        require_stop_capability(&state, ExternalControlOperation::ForceCharge).await
     {
         return *response;
     }
@@ -856,7 +891,7 @@ pub async fn force_discharge_stop(
         Err(response) => return *response,
     }
     if let Err(response) =
-        require_operation_capability(&state, ExternalControlOperation::ForceDischarge).await
+        require_stop_capability(&state, ExternalControlOperation::ForceDischarge).await
     {
         return *response;
     }
@@ -907,7 +942,7 @@ pub async fn pause_mode_stop(State(state): State<Arc<AppState>>, request: Reques
         );
     }
     if let Err(response) =
-        require_operation_capability(&state, ExternalControlOperation::PauseBoth).await
+        require_stop_capability(&state, ExternalControlOperation::PauseBoth).await
     {
         return *response;
     }
@@ -1402,6 +1437,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pause_mode_rejects_corrupt_register_baseline() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_native_pause().await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .battery_pause_slot_end_raw = Some(2360);
+            let response = request(
+                state.clone(),
+                "pause-mode",
+                Some("integration-key"),
+                json!({"mode":"pause_both","minutes":30}),
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.1["code"], "state_unavailable");
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert!(state.pause_mode_revert.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn pause_mode_retry_replays_before_connection_guard() {
         with_isolated_config_dir_async(|| async {
             let state = setup_native_pause().await;
@@ -1437,7 +1498,7 @@ mod tests {
                 state.clone(),
                 "pause-mode",
                 Some("integration-key"),
-                json!({"mode":"pause_both","minutes":30}),
+                json!({"mode":"both","minutes":30}),
             )
             .await;
             assert_eq!(response.0, StatusCode::OK);

@@ -40,7 +40,7 @@ Treat this API as a small, single-owner integration surface, not as a general id
 
 - There is no emergency-stop guarantee. Remote stops are ordinary queued writes: if HEM or the inverter link is down, use the inverter's physical controls per the manufacturer's guidance.
 
-Native pause is an aggregate inverter/plant control (there is no battery selector). Set `mode` to `pause_charge`, `pause_discharge`, or `pause_both`; `minutes` must be 1–1439. HEM captures the inverter's exact pause registers before starting and restores them on Stop or expiry. These controls are available only on confirmed model/firmware combinations; unsupported devices return `422 unsupported_control`, while missing or stale register state returns `503 state_unavailable`. Read-only endpoints remain available.
+Native pause is an aggregate inverter/plant control (there is no battery selector). Set `mode` to `charge`, `discharge`, or `both`; the equivalent `pause_`-prefixed spellings are accepted for compatibility. `minutes` must be 1–1439. HEM captures the inverter's exact pause registers before starting and restores them on Stop or expiry. These controls are available only on confirmed model/firmware combinations; unsupported devices return `422 unsupported_control`, while missing or stale register state returns `503 state_unavailable`. Read-only endpoints remain available.
 
 The separate API does not expose settings or WebSocket endpoints. Enabling it does not change access to the main HEM server.
 
@@ -57,7 +57,7 @@ All paths below are relative to your authenticated server address.
 | POST | `/api/control/force-charge/stop` | None | See recovery stops below |
 | POST | `/api/control/force-discharge` | `{"minutes":30}` | Required for new starts |
 | POST | `/api/control/force-discharge/stop` | None | See recovery stops below |
-| POST | `/api/control/pause-mode` | `{"mode":"pause_charge","minutes":60}` | Required for new starts |
+| POST | `/api/control/pause-mode` | `{"mode":"charge","minutes":60}` | Required for new starts |
 | POST | `/api/control/pause-mode/stop` | None | See recovery stops below |
 
 Every POST needs two headers:
@@ -178,7 +178,7 @@ curl --silent --show-error --fail-with-body --max-time 10 \
   -X POST -H "Authorization: Bearer $HEM_KEY" \
   -H "Idempotency-Key: $IDEM_KEY" \
   -H 'Content-Type: application/json' \
-  --data '{"mode":"pause_charge","minutes":60}' \
+  --data '{"mode":"charge","minutes":60}' \
   "$HEM_API/api/control/pause-mode"
 
 curl --silent --show-error --fail-with-body --max-time 10 \
@@ -236,9 +236,9 @@ A typical response while Force Charge is active contains these fields (other fie
 | `summary` | Human-readable description. Display it, but do not parse its wording for automation. |
 | `mode` | `eco`, `eco_paused`, `timed_demand`, `timed_export`, `export_paused`, or `unknown`. |
 | `activity` | Observed `charging`, `discharging`, `idle`, or `unavailable`; not simply the requested action. |
-| `control_source` | Best-known controller: `force_charge`, `force_discharge`, `timed_export`, `winter`, `cosy`, `agile`, `adaptive`, `timed_charge`, `inverter`, `safety`, or `unknown`. |
-| `control_phase` | Controller-specific state, such as `pending`, `active`, `expired`, `waiting`, `observed` or `restricted`. Handle unrecognised values gracefully. |
-| `quick_action` | Known HEM-owned force action, phase, request time and window end; otherwise `null`. Dates can be `null` if unavailable. |
+| `control_source` | Best-known controller: `force_charge`, `force_discharge`, `pause_mode`, `timed_export`, `winter`, `cosy`, `agile`, `adaptive`, `timed_charge`, `inverter`, `safety`, or `unknown`. |
+| `control_phase` | Controller-specific state, such as `pending`, `active`, `restoring`, `expired`, `waiting`, `observed` or `restricted`. Handle unrecognised values gracefully. |
+| `quick_action` | Known HEM-owned force or native pause action, phase, request time and window end; otherwise `null`. Native pause also reports its mode. Dates can be `null` if unavailable. |
 | `remaining_minutes` | Known Quick Action window time remaining, rounded up; `0` after expiry, or `null` when unknown/not applicable. Not time until the battery is full or empty. |
 | `schedules` | Separate `charge`, `export` and `demand_discharge` states: `off`, `armed`, `active` or `unknown`. `armed` can mean outside the window or not currently performing the action. |
 | `automation` | Configuration and phases for Cosy, Agile, Adaptive Charge, winter, forecast and HEM-managed Timed Export; also `charging_mode`. |

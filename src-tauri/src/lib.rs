@@ -690,9 +690,9 @@ pub fn run() {
 
 /// Parse a `--port <N>` argument from the CLI args.
 /// Startup reconciliation for external commands (U5): commands still
-/// in-progress from a previous process can never be auto-resumed — they are
-/// marked `unknown` and surfaced loudly so the operator can inspect the
-/// inverter through the app's own UI.
+/// in-progress from a previous process are marked `unknown` and surfaced
+/// loudly. Their durable recovery baselines are retained for an explicit,
+/// authenticated Stop, but no action is auto-resumed.
 fn reconcile_external_commands(state: &Arc<AppState>) -> Vec<(String, String)> {
     // Preserve durable recovery baselines for an explicit Stop after restart.
     // This does not re-arm anything: startup still marks the command unknown,
