@@ -38,8 +38,9 @@ Treat this API as a small, single-owner integration surface, not as a general id
 - `GET /api/snapshot` returns a deliberately limited operating view (power flows, state of charge, temperatures, grid readings, today's energy counters). It still reveals household energy behaviour, so grant read access only to systems that need it.
 - A successful start response means HEM **accepted and queued** the command — not that the inverter has applied it. Every mutation returns a `command_id`; poll `GET /api/commands/{id}` for `readback_confirmed`, `failed`, `expired` or `unknown` before drawing conclusions.
 
-Native pause is an aggregate inverter/plant control (there is no battery selector). Set `mode` to `pause_charge`, `pause_discharge`, or `pause_both`; `minutes` must be 1–1439. HEM captures the inverter's exact pause registers before starting and restores them on Stop or expiry. These controls are available only on confirmed model/firmware combinations; unsupported devices return `422 unsupported_control`, while missing or stale register state returns `503 state_unavailable`. Read-only endpoints remain available.
 - There is no emergency-stop guarantee. Remote stops are ordinary queued writes: if HEM or the inverter link is down, use the inverter's physical controls per the manufacturer's guidance.
+
+Native pause is an aggregate inverter/plant control (there is no battery selector). Set `mode` to `pause_charge`, `pause_discharge`, or `pause_both`; `minutes` must be 1–1439. HEM captures the inverter's exact pause registers before starting and restores them on Stop or expiry. These controls are available only on confirmed model/firmware combinations; unsupported devices return `422 unsupported_control`, while missing or stale register state returns `503 state_unavailable`. Read-only endpoints remain available.
 
 The separate API does not expose settings or WebSocket endpoints. Enabling it does not change access to the main HEM server.
 
