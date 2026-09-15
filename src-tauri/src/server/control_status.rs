@@ -52,9 +52,17 @@ struct ForceWindow {
     end_ms: Option<i64>,
 }
 
+struct PauseWindow {
+    mode: u16,
+    started_at_ms: i64,
+    end_ms: i64,
+    restoring: bool,
+}
+
 #[derive(Default)]
 struct Context {
     force: Option<ForceWindow>,
+    pause: Option<PauseWindow>,
     export_config: TimedExportConfig,
     export_state: TimedExportState,
 }
@@ -80,6 +88,17 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
                 })
             })
     };
+    let pause = state
+        .pause_mode_revert
+        .lock()
+        .await
+        .as_ref()
+        .map(|r| PauseWindow {
+            mode: r.requested_mode,
+            started_at_ms: r.started_at_ms,
+            end_ms: r.expires_at_ms,
+            restoring: r.restoring,
+        });
     let export_config = state.timed_export_config.lock().await.clone();
     let export_state = state.timed_export_state.lock().await.clone();
     let conn = state.connection_state.lock().await.clone();
@@ -93,6 +112,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
         interval,
         &Context {
             force,
+            pause,
             export_config,
             export_state,
         },
@@ -204,8 +224,7 @@ fn control_capabilities(snapshot: Option<&InverterSnapshot>, available: bool) ->
     }
 
     let arm_fw = snapshot.firmware_version.parse::<u16>().ok();
-    let pause_modes = if matches!(snapshot.device_type, DeviceType::Gen3Hybrid)
-        && arm_fw.is_none()
+    let pause_modes = if matches!(snapshot.device_type, DeviceType::Gen3Hybrid) && arm_fw.is_none()
     {
         Value::Null
     } else {
@@ -497,6 +516,36 @@ fn build_status(
             "requested_at":DateTime::<Utc>::from_timestamp_millis(force.started_at_ms).map(|t| t.to_rfc3339()),
             "window_ends_at":force.end_ms.and_then(DateTime::<Utc>::from_timestamp_millis).map(|t| t.to_rfc3339())});
         (force.kind.code(), phase, force.kind.label().to_string())
+    } else if let Some(pause) = &ctx.pause {
+        let expired = now_ms >= pause.end_ms;
+        let readback_after_request = s.timestamp.saturating_mul(1000) > pause.started_at_ms;
+        let observed = s.battery_pause_mode_raw == Some(pause.mode)
+            && window(std::slice::from_ref(&s.battery_pause_slot), minute) == Some(true);
+        let phase = if pause.restoring {
+            "restoring"
+        } else if expired {
+            "expired"
+        } else if observed && readback_after_request {
+            "active"
+        } else {
+            "pending"
+        };
+        value["remaining_minutes"] = json!(
+            pause
+                .end_ms
+                .saturating_sub(now_ms)
+                .max(0)
+                .saturating_add(59_999)
+                / 60_000
+        );
+        value["quick_action"] = json!({
+            "action": "pause_mode",
+            "mode": pause.mode,
+            "phase": phase,
+            "requested_at": DateTime::<Utc>::from_timestamp_millis(pause.started_at_ms).map(|t| t.to_rfc3339()),
+            "window_ends_at": DateTime::<Utc>::from_timestamp_millis(pause.end_ms).map(|t| t.to_rfc3339()),
+        });
+        ("pause_mode", phase, "Battery Pause".into())
     } else if ctx.export_state.owns_discharge_control()
         || matches!(
             ctx.export_state,
@@ -656,7 +705,10 @@ mod tests {
             NOW,
         );
         assert_eq!(value["control_capabilities"]["force_charge"], Value::Null);
-        assert_eq!(value["control_capabilities"]["force_discharge"], Value::Null);
+        assert_eq!(
+            value["control_capabilities"]["force_discharge"],
+            Value::Null
+        );
         assert_eq!(value["control_capabilities"]["pause_modes"], Value::Null);
     }
 

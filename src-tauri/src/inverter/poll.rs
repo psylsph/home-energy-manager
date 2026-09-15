@@ -271,6 +271,38 @@ pub struct ForceChargeRevert {
 /// A value of `None` in an `Option<_>` field means "no previous value known"
 /// and the corresponding write is skipped.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PauseModeRevert {
+    /// Request timestamp; status/readback must not treat older data as proof.
+    pub started_at_ms: i64,
+    /// Expiry of the finite native pause window.
+    pub expires_at_ms: i64,
+    /// Stop/expiry has queued restoration and retains ownership until a fresh
+    /// exact readback confirms the baseline.
+    #[serde(default)]
+    pub restoring: bool,
+    #[serde(default)]
+    pub restoration_requested_at_ms: Option<i64>,
+    /// External identity that owns recovery of this action.
+    #[serde(default)]
+    pub external_owner: Option<String>,
+    /// Model identity captured with the baseline; restoration must not cross
+    /// an inverter replacement or model transition.
+    pub device_type: crate::inverter::model::DeviceType,
+    pub inverter_serial: String,
+    pub firmware_version: String,
+    /// Requested raw HR318 mode (1, 2, or 3).
+    pub requested_mode: u16,
+    /// Exact raw values read together before the action.
+    pub battery_pause_mode: u16,
+    pub battery_pause_slot_start: u16,
+    pub battery_pause_slot_end: u16,
+    pub registers_observed_at: i64,
+}
+
+/// Snapshot of inverter registers captured at the moment Force Discharge is
+/// started, used to restore the inverter to its pre-force-discharge state
+/// when the user clicks Stop Discharge.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ForceDischargeRevert {
     /// Request timestamp; summary status must not treat older readback as confirmation.
     pub started_at_ms: i64,
@@ -285,7 +317,6 @@ pub struct ForceDischargeRevert {
     /// Battery discharge rate (HR 112 / HR 314) before force discharge, if known.
     pub discharge_rate: Option<u8>,
     /// Discharge slot 1 start time (HH,MM) before force discharge, if any was set.
-    /// `None` means no slot was configured (write 00:00–00:00 to clear).
     pub discharge_slot_1_start: Option<(u8, u8)>,
     /// Discharge slot 1 end time (HH,MM) before force discharge, if any was set.
     pub discharge_slot_1_end: Option<(u8, u8)>,
@@ -300,22 +331,21 @@ pub struct ForceDischargeRevert {
     /// three-phase models. The force-discharge encoder writes 0 to this
     /// register, so we need to restore its prior value.
     pub three_phase_force_charge_enable: Option<bool>,
-    /// Unix epoch millis at which the discharge slot window ends. Set only
-    /// on the timed (minutes-bounded) path so the poll loop can auto-revert
-    /// when the slot expires — preventing the inverter from being left in
-    /// export mode with enable_discharge=1 but no active slot, which
-    /// effectively pauses the battery (no charge, no discharge). None on
-    /// the "no body" / "until stopped" path, where there is no slot to
-    /// expire. See issue #129.
+    /// Unix epoch millis at which the discharge slot window ends.
     pub force_discharge_slot_end_ms: Option<i64>,
-    /// Battery pause mode (HR 318) before force discharge (issue #289).
-    /// Captured so Stop Discharge / auto-revert restores the exact
-    /// pre-action pause configuration — GivTCP's Force Export does the
-    /// same after temporarily disabling pause mode.
+    /// Whether HR318-320 are confirmed writable on this model/firmware.
+    #[serde(default)]
+    pub pause_registers_supported: bool,
+    /// Exact pause-register baseline when the optional block was observed.
+    #[serde(default)]
+    pub battery_pause_mode_raw: Option<u16>,
+    #[serde(default)]
+    pub battery_pause_slot_start_raw: Option<u16>,
+    #[serde(default)]
+    pub battery_pause_slot_end_raw: Option<u16>,
+    /// Battery pause mode (HR 318) before force discharge.
     pub battery_pause_mode: u8,
-    /// Battery pause slot (HR 319-320) before force discharge. Restored
-    /// together with `battery_pause_mode` so a Timed Discharge window that
-    /// was armed before the force action survives it unchanged.
+    /// Battery pause slot (HR 319-320) before force discharge.
     pub battery_pause_slot: crate::inverter::model::ScheduleSlot,
 }
 
@@ -400,9 +430,10 @@ pub struct AppState {
     /// the inverter to its prior configuration when the user clicks Stop
     /// Discharge. Set on `force_discharge` start, cleared on stop.
     pub force_discharge_revert: Arc<Mutex<Option<ForceDischargeRevert>>>,
-    /// Serialises Force Charge / Force Discharge start and stop handlers so
-    /// two concurrent API requests cannot arm both actions before either has
-    /// recorded its revert state.
+    /// Captured raw HR318-320 baseline for an authenticated native pause.
+    pub pause_mode_revert: Arc<Mutex<Option<PauseModeRevert>>>,
+    /// Serialises Force and native pause actions across admission, capture,
+    /// queueing, and restoration.
     pub force_action_lock: Arc<Mutex<()>>,
     /// Serialises Timed Export schedule mutations (enable/disable, slot
     /// edits, desired-slot restore from backup, test reset) so two
@@ -600,6 +631,7 @@ impl AppState {
             write_notify: Arc::new(Notify::new()),
             force_charge_revert: Arc::new(Mutex::new(None)),
             force_discharge_revert: Arc::new(Mutex::new(None)),
+            pause_mode_revert: Arc::new(Mutex::new(None)),
             force_action_lock: Arc::new(Mutex::new(())),
             timed_export_action_lock: Arc::new(Mutex::new(())),
             history: Arc::new(Mutex::new(None)),
@@ -1103,6 +1135,58 @@ fn take_pending_writes(queue: &mut Vec<PendingWriteBatch>, cap: usize) -> Vec<Pe
     taken
 }
 
+/// Clear a native pause owner only after a fresh exact raw baseline readback.
+async fn clear_confirmed_pause_restoration(state: &Arc<AppState>, snapshot: &InverterSnapshot) {
+    let snapshot_ts_ms = snapshot.timestamp.saturating_mul(1000);
+    let mut pause = state.pause_mode_revert.lock().await;
+    let Some(revert) = pause.as_ref() else { return };
+    if revert.restoring
+        && revert
+            .restoration_requested_at_ms
+            .is_some_and(|requested| snapshot_ts_ms > requested)
+        && snapshot.battery_pause_mode_raw == Some(revert.battery_pause_mode)
+        && snapshot.battery_pause_slot_start_raw == Some(revert.battery_pause_slot_start)
+        && snapshot.battery_pause_slot_end_raw == Some(revert.battery_pause_slot_end)
+        && snapshot.device_type == revert.device_type
+        && snapshot.inverter_serial == revert.inverter_serial
+        && snapshot.firmware_version == revert.firmware_version
+    {
+        *pause = None;
+        tracing::info!("Native battery pause restoration confirmed by fresh readback");
+    }
+}
+
+/// Queue expiry restoration once the finite native pause window ends. The
+/// owner remains present while writes are dispatched and until readback clears
+/// it, preventing automations from racing the restoration.
+async fn expire_native_pause_if_needed(state: &Arc<AppState>) {
+    let _action_guard = state.force_action_lock.lock().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let baseline = {
+        let mut pause = state.pause_mode_revert.lock().await;
+        let Some(revert) = pause.as_mut() else { return };
+        if revert.restoring || now_ms < revert.expires_at_ms {
+            return;
+        }
+        revert.restoring = true;
+        revert.restoration_requested_at_ms = Some(now_ms);
+        revert.clone()
+    };
+    let writes = crate::server::api::build_pause_mode_writes(
+        baseline.battery_pause_mode,
+        baseline.battery_pause_slot_start,
+        baseline.battery_pause_slot_end,
+    );
+    crate::server::api::queue_writes_with_policy(
+        state,
+        writes,
+        WriteBatchPolicy::FailFast,
+        None,
+        Some(DischargeControlOwner::ExplicitPause),
+    )
+    .await;
+}
+
 /// Select the highest-priority discharge owner represented by the current
 /// runtime state or queued API requests.  The previous snapshot is used here
 /// because this function runs before the next read; it is still the latest
@@ -1112,6 +1196,7 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
     let snapshot = state.latest_snapshot.lock().await.clone();
     let force_charge = state.force_charge_revert.lock().await.is_some();
     let force_discharge = state.force_discharge_revert.lock().await.is_some();
+    let native_pause = state.pause_mode_revert.lock().await.is_some();
     let load_paused = state.load_limiter_state.lock().await.is_actively_pausing();
     let temperature_paused = state
         .temperature_limiter_state
@@ -1167,6 +1252,9 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
     }
     if force_charge || force_discharge {
         arbiter.request(DischargeControlOwner::ManualForce);
+    }
+    if native_pause {
+        arbiter.request(DischargeControlOwner::ExplicitPause);
     }
     if timed_export_active {
         arbiter.request(DischargeControlOwner::TimedExport);
@@ -1614,6 +1702,8 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
         let mut latest = state.latest_snapshot.lock().await;
         *latest = Some(snapshot.clone());
     }
+    clear_confirmed_pause_restoration(state, &snapshot).await;
+    expire_native_pause_if_needed(state).await;
 
     // Clone for history before moving `snapshot` into the broadcast.
     // This avoids a third clone — `latest` + `history` are the only
@@ -1633,6 +1723,7 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
             snapshot_ts_ms: snapshot.timestamp.saturating_mul(1000),
             charge_active: snapshot.enable_charge && snapshot.battery_power_mode == 1,
             discharge_active: snapshot.enable_discharge && snapshot.battery_power_mode == 0,
+            pause_mode: snapshot.battery_pause_mode_raw,
             now_ms: chrono::Utc::now().timestamp_millis(),
         };
         if let Err(e) = state.command_ledger.advance_readback(&evidence) {

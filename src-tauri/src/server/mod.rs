@@ -813,6 +813,10 @@ pub fn create_authenticated_router_with_origins(
             "/api/control/force-discharge",
             post(external_control::force_discharge),
         )
+        .route(
+            "/api/control/pause-mode",
+            post(external_control::pause_mode),
+        )
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -829,6 +833,10 @@ pub fn create_authenticated_router_with_origins(
         .route(
             "/api/control/force-discharge/stop",
             post(external_control::force_discharge_stop),
+        )
+        .route(
+            "/api/control/pause-mode/stop",
+            post(external_control::pause_mode_stop),
         )
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES));
 
@@ -879,6 +887,7 @@ pub fn create_authenticated_router_with_origins(
                 .allow_headers([
                     axum::http::header::AUTHORIZATION,
                     axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderName::from_static("idempotency-key"),
                 ]),
         )
     };

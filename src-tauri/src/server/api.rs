@@ -15,7 +15,7 @@ use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
 use crate::inverter::model::{DeviceType, InverterSnapshot};
 use crate::inverter::poll::{
     stamp_solar_array_fields, AppState, ConnectionState, ForceChargeRevert, ForceDischargeRevert,
-    PendingWriteBatch, PollMessage, PollSettings, WriteBatchPolicy,
+    PauseModeRevert, PendingWriteBatch, PollMessage, PollSettings, WriteBatchPolicy,
 };
 use crate::inverter::state_machines::DischargeControlOwner;
 use crate::modbus::registers::encode_hhmm;
@@ -649,7 +649,7 @@ async fn queue_owned_writes(
 }
 
 /// Completion-aware variant for an owned discharge-control batch.
-async fn queue_owned_writes_with_completion(
+pub(crate) async fn queue_owned_writes_with_completion(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
     owner: DischargeControlOwner,
@@ -661,6 +661,17 @@ async fn queue_owned_writes_with_completion(
         Some(owner),
     )
     .await
+}
+
+/// Queue an ordered safety-critical action. Fail-fast prevents a rejected
+/// pause-window write from being followed by the HR318 arm write.
+pub(crate) async fn queue_owned_writes_fail_fast(
+    state: &Arc<AppState>,
+    writes: Vec<RegisterWrite>,
+    owner: DischargeControlOwner,
+) -> (tokio::sync::oneshot::Receiver<WriteOutcome>, Duration) {
+    queue_writes_with_completion_budget(state, writes, WriteBatchPolicy::FailFast, Some(owner))
+        .await
 }
 
 /// Transactional Timed Export write. If the API request times out, the poll
@@ -707,7 +718,7 @@ async fn queue_writes_transactional(
     .await
 }
 
-async fn queue_writes_with_policy(
+pub(crate) async fn queue_writes_with_policy(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
     policy: WriteBatchPolicy,
@@ -779,7 +790,7 @@ fn batch_completion_timeout(write_count: usize) -> Duration {
 /// Testable implementation with an injectable timeout. Production callers
 /// pass [`WRITE_COMPLETION_TIMEOUT`] (or a batch-scaled budget); tests can
 /// exercise the slow-but-progressing fallback without waiting 15 seconds.
-async fn await_write_outcome_with_timeout(
+pub(crate) async fn await_write_outcome_with_timeout(
     rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
     timeout: Duration,
 ) -> Result<(), String> {
@@ -826,6 +837,71 @@ async fn await_required_write_outcome_with_timeout(
             timeout.as_secs()
         )),
     }
+}
+
+/// Capture exact raw HR318-320 values for an authenticated native pause.
+pub(crate) async fn capture_pause_mode_revert(
+    state: &Arc<AppState>,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> Result<PauseModeRevert, String> {
+    let snapshot = state.latest_snapshot.lock().await;
+    let snapshot = snapshot
+        .as_ref()
+        .ok_or_else(|| "No inverter snapshot is available".to_string())?;
+    let mode = snapshot
+        .battery_pause_mode_raw
+        .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?;
+    let start = snapshot
+        .battery_pause_slot_start_raw
+        .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?;
+    let end = snapshot
+        .battery_pause_slot_end_raw
+        .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?;
+    let observed_at = snapshot
+        .battery_pause_registers_observed_at
+        .ok_or_else(|| "No HR318-320 read timestamp is available".to_string())?;
+    if observed_at != snapshot.timestamp || snapshot.inverter_serial.is_empty() {
+        return Err(
+            "The native pause baseline is not fresh or lacks inverter identity".to_string(),
+        );
+    }
+    Ok(PauseModeRevert {
+        started_at_ms: now_ms,
+        expires_at_ms,
+        restoring: false,
+        restoration_requested_at_ms: None,
+        external_owner: None,
+        requested_mode: 0,
+        device_type: snapshot.device_type,
+        inverter_serial: snapshot.inverter_serial.clone(),
+        firmware_version: snapshot.firmware_version.clone(),
+        battery_pause_mode: mode,
+        battery_pause_slot_start: start,
+        battery_pause_slot_end: end,
+        registers_observed_at: observed_at,
+    })
+}
+
+/// Build the native pause writes in safe order: window first, then mode.
+pub(crate) fn build_pause_mode_writes(mode: u16, start: u16, end: u16) -> Vec<RegisterWrite> {
+    use crate::modbus::registers::{
+        HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END, HR_BATTERY_PAUSE_SLOT_1_START,
+    };
+    vec![
+        RegisterWrite {
+            address: HR_BATTERY_PAUSE_SLOT_1_START,
+            value: start,
+        },
+        RegisterWrite {
+            address: HR_BATTERY_PAUSE_SLOT_1_END,
+            value: end,
+        },
+        RegisterWrite {
+            address: HR_BATTERY_PAUSE_MODE,
+            value: mode,
+        },
+    ]
 }
 
 /// Capture the pre-force-charge state of the inverter into a `ForceChargeRevert`
@@ -1053,9 +1129,13 @@ async fn capture_force_discharge_revert(
         // is used, after the capture is taken. The poll loop reads this
         // field to auto-revert when the slot window expires (issue #129).
         force_discharge_slot_end_ms: None,
-        // HR318/319/320 pre-state (issue #289): the force action may
-        // temporarily disable pause mode so discharge can run; Stop
-        // Discharge / auto-revert restores the exact prior configuration.
+        // HR318/319/320 pre-state (issue #289): only capture/use this
+        // register family where the model/firmware capability is confirmed.
+        pause_registers_supported: device_type
+            .supports_pause_registers(snap.firmware_version.parse::<u16>().unwrap_or(0)),
+        battery_pause_mode_raw: snap.battery_pause_mode_raw,
+        battery_pause_slot_start_raw: snap.battery_pause_slot_start_raw,
+        battery_pause_slot_end_raw: snap.battery_pause_slot_end_raw,
         battery_pause_mode: snap.battery_pause_mode,
         battery_pause_slot: snap.battery_pause_slot.clone(),
     })
@@ -1149,18 +1229,19 @@ fn build_force_discharge_stop_writes(
         });
     }
 
-    // Restore the pre-force HR318/319/320 pause configuration (issue #289)
-    // on EVERY device family — including three-phase / AC-three-phase, whose
-    // enable/slot restoration was routed through the three-phase register
-    // bank above but whose pause schedule lives in the common holding block
-    // and was captured + temporarily disabled just the same. Slot values
-    // precede the pause mode so an enabled mode never coexists with stale
-    // window data.
-    crate::inverter::state_machines::push_pause_restore_writes(
-        &mut writes,
-        Some(revert.battery_pause_mode),
-        Some(&revert.battery_pause_slot),
-    );
+    // Restore pause registers only when this model's HR318-320 path was
+    // confirmed and the exact raw baseline was captured. Never emit these
+    // writes for AC single-phase or another family that merely defaults the
+    // normalized fields to zero.
+    if revert.pause_registers_supported {
+        if let (Some(mode), Some(start), Some(end)) = (
+            revert.battery_pause_mode_raw,
+            revert.battery_pause_slot_start_raw,
+            revert.battery_pause_slot_end_raw,
+        ) {
+            writes.extend(build_pause_mode_writes(mode, start, end));
+        }
+    }
 
     writes
 }
@@ -5154,9 +5235,10 @@ async fn force_discharge_at(
     // HR318/319/320 state. Mode 1 (pause charging) does not block
     // discharge and is left alone.
     if revert.as_ref().is_some_and(|r| {
-        crate::inverter::state_machines::should_disable_pause_for_force_discharge(
-            r.battery_pause_mode,
-        )
+        r.pause_registers_supported
+            && crate::inverter::state_machines::should_disable_pause_for_force_discharge(
+                r.battery_pause_mode,
+            )
     }) {
         writes.push(RegisterWrite {
             address: crate::modbus::registers::HR_BATTERY_PAUSE_MODE,
@@ -15550,6 +15632,42 @@ mod tests {
                 revert.three_phase_force_discharge_enable.is_none(),
                 "single-phase should not capture three-phase flags"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_discharge_never_writes_pause_registers_on_ac_single_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END, HR_BATTERY_PAUSE_SLOT_1_START,
+            };
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .battery_pause_mode = 2;
+            let (status, _) = force_discharge(
+                State(state.clone()),
+                Some(Json(serde_json::json!({"minutes": 30}))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let _ = drain_pending_writes(&state).await;
+            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert!(!writes.iter().any(|write| {
+                matches!(
+                    write.address,
+                    HR_BATTERY_PAUSE_MODE
+                        | HR_BATTERY_PAUSE_SLOT_1_START
+                        | HR_BATTERY_PAUSE_SLOT_1_END
+                )
+            }));
         })
         .await;
     }
