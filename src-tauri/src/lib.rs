@@ -648,11 +648,11 @@ pub fn run() {
             // (U2 hardening). Read-only unless the user opts in to external
             // battery control. An empty key means no credential configured.
             let recoveries = reconcile_external_commands(&state);
-            tauri::async_runtime::spawn(restore_external_recoveries(state.clone(), recoveries));
             {
                 let ro_state = state.clone();
                 let desired = api_config.clone();
                 tauri::async_runtime::spawn(async move {
+                    restore_external_recoveries(ro_state.clone(), recoveries).await;
                     if let Err(e) = ro_state
                         .authenticated_lifecycle
                         .apply(ro_state.clone(), desired)
@@ -998,11 +998,11 @@ pub fn run_headless(args: &[String]) {
         // Start the authenticated external API listener through its
         // lifecycle manager (see the Tauri path above).
         let recoveries = reconcile_external_commands(&state);
-        tokio::spawn(restore_external_recoveries(state.clone(), recoveries));
         {
             let ro_state = state.clone();
             let desired = api_config.clone();
             tokio::spawn(async move {
+                restore_external_recoveries(ro_state.clone(), recoveries).await;
                 if let Err(e) = ro_state
                     .authenticated_lifecycle
                     .apply(ro_state.clone(), desired)
