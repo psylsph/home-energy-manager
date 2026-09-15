@@ -62,6 +62,8 @@ pub struct ReadbackEvidence {
     pub charge_active: bool,
     /// Strict force-discharge predicate.
     pub discharge_active: bool,
+    /// Raw HR318 mode from the same fresh readback, when available.
+    pub pause_mode: Option<u16>,
     /// Current wall-clock milliseconds.
     pub now_ms: i64,
 }
@@ -399,6 +401,9 @@ impl CommandLedger {
                 let active = match action.as_str() {
                     "force_charge" => evidence.charge_active,
                     "force_discharge" => evidence.discharge_active,
+                    "pause_charge" => evidence.pause_mode == Some(1),
+                    "pause_discharge" => evidence.pause_mode == Some(2),
+                    "pause_both" => evidence.pause_mode == Some(3),
                     _ => false,
                 };
                 let new_state = if is_start == 1 {
@@ -539,6 +544,23 @@ impl CommandLedger {
                 )
                 .map(|count| count > 0)
                 .map_err(|e| format!("active-start lookup failed: {e}"))
+        })
+    }
+
+    /// Whether an active command owns the shared battery-control domain.
+    pub fn has_active_battery_control(&self) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM external_commands
+                     WHERE is_start = 1 AND state IN ('accepted','queued','dispatched')
+                       AND action IN ('force_charge','force_discharge',
+                                      'pause_charge','pause_discharge','pause_both')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)
+                .map_err(|e| format!("active battery-control lookup failed: {e}"))
         })
     }
 
@@ -705,6 +727,7 @@ mod tests {
                 snapshot_ts_ms: 5_000,
                 charge_active: true,
                 discharge_active: false,
+                pause_mode: None,
                 now_ms: 11_000,
             })
             .unwrap();
@@ -716,6 +739,7 @@ mod tests {
                 snapshot_ts_ms: 12_000,
                 charge_active: true,
                 discharge_active: false,
+                pause_mode: None,
                 now_ms: 13_000,
             })
             .unwrap();
@@ -742,6 +766,7 @@ mod tests {
                 snapshot_ts_ms: 500,
                 charge_active: false,
                 discharge_active: false,
+                pause_mode: None,
                 now_ms: 70_000,
             })
             .unwrap();
@@ -752,6 +777,7 @@ mod tests {
                 snapshot_ts_ms: 500,
                 charge_active: false,
                 discharge_active: false,
+                pause_mode: None,
                 now_ms: 70_000 + 300_000,
             })
             .unwrap();
@@ -770,6 +796,7 @@ mod tests {
                 snapshot_ts_ms: 62_000,
                 charge_active: false,
                 discharge_active: false,
+                pause_mode: None,
                 now_ms: 70_000,
             })
             .unwrap();

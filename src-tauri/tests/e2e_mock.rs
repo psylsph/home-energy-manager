@@ -1049,6 +1049,10 @@ async fn test_reset_clears_schedule_state_and_force_reverts() {
             three_phase_force_discharge_enable: None,
             three_phase_force_charge_enable: None,
             force_discharge_slot_end_ms: None,
+            pause_registers_supported: false,
+            battery_pause_mode_raw: None,
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
             battery_pause_mode: 0,
             battery_pause_slot: Default::default(),
         });

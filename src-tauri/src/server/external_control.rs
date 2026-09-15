@@ -66,7 +66,11 @@ fn identity(request: &Request) -> String {
 }
 
 fn capability_error(status: StatusCode, code: &'static str, error: &str) -> Response {
-    (status, Json(json!({"ok": false, "code": code, "error": error}))).into_response()
+    (
+        status,
+        Json(json!({"ok": false, "code": code, "error": error})),
+    )
+        .into_response()
 }
 
 /// Reject an authenticated mutation unless its complete register path is
@@ -133,7 +137,18 @@ async fn require_operation_capability(
             "The inverter firmware is unavailable; control request refused for safety",
         )));
     }
-    if !device_type.supports_external_control(operation, arm_fw.unwrap_or(0)) {
+    let firmware = arm_fw.unwrap_or(0);
+    if operation == ExternalControlOperation::ForceDischarge
+        && device_type.supports_pause_registers(firmware)
+        && (snapshot_pause_baseline_unavailable(state).await)
+    {
+        return Err(Box::new(capability_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "state_unavailable",
+            "The pause-register baseline is unavailable; control request refused for safety",
+        )));
+    }
+    if !device_type.supports_external_control(operation, firmware) {
         return Err(Box::new(capability_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_control",
@@ -141,6 +156,17 @@ async fn require_operation_capability(
         )));
     }
     Ok(())
+}
+
+async fn snapshot_pause_baseline_unavailable(state: &Arc<AppState>) -> bool {
+    let snapshot = state.latest_snapshot.lock().await;
+    let Some(snapshot) = snapshot.as_ref() else {
+        return true;
+    };
+    snapshot.battery_pause_mode_raw.is_none()
+        || snapshot.battery_pause_slot_start_raw.is_none()
+        || snapshot.battery_pause_slot_end_raw.is_none()
+        || snapshot.battery_pause_registers_observed_at != Some(snapshot.timestamp)
 }
 
 /// Fail-open audit for denials (no mutation happens, so a failed audit
@@ -248,6 +274,47 @@ pub struct DurationRequest {
     minutes: u64,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PauseMode {
+    Charge,
+    Discharge,
+    Both,
+}
+
+impl PauseMode {
+    fn register_value(self) -> u16 {
+        match self {
+            Self::Charge => 1,
+            Self::Discharge => 2,
+            Self::Both => 3,
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Charge => "pause_charge",
+            Self::Discharge => "pause_discharge",
+            Self::Both => "pause_both",
+        }
+    }
+
+    fn operation(self) -> ExternalControlOperation {
+        match self {
+            Self::Charge => ExternalControlOperation::PauseCharge,
+            Self::Discharge => ExternalControlOperation::PauseDischarge,
+            Self::Both => ExternalControlOperation::PauseBoth,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseModeRequest {
+    mode: PauseMode,
+    minutes: u64,
+}
+
 fn bad_duration_request() -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
@@ -284,6 +351,27 @@ async fn duration_body(
         ),
         _ => (None, Err(bad_duration_request())),
     }
+}
+
+async fn pause_mode_body(request: Request) -> Result<(PauseMode, u64), Response> {
+    let content_type = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !content_type.starts_with("application/json") {
+        return Err(bad_duration_request().into_response());
+    }
+    let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024)
+        .await
+        .map_err(|_| bad_duration_request().into_response())?;
+    let body: PauseModeRequest =
+        serde_json::from_slice(&bytes).map_err(|_| bad_duration_request().into_response())?;
+    if !(1..=1439).contains(&body.minutes) {
+        return Err(bad_duration_request().into_response());
+    }
+    Ok((body.mode, body.minutes))
 }
 
 /// Shared start-adapter body: limits, reservation, fail-closed audit,
@@ -381,6 +469,177 @@ async fn run_start(
     (status, Json(response_body)).into_response()
 }
 
+async fn run_pause_start(
+    state: Arc<AppState>,
+    fingerprint: String,
+    idem_key: String,
+    mode: PauseMode,
+    minutes: u64,
+) -> Response {
+    let _action_guard = state.force_action_lock.lock().await;
+    if state.force_charge_revert.lock().await.is_some()
+        || state.force_discharge_revert.lock().await.is_some()
+        || state.pause_mode_revert.lock().await.is_some()
+        || state
+            .command_ledger
+            .has_active_battery_control()
+            .unwrap_or(false)
+    {
+        return capability_error(
+            StatusCode::CONFLICT,
+            "control_conflict",
+            "Another battery control action is active",
+        );
+    }
+    let reservation = match state.command_ledger.reserve_start(
+        &fingerprint,
+        mode.action(),
+        minutes,
+        &idem_key,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(reservation) => reservation,
+        Err(e) => return capability_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e),
+    };
+    let command_id = match reservation {
+        Reservation::Accepted { command_id } => command_id,
+        Reservation::Replayed { response } => return replay_response(response),
+        Reservation::InProgress { command_id } => return in_progress_response(command_id),
+        Reservation::Conflict {
+            existing_command_id,
+        } => return conflict_response(existing_command_id),
+    };
+
+    if state.force_charge_revert.lock().await.is_some()
+        || state.force_discharge_revert.lock().await.is_some()
+        || state.pause_mode_revert.lock().await.is_some()
+    {
+        let _ = state.command_ledger.finish(
+            &command_id,
+            "failed",
+            &json!({"status":409,"body":{"ok":false,"error":"Another battery control action is active"}}).to_string(),
+        );
+        return conflict_response(command_id);
+    }
+    if let Some(response) = audit_action(
+        &state,
+        &fingerprint,
+        "action_start",
+        Some(format!("{} minutes={minutes}", mode.action())),
+    ) {
+        let _ = state.command_ledger.mark_state(&command_id, "failed");
+        return response;
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let (start, end) = {
+        let snapshot = state.latest_snapshot.lock().await;
+        let Some(snapshot) = snapshot.as_ref() else {
+            let _ = state.command_ledger.mark_state(&command_id, "failed");
+            return capability_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "state_unavailable",
+                "No inverter snapshot is available; pause request refused for safety",
+            );
+        };
+        let Some(start_minute) = crate::inverter::state_machines::inverter_minute_of_day(snapshot)
+        else {
+            let _ = state.command_ledger.mark_state(&command_id, "failed");
+            return capability_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "state_unavailable",
+                "The inverter clock is unavailable; pause request refused for safety",
+            );
+        };
+        let end_minute = (start_minute + minutes as u16) % 1440;
+        (
+            (start_minute / 60) * 100 + start_minute % 60,
+            (end_minute / 60) * 100 + end_minute % 60,
+        )
+    };
+    let mut revert =
+        match api::capture_pause_mode_revert(&state, now_ms, now_ms + (minutes as i64) * 60_000)
+            .await
+        {
+            Ok(revert) => revert,
+            Err(error) => {
+                let _ = state.command_ledger.mark_state(&command_id, "failed");
+                return capability_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "state_unavailable",
+                    &error,
+                );
+            }
+        };
+    revert.external_owner = Some(fingerprint.clone());
+    revert.requested_mode = mode.register_value();
+    let writes = api::build_pause_mode_writes(mode.register_value(), start, end);
+    let (rx, budget) = api::queue_owned_writes_fail_fast(
+        &state,
+        writes,
+        crate::inverter::state_machines::DischargeControlOwner::ExplicitPause,
+    )
+    .await;
+    *state.pause_mode_revert.lock().await = Some(revert.clone());
+    let mut body = json!({"ok":true,"message":"Battery pause queued","command_id":command_id});
+    match api::await_write_outcome_with_timeout(rx, budget).await {
+        Ok(()) => {
+            let _ = state.command_ledger.mark_state(&command_id, "queued");
+            let _ = state.command_ledger.record_recovery(
+                &command_id,
+                &serde_json::to_string(&revert).unwrap_or_default(),
+            );
+            store_envelope(&state, &command_id, StatusCode::OK, &body);
+        }
+        Err(error) => {
+            let _ = state.command_ledger.finish(
+                &command_id,
+                "failed",
+                &json!({"status":502,"body":{"ok":false,"error":error}}).to_string(),
+            );
+            // The fail-fast batch may have applied its window before failing.
+            // Queue exact rollback while retaining pause ownership.
+            let rollback = api::build_pause_mode_writes(
+                revert.battery_pause_mode,
+                revert.battery_pause_slot_start,
+                revert.battery_pause_slot_end,
+            );
+            let _ = api::queue_owned_writes_fail_fast(
+                &state,
+                rollback,
+                crate::inverter::state_machines::DischargeControlOwner::ExplicitPause,
+            )
+            .await;
+            body = json!({"ok":false,"error":format!("Battery pause could not be applied safely: {error}"),"command_id":command_id});
+        }
+    }
+    (
+        if body["ok"] == true {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_GATEWAY
+        },
+        Json(body),
+    )
+        .into_response()
+}
+
+pub async fn pause_mode(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let fingerprint = identity(&request);
+    let idem_key = match idempotency_key(&request) {
+        Ok(key) => key,
+        Err(response) => return *response,
+    };
+    let (mode, minutes) = match pause_mode_body(request).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_operation_capability(&state, mode.operation()).await {
+        return *response;
+    }
+    run_pause_start(state, fingerprint, idem_key, mode, minutes).await
+}
+
 pub async fn force_charge(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let fingerprint = identity(&request);
     let idem_key = match idempotency_key(&request) {
@@ -394,11 +653,8 @@ pub async fn force_charge(State(state): State<Arc<AppState>>, request: Request) 
         return error.into_response();
     }
     let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
-    if let Err(response) = require_operation_capability(
-        &state,
-        ExternalControlOperation::ForceCharge,
-    )
-    .await
+    if let Err(response) =
+        require_operation_capability(&state, ExternalControlOperation::ForceCharge).await
     {
         return *response;
     }
@@ -418,11 +674,8 @@ pub async fn force_discharge(State(state): State<Arc<AppState>>, request: Reques
         return error.into_response();
     }
     let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
-    if let Err(response) = require_operation_capability(
-        &state,
-        ExternalControlOperation::ForceDischarge,
-    )
-    .await
+    if let Err(response) =
+        require_operation_capability(&state, ExternalControlOperation::ForceDischarge).await
     {
         return *response;
     }
@@ -538,11 +791,8 @@ pub async fn force_charge_stop(State(state): State<Arc<AppState>>, request: Requ
         Ok(key) => key,
         Err(response) => return *response,
     };
-    if let Err(response) = require_operation_capability(
-        &state,
-        ExternalControlOperation::ForceCharge,
-    )
-    .await
+    if let Err(response) =
+        require_operation_capability(&state, ExternalControlOperation::ForceCharge).await
     {
         return *response;
     }
@@ -559,15 +809,155 @@ pub async fn force_discharge_stop(
         Ok(key) => key,
         Err(response) => return *response,
     };
-    if let Err(response) = require_operation_capability(
-        &state,
-        ExternalControlOperation::ForceDischarge,
-    )
-    .await
+    if let Err(response) =
+        require_operation_capability(&state, ExternalControlOperation::ForceDischarge).await
     {
         return *response;
     }
     run_stop(state, fingerprint, idem_key, "force_discharge").await
+}
+
+pub async fn pause_mode_stop(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let fingerprint = identity(&request);
+    let idem_key = match idempotency_key(&request) {
+        Ok(key) => key,
+        Err(response) => return *response,
+    };
+    let settings = Settings::load_async().await;
+    let owned = state
+        .pause_mode_revert
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|revert| revert.external_owner.as_ref())
+        .is_some();
+    if !settings.api_control_enabled && !owned {
+        audit_denial(
+            &state,
+            AuditEvent {
+                kind: "authz_denied",
+                actor: Some(fingerprint),
+                source: None,
+                method: Some("POST".into()),
+                path: Some("/api/control/pause-mode/stop".into()),
+                outcome: "denied",
+                detail: Some("control permission off; no external pause action owned".into()),
+            },
+        );
+        return capability_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "External battery control is disabled",
+        );
+    }
+    if let Err(response) =
+        require_operation_capability(&state, ExternalControlOperation::PauseBoth).await
+    {
+        return *response;
+    }
+
+    let _action_guard = state.force_action_lock.lock().await;
+    let reservation = match state.command_ledger.reserve_stop(
+        &fingerprint,
+        "pause_mode",
+        &idem_key,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            return capability_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &error)
+        }
+    };
+    let command_id = match reservation {
+        Reservation::Accepted { command_id } => command_id,
+        Reservation::Replayed { response } => return replay_response(response),
+        Reservation::InProgress { command_id } => return in_progress_response(command_id),
+        Reservation::Conflict {
+            existing_command_id,
+        } => return conflict_response(existing_command_id),
+    };
+    if let Some(response) = audit_action(
+        &state,
+        &fingerprint,
+        "action_stop",
+        Some("pause_mode".into()),
+    ) {
+        let _ = state.command_ledger.mark_state(&command_id, "failed");
+        return response;
+    }
+
+    let revert = state.pause_mode_revert.lock().await.clone();
+    let Some(revert) = revert else {
+        let body =
+            json!({"ok":true,"message":"Battery pause was not active","command_id":command_id});
+        let _ = state
+            .command_ledger
+            .mark_state(&command_id, "readback_confirmed");
+        store_envelope(&state, &command_id, StatusCode::OK, &body);
+        return (StatusCode::OK, Json(body)).into_response();
+    };
+    {
+        let snapshot = state.latest_snapshot.lock().await;
+        let Some(snapshot) = snapshot.as_ref() else {
+            let _ = state.command_ledger.mark_state(&command_id, "failed");
+            return capability_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "state_unavailable",
+                "Current inverter identity is unavailable; pause restoration refused for safety",
+            );
+        };
+        if snapshot.device_type != revert.device_type
+            || snapshot.inverter_serial != revert.inverter_serial
+            || snapshot.firmware_version != revert.firmware_version
+        {
+            let _ = state.command_ledger.mark_state(&command_id, "failed");
+            return capability_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "state_unavailable",
+                "The inverter identity changed; pause restoration refused for safety",
+            );
+        }
+    }
+    let writes = api::build_pause_mode_writes(
+        revert.battery_pause_mode,
+        revert.battery_pause_slot_start,
+        revert.battery_pause_slot_end,
+    );
+    {
+        let mut stored = state.pause_mode_revert.lock().await;
+        if let Some(current) = stored.as_mut() {
+            current.restoring = true;
+            current.restoration_requested_at_ms = Some(chrono::Utc::now().timestamp_millis());
+        }
+    }
+    let (rx, budget) = api::queue_owned_writes_fail_fast(
+        &state,
+        writes,
+        crate::inverter::state_machines::DischargeControlOwner::ExplicitPause,
+    )
+    .await;
+    let body = match api::await_write_outcome_with_timeout(rx, budget).await {
+        Ok(()) => {
+            let body = json!({"ok":true,"message":"Battery pause restoration queued","command_id":command_id});
+            let _ = state.command_ledger.mark_state(&command_id, "queued");
+            store_envelope(&state, &command_id, StatusCode::OK, &body);
+            body
+        }
+        Err(error) => {
+            let _ = state.command_ledger.finish(
+                &command_id,
+                "failed",
+                &json!({"status":502,"body":{"ok":false,"error":error}}).to_string(),
+            );
+            json!({"ok":false,"error":format!("Battery pause could not be restored safely: {error}"),"command_id":command_id})
+        }
+    };
+    let status = if body["ok"] == true {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (status, Json(body)).into_response()
 }
 
 fn replay_response(response: Value) -> Response {
@@ -653,11 +1043,13 @@ mod tests {
         settings::Settings,
     };
 
-    const ACTIONS: [&str; 4] = [
+    const ACTIONS: [&str; 6] = [
         "force-charge",
         "force-charge/stop",
         "force-discharge",
         "force-discharge/stop",
+        "pause-mode",
+        "pause-mode/stop",
     ];
 
     async fn setup(enabled: bool) -> Arc<AppState> {
@@ -680,6 +1072,22 @@ mod tests {
             ..Default::default()
         });
         *state.connection_state.lock().await = ConnectionState::Connected;
+        state
+    }
+
+    async fn setup_native_pause() -> Arc<AppState> {
+        let state = setup(true).await;
+        let mut snapshot_guard = state.latest_snapshot.lock().await;
+        let snapshot = snapshot_guard.as_mut().unwrap();
+        snapshot.device_type = DeviceType::AllInOne3_6kW;
+        snapshot.inverter_serial = "AIO-TEST-001".into();
+        snapshot.firmware_version = "400".into();
+        snapshot.inverter_time = "2027-01-15 12:34:00".into();
+        snapshot.battery_pause_mode_raw = Some(0);
+        snapshot.battery_pause_slot_start_raw = Some(0);
+        snapshot.battery_pause_slot_end_raw = Some(0);
+        snapshot.battery_pause_registers_observed_at = Some(snapshot.timestamp);
+        drop(snapshot_guard);
         state
     }
 
@@ -818,21 +1226,19 @@ mod tests {
                 for action in ACTIONS {
                     let body = if action.ends_with("/stop") {
                         Value::Null
+                    } else if action == "pause-mode" {
+                        json!({"mode":"both","minutes":30})
                     } else {
                         json!({"minutes":30})
                     };
-                    let (status, response) = request(
-                        state.clone(),
-                        action,
-                        Some("integration-key"),
-                        body,
-                    )
-                    .await;
-                    let (expected_status, expected_code) = if matches!(device, DeviceType::Unknown(_)) {
-                        (StatusCode::SERVICE_UNAVAILABLE, "state_unavailable")
-                    } else {
-                        (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_control")
-                    };
+                    let (status, response) =
+                        request(state.clone(), action, Some("integration-key"), body).await;
+                    let (expected_status, expected_code) =
+                        if matches!(device, DeviceType::Unknown(_)) {
+                            (StatusCode::SERVICE_UNAVAILABLE, "state_unavailable")
+                        } else {
+                            (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_control")
+                        };
                     assert_eq!(status, expected_status, "{device:?} {action}");
                     assert_eq!(response["code"], expected_code);
                 }
@@ -840,7 +1246,10 @@ mod tests {
                 assert!(state.pending_writes.lock().await.is_empty());
                 assert!(state.force_charge_revert.lock().await.is_none());
                 assert!(state.force_discharge_revert.lock().await.is_none());
-                assert!(!state.command_ledger.has_active_start("force_charge").unwrap());
+                assert!(!state
+                    .command_ledger
+                    .has_active_start("force_charge")
+                    .unwrap());
                 assert!(!state
                     .command_ledger
                     .has_active_start("force_discharge")
@@ -875,6 +1284,72 @@ mod tests {
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::OK, "{path}");
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_mode_validates_mode_duration_and_unknown_fields() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_native_pause().await;
+            for body in [
+                json!({}),
+                json!({"mode":"invalid","minutes":30}),
+                json!({"mode":"charge","minutes":0}),
+                json!({"mode":"charge","minutes":1440}),
+                json!({"mode":"charge","minutes":1.5}),
+                json!({"mode":"charge","minutes":"30"}),
+                json!({"mode":"charge","minutes":30,"extra":true}),
+                Value::Null,
+            ] {
+                assert_eq!(
+                    request(
+                        state.clone(),
+                        "pause-mode",
+                        Some("integration-key"),
+                        body.clone()
+                    )
+                    .await
+                    .0,
+                    StatusCode::BAD_REQUEST,
+                    "{body}"
+                );
+            }
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert!(state.pause_mode_revert.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_mode_start_uses_inverter_clock_and_queues_window_before_mode() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_native_pause().await;
+            let response = request(
+                state.clone(),
+                "pause-mode",
+                Some("integration-key"),
+                json!({"mode":"both","minutes":30}),
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::OK);
+            let writes: Vec<_> = state
+                .pending_writes
+                .lock()
+                .await
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .writes
+                        .iter()
+                        .map(|write| (write.address, write.value))
+                })
+                .collect();
+            assert_eq!(writes[0], (319, 1234));
+            assert_eq!(writes[1], (320, 1304));
+            assert_eq!(writes[2], (318, 3));
+            assert!(state.pause_mode_revert.lock().await.is_some());
+            state.pending_writes.lock().await.clear();
         })
         .await;
     }
@@ -1205,6 +1680,10 @@ mod tests {
                     three_phase_force_discharge_enable: None,
                     three_phase_force_charge_enable: None,
                     force_discharge_slot_end_ms: None,
+                    pause_registers_supported: false,
+                    battery_pause_mode_raw: None,
+                    battery_pause_slot_start_raw: None,
+                    battery_pause_slot_end_raw: None,
                     battery_pause_mode: 0,
                     battery_pause_slot: Default::default(),
                     external_owner: None,
