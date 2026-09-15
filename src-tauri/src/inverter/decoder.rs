@@ -5866,7 +5866,10 @@ mod tests {
         assert_eq!(snap.battery_pause_mode_raw, Some(2));
         assert_eq!(snap.battery_pause_slot_start_raw, Some(2200));
         assert_eq!(snap.battery_pause_slot_end_raw, Some(600));
-        assert_eq!(snap.battery_pause_registers_observed_at, Some(1_800_000_000));
+        assert_eq!(
+            snap.battery_pause_registers_observed_at,
+            Some(1_800_000_000)
+        );
         assert!(snap.battery_pause_slot.enabled);
         assert_eq!(snap.battery_pause_slot.start_hour, 22);
         assert_eq!(snap.battery_pause_slot.end_hour, 6);
