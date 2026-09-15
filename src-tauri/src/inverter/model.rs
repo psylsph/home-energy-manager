@@ -646,8 +646,7 @@ impl DeviceType {
         arm_fw: u16,
     ) -> bool {
         match operation {
-            ExternalControlOperation::ForceCharge
-            | ExternalControlOperation::ForceDischarge => {
+            ExternalControlOperation::ForceCharge | ExternalControlOperation::ForceDischarge => {
                 self.supports_schedule_slots()
                     && (!self.is_batteryless() || matches!(self, Self::Gateway))
                     && !matches!(self, Self::Unknown(_))
@@ -2256,7 +2255,10 @@ mod tests {
                 assert!(device.supports_external_control(operation, 0));
             }
             assert!(device.supports_pause_registers(0));
-            assert_eq!(device.supports_pause_registers(0), device.supports_timed_discharge(0));
+            assert_eq!(
+                device.supports_pause_registers(0),
+                device.supports_timed_discharge(0)
+            );
         }
 
         for firmware in [311, 312] {
@@ -2265,10 +2267,8 @@ mod tests {
                 firmware >= 312
             );
             assert_eq!(
-                DeviceType::Gen3Hybrid.supports_external_control(
-                    ExternalControlOperation::PauseBoth,
-                    firmware,
-                ),
+                DeviceType::Gen3Hybrid
+                    .supports_external_control(ExternalControlOperation::PauseBoth, firmware,),
                 firmware >= 312
             );
             assert_eq!(
