@@ -353,7 +353,7 @@ async fn duration_body(
     }
 }
 
-async fn pause_mode_body(request: Request) -> Result<(PauseMode, u64), Response> {
+async fn pause_mode_body(request: Request) -> Result<(PauseMode, u64), Box<Response>> {
     let content_type = request
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
@@ -361,15 +361,15 @@ async fn pause_mode_body(request: Request) -> Result<(PauseMode, u64), Response>
         .unwrap_or_default()
         .to_ascii_lowercase();
     if !content_type.starts_with("application/json") {
-        return Err(bad_duration_request().into_response());
+        return Err(Box::new(bad_duration_request().into_response()));
     }
     let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024)
         .await
-        .map_err(|_| bad_duration_request().into_response())?;
-    let body: PauseModeRequest =
-        serde_json::from_slice(&bytes).map_err(|_| bad_duration_request().into_response())?;
+        .map_err(|_| Box::new(bad_duration_request().into_response()))?;
+    let body: PauseModeRequest = serde_json::from_slice(&bytes)
+        .map_err(|_| Box::new(bad_duration_request().into_response()))?;
     if !(1..=1439).contains(&body.minutes) {
-        return Err(bad_duration_request().into_response());
+        return Err(Box::new(bad_duration_request().into_response()));
     }
     Ok((body.mode, body.minutes))
 }
@@ -632,7 +632,7 @@ pub async fn pause_mode(State(state): State<Arc<AppState>>, request: Request) ->
     };
     let (mode, minutes) = match pause_mode_body(request).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if let Err(response) = require_operation_capability(&state, mode.operation()).await {
         return *response;
