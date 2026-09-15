@@ -529,6 +529,25 @@ impl CommandLedger {
         })
     }
 
+    /// Return in-progress command recovery payloads before startup marks them
+    /// unknown. These payloads enable an explicit recovery Stop without ever
+    /// silently re-arming the inverter.
+    pub fn active_recoveries(&self) -> Result<Vec<(String, String)>, String> {
+        self.with_connection(|connection| {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT action, recovery FROM external_commands
+                     WHERE is_start = 1 AND state IN ('accepted','queued','dispatched')
+                       AND recovery IS NOT NULL",
+                )
+                .map_err(|e| format!("recovery lookup failed: {e}"))?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| format!("recovery query failed: {e}"))?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
     /// Whether a start command for `action` is currently active (accepted,
     /// queued or dispatched). Used by recovery stops after permission
     /// revocation.

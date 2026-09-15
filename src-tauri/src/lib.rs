@@ -647,7 +647,8 @@ pub fn run() {
             // lifecycle manager so settings changes can rebind/stop it live
             // (U2 hardening). Read-only unless the user opts in to external
             // battery control. An empty key means no credential configured.
-            reconcile_external_commands(&state);
+            let recoveries = reconcile_external_commands(&state);
+            tauri::async_runtime::spawn(restore_external_recoveries(state.clone(), recoveries));
             {
                 let ro_state = state.clone();
                 let desired = api_config.clone();
@@ -692,7 +693,11 @@ pub fn run() {
 /// in-progress from a previous process can never be auto-resumed — they are
 /// marked `unknown` and surfaced loudly so the operator can inspect the
 /// inverter through the app's own UI.
-fn reconcile_external_commands(state: &Arc<AppState>) {
+fn reconcile_external_commands(state: &Arc<AppState>) -> Vec<(String, String)> {
+    // Preserve durable recovery baselines for an explicit Stop after restart.
+    // This does not re-arm anything: startup still marks the command unknown,
+    // and only a later authenticated Stop may enqueue restoration writes.
+    let recoveries = state.command_ledger.active_recoveries().unwrap_or_default();
     match state.command_ledger.reconcile_startup() {
         Ok(0) => {}
         Ok(n) => {
@@ -713,6 +718,31 @@ fn reconcile_external_commands(state: &Arc<AppState>) {
             }
         }
         Err(e) => tracing::warn!("Command ledger startup reconciliation failed: {e}"),
+    }
+    recoveries
+}
+
+async fn restore_external_recoveries(state: Arc<AppState>, recoveries: Vec<(String, String)>) {
+    for (action, recovery) in recoveries {
+        if action.starts_with("pause_") {
+            if let Ok(revert) =
+                serde_json::from_str::<crate::inverter::poll::PauseModeRevert>(&recovery)
+            {
+                *state.pause_mode_revert.lock().await = Some(revert);
+            }
+        } else if action == "force_charge" {
+            if let Ok(revert) =
+                serde_json::from_str::<crate::inverter::poll::ForceChargeRevert>(&recovery)
+            {
+                *state.force_charge_revert.lock().await = Some(revert);
+            }
+        } else if action == "force_discharge" {
+            if let Ok(revert) =
+                serde_json::from_str::<crate::inverter::poll::ForceDischargeRevert>(&recovery)
+            {
+                *state.force_discharge_revert.lock().await = Some(revert);
+            }
+        }
     }
 }
 
@@ -967,7 +997,8 @@ pub fn run_headless(args: &[String]) {
 
         // Start the authenticated external API listener through its
         // lifecycle manager (see the Tauri path above).
-        reconcile_external_commands(&state);
+        let recoveries = reconcile_external_commands(&state);
+        tokio::spawn(restore_external_recoveries(state.clone(), recoveries));
         {
             let ro_state = state.clone();
             let desired = api_config.clone();
