@@ -873,6 +873,8 @@ pub(crate) async fn capture_pause_mode_revert(
         restoration_requested_at_ms: None,
         external_owner: None,
         requested_mode: 0,
+        requested_slot_start: 0,
+        requested_slot_end: 0,
         device_type: snapshot.device_type,
         inverter_serial: snapshot.inverter_serial.clone(),
         firmware_version: snapshot.firmware_version.clone(),

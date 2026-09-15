@@ -292,6 +292,11 @@ pub struct PauseModeRevert {
     pub firmware_version: String,
     /// Requested raw HR318 mode (1, 2, or 3).
     pub requested_mode: u16,
+    /// Requested raw HR319/320 window for exact start readback.
+    #[serde(default)]
+    pub requested_slot_start: u16,
+    #[serde(default)]
+    pub requested_slot_end: u16,
     /// Exact raw values read together before the action.
     pub battery_pause_mode: u16,
     pub battery_pause_slot_start: u16,
@@ -1724,6 +1729,8 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
             charge_active: snapshot.enable_charge && snapshot.battery_power_mode == 1,
             discharge_active: snapshot.enable_discharge && snapshot.battery_power_mode == 0,
             pause_mode: snapshot.battery_pause_mode_raw,
+            pause_slot_start: snapshot.battery_pause_slot_start_raw,
+            pause_slot_end: snapshot.battery_pause_slot_end_raw,
             now_ms: chrono::Utc::now().timestamp_millis(),
         };
         if let Err(e) = state.command_ledger.advance_readback(&evidence) {

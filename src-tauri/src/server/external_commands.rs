@@ -64,6 +64,9 @@ pub struct ReadbackEvidence {
     pub discharge_active: bool,
     /// Raw HR318 mode from the same fresh readback, when available.
     pub pause_mode: Option<u16>,
+    /// Raw HR319/320 pause window from the same fresh readback.
+    pub pause_slot_start: Option<u16>,
+    pub pause_slot_end: Option<u16>,
     /// Current wall-clock milliseconds.
     pub now_ms: i64,
 }
@@ -205,6 +208,68 @@ impl CommandLedger {
             return Ok(Reservation::Accepted { command_id });
         }
         self.resolve_duplicate(&scope, &request_hash, action)
+    }
+
+    /// Check whether this exact idempotency scope already has a command,
+    /// without reserving a new command. This preflight lets API handlers
+    /// replay an accepted response before a changing inverter-state guard.
+    pub fn lookup_start(
+        &self,
+        fingerprint: &str,
+        action: &str,
+        minutes: u64,
+        idem_key: &str,
+    ) -> Result<Option<Reservation>, String> {
+        self.lookup_scope(
+            &format!("{fingerprint}:/api/control/{action}:{idem_key}"),
+            &format!("minutes={minutes}"),
+        )
+    }
+
+    pub fn lookup_stop(
+        &self,
+        fingerprint: &str,
+        action: &str,
+        idem_key: &str,
+    ) -> Result<Option<Reservation>, String> {
+        self.lookup_scope(
+            &format!("{fingerprint}:/api/control/{action}/stop:{idem_key}"),
+            "stop",
+        )
+    }
+
+    fn lookup_scope(&self, scope: &str, request_hash: &str) -> Result<Option<Reservation>, String> {
+        self.with_connection(|connection| {
+            let existing = connection
+                .query_row(
+                    "SELECT id, request_hash, response FROM external_commands
+                     WHERE scope = ?1",
+                    params![scope],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|e| format!("idempotency lookup failed: {e}"))?;
+            let Some((command_id, existing_hash, response)) = existing else {
+                return Ok(None);
+            };
+            if existing_hash != request_hash {
+                return Ok(Some(Reservation::Conflict {
+                    existing_command_id: command_id,
+                }));
+            }
+            if let Some(response) = response {
+                let parsed = serde_json::from_str(&response)
+                    .map_err(|e| format!("stored response unparsable: {e}"))?;
+                return Ok(Some(Reservation::Replayed { response: parsed }));
+            }
+            Ok(Some(Reservation::InProgress { command_id }))
+        })
     }
 
     /// Reserve a stop command. Stops never conflict with the active-action
@@ -372,7 +437,7 @@ impl CommandLedger {
         self.with_connection(|connection| {
             let mut stmt = connection
                 .prepare(
-                    "SELECT id, action, is_start, state, expires_at_ms, created_ms
+                    "SELECT id, action, is_start, state, expires_at_ms, created_ms, recovery
                      FROM external_commands
                      WHERE state IN ('accepted','queued','dispatched')",
                 )
@@ -386,6 +451,7 @@ impl CommandLedger {
                         row.get::<_, String>(3)?,
                         row.get::<_, Option<i64>>(4)?,
                         row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 })
                 .map_err(|e| format!("advance query failed: {e}"))?;
@@ -396,15 +462,45 @@ impl CommandLedger {
                 .collect();
             drop(stmt);
             let mut changed = 0;
-            for (id, action, is_start, state, expires_at_ms, created_ms) in commands {
+            for (id, action, is_start, state, expires_at_ms, created_ms, recovery) in commands {
                 let causally_fresh = evidence.snapshot_ts_ms > created_ms;
+                let pause_target = recovery
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<Value>(json).ok());
+                let pause_registers_match = |mode: u16, start: u16, end: u16| {
+                    evidence.pause_mode == Some(mode)
+                        && evidence.pause_slot_start == Some(start)
+                        && evidence.pause_slot_end == Some(end)
+                };
                 let active = match action.as_str() {
                     "force_charge" => evidence.charge_active,
                     "force_discharge" => evidence.discharge_active,
-                    "pause_charge" => evidence.pause_mode == Some(1),
-                    "pause_discharge" => evidence.pause_mode == Some(2),
-                    "pause_both" => evidence.pause_mode == Some(3),
+                    "pause_charge" | "pause_discharge" | "pause_both" => pause_target
+                        .as_ref()
+                        .and_then(|target| {
+                            Some((
+                                target.get("requested_mode")?.as_u64()? as u16,
+                                target.get("requested_slot_start")?.as_u64()? as u16,
+                                target.get("requested_slot_end")?.as_u64()? as u16,
+                            ))
+                        })
+                        .is_some_and(|(mode, start, end)| pause_registers_match(mode, start, end)),
+                    "pause_mode" => pause_target
+                        .as_ref()
+                        .and_then(|target| {
+                            Some((
+                                target.get("battery_pause_mode")?.as_u64()? as u16,
+                                target.get("battery_pause_slot_start")?.as_u64()? as u16,
+                                target.get("battery_pause_slot_end")?.as_u64()? as u16,
+                            ))
+                        })
+                        .is_some_and(|(mode, start, end)| pause_registers_match(mode, start, end)),
                     _ => false,
+                };
+                let stop_satisfied = if action == "pause_mode" {
+                    active
+                } else {
+                    !active
                 };
                 let new_state = if is_start == 1 {
                     if causally_fresh && active {
@@ -431,7 +527,7 @@ impl CommandLedger {
                     }
                 } else {
                     // Stops confirm when the action is no longer active.
-                    if causally_fresh && !active {
+                    if causally_fresh && stop_satisfied {
                         Some("readback_confirmed")
                     } else {
                         None
@@ -545,6 +641,27 @@ impl CommandLedger {
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(|e| format!("recovery query failed: {e}"))?;
             Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
+    /// Whether another battery-control start is active, excluding the command
+    /// currently being prepared after its idempotency reservation.
+    pub fn has_active_battery_control_except(&self, command_id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            let exists = connection
+                .query_row(
+                    "SELECT 1 FROM external_commands
+                     WHERE id != ?1 AND is_start = 1
+                       AND state IN ('accepted','queued','dispatched')
+                       AND action IN ('force_charge','force_discharge',
+                                      'pause_charge','pause_discharge','pause_both')
+                     LIMIT 1",
+                    params![command_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| format!("active control lookup failed: {e}"))?;
+            Ok(exists.is_some())
         })
     }
 
@@ -747,6 +864,8 @@ mod tests {
                 charge_active: true,
                 discharge_active: false,
                 pause_mode: None,
+                pause_slot_start: None,
+                pause_slot_end: None,
                 now_ms: 11_000,
             })
             .unwrap();
@@ -759,11 +878,100 @@ mod tests {
                 charge_active: true,
                 discharge_active: false,
                 pause_mode: None,
+                pause_slot_start: None,
+                pause_slot_end: None,
                 now_ms: 13_000,
             })
             .unwrap();
         assert_eq!(
             ledger.get(&command_id).unwrap().unwrap().state,
+            "readback_confirmed"
+        );
+    }
+
+    #[test]
+    fn pause_readback_requires_exact_mode_and_window() {
+        let ledger = isolated_ledger();
+        let command_id = match ledger
+            .reserve_start("fp", "pause_both", 30, "pause-key-1", 1_000)
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        ledger.mark_state(&command_id, "queued").unwrap();
+        ledger
+            .record_recovery(
+                &command_id,
+                r#"{"requested_mode":3,"requested_slot_start":1234,"requested_slot_end":1304}"#,
+            )
+            .unwrap();
+        ledger
+            .advance_readback(&ReadbackEvidence {
+                snapshot_ts_ms: 2_000,
+                charge_active: false,
+                discharge_active: false,
+                pause_mode: Some(3),
+                pause_slot_start: Some(1234),
+                pause_slot_end: Some(1305),
+                now_ms: 2_000,
+            })
+            .unwrap();
+        assert_eq!(ledger.get(&command_id).unwrap().unwrap().state, "queued");
+        ledger
+            .advance_readback(&ReadbackEvidence {
+                snapshot_ts_ms: 3_000,
+                charge_active: false,
+                discharge_active: false,
+                pause_mode: Some(3),
+                pause_slot_start: Some(1234),
+                pause_slot_end: Some(1304),
+                now_ms: 3_000,
+            })
+            .unwrap();
+        assert_eq!(
+            ledger.get(&command_id).unwrap().unwrap().state,
+            "readback_confirmed"
+        );
+
+        let stop_id = match ledger
+            .reserve_stop("fp", "pause_mode", "pause-stop-key-1", 4_000)
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        ledger
+            .record_recovery(
+                &stop_id,
+                r#"{"battery_pause_mode":0,"battery_pause_slot_start":0,"battery_pause_slot_end":0}"#,
+            )
+            .unwrap();
+        ledger
+            .advance_readback(&ReadbackEvidence {
+                snapshot_ts_ms: 5_000,
+                charge_active: false,
+                discharge_active: false,
+                pause_mode: Some(0),
+                pause_slot_start: Some(1),
+                pause_slot_end: Some(0),
+                now_ms: 5_000,
+            })
+            .unwrap();
+        assert_eq!(ledger.get(&stop_id).unwrap().unwrap().state, "accepted");
+        ledger
+            .advance_readback(&ReadbackEvidence {
+                snapshot_ts_ms: 6_000,
+                charge_active: false,
+                discharge_active: false,
+                pause_mode: Some(0),
+                pause_slot_start: Some(0),
+                pause_slot_end: Some(0),
+                now_ms: 6_000,
+            })
+            .unwrap();
+        assert_eq!(
+            ledger.get(&stop_id).unwrap().unwrap().state,
             "readback_confirmed"
         );
     }
@@ -786,6 +994,8 @@ mod tests {
                 charge_active: false,
                 discharge_active: false,
                 pause_mode: None,
+                pause_slot_start: None,
+                pause_slot_end: None,
                 now_ms: 70_000,
             })
             .unwrap();
@@ -797,6 +1007,8 @@ mod tests {
                 charge_active: false,
                 discharge_active: false,
                 pause_mode: None,
+                pause_slot_start: None,
+                pause_slot_end: None,
                 now_ms: 70_000 + 300_000,
             })
             .unwrap();
@@ -816,6 +1028,8 @@ mod tests {
                 charge_active: false,
                 discharge_active: false,
                 pause_mode: None,
+                pause_slot_start: None,
+                pause_slot_end: None,
                 now_ms: 70_000,
             })
             .unwrap();

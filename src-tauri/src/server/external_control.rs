@@ -275,10 +275,12 @@ pub struct DurationRequest {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
 enum PauseMode {
+    #[serde(rename = "pause_charge")]
     Charge,
+    #[serde(rename = "pause_discharge")]
     Discharge,
+    #[serde(rename = "pause_both")]
     Both,
 }
 
@@ -477,20 +479,6 @@ async fn run_pause_start(
     minutes: u64,
 ) -> Response {
     let _action_guard = state.force_action_lock.lock().await;
-    if state.force_charge_revert.lock().await.is_some()
-        || state.force_discharge_revert.lock().await.is_some()
-        || state.pause_mode_revert.lock().await.is_some()
-        || state
-            .command_ledger
-            .has_active_battery_control()
-            .unwrap_or(false)
-    {
-        return capability_error(
-            StatusCode::CONFLICT,
-            "control_conflict",
-            "Another battery control action is active",
-        );
-    }
     let reservation = match state.command_ledger.reserve_start(
         &fingerprint,
         mode.action(),
@@ -513,13 +501,21 @@ async fn run_pause_start(
     if state.force_charge_revert.lock().await.is_some()
         || state.force_discharge_revert.lock().await.is_some()
         || state.pause_mode_revert.lock().await.is_some()
+        || state
+            .command_ledger
+            .has_active_battery_control_except(&command_id)
+            .unwrap_or(false)
     {
         let _ = state.command_ledger.finish(
             &command_id,
             "failed",
             &json!({"status":409,"body":{"ok":false,"error":"Another battery control action is active"}}).to_string(),
         );
-        return conflict_response(command_id);
+        return capability_error(
+            StatusCode::CONFLICT,
+            "control_conflict",
+            "Another battery control action is active",
+        );
     }
     if let Some(response) = audit_action(
         &state,
@@ -573,6 +569,8 @@ async fn run_pause_start(
         };
     revert.external_owner = Some(fingerprint.clone());
     revert.requested_mode = mode.register_value();
+    revert.requested_slot_start = start;
+    revert.requested_slot_end = end;
     let writes = api::build_pause_mode_writes(mode.register_value(), start, end);
     let (rx, budget) = api::queue_owned_writes_fail_fast(
         &state,
@@ -634,6 +632,16 @@ pub async fn pause_mode(State(state): State<Arc<AppState>>, request: Request) ->
         Ok(value) => value,
         Err(response) => return *response,
     };
+    match idempotency_preflight(state.command_ledger.lookup_start(
+        &fingerprint,
+        mode.action(),
+        minutes,
+        &idem_key,
+    )) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
     if let Err(response) = require_operation_capability(&state, mode.operation()).await {
         return *response;
     }
@@ -653,6 +661,16 @@ pub async fn force_charge(State(state): State<Arc<AppState>>, request: Request) 
         return error.into_response();
     }
     let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
+    match idempotency_preflight(state.command_ledger.lookup_start(
+        &fingerprint,
+        "force_charge",
+        minutes_u64,
+        &idem_key,
+    )) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
     if let Err(response) =
         require_operation_capability(&state, ExternalControlOperation::ForceCharge).await
     {
@@ -674,6 +692,16 @@ pub async fn force_discharge(State(state): State<Arc<AppState>>, request: Reques
         return error.into_response();
     }
     let minutes_u64: u64 = minutes.as_deref().and_then(|m| m.parse().ok()).unwrap_or(0);
+    match idempotency_preflight(state.command_ledger.lookup_start(
+        &fingerprint,
+        "force_discharge",
+        minutes_u64,
+        &idem_key,
+    )) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
     if let Err(response) =
         require_operation_capability(&state, ExternalControlOperation::ForceDischarge).await
     {
@@ -791,6 +819,15 @@ pub async fn force_charge_stop(State(state): State<Arc<AppState>>, request: Requ
         Ok(key) => key,
         Err(response) => return *response,
     };
+    match idempotency_preflight(state.command_ledger.lookup_stop(
+        &fingerprint,
+        "force_charge",
+        &idem_key,
+    )) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
     if let Err(response) =
         require_operation_capability(&state, ExternalControlOperation::ForceCharge).await
     {
@@ -809,6 +846,15 @@ pub async fn force_discharge_stop(
         Ok(key) => key,
         Err(response) => return *response,
     };
+    match idempotency_preflight(state.command_ledger.lookup_stop(
+        &fingerprint,
+        "force_discharge",
+        &idem_key,
+    )) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
     if let Err(response) =
         require_operation_capability(&state, ExternalControlOperation::ForceDischarge).await
     {
@@ -823,6 +869,16 @@ pub async fn pause_mode_stop(State(state): State<Arc<AppState>>, request: Reques
         Ok(key) => key,
         Err(response) => return *response,
     };
+    match idempotency_preflight(state.command_ledger.lookup_stop(
+        &fingerprint,
+        "pause_mode",
+        &idem_key,
+    )) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
+    let _action_guard = state.force_action_lock.lock().await;
     let settings = Settings::load_async().await;
     let owned = state
         .pause_mode_revert
@@ -856,7 +912,6 @@ pub async fn pause_mode_stop(State(state): State<Arc<AppState>>, request: Reques
         return *response;
     }
 
-    let _action_guard = state.force_action_lock.lock().await;
     let reservation = match state.command_ledger.reserve_stop(
         &fingerprint,
         "pause_mode",
@@ -918,6 +973,10 @@ pub async fn pause_mode_stop(State(state): State<Arc<AppState>>, request: Reques
             );
         }
     }
+    let _ = state.command_ledger.record_recovery(
+        &command_id,
+        &serde_json::to_string(&revert).unwrap_or_default(),
+    );
     let writes = api::build_pause_mode_writes(
         revert.battery_pause_mode,
         revert.battery_pause_slot_start,
@@ -958,6 +1017,27 @@ pub async fn pause_mode_stop(State(state): State<Arc<AppState>>, request: Reques
         StatusCode::BAD_GATEWAY
     };
     (status, Json(body)).into_response()
+}
+
+fn idempotency_preflight(
+    result: Result<Option<Reservation>, String>,
+) -> Result<Option<Response>, Box<Response>> {
+    match result {
+        Ok(Some(Reservation::Replayed { response })) => Ok(Some(replay_response(response))),
+        Ok(Some(Reservation::InProgress { command_id })) => {
+            Ok(Some(in_progress_response(command_id)))
+        }
+        Ok(Some(Reservation::Conflict {
+            existing_command_id,
+        })) => Ok(Some(conflict_response(existing_command_id))),
+        Ok(None) => Ok(None),
+        Err(error) => Err(Box::new(capability_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            &error,
+        ))),
+        Ok(Some(Reservation::Accepted { .. })) => unreachable!("lookup cannot accept a command"),
+    }
 }
 
 fn replay_response(response: Value) -> Response {
@@ -1227,7 +1307,7 @@ mod tests {
                     let body = if action.ends_with("/stop") {
                         Value::Null
                     } else if action == "pause-mode" {
-                        json!({"mode":"both","minutes":30})
+                        json!({"mode":"pause_both","minutes":30})
                     } else {
                         json!({"minutes":30})
                     };
@@ -1295,11 +1375,11 @@ mod tests {
             for body in [
                 json!({}),
                 json!({"mode":"invalid","minutes":30}),
-                json!({"mode":"charge","minutes":0}),
-                json!({"mode":"charge","minutes":1440}),
-                json!({"mode":"charge","minutes":1.5}),
-                json!({"mode":"charge","minutes":"30"}),
-                json!({"mode":"charge","minutes":30,"extra":true}),
+                json!({"mode":"pause_charge","minutes":0}),
+                json!({"mode":"pause_charge","minutes":1440}),
+                json!({"mode":"pause_charge","minutes":1.5}),
+                json!({"mode":"pause_charge","minutes":"30"}),
+                json!({"mode":"pause_charge","minutes":30,"extra":true}),
                 Value::Null,
             ] {
                 assert_eq!(
@@ -1322,6 +1402,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pause_mode_retry_replays_before_connection_guard() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_native_pause().await;
+            let key = format!("pause-replay-{}", next_key());
+            let first = request_with_key(
+                state.clone(),
+                "pause-mode",
+                Some("integration-key"),
+                &key,
+                json!({"mode":"pause_both","minutes":30}),
+            )
+            .await;
+            assert_eq!(first.0, StatusCode::OK);
+            *state.connection_state.lock().await = ConnectionState::Disconnected;
+            let replay = request_with_key(
+                state,
+                "pause-mode",
+                Some("integration-key"),
+                &key,
+                json!({"mode":"pause_both","minutes":30}),
+            )
+            .await;
+            assert_eq!(replay, first);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn pause_mode_start_uses_inverter_clock_and_queues_window_before_mode() {
         with_isolated_config_dir_async(|| async {
             let state = setup_native_pause().await;
@@ -1329,7 +1437,7 @@ mod tests {
                 state.clone(),
                 "pause-mode",
                 Some("integration-key"),
-                json!({"mode":"both","minutes":30}),
+                json!({"mode":"pause_both","minutes":30}),
             )
             .await;
             assert_eq!(response.0, StatusCode::OK);
