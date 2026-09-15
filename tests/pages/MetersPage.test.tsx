@@ -131,7 +131,7 @@ describe('MetersPage', () => {
     });
   });
 
-  it('explains the wrapping meter counters and points to inverter totals', () => {
+  it('shows lifetime grid totals above the meter cards (issue #314 follow-up)', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({
         total_import_kwh: 6586.2,
@@ -142,17 +142,58 @@ describe('MetersPage', () => {
     });
     render(<MetersPage />);
 
-    expect(screen.queryByText('Grid Energy')).toBeNull();
-    const note = screen.getByRole('note', { name: 'Meter counter note' });
+    // The accurate inverter-level lifetime totals (previously only on the
+    // Inverter page) are now surfaced here, above the meter cards.
+    const totalsCard = screen.getByRole('heading', { name: 'Lifetime Grid Totals' }).closest('.bg-bg-surface')!;
+    expect(within(totalsCard).getByText('Lifetime Import')).toBeDefined();
+    expect(within(totalsCard).getByText('Lifetime Export')).toBeDefined();
+    expect(within(totalsCard).getByText('6586.2kWh')).toBeDefined();
+    expect(within(totalsCard).getByText('6596.2kWh')).toBeDefined();
+
+    // Placement: the totals card comes before both the CT configuration
+    // card and the meter cards — it is the headline information.
     const configHeading = screen.getByRole('heading', { name: 'CT Clamp Configuration' });
-    expect(configHeading.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByText(
-      'The import and export counters values wrap. Check the Inverter page for accurate lifetime Import and Export totals.',
-    )).toBeDefined();
-    expect(screen.queryByText('6586.2kWh')).toBeNull();
-    expect(screen.queryByText('6596.2kWh')).toBeNull();
-    expect(screen.getByText('Meter Import Counter')).toBeDefined();
-    expect(screen.getByText('Meter Export Counter')).toBeDefined();
+    const meterCard = screen.getByText('Meter 0x01').closest('.bg-bg-surface')!;
+    expect(totalsCard.compareDocumentPosition(configHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(totalsCard.compareDocumentPosition(meterCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows lifetime grid totals even when no CT meters are present', () => {
+    // The totals are inverter-level figures, not per-CT-meter, so the card
+    // renders regardless of how many external clamps are detected.
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        total_import_kwh: 123.4,
+        total_export_kwh: 56.7,
+        meters: [],
+      }),
+      connectionState: 'connected',
+    });
+    render(<MetersPage />);
+    expect(screen.getByText('123.4kWh')).toBeDefined();
+    expect(screen.getByText('56.7kWh')).toBeDefined();
+    expect(
+      screen.getByText('No external CT meters detected on your system.'),
+    ).toBeDefined();
+  });
+
+  it('labels wrapping registers as raw meter counters and drops the note box', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        meters: [externalMeter({ e_import_active_kwh: 32.6, e_export_active_kwh: 42.6 })],
+      }),
+      connectionState: 'connected',
+    });
+    render(<MetersPage />);
+
+    // "Import Counter" still read like a total; the raw-register labelling
+    // plus an inline wrap note replace the amber explanation box.
+    expect(screen.getByText('Raw Meter Import Counter')).toBeDefined();
+    expect(screen.getByText('Raw Meter Export Counter')).toBeDefined();
+    expect(screen.getByText(/6553\.6/)).toBeDefined();
+    expect(screen.queryByText('Meter Import Counter')).toBeNull();
+    expect(screen.queryByText('Meter Export Counter')).toBeNull();
+    expect(screen.queryByRole('note', { name: 'Meter counter note' })).toBeNull();
   });
 
   describe('synthetic built-in grid CT vs external meter (address 0x00)', () => {
