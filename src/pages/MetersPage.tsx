@@ -1,9 +1,35 @@
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, MeterData } from '../lib/types';
+import { formatEnergy } from '../lib/format';
 import AwaitingConnection from '../components/AwaitingConnection';
 
 /** A phase is "active" if it has a plausible non-zero voltage (>10 V). */
 const VOLTAGE_THRESHOLD = 10;
+
+/**
+ * Inverter-level lifetime grid totals (issue #314 follow-up). These come
+ * from the inverter's own 32-bit registers — unlike the CT meter's raw
+ * uint16 counters, they never wrap — and are the figures users actually
+ * want on a "meters" page. Rendered above the per-meter cards because
+ * they are the headline information; the Inverter page keeps its copy.
+ */
+function LifetimeTotalsCard({ snapshot }: { snapshot: InverterSnapshot }) {
+  return (
+    <div className="bg-bg-surface rounded-xl p-4">
+      <h3 className="text-text-primary font-medium mb-3">Lifetime Grid Totals</h3>
+      <div className="grid grid-cols-2 gap-2 text-center">
+        <div>
+          <div className="text-xs text-text-secondary">Lifetime Import</div>
+          <div className="font-mono text-lg text-green-400">{formatEnergy(snapshot.total_import_kwh)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-text-secondary">Lifetime Export</div>
+          <div className="font-mono text-lg text-amber-400">{formatEnergy(snapshot.total_export_kwh)}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function MeterCard({ meter }: { meter: MeterData }) {
   const dir = meter.p_active_total >= 0 ? '↓ Import' : '↑ Export';
@@ -79,19 +105,23 @@ function MeterCard({ meter }: { meter: MeterData }) {
         </div>
       </div>
 
-      {/* Raw meter energy counters are uint16 deci-kWh registers and wrap
-          every 6553.6 kWh. They are intentionally not labelled as lifetime
-          totals; use the Inverter page for those. */}
+      {/* The CT meter's energy registers are uint16 deci-kWh counters that
+          wrap every 6553.6 kWh, so they are labelled as raw counters — not
+          lifetime totals — with the wrap limit stated inline instead of the
+          old amber note box (issue #314). */}
       <div className="grid grid-cols-2 gap-2 text-center border-t border-white/5 pt-3">
         <div>
-          <div className="text-xs text-text-secondary">Meter Import Counter</div>
+          <div className="text-xs text-text-secondary">Raw Meter Import Counter</div>
           <div className="font-mono text-sm text-green-400">{meter.e_import_active_kwh.toFixed(1)} kWh</div>
         </div>
         <div>
-          <div className="text-xs text-text-secondary">Meter Export Counter</div>
+          <div className="text-xs text-text-secondary">Raw Meter Export Counter</div>
           <div className="font-mono text-sm text-amber-400">{meter.e_export_active_kwh.toFixed(1)} kWh</div>
         </div>
       </div>
+      <p className="text-center text-[10px] text-text-secondary">
+        Raw counters wrap to zero every 6553.6 kWh
+      </p>
     </div>
   );
 }
@@ -154,40 +184,22 @@ export default function MetersPage() {
   return (
     <div className="flex flex-col gap-4 max-w-2xl mx-auto px-4 py-6">
       <h2 className="text-text-primary font-semibold text-lg">External CT Meters</h2>
+      <LifetimeTotalsCard snapshot={snapshot} />
       <CtConfigCard snapshot={snapshot} />
 
-      {!meters || meters.length === 0 ? (
-        <div className="bg-bg-surface rounded-xl p-6 text-center">
-          <p className="text-text-secondary">
-            No external CT meters detected on your system.
-          </p>
-        </div>
-      ) : (
+      {meters && meters.length > 0 ? (
         <div className="space-y-4">
           {meters.map((m) => (
             <MeterCard key={m.address} meter={m} />
           ))}
         </div>
-      )}
-
-      <aside
-        role="note"
-        aria-label="Meter counter note"
-        className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 shadow-sm"
-      >
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-500">
-            <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 3.5 1.8 20.5h20.4L12 3.5Zm0 4.2 6.5 10.8h-13L12 7.7Zm-1 3.1v4.1h2v-4.1h-2Zm0 5.2v2h2v-2h-2Z" />
-            </svg>
-          </div>
-          <div className="min-w-0">
-            <p className="text-xs leading-relaxed text-text-secondary">
-              The import and export counters values wrap. Check the Inverter page for accurate lifetime Import and Export totals.
-            </p>
-          </div>
+      ) : (
+        <div className="bg-bg-surface rounded-xl p-6 text-center">
+          <p className="text-text-secondary">
+            No external CT meters detected on your system.
+          </p>
         </div>
-      </aside>
+      )}
     </div>
   );
 }
