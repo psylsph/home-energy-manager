@@ -230,7 +230,7 @@ External software can use an authenticated integration API for battery status an
 
 For detailed setup, status-field explanations, curl commands, JavaScript/Python examples and troubleshooting, see the [Remote Battery Control API guide](REMOTE_CONTROL.md).
 
-A separate HTTP server (default port **7338**, Bearer-token authenticated) lets external software read inverter data and — with explicit permission — use the same four battery Quick Actions as the app's buttons. The main dashboard server is unchanged by any of this.
+A separate HTTP server (default port **7338**, Bearer-token authenticated) lets external software read inverter data and — with explicit permission — use the app's battery controls, including Force Charge, Force Discharge and finite native Pause windows. The main dashboard server is unchanged by any of this.
 
 ### Setup
 
@@ -249,8 +249,10 @@ A separate HTTP server (default port **7338**, Bearer-token authenticated) lets 
 | POST | `/api/control/force-charge/stop` | None | Recovery always allowed; otherwise yes |
 | POST | `/api/control/force-discharge` | `{"minutes":60}` | Yes |
 | POST | `/api/control/force-discharge/stop` | None | Recovery always allowed; otherwise yes |
+| POST | `/api/control/pause-mode` | `{"mode":"pause_charge","minutes":60}` | Yes, on supported models |
+| POST | `/api/control/pause-mode/stop` | None | Recovery always allowed; otherwise yes |
 
-Every POST needs an `Idempotency-Key` header (16–128 characters; a UUID is ideal). **Retries must reuse the same key** — HEM replays the original response instead of queuing anything; the same key with a different payload is rejected with `409`. Starts act immediately (duration 1–1439 minutes; extra fields are rejected), and a start while the same action is already running returns `409` with the running command's id. The actions reuse the Quick Action handlers exactly: same model-aware registers, restore behaviour, configured power limits, and mutual exclusion (stop one direction before starting the other).
+Every POST needs an `Idempotency-Key` header (16–128 characters; a UUID is ideal). **Retries must reuse the same key** — HEM replays the original response instead of queuing anything; the same key with a different payload is rejected with `409`. Starts act immediately (duration 1–1439 minutes; extra fields are rejected), and a start while the same action is already running returns `409` with the running command's id. The actions reuse the Quick Action handlers exactly: same model-aware registers, restore behaviour, configured power limits, and mutual exclusion (stop one direction before starting the other). Native Pause is aggregate inverter/plant control with modes `pause_charge`, `pause_discharge` and `pause_both`, for 1–1439 minutes. It is limited to confirmed model/firmware combinations and restores the exact prior pause state on Stop or expiry; unsupported devices return `422`, and unavailable baseline state returns `503`.
 
 A mutation response carries a `command_id` meaning **accepted and queued** — not confirmed by the inverter. Poll `GET /api/commands/{command_id}` until the state is `readback_confirmed` (`failed`, `expired` and `unknown` are the honest alternatives). Other errors: `400` invalid input, `401` bad key, `403` control disabled, `409` no inverter snapshot yet or idempotency conflict, `429` rate limited (with `Retry-After`).
 
