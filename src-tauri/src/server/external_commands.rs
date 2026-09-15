@@ -164,8 +164,8 @@ impl CommandLedger {
         f(cached.as_ref().expect("connection initialized"))
     }
 
-    /// Reserve a start command. `action` is `force_charge` or
-    /// `force_discharge`; `idem_key` scopes replay; the active-action index
+    /// Reserve a start command. `action` identifies a force or native pause
+    /// operation; `idem_key` scopes replay; the active-action index
     /// guarantees a single live start per action kind.
     pub fn reserve_start(
         &self,
