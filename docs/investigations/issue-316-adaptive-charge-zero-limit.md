@@ -2,7 +2,12 @@
 
 ## Status and scope
 
-Diagnosis only; no implementation changes made.
+Diagnosed, then implemented: `observed_charge_rate_is_valid()` in
+`src-tauri/src/inverter/state_machines.rs` now accepts **0–50 inclusive**
+for `HR_BATTERY_CHARGE_LIMIT`, matching the encoder's write contract, while
+direct-percentage registers keep the stricter 1–100 range. The regression
+coverage listed below accompanies the fix. No Timed Export ownership or
+scheduling changes were made.
 
 Issue: <https://github.com/psylsph/home-energy-manager/issues/316>
 
