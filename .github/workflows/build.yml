@@ -595,6 +595,11 @@ jobs:
         # intermittently on dl.google.com (Google's T&C gating on direct
         # cmdline-tools downloads, see android-actions/setup-android#513).
         uses: android-actions/setup-android@v4
+        with:
+          # setup-android defaults to the removed legacy `tools` package.
+          # Install only the package still needed here; sdkmanager itself is
+          # provided by the command-line tools already present on the runner.
+          packages: platform-tools
 
       - name: Install NDK
         run: |
