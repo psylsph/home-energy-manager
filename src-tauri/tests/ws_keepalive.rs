@@ -61,14 +61,24 @@ async fn wait_for_client_count(state: &Arc<AppState>, expected: usize) {
 
 #[tokio::test]
 async fn quiet_client_survives_keepalive_probe_and_still_receives_broadcasts() {
-    tokio::time::pause();
     let config_guard = test_config_isolation::enter();
     let state = Arc::new(AppState::new());
     {
         let mut timing = state.ws_keepalive.lock().await;
+        // Real time with a fast probe: the interval is short enough that a
+        // probe certainly fires during the test, and the grace is far
+        // longer than the whole test, so the only reachable probe branch
+        // is "Pong answered, connection alive". The previous paused-clock
+        // design raced tokio's idle auto-advance against the Ping/Pong
+        // socket round-trip: when the runtime parked during the real I/O
+        // gap, the paused clock jumped straight to the armed grace timer,
+        // expired the probe, and dropped the client - intermittently, and
+        // only under load on macOS CI. Synchronising the exchange with
+        // oneshots and yields cannot fix that; the clock itself was the
+        // adversary.
         *timing = KeepaliveConfig {
-            interval: Duration::from_secs(5),
-            probe_grace: Duration::from_secs(10),
+            interval: Duration::from_millis(100),
+            probe_grace: Duration::from_secs(30),
         };
     }
     let (addr, server) = spawn_server(state.clone()).await;
@@ -80,8 +90,6 @@ async fn quiet_client_survives_keepalive_probe_and_still_receives_broadcasts() {
     wait_for_client_count(&state, 1).await;
 
     // Consume the connection-on-open message before driving the quiet period.
-    // This leaves the driver waiting for the next frame, so the test can
-    // explicitly synchronize on the Ping/Pong exchange below.
     let connection = stream
         .next()
         .await
@@ -91,8 +99,7 @@ async fn quiet_client_survives_keepalive_probe_and_still_receives_broadcasts() {
 
     // Client never sends anything except the Pong answering the server's
     // Ping, which is exactly the reporter's scenario in issue #274: an idle
-    // tab on a remote link. The acknowledgement channel makes the virtual
-    // clock advance deterministic instead of racing the socket driver.
+    // tab on a remote link.
     let (ping_answered_tx, ping_answered_rx) = tokio::sync::oneshot::channel();
     let driver = tokio::spawn(async move {
         let mut ping_answered_tx = Some(ping_answered_tx);
@@ -121,33 +128,25 @@ async fn quiet_client_survives_keepalive_probe_and_still_receives_broadcasts() {
         }
     });
 
-    // Let the server and driver reach their steady-state receive loops before
-    // advancing the virtual clock to the keepalive deadline.
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(Duration::from_secs(5)).await;
-    ping_answered_rx
+    // The first keepalive probe fires within the 100ms interval; the driver
+    // must answer it and survive. Bounded waits keep the test hermetic.
+    tokio::time::timeout(Duration::from_secs(5), ping_answered_rx)
         .await
-        .expect("keepalive Ping was not answered");
+        .expect("no keepalive probe fired within 5s")
+        .expect("client stream ended before the first probe was answered");
 
-    // Give the server a chance to consume the Pong and leave probe_alive. The
-    // final receive uses real time: with Tokio's clock paused, advancing the
-    // timeout in the same turn as the broadcast can otherwise win the race
-    // before the network tasks run (especially on macOS CI).
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    // Let further intervals fire so the loop provably keeps answering
+    // probes instead of surviving exactly one.
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     // The connection must still be alive: broadcast a snapshot and expect
-    // the client to receive it. If the server had dropped the client at the
+    // the client to receive it. If the server had dropped the client at a
     // keepalive deadline, the socket would be closed and this send would
     // reach nobody.
     let snapshot = givenergy_local::inverter::model::InverterSnapshot::default();
     let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot)));
 
-    tokio::time::resume();
-    let received = tokio::time::timeout(Duration::from_secs(1), driver)
+    let received = tokio::time::timeout(Duration::from_secs(5), driver)
         .await
         .expect("timeout waiting for broadcast after quiet window")
         .expect("driver task panicked");
