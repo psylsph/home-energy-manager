@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.3] - 2026-09-16
+
+### Fixed
+
+- **Battery controls recover safely after interrupted commands.** Force Charge, Force Discharge, and native pause actions now retain recovery state until the inverter confirms the exact restored settings, while reconnects and inverter identity changes fail closed instead of risking a write to the wrong device.
+- **Authenticated integrations can use native battery pause controls safely.** HEM exposes capability-aware pause actions and status reporting, while unsupported inverter families reject unsafe remote mutations instead of guessing at registers.
+- **Headless installs explain how to generate the first API key.** Remote browser users now have documented SSH and temporary console-forwarding workarounds for the deliberately local-only security settings.
+
 ## [0.83.2] - 2026-09-14
 
 ### Fixed
