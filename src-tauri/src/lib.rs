@@ -612,12 +612,6 @@ pub fn run() {
                 }
             }
 
-            // Spawn the Modbus polling loop
-            let poll_state = state.clone();
-            tauri::async_runtime::spawn(async move {
-                run_poll_loop(poll_state).await;
-            });
-
             // Spawn the EV charger polling loop
             let evc_state = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -643,24 +637,27 @@ pub fn run() {
                 update::run_update_loop(update_state).await;
             });
 
-            // Start the authenticated external API listener through its
-            // lifecycle manager so settings changes can rebind/stop it live
-            // (U2 hardening). Read-only unless the user opts in to external
-            // battery control. An empty key means no credential configured.
-            reconcile_external_commands(&state);
-            {
-                let ro_state = state.clone();
-                let desired = api_config.clone();
+            // Reconcile and hydrate durable external-control ownership before
+            // starting the poll loop. Otherwise the first poll can run
+            // automation against a physically active command before its
+            // recovery baseline is back in memory.
+            let recoveries = reconcile_external_commands(&state);
+            let recovery_state = state.clone();
+            let poll_state = state.clone();
+            let desired = api_config.clone();
+            tauri::async_runtime::spawn(async move {
+                restore_external_recoveries(recovery_state.clone(), recoveries).await;
+                if let Err(e) = recovery_state
+                    .authenticated_lifecycle
+                    .apply(recovery_state.clone(), desired)
+                    .await
+                {
+                    tracing::error!("Authenticated API startup failed: {e}");
+                }
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = ro_state
-                        .authenticated_lifecycle
-                        .apply(ro_state.clone(), desired)
-                        .await
-                    {
-                        tracing::error!("Authenticated API startup failed: {e}");
-                    }
+                    run_poll_loop(poll_state).await;
                 });
-            }
+            });
 
             Ok(())
         })
@@ -689,10 +686,14 @@ pub fn run() {
 
 /// Parse a `--port <N>` argument from the CLI args.
 /// Startup reconciliation for external commands (U5): commands still
-/// in-progress from a previous process can never be auto-resumed — they are
-/// marked `unknown` and surfaced loudly so the operator can inspect the
-/// inverter through the app's own UI.
-fn reconcile_external_commands(state: &Arc<AppState>) {
+/// in-progress from a previous process are marked `unknown` and surfaced
+/// loudly. Their durable recovery baselines are retained for an explicit,
+/// authenticated Stop, but no action is auto-resumed.
+fn reconcile_external_commands(state: &Arc<AppState>) -> Vec<(String, String)> {
+    // Preserve durable recovery baselines for an explicit Stop after restart.
+    // This does not re-arm anything: startup still marks the command unknown,
+    // and only a later authenticated Stop may enqueue restoration writes.
+    let recoveries = state.command_ledger.active_recoveries().unwrap_or_default();
     match state.command_ledger.reconcile_startup() {
         Ok(0) => {}
         Ok(n) => {
@@ -713,6 +714,31 @@ fn reconcile_external_commands(state: &Arc<AppState>) {
             }
         }
         Err(e) => tracing::warn!("Command ledger startup reconciliation failed: {e}"),
+    }
+    recoveries
+}
+
+async fn restore_external_recoveries(state: Arc<AppState>, recoveries: Vec<(String, String)>) {
+    for (action, recovery) in recoveries {
+        if action.starts_with("pause_") {
+            if let Ok(revert) =
+                serde_json::from_str::<crate::inverter::poll::PauseModeRevert>(&recovery)
+            {
+                *state.pause_mode_revert.lock().await = Some(revert);
+            }
+        } else if action == "force_charge" {
+            if let Ok(revert) =
+                serde_json::from_str::<crate::inverter::poll::ForceChargeRevert>(&recovery)
+            {
+                *state.force_charge_revert.lock().await = Some(revert);
+            }
+        } else if action == "force_discharge" {
+            if let Ok(revert) =
+                serde_json::from_str::<crate::inverter::poll::ForceDischargeRevert>(&recovery)
+            {
+                *state.force_discharge_revert.lock().await = Some(revert);
+            }
+        }
     }
 }
 
@@ -934,6 +960,20 @@ pub fn run_headless(args: &[String]) {
             tracing::warn!("E2E admin surface enabled (--e2e-admin): /api/test/reset is live");
         }
 
+        // Reconcile and hydrate durable external-control ownership before
+        // starting the poll loop. Otherwise the first poll can run automation
+        // against a physically active command before its recovery baseline is
+        // back in memory.
+        let recoveries = reconcile_external_commands(&state);
+        restore_external_recoveries(state.clone(), recoveries).await;
+        if let Err(e) = state
+            .authenticated_lifecycle
+            .apply(state.clone(), api_config.clone())
+            .await
+        {
+            tracing::error!("Authenticated API startup failed: {e}");
+        }
+
         // Spawn the poll loop
         let poll_state = state.clone();
         tokio::spawn(async move {
@@ -964,23 +1004,6 @@ pub fn run_headless(args: &[String]) {
         tokio::spawn(async move {
             update::run_update_loop(update_state).await;
         });
-
-        // Start the authenticated external API listener through its
-        // lifecycle manager (see the Tauri path above).
-        reconcile_external_commands(&state);
-        {
-            let ro_state = state.clone();
-            let desired = api_config.clone();
-            tokio::spawn(async move {
-                if let Err(e) = ro_state
-                    .authenticated_lifecycle
-                    .apply(ro_state.clone(), desired)
-                    .await
-                {
-                    tracing::error!("Authenticated API startup failed: {e}");
-                }
-            });
-        }
 
         // Start the HTTP server
         let server_state = state.clone();
@@ -1659,5 +1682,79 @@ mod tests {
         unsafe {
             std::env::remove_var("TZ");
         }
+    }
+
+    /// Restart during a readback-confirmed Force action: the durable
+    /// recovery row hydrates the revert (so an authenticated Stop stays
+    /// available and carries the inverter identity for confirmation), while
+    /// the Force restoration trackers stay empty — restart never auto-resumes
+    /// a Force action or its restoration.
+    #[tokio::test]
+    async fn restart_hydration_restores_force_revert_without_auto_resume() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let command_id = match state
+                .command_ledger
+                .reserve_start("fp", "force_charge", 30, "restart-key", now_ms)
+                .unwrap()
+            {
+                crate::server::external_commands::Reservation::Accepted { command_id } => {
+                    command_id
+                }
+                other => panic!("expected accepted, got {other:?}"),
+            };
+            let revert = crate::inverter::poll::ForceChargeRevert {
+                started_at_ms: now_ms,
+                external_owner: Some("fp".into()),
+                force_charge_slot_end_ms: None,
+                enable_charge: true,
+                enable_charge_target: true,
+                device_type: crate::inverter::model::DeviceType::Gen2Hybrid,
+                inverter_serial: "SN1".into(),
+                firmware_version: "400".into(),
+                enable_discharge: false,
+                target_soc: 60,
+                battery_power_mode: 1,
+                charge_rate: Some(30),
+                charge_slot_1_start: None,
+                charge_slot_1_end: None,
+                three_phase_force_charge_enable: None,
+                three_phase_ac_charge_enable: None,
+                battery_pause_mode: Some(0),
+            };
+            state
+                .command_ledger
+                .record_recovery(&command_id, &serde_json::to_string(&revert).unwrap())
+                .unwrap();
+            // A readback-confirmed start must remain a hydration candidate.
+            state
+                .command_ledger
+                .finish(&command_id, "readback_confirmed", r#"{"ok":true}"#)
+                .unwrap();
+
+            // Startup reconciliation surfaces the stranded command, then the
+            // recoveries hydrate BEFORE the poll loop starts.
+            let recoveries = reconcile_external_commands(&state);
+            assert_eq!(recoveries.len(), 1);
+            restore_external_recoveries(state.clone(), recoveries).await;
+
+            let hydrated = state.force_charge_revert.lock().await.clone().unwrap();
+            assert_eq!(hydrated.inverter_serial, "SN1");
+            assert_eq!(
+                hydrated.device_type,
+                crate::inverter::model::DeviceType::Gen2Hybrid
+            );
+            assert!(hydrated.enable_charge);
+            // No auto-resume: the restoration freshness barriers start empty.
+            assert!(state.force_charge_restoration.lock().await.is_none());
+            assert!(state.force_discharge_restoration.lock().await.is_none());
+            // The hydrated revert is enough for an authenticated Stop to
+            // reconstruct the restoration (exact writes, identity check).
+            let writes =
+                crate::server::api::build_force_charge_stop_writes(hydrated.device_type, &hydrated);
+            assert!(!writes.is_empty());
+        })
+        .await;
     }
 }

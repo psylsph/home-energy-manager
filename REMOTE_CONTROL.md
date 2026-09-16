@@ -62,7 +62,10 @@ Treat this API as a small, single-owner integration surface, not as a general id
 - The secret is shown once at generation and stored by HEM only as a verifier, but filesystem access to the HEM machine remains full control of the integration: protect the config directory and any backups you keep of it.
 - `GET /api/snapshot` returns a deliberately limited operating view (power flows, state of charge, temperatures, grid readings, today's energy counters). It still reveals household energy behaviour, so grant read access only to systems that need it.
 - A successful start response means HEM **accepted and queued** the command — not that the inverter has applied it. Every mutation returns a `command_id`; poll `GET /api/commands/{id}` for `readback_confirmed`, `failed`, `expired` or `unknown` before drawing conclusions.
+
 - There is no emergency-stop guarantee. Remote stops are ordinary queued writes: if HEM or the inverter link is down, use the inverter's physical controls per the manufacturer's guidance.
+
+Native pause is an aggregate inverter/plant control (there is no battery selector). Set `mode` to `charge`, `discharge`, or `both`; the equivalent `pause_`-prefixed spellings are accepted for compatibility. `minutes` must be 1–1439. HEM captures the inverter's exact pause registers before starting and restores them on Stop or expiry. These controls are available only on confirmed model/firmware combinations; unsupported devices return `422 unsupported_control`, while missing or stale register state returns `503 state_unavailable`. Read-only endpoints remain available.
 
 The separate API does not expose settings or WebSocket endpoints. Enabling it does not change access to the main HEM server.
 
@@ -79,6 +82,8 @@ All paths below are relative to your authenticated server address.
 | POST | `/api/control/force-charge/stop` | None | See recovery stops below |
 | POST | `/api/control/force-discharge` | `{"minutes":30}` | Required for new starts |
 | POST | `/api/control/force-discharge/stop` | None | See recovery stops below |
+| POST | `/api/control/pause-mode` | `{"mode":"charge","minutes":60}` | Required for new starts |
+| POST | `/api/control/pause-mode/stop` | None | See recovery stops below |
 
 Every POST needs two headers:
 
@@ -165,7 +170,11 @@ An example acknowledgement is:
 {"ok":true,"message":"Force charge stopped","command_id":"9a8b7c6d5e4f"}
 ```
 
-This acknowledges the handler's work; queued inverter writes and the next status reading can follow later. Poll the command id — `readback_confirmed` means the inverter has actually left the forced mode.
+This acknowledges the handler's work; queued inverter writes and the next status reading can follow later. Poll the command id — `readback_confirmed` means a fresh readback has proved that the captured pre-action baseline was restored. This also confirms when Stop is sent while the force window is still running; an armed normal charge schedule is not evidence that Stop was ignored.
+
+If the connected inverter is demonstrably a *different* unit from the one the action was started on (its serial differs), a stop cannot restore anything: it is refused with `state_unavailable` and the stale baseline is **released** (in-memory and durable), so the action kind is not blocked forever. The release is logged and audited as `stale_ownership_released`. Firmware version is deliberately not part of that identity check, so a firmware update never blocks restoration.
+
+A stop is also valid *after* a timed window has already ended: the inverter may have returned to Eco on its own, but the start temporarily overwrote charge/discharge slot 1, so the stop still restores the schedule and settings captured before the start and confirms once a fresh reading shows that baseline. Until then the stop stays in flight (`queued`/`dispatched`), and a stop sent before a previous stop's restoration is confirmed safely re-applies the same restoration rather than reporting nothing to do. Stop-command readback is strict: it only confirms from a reading taken after the stop, from the same inverter, that matches the restored baseline.
 
 ### Start Force Discharge for 30 minutes
 
@@ -187,6 +196,24 @@ curl --silent --show-error --fail-with-body --max-time 10 \
   -X POST -H "Authorization: Bearer $HEM_KEY" \
   -H "Idempotency-Key: $IDEM_KEY" \
   "$HEM_API/api/control/force-discharge/stop"
+```
+
+### Start and stop native Pause
+
+Use a fresh idempotency key for this start. The response is accepted/queued; poll its `command_id` for readback confirmation.
+
+```bash
+curl --silent --show-error --fail-with-body --max-time 10 \
+  -X POST -H "Authorization: Bearer $HEM_KEY" \
+  -H "Idempotency-Key: $IDEM_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"mode":"charge","minutes":60}' \
+  "$HEM_API/api/control/pause-mode"
+
+curl --silent --show-error --fail-with-body --max-time 10 \
+  -X POST -H "Authorization: Bearer $HEM_KEY" \
+  -H "Idempotency-Key: $IDEM_KEY" \
+  "$HEM_API/api/control/pause-mode/stop"
 ```
 
 ### Read the inverter snapshot
@@ -238,9 +265,10 @@ A typical response while Force Charge is active contains these fields (other fie
 | `summary` | Human-readable description. Display it, but do not parse its wording for automation. |
 | `mode` | `eco`, `eco_paused`, `timed_demand`, `timed_export`, `export_paused`, or `unknown`. |
 | `activity` | Observed `charging`, `discharging`, `idle`, or `unavailable`; not simply the requested action. |
-| `control_source` | Best-known controller: `force_charge`, `force_discharge`, `timed_export`, `winter`, `cosy`, `agile`, `adaptive`, `timed_charge`, `inverter`, `safety`, or `unknown`. |
-| `control_phase` | Controller-specific state, such as `pending`, `active`, `expired`, `waiting`, `observed` or `restricted`. Handle unrecognised values gracefully. |
-| `quick_action` | Known HEM-owned force action, phase, request time and window end; otherwise `null`. Dates can be `null` if unavailable. |
+| `control_source` | Best-known controller: `force_charge`, `force_discharge`, `pause_mode`, `timed_export`, `winter`, `cosy`, `agile`, `adaptive`, `timed_charge`, `inverter`, `safety`, or `unknown`. |
+| `control_phase` | Controller-specific state, such as `pending`, `active`, `restoring`, `expired`, `waiting`, `observed` or `restricted`. Handle unrecognised values gracefully. |
+| `control_capabilities` | Which control operations this model and firmware support: `force_charge`, `force_discharge` (booleans) and `pause_modes` (array of `charge`/`discharge`/`both`, or `null` when the firmware version cannot be read). A `null` capability means "ask again", not "unsupported". |
+| `quick_action` | Known HEM-owned force or native pause action, phase, request time and window end; otherwise `null`. Native pause also reports its mode. Dates can be `null` if unavailable. |
 | `remaining_minutes` | Known Quick Action window time remaining, rounded up; `0` after expiry, or `null` when unknown/not applicable. Not time until the battery is full or empty. |
 | `schedules` | Separate `charge`, `export` and `demand_discharge` states: `off`, `armed`, `active` or `unknown`. `armed` can mean outside the window or not currently performing the action. |
 | `automation` | Configuration and phases for Cosy, Agile, Adaptive Charge, winter, forecast and HEM-managed Timed Export; also `charging_mode`. |

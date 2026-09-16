@@ -1332,6 +1332,12 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 
     // HR 319-320: battery pause slot
     snap.battery_pause_slot = decode_timeslot(data, 319 - 300, 320 - 300);
+    record_raw_pause_registers(
+        snap,
+        get_reg(data, 318 - 300),
+        get_reg(data, 319 - 300),
+        get_reg(data, 320 - 300),
+    );
 }
 
 /// Decode the targeted HR 318-320 pause-register probe.
@@ -1347,8 +1353,19 @@ pub fn decode_holding_318_320(data: &[u16], snap: &mut InverterSnapshot) {
     if data.len() < 3 {
         return;
     }
-    snap.battery_pause_mode = get_reg(data, 0) as u8;
+    let mode = get_reg(data, 0);
+    let start = get_reg(data, 1);
+    let end = get_reg(data, 2);
+    snap.battery_pause_mode = mode as u8;
     snap.battery_pause_slot = decode_timeslot(data, 1, 2);
+    record_raw_pause_registers(snap, mode, start, end);
+}
+
+fn record_raw_pause_registers(snap: &mut InverterSnapshot, mode: u16, start: u16, end: u16) {
+    snap.battery_pause_mode_raw = Some(mode);
+    snap.battery_pause_slot_start_raw = Some(start);
+    snap.battery_pause_slot_end_raw = Some(end);
+    snap.battery_pause_registers_observed_at = Some(snap.timestamp);
 }
 
 /// Decode holding registers 1080-1124 (three-phase battery/control block).
@@ -5838,14 +5855,37 @@ mod tests {
     /// targeted `read_registers(Holding, 318, 3)`.
     #[test]
     fn decode_holding_318_320_targeted_probe() {
-        let mut snap = InverterSnapshot::default();
+        let mut snap = InverterSnapshot {
+            timestamp: 1_800_000_000,
+            ..Default::default()
+        };
 
         // HR 318 = pause mode 2 (pause discharge), HR 319 = 22:00, HR 320 = 06:00.
         decode_holding_318_320(&[2, 2200, 600], &mut snap);
         assert_eq!(snap.battery_pause_mode, 2);
+        assert_eq!(snap.battery_pause_mode_raw, Some(2));
+        assert_eq!(snap.battery_pause_slot_start_raw, Some(2200));
+        assert_eq!(snap.battery_pause_slot_end_raw, Some(600));
+        assert_eq!(
+            snap.battery_pause_registers_observed_at,
+            Some(1_800_000_000)
+        );
         assert!(snap.battery_pause_slot.enabled);
         assert_eq!(snap.battery_pause_slot.start_hour, 22);
         assert_eq!(snap.battery_pause_slot.end_hour, 6);
+    }
+
+    #[test]
+    fn decode_holding_318_320_preserves_invalid_raw_values_for_exact_restoration() {
+        let mut snap = InverterSnapshot {
+            timestamp: 1_800_000_000,
+            ..Default::default()
+        };
+        decode_holding_318_320(&[7, 2461, 9999], &mut snap);
+        assert_eq!(snap.battery_pause_mode_raw, Some(7));
+        assert_eq!(snap.battery_pause_slot_start_raw, Some(2461));
+        assert_eq!(snap.battery_pause_slot_end_raw, Some(9999));
+        assert!(!snap.battery_pause_slot.enabled);
     }
 
     /// A short read (fewer than 3 registers) must be a no-op rather than

@@ -6,7 +6,10 @@
 //! window), never the HTTP client's or server's timezone.
 
 use crate::inverter::{
-    model::{BatteryMode, BatteryState, DeviceType, InverterSnapshot, ScheduleSlot},
+    model::{
+        BatteryMode, BatteryState, DeviceType, ExternalControlOperation, InverterSnapshot,
+        ScheduleSlot,
+    },
     poll::{AppState, ConnectionState},
     state_machines::{
         export_window_contains, inverter_minute_of_day, TimedExportConfig, TimedExportState,
@@ -49,9 +52,17 @@ struct ForceWindow {
     end_ms: Option<i64>,
 }
 
+struct PauseWindow {
+    mode: u16,
+    started_at_ms: i64,
+    end_ms: i64,
+    restoring: bool,
+}
+
 #[derive(Default)]
 struct Context {
     force: Option<ForceWindow>,
+    pause: Option<PauseWindow>,
     export_config: TimedExportConfig,
     export_state: TimedExportState,
 }
@@ -77,6 +88,17 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
                 })
             })
     };
+    let pause = state
+        .pause_mode_revert
+        .lock()
+        .await
+        .as_ref()
+        .map(|r| PauseWindow {
+            mode: r.requested_mode,
+            started_at_ms: r.started_at_ms,
+            end_ms: r.expires_at_ms,
+            restoring: r.restoring,
+        });
     let export_config = state.timed_export_config.lock().await.clone();
     let export_state = state.timed_export_state.lock().await.clone();
     let conn = state.connection_state.lock().await.clone();
@@ -90,6 +112,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
         interval,
         &Context {
             force,
+            pause,
             export_config,
             export_state,
         },
@@ -172,6 +195,54 @@ fn window(slots: &[ScheduleSlot], minute: Option<u16>) -> Option<bool> {
     minute.map(|m| export_window_contains(slots, m))
 }
 
+/// The strict "a Force Charge is physically running right now" predicate,
+/// shared by the status endpoint and the external-command readback evidence.
+/// The slot-window conjunct is the part that keeps an *armed* charge schedule
+/// in Eco mode from reading as a perpetual force charge: once the charge
+/// window ends the inverter stops charging by itself, and this must observe
+/// that (issue #301 field report: a stop sent after the window ended stayed
+/// `dispatched` forever because `!charge_active` could never become true).
+///
+/// Returns `None` when the predicate cannot be evaluated — no inverter clock,
+/// or corrupt slot components. That is deliberately distinct from `Some(false)`:
+/// callers that treat "not active" as evidence of completion (expiry, a
+/// fallback stop confirmation) must not release ownership on a cycle whose
+/// clock is missing, because a zeroed HR35-40 block is exactly the supported
+/// `EmptyData`/`Intermittent` dongle behaviour.
+pub(crate) fn force_charge_active(s: &InverterSnapshot, minute: Option<u16>) -> Option<bool> {
+    // Even an unbounded Force Charge needs a readable inverter clock before
+    // its flags can be treated as activity evidence; otherwise a clockless
+    // snapshot could incorrectly expire or release ownership.
+    let minute = minute?;
+    let pause_window = window(std::slice::from_ref(&s.battery_pause_slot), Some(minute));
+    let charge_window = window(&s.charge_slots, Some(minute));
+    let (Some(pause_window), Some(charge_window)) = (pause_window, charge_window) else {
+        return None;
+    };
+    let charge_paused = matches!(s.battery_pause_mode, 1 | 3) && pause_window;
+    // The legacy no-body endpoint deliberately creates no slot. When the
+    // Force Charge owner is present, armed charge flags are the only available
+    // evidence for that unbounded action; a normal scheduled charge cannot
+    // reach this predicate without that owner context.
+    let force_window = if s.charge_slots.iter().any(ScheduleSlot::is_configured) {
+        charge_window
+    } else {
+        true
+    };
+    Some(s.enable_charge && s.battery_power_mode == 1 && force_window && !charge_paused)
+}
+
+/// The Force Discharge mirror of [`force_charge_active`].
+pub(crate) fn force_discharge_active(s: &InverterSnapshot, minute: Option<u16>) -> Option<bool> {
+    let pause_window = window(std::slice::from_ref(&s.battery_pause_slot), minute);
+    let discharge_window = window(&s.discharge_slots, minute);
+    let (Some(pause_window), Some(discharge_window)) = (pause_window, discharge_window) else {
+        return None;
+    };
+    let discharge_paused = matches!(s.battery_pause_mode, 2 | 3) && pause_window;
+    Some(s.enable_discharge && s.battery_power_mode == 0 && discharge_window && !discharge_paused)
+}
+
 fn schedule(armed: bool, in_window: Option<bool>, performing: bool) -> &'static str {
     if !armed {
         "off"
@@ -182,6 +253,57 @@ fn schedule(armed: bool, in_window: Option<bool>, performing: bool) -> &'static 
             _ => "armed",
         }
     }
+}
+
+fn control_capabilities(snapshot: Option<&InverterSnapshot>, available: bool) -> Value {
+    let Some(snapshot) = snapshot.filter(|_| available) else {
+        return json!({
+            "force_charge": Value::Null,
+            "force_discharge": Value::Null,
+            "pause_modes": Value::Null,
+        });
+    };
+    if matches!(snapshot.device_type, DeviceType::Unknown(_)) {
+        return json!({
+            "force_charge": Value::Null,
+            "force_discharge": Value::Null,
+            "pause_modes": Value::Null,
+        });
+    }
+
+    let arm_fw = snapshot.firmware_version.parse::<u16>().ok();
+    let pause_modes = if matches!(snapshot.device_type, DeviceType::Gen3Hybrid) && arm_fw.is_none()
+    {
+        Value::Null
+    } else {
+        let firmware = arm_fw.unwrap_or(0);
+        let mut modes = Vec::new();
+        for (operation, label) in [
+            (ExternalControlOperation::PauseCharge, "charge"),
+            (ExternalControlOperation::PauseDischarge, "discharge"),
+            (ExternalControlOperation::PauseBoth, "both"),
+        ] {
+            if snapshot
+                .device_type
+                .supports_external_control(operation, firmware)
+            {
+                modes.push(label);
+            }
+        }
+        json!(modes)
+    };
+
+    json!({
+        "force_charge": snapshot.device_type.supports_external_control(
+            ExternalControlOperation::ForceCharge,
+            arm_fw.unwrap_or(0),
+        ),
+        "force_discharge": snapshot.device_type.supports_external_control(
+            ExternalControlOperation::ForceDischarge,
+            arm_fw.unwrap_or(0),
+        ),
+        "pause_modes": pause_modes,
+    })
 }
 
 /// `now_ms` is injected. Readings older than three polling intervals (minimum
@@ -209,6 +331,7 @@ fn build_status(
         "schedules":{"charge":"unknown","export":"unknown","demand_discharge":"unknown"},
         "automation":null, "conditions":[], "calibration":null, "maintenance":null,
         "quick_action":null, "limits":null,
+        "control_capabilities":control_capabilities(snapshot, available),
         "connection":conn, "stale":stale, "observed_at":observed_at,
         "age_seconds":age_s.map(|age| age.max(0)), "stale_after_seconds":stale_after_s,
     });
@@ -413,19 +536,10 @@ fn build_status(
         let expired = force.end_ms.is_some_and(|end| now_ms >= end);
         let readback_after_request = s.timestamp.saturating_mul(1000) > force.started_at_ms;
         let observed = match force.kind {
-            ForceKind::Charge => {
-                s.enable_charge
-                    && s.battery_power_mode == 1
-                    && charge_window == Some(true)
-                    && !charge_paused
-            }
-            ForceKind::Discharge => {
-                s.enable_discharge
-                    && s.battery_power_mode == 0
-                    && discharge_window == Some(true)
-                    && !discharge_paused
-            }
+            ForceKind::Charge => force_charge_active(s, minute),
+            ForceKind::Discharge => force_discharge_active(s, minute),
         };
+        let observed = observed == Some(true);
         let phase = if expired {
             "expired"
         } else if observed && readback_after_request {
@@ -441,6 +555,36 @@ fn build_status(
             "requested_at":DateTime::<Utc>::from_timestamp_millis(force.started_at_ms).map(|t| t.to_rfc3339()),
             "window_ends_at":force.end_ms.and_then(DateTime::<Utc>::from_timestamp_millis).map(|t| t.to_rfc3339())});
         (force.kind.code(), phase, force.kind.label().to_string())
+    } else if let Some(pause) = &ctx.pause {
+        let expired = now_ms >= pause.end_ms;
+        let readback_after_request = s.timestamp.saturating_mul(1000) > pause.started_at_ms;
+        let observed = s.battery_pause_mode_raw == Some(pause.mode)
+            && window(std::slice::from_ref(&s.battery_pause_slot), minute) == Some(true);
+        let phase = if pause.restoring {
+            "restoring"
+        } else if expired {
+            "expired"
+        } else if observed && readback_after_request {
+            "active"
+        } else {
+            "pending"
+        };
+        value["remaining_minutes"] = json!(
+            pause
+                .end_ms
+                .saturating_sub(now_ms)
+                .max(0)
+                .saturating_add(59_999)
+                / 60_000
+        );
+        value["quick_action"] = json!({
+            "action": "pause_mode",
+            "mode": pause.mode,
+            "phase": phase,
+            "requested_at": DateTime::<Utc>::from_timestamp_millis(pause.started_at_ms).map(|t| t.to_rfc3339()),
+            "window_ends_at": DateTime::<Utc>::from_timestamp_millis(pause.end_ms).map(|t| t.to_rfc3339()),
+        });
+        ("pause_mode", phase, "Battery Pause".into())
     } else if ctx.export_state.owns_discharge_control()
         || matches!(
             ctx.export_state,
@@ -549,6 +693,63 @@ mod tests {
         )
     }
 
+    /// Issue #301 field report: scheduled force predicates must include the
+    /// slot window. An armed charge schedule (enable_charge=1) in Eco mode
+    /// with the window ENDED is the inverter's normal idle state, not a
+    /// running scheduled force charge. The legacy no-body Force Charge path
+    /// has no slot, so its armed flags are the activity evidence instead.
+    /// Unknown evaluability is `None`, never `Some(false)`, so a missing clock
+    /// cannot release ownership.
+    #[test]
+    fn force_predicates_require_a_live_window() {
+        let mut s = snapshot();
+        s.enable_charge = true;
+        s.battery_power_mode = 1; // eco
+        s.charge_slots[0] = slot(2, 4); // armed 02:00–04:00
+
+        // Inside the window: a genuine force charge reads active.
+        assert_eq!(force_charge_active(&s, Some(3 * 60)), Some(true));
+        // After the window ended (the inverter is back on its armed
+        // schedule in eco): NOT active — this is the #301 regression.
+        assert_eq!(force_charge_active(&s, Some(5 * 60)), Some(false));
+        // Before the window: same.
+        assert_eq!(force_charge_active(&s, Some(60)), Some(false));
+        // The legacy no-body Force Charge path has no slot; armed flags are
+        // sufficient evidence while its owner is active.
+        let mut no_slot = s.clone();
+        no_slot.charge_slots = Default::default();
+        assert_eq!(force_charge_active(&no_slot, Some(3 * 60)), Some(true));
+        no_slot.enable_charge = false;
+        assert_eq!(force_charge_active(&no_slot, Some(3 * 60)), Some(false));
+        assert_eq!(force_charge_active(&no_slot, None), None);
+        // A live charge pause (HR318 mode 1 inside the pause window) masks
+        // the charge.
+        let mut paused = s.clone();
+        paused.battery_pause_mode = 1;
+        paused.battery_pause_slot = slot(2, 6);
+        assert_eq!(force_charge_active(&paused, Some(3 * 60)), Some(false));
+        // Unknown inverter clock or corrupt slot data: not evaluable.
+        assert_eq!(force_charge_active(&s, None), None);
+        let mut corrupt = s.clone();
+        corrupt.charge_slots[0].end_hour = 99;
+        assert_eq!(force_charge_active(&corrupt, Some(3 * 60)), None);
+
+        // Discharge mirror: max-power mode + discharge enabled inside its
+        // slot window.
+        let mut d = snapshot();
+        d.enable_discharge = true;
+        d.battery_power_mode = 0; // max power / export
+        d.discharge_slots[0] = slot(1, 5);
+        assert_eq!(force_discharge_active(&d, Some(2 * 60)), Some(true));
+        assert_eq!(force_discharge_active(&d, Some(6 * 60)), Some(false));
+        // A live discharge pause masks it.
+        let mut d_paused = d.clone();
+        d_paused.battery_pause_mode = 2;
+        d_paused.battery_pause_slot = slot(1, 5);
+        assert_eq!(force_discharge_active(&d_paused, Some(2 * 60)), Some(false));
+        assert_eq!(force_discharge_active(&d, None), None);
+    }
+
     fn slot(start: u8, end: u8) -> ScheduleSlot {
         ScheduleSlot {
             enabled: true,
@@ -556,6 +757,55 @@ mod tests {
             end_hour: end,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn status_reports_model_and_firmware_specific_control_capabilities() {
+        for (device_type, firmware, force, pause_modes) in [
+            (DeviceType::ACCoupled, "", true, json!([])),
+            (DeviceType::PvInverter, "", false, json!([])),
+            (
+                DeviceType::ACThreePhase,
+                "",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            (DeviceType::Gen3Hybrid, "311", true, json!([])),
+            (
+                DeviceType::Gen3Hybrid,
+                "312",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            (DeviceType::Gen3Hybrid, "not-a-version", true, Value::Null),
+        ] {
+            let s = InverterSnapshot {
+                device_type,
+                firmware_version: firmware.into(),
+                ..snapshot()
+            };
+            let capabilities = &status(&s)["control_capabilities"];
+            assert_eq!(capabilities["force_charge"], force, "{device_type:?}");
+            assert_eq!(capabilities["force_discharge"], force, "{device_type:?}");
+            assert_eq!(capabilities["pause_modes"], pause_modes, "{device_type:?}");
+        }
+    }
+
+    #[test]
+    fn unavailable_status_does_not_claim_control_support() {
+        let value = build_status(
+            None,
+            ConnectionState::Connected,
+            20,
+            &Context::default(),
+            NOW,
+        );
+        assert_eq!(value["control_capabilities"]["force_charge"], Value::Null);
+        assert_eq!(
+            value["control_capabilities"]["force_discharge"],
+            Value::Null
+        );
+        assert_eq!(value["control_capabilities"]["pause_modes"], Value::Null);
     }
 
     #[test]

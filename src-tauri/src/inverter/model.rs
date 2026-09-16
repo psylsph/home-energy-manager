@@ -82,6 +82,22 @@ impl BatteryMode {
 // Device type
 // ---------------------------------------------------------------------------
 
+/// Authenticated battery-control operations whose register safety varies by
+/// inverter family and, for some families, firmware version.
+///
+/// Start and Stop intentionally share an operation: restoration touches the
+/// same model-specific register bank as admission, so neither direction may be
+/// enabled unless that complete path is confirmed for the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalControlOperation {
+    ForceCharge,
+    ForceDischarge,
+    PauseCharge,
+    PauseDischarge,
+    PauseBoth,
+}
+
 /// Inverter hardware variant, read from holding register HR(0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceType {
@@ -601,7 +617,11 @@ impl DeviceType {
     /// feature is enabled there via a dedicated probe in `poll.rs` rather
     /// than the block poll. Older Gen3 firmware (< 312) is gated out until
     /// confirmed.
-    pub fn supports_timed_discharge(&self, arm_fw: u16) -> bool {
+    /// Whether the native pause register set (HR 318-320) is confirmed for
+    /// this exact model and firmware. Keep every consumer on this single
+    /// boundary so polling, dashboard Timed Discharge, and authenticated
+    /// control cannot drift into contradictory safety decisions.
+    pub fn supports_pause_registers(&self, arm_fw: u16) -> bool {
         if matches!(
             self,
             Self::ACThreePhase | Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW
@@ -609,6 +629,36 @@ impl DeviceType {
             return true;
         }
         matches!(self, Self::Gen3Hybrid) && arm_fw >= 312
+    }
+
+    /// Whether an authenticated battery-control operation is confirmed safe
+    /// for this exact inverter family and firmware.
+    ///
+    /// Force actions require both a battery-capable control path and confirmed
+    /// schedule-slot writes because authenticated starts always carry a finite
+    /// duration. Gateway is the deliberate batteryless exception: its standard
+    /// controls are forwarded to the child AIO plant. Native pause modes are
+    /// separate operation variants so evidence can diverge per mode later
+    /// without changing callers or accidentally broadening support.
+    pub fn supports_external_control(
+        &self,
+        operation: ExternalControlOperation,
+        arm_fw: u16,
+    ) -> bool {
+        match operation {
+            ExternalControlOperation::ForceCharge | ExternalControlOperation::ForceDischarge => {
+                self.supports_schedule_slots()
+                    && (!self.is_batteryless() || matches!(self, Self::Gateway))
+                    && !matches!(self, Self::Unknown(_))
+            }
+            ExternalControlOperation::PauseCharge
+            | ExternalControlOperation::PauseDischarge
+            | ExternalControlOperation::PauseBoth => self.supports_pause_registers(arm_fw),
+        }
+    }
+
+    pub fn supports_timed_discharge(&self, arm_fw: u16) -> bool {
+        self.supports_pause_registers(arm_fw)
     }
 }
 
@@ -1146,6 +1196,19 @@ pub struct InverterSnapshot {
     /// Battery pause time slot — HR 319-320.
     #[serde(default)]
     pub battery_pause_slot: ScheduleSlot,
+    /// Exact raw HR318 value from the latest complete pause-register read.
+    /// Kept separately from the UI-normalized u8 field for safe restoration.
+    #[serde(default)]
+    pub battery_pause_mode_raw: Option<u16>,
+    /// Exact raw HR319 value from the latest complete pause-register read.
+    #[serde(default)]
+    pub battery_pause_slot_start_raw: Option<u16>,
+    /// Exact raw HR320 value from the latest complete pause-register read.
+    #[serde(default)]
+    pub battery_pause_slot_end_raw: Option<u16>,
+    /// Snapshot timestamp at which HR318-320 were read together.
+    #[serde(default)]
+    pub battery_pause_registers_observed_at: Option<i64>,
 
     // -- External CT configuration (single-phase only) --
     /// Whether the external CT ammeter is enabled — HR(7).
@@ -1340,6 +1403,10 @@ impl InverterSnapshot {
             ac_eps_enabled: false,
             battery_pause_mode: 0,
             battery_pause_slot: ScheduleSlot::default(),
+            battery_pause_mode_raw: None,
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
+            battery_pause_registers_observed_at: None,
             enable_ammeter: false,
             enable_reversed_ct_clamp: false,
             meter_type: 0,
@@ -2115,6 +2182,100 @@ mod tests {
         assert!(DeviceType::AllInOne6kW.supports_timed_discharge(0));
         assert!(DeviceType::AllInOne3_6kW.supports_timed_discharge(0));
         assert!(DeviceType::AllInOne5kW.supports_timed_discharge(0));
+    }
+
+    #[test]
+    fn external_control_capabilities_are_explicit_for_every_device_type() {
+        let supported = [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ThreePhase,
+            DeviceType::AioCommercial,
+            DeviceType::ACThreePhase,
+            DeviceType::Gateway,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ];
+        let unsupported = [
+            DeviceType::PvInverter,
+            DeviceType::Ems,
+            DeviceType::EmsCommercial,
+            DeviceType::Gen4Hybrid,
+            DeviceType::Unknown(0),
+        ];
+
+        for device in supported {
+            assert!(
+                device.supports_external_control(ExternalControlOperation::ForceCharge, 400),
+                "{device:?} should support Force Charge"
+            );
+            assert!(
+                device.supports_external_control(ExternalControlOperation::ForceDischarge, 400),
+                "{device:?} should support Force Discharge"
+            );
+        }
+        for device in unsupported {
+            for operation in [
+                ExternalControlOperation::ForceCharge,
+                ExternalControlOperation::ForceDischarge,
+                ExternalControlOperation::PauseCharge,
+                ExternalControlOperation::PauseDischarge,
+                ExternalControlOperation::PauseBoth,
+            ] {
+                assert!(
+                    !device.supports_external_control(operation, 400),
+                    "{device:?} must reject {operation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_pause_capabilities_share_the_timed_discharge_register_boundary() {
+        let always_supported = [
+            DeviceType::ACThreePhase,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+        ];
+        for device in always_supported {
+            for operation in [
+                ExternalControlOperation::PauseCharge,
+                ExternalControlOperation::PauseDischarge,
+                ExternalControlOperation::PauseBoth,
+            ] {
+                assert!(device.supports_external_control(operation, 0));
+            }
+            assert!(device.supports_pause_registers(0));
+            assert_eq!(
+                device.supports_pause_registers(0),
+                device.supports_timed_discharge(0)
+            );
+        }
+
+        for firmware in [311, 312] {
+            assert_eq!(
+                DeviceType::Gen3Hybrid.supports_pause_registers(firmware),
+                firmware >= 312
+            );
+            assert_eq!(
+                DeviceType::Gen3Hybrid
+                    .supports_external_control(ExternalControlOperation::PauseBoth, firmware,),
+                firmware >= 312
+            );
+            assert_eq!(
+                DeviceType::Gen3Hybrid.supports_pause_registers(firmware),
+                DeviceType::Gen3Hybrid.supports_timed_discharge(firmware)
+            );
+        }
     }
 
     #[test]
