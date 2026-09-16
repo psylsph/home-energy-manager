@@ -15,7 +15,7 @@
  *   - The /api/control/force-charge/stop and /api/control/force-discharge/stop
  *     endpoints exist and respond correctly.
  *   - Defensive guards: stop with no active force returns 400.
- *   - Stop is one-shot (second call also returns 400).
+ *   - Stop retains ownership until a confirming readback (repeat calls accepted).
  *   - The end-to-end flow (start, wait, stop, wait) doesn't crash.
  *   - Force Charge / Force Discharge reverts are independent.
  *   - Charge slot registers appear in the snapshot when the simulator
@@ -105,6 +105,16 @@ async function setMode(
   if (!(await resp.json()).ok) throw new Error(`setMode(${mode}) failed`);
 }
 
+/**
+ * Harness-only clean slate (POST /api/test/reset, armed by --e2e-admin in the
+ * local global setup). Needed since a Stop retains ownership until a confirming
+ * readback, so another Stop can no longer be used to drain a revert.
+ */
+async function resetHarness(baseUrl: string): Promise<void> {
+  const resp = await fetch(`${baseUrl}/api/test/reset`, { method: 'POST' });
+  if (!resp.ok) throw new Error(`test reset failed: ${resp.status}`);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -112,6 +122,9 @@ async function setMode(
 test.describe('Force Charge → Stop API', () => {
 
   test('Start then stop completes the full flow', async ({ baseUrl }) => {
+    // A previous local duration test may retain an unconfirmed restoration
+    // owner because the simulator does not echo every slot write.
+    await resetHarness(baseUrl);
     // Ensure baseline: simulator in Eco so the charge flag is 0.
     await setMode(baseUrl, 'eco');
     await waitForSnapshot(baseUrl, (d) => d.enable_charge === false, 15_000);
@@ -140,19 +153,11 @@ test.describe('Force Charge → Stop API', () => {
   });
 
   test('Stop with no active Force Charge returns 400', async ({ baseUrl }) => {
-    // Drain any in-flight state. If the previous test left a force
-    // charge active, the stop here would succeed (consume the revert)
-    // and the assertion below would fail with ok=true. We want the
-    // "no force charge in progress" path, so we first ensure no
-    // force charge is active by calling stop once and ignoring the
-    // result — if it was 200, great; if it was 400, the revert was
-    // already gone.
-    const preResp = await fetch(`${baseUrl}/api/control/force-charge/stop`, {
-      method: 'POST',
-    });
-    await preResp.json();
+    // A stop no longer consumes the revert (ownership is retained until a
+    // confirming readback), so clearing state for this assertion has to go
+    // through the harness reset rather than another stop.
+    await resetHarness(baseUrl);
 
-    // Now a fresh stop should reliably 400.
     const stopResp = await fetch(`${baseUrl}/api/control/force-charge/stop`, {
       method: 'POST',
     });
@@ -161,7 +166,9 @@ test.describe('Force Charge → Stop API', () => {
     expect(data.error).toMatch(/no force charge/i);
   });
 
-  test('Stop is one-shot — second call also returns 400', async ({ baseUrl }) => {
+  test('Stop retains ownership — a second call is accepted until confirmed', async ({
+    baseUrl,
+  }) => {
     // Start a fresh force charge, stop it, then try to stop again.
     await setMode(baseUrl, 'eco');
     await waitForSnapshot(baseUrl, (d) => d.enable_charge === false, 15_000);
@@ -178,10 +185,12 @@ test.describe('Force Charge → Stop API', () => {
     const stop1 = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
     expect((await stop1.json()).ok).toBe(true);
 
-    // Second stop should be rejected (revert already consumed).
+    // Ownership is released only by a causally fresh confirming readback, so
+    // repeated stops are accepted and re-apply the restoration.
     const stop2 = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
-    const data = await stop2.json();
-    expect(data.ok).toBe(false);
+    expect((await stop2.json()).ok).toBe(true);
+    const stop3 = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
+    expect((await stop3.json()).ok).toBe(true);
   });
 
   test('Stop accepts no body (no Content-Type required)', async ({ baseUrl }) => {
@@ -207,11 +216,12 @@ test.describe('Force Charge → Stop API', () => {
 test.describe('Force Discharge → Stop API', () => {
 
   test('Start then stop completes the full flow', async ({ baseUrl }) => {
+    // Clear any retained revert from the previous describe: a stop no longer
+    // consumes one, so it cannot be used to drain state between tests.
+    await resetHarness(baseUrl);
+
     // Set up Eco baseline.
     await setMode(baseUrl, 'eco');
-
-    // Drain any leftover discharge state from a previous test.
-    await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
 
     // The revert capture can race with the poll loop clearing the snapshot.
     // Retry the start+stop so a transient None revert doesn't fail the test.
@@ -233,6 +243,9 @@ test.describe('Force Discharge → Stop API', () => {
   });
 
   test('Stop with no active Force Discharge returns 400', async ({ baseUrl }) => {
+    // A stop retains ownership until a confirming readback, so clearing the
+    // revert for this assertion needs the harness reset.
+    await resetHarness(baseUrl);
     // Drain any in-flight state (see the charge counterpart above).
     const preResp = await fetch(`${baseUrl}/api/control/force-discharge/stop`, {
       method: 'POST',
@@ -268,13 +281,19 @@ test.describe('Force Discharge → Stop API', () => {
       const probe = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
       fcOk = (await probe.json()).ok;
     }
-    // Re-start the charge (the probe above consumed the revert).
-    const fcResp = await fetch(`${baseUrl}/api/control/force-charge`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minutes: 30 }),
-    });
-    expect((await fcResp.json()).ok).toBe(true);
+    // Re-start only after the probe stop's restoration has round-tripped. A
+    // retained restoration deliberately owns the direction until then.
+    let fcBody: { ok: boolean } = { ok: false };
+    for (let attempt = 0; attempt < 30 && !fcBody.ok; attempt++) {
+      const fcResp = await fetch(`${baseUrl}/api/control/force-charge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minutes: 30 }),
+      });
+      fcBody = await fcResp.json();
+      if (!fcBody.ok) await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(fcBody.ok).toBe(true);
 
     // Force discharge while the charge revert is armed must be rejected,
     // leaving the charge revert intact.
@@ -287,9 +306,22 @@ test.describe('Force Discharge → Stop API', () => {
     expect(fdRejectedBody.ok).toBe(false);
     expect(fdRejectedBody.error).toMatch(/stop force charge/i);
 
-    // Stop the charge; its revert is consumed.
+    // Stop the charge: the request is accepted, but ownership is retained until
+    // a confirming readback, so the charge revert still blocks the opposite
+    // direction. Clear it through the harness reset instead of assuming a
+    // consumed revert, then the discharge start can arm its own.
     const stopFc = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
     expect((await stopFc.json()).ok).toBe(true);
+    const fdWhileRetained = await fetch(`${baseUrl}/api/control/force-discharge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    expect(
+      (await fdWhileRetained.json()).ok,
+      'a retained charge baseline must still block the opposite direction',
+    ).toBe(false);
+    await resetHarness(baseUrl);
 
     // Now force discharge arms its own revert...
     const fdResp = await fetch(`${baseUrl}/api/control/force-discharge`, {
@@ -309,9 +341,20 @@ test.describe('Force Discharge → Stop API', () => {
     expect(fcRejectedBody.ok).toBe(false);
     expect(fcRejectedBody.error).toMatch(/stop force discharge/i);
 
-    // Stop the discharge; its revert is consumed independently.
+    // Stop the discharge: the request is accepted, but ownership is retained
+    // until a confirming readback, so it still blocks the opposite direction.
     const stopFd = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     expect((await stopFd.json()).ok).toBe(true);
+    const fcWhileRetained = await fetch(`${baseUrl}/api/control/force-charge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    });
+    expect(
+      (await fcWhileRetained.json()).ok,
+      'a retained discharge baseline must still block the opposite direction',
+    ).toBe(false);
+    await resetHarness(baseUrl);
 
     // Both sides can arm again cleanly afterwards.
     const fcAgain = await fetch(`${baseUrl}/api/control/force-charge`, {
@@ -322,6 +365,7 @@ test.describe('Force Discharge → Stop API', () => {
     expect((await fcAgain.json()).ok).toBe(true);
     const stopFc2 = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
     expect((await stopFc2.json()).ok).toBe(true);
+    await resetHarness(baseUrl);
   });
 });
 
