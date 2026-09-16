@@ -3515,6 +3515,9 @@ mod tests {
 
     struct MockNtfy {
         base_url: String,
+        /// Body drained by the handler, exposed so tests can assert the
+        /// server consumed the request before replying.
+        received_body: std::sync::Arc<std::sync::Mutex<Option<String>>>,
         _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
@@ -3524,7 +3527,20 @@ mod tests {
                 .await
                 .expect("bind ephemeral port");
             let addr = listener.local_addr().expect("local addr");
-            let app = axum::Router::new().fallback(move || async move { (status, "") });
+            let received_body = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+            let handler_body = received_body.clone();
+            // The handler must drain the request body before replying. A
+            // server that answers a bodied POST and closes with the body
+            // still unread makes the OS send a TCP RST, which macOS
+            // surfaces to the client as EINVAL (os error 22) — that raced
+            // the 404 readback and flaked CI intermittently.
+            let app = axum::Router::new().fallback(move |req: axum::extract::Request| async move {
+                let bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
+                    .await
+                    .unwrap_or_default();
+                *handler_body.lock().unwrap() = Some(String::from_utf8_lossy(&bytes).into_owned());
+                (status, "")
+            });
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             tokio::spawn(async move {
                 let _ = axum::serve(listener, app)
@@ -3535,8 +3551,13 @@ mod tests {
             });
             Self {
                 base_url: format!("http://{addr}"),
+                received_body,
                 _shutdown: Some(shutdown_tx),
             }
+        }
+
+        fn received_body(&self) -> Option<String> {
+            self.received_body.lock().unwrap().clone()
         }
     }
 
@@ -3562,6 +3583,14 @@ mod tests {
         assert!(
             err.contains("ntfy API"),
             "expected an ntfy API error, got: {err}"
+        );
+        // The handler must consume the POST body before replying; an
+        // undrained body triggers a TCP RST on close, which intermittently
+        // surfaced as EINVAL on macOS CI instead of the 404 above.
+        assert_eq!(
+            mock.received_body().as_deref(),
+            Some("battery temp high"),
+            "mock must drain the request body it is responding to"
         );
     }
 
