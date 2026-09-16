@@ -237,6 +237,7 @@ A separate HTTP server (default port **7338**, Bearer-token authenticated) lets 
 1. **Settings → Remote / Mobile Network Access → Authenticated API**: click **Generate API key** (shown once — copy it), choose a port and listen address. New installs listen on `127.0.0.1` only; **Apply network settings** rebinds the running listener without a restart (only *starting* the API for the first time on an older install needs an app restart).
 2. Reading data needs only the key. To allow battery writes, toggle on **Allow battery control through the authenticated API** — it applies immediately (off by default, including after upgrades). A started action can still be stopped remotely after revocation; revocation never strands the inverter in a forced mode.
 3. These settings can only be changed from the machine running HEM, and Bearer tokens are not encrypted over plain HTTP — prefer a listen address of `127.0.0.1` behind a trusted reverse proxy or VPN; direct LAN exposure is an explicit compatibility choice.
+4. Browsing HEM from another machine (headless server, Proxmox LXC, VM, Docker)? The key-generation and network settings are refused with a `403` by design — a remote, unauthenticated browser must not be able to mint itself an API credential. See [Generating your first key on a remote/headless install](./REMOTE_CONTROL.md#generating-your-first-key-on-a-remote-headless-install) for the one-time SSH or console workaround.
 
 ### Endpoints
 
