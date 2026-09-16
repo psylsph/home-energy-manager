@@ -41,6 +41,11 @@ async function fetchSnapshot(baseUrl: string): Promise<Snapshot> {
   return (await fetch(`${baseUrl}/api/snapshot`)).json();
 }
 
+async function resetHarness(baseUrl: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/api/test/reset`, { method: 'POST' });
+  if (!response.ok) throw new Error(`test reset failed: ${response.status}`);
+}
+
 async function waitForSnapshot(
   baseUrl: string,
   predicate: (d: Snapshot['data']) => boolean,
@@ -66,6 +71,10 @@ async function clearForceState(baseUrl: string) {
     d.enable_charge === false && d.enable_discharge === false,
     20_000,
   );
+  // The simulator does not echo all slot writes, so the backend may retain a
+  // restoration owner after the physical flags have returned to Eco. Reset
+  // the harness ledger before the next independent action.
+  await resetHarness(baseUrl);
 }
 
 // ---------------------------------------------------------------------------

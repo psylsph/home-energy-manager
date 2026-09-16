@@ -8,14 +8,15 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Timelike};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
 use crate::inverter::model::{DeviceType, InverterSnapshot};
 use crate::inverter::poll::{
     stamp_solar_array_fields, AppState, ConnectionState, ForceChargeRevert, ForceDischargeRevert,
-    PauseModeRevert, PendingWriteBatch, PollMessage, PollSettings, WriteBatchPolicy,
+    ForceRestorationRequest, PauseModeRevert, PendingWriteBatch, PollMessage, PollSettings,
+    WriteBatchPolicy,
 };
 use crate::inverter::state_machines::DischargeControlOwner;
 use crate::modbus::registers::encode_hhmm;
@@ -123,6 +124,100 @@ async fn latest_arm_fw(state: &Arc<AppState>) -> u16 {
         .as_ref()
         .and_then(|s| s.firmware_version.parse::<u16>().ok())
         .unwrap_or(0)
+}
+
+/// What the connected inverter says about a captured Force baseline.
+enum BaselineIdentity {
+    /// The baseline belongs to this inverter (or is unverifiable but harmless).
+    Verified,
+    /// The question cannot be answered right now (no snapshot, or an unreadable
+    /// serial on either side): refuse, but keep ownership because a later cycle
+    /// may verify and restore.
+    Unavailable,
+    /// The baseline provably belongs to a different inverter, so it can never be
+    /// applied here. Retaining it would block this action kind forever.
+    Foreign,
+}
+
+/// Check a captured Force baseline against one particular inverter snapshot.
+/// Keeping this synchronous lets stop handlers validate and select the device
+/// type while holding the same snapshot lock that protects the readback view.
+fn force_baseline_identity_for_snapshot(
+    snapshot: Option<&InverterSnapshot>,
+    device_type: DeviceType,
+    inverter_serial: &str,
+) -> BaselineIdentity {
+    if crate::inverter::poll::force_baseline_matches_inverter(
+        snapshot,
+        device_type,
+        inverter_serial,
+    ) {
+        return BaselineIdentity::Verified;
+    }
+    if crate::inverter::poll::force_baseline_belongs_to_other_inverter(
+        snapshot,
+        device_type,
+        inverter_serial,
+    ) {
+        BaselineIdentity::Foreign
+    } else {
+        BaselineIdentity::Unavailable
+    }
+}
+
+/// Check a captured Force baseline against the connected inverter. Uses the
+/// same predicates as the exact-readback barrier and the bounded retry
+/// ([`crate::inverter::poll::force_baseline_matches_inverter`] and
+/// [`crate::inverter::poll::force_baseline_belongs_to_other_inverter`]), so
+/// every path that applies or confirms a baseline agrees on the answer.
+async fn force_baseline_identity(
+    state: &Arc<AppState>,
+    device_type: DeviceType,
+    inverter_serial: &str,
+) -> BaselineIdentity {
+    let snapshot = state.latest_snapshot.lock().await;
+    force_baseline_identity_for_snapshot(snapshot.as_ref(), device_type, inverter_serial)
+}
+
+/// Release a Force baseline that provably belongs to another inverter.
+///
+/// The baseline can never be applied on the connected hardware, and keeping it
+/// would refuse this action kind — and the opposite-direction start — forever,
+/// across restarts, with no in-app escape. Releasing is safe: the old inverter
+/// is unreachable by definition, so nothing is written and no restoration is
+/// lost. The release is logged and audited.
+async fn release_foreign_force_baseline(
+    state: &Arc<AppState>,
+    action: &str,
+    captured_serial: &str,
+) -> (StatusCode, Json<Value>) {
+    tracing::warn!(
+        action,
+        captured = captured_serial,
+        "Captured Force baseline belongs to a different inverter; releasing stale ownership"
+    );
+    if action == "force_charge" {
+        state.force_charge_revert.lock().await.take();
+        state.force_charge_restoration.lock().await.take();
+    } else {
+        state.force_discharge_revert.lock().await.take();
+        state.force_discharge_restoration.lock().await.take();
+    }
+    if let Err(error) = state.command_ledger.complete_restoration(action) {
+        tracing::warn!("Failed to release durable ownership for {action}: {error}");
+    }
+    if let Err(error) = state.audit.record(crate::server::audit::AuditEvent {
+        kind: "stale_ownership_released",
+        actor: None,
+        source: None,
+        method: Some("POST".to_string()),
+        path: Some(format!("/api/control/{}/stop", action.replace('_', "-"))),
+        outcome: "released",
+        detail: Some(format!("baseline captured on inverter {captured_serial}")),
+    }) {
+        tracing::warn!("Audit write failed: {error}");
+    }
+    error_response("The inverter identity changed; the stale restoration baseline was released")
 }
 
 /// Resolve the AC-coupled and three-phase routing flags from a single lock,
@@ -638,14 +733,40 @@ async fn queue_owned_writes(
     writes: Vec<RegisterWrite>,
     owner: DischargeControlOwner,
 ) {
-    queue_writes_with_policy(
+    queue_owned_writes_with_command(state, writes, owner, None).await;
+}
+
+async fn queue_owned_writes_with_command(
+    state: &Arc<AppState>,
+    writes: Vec<RegisterWrite>,
+    owner: DischargeControlOwner,
+    command_id: Option<&str>,
+) {
+    queue_writes_with_command_policy(
         state,
         writes,
-        WriteBatchPolicy::ContinueOnError,
+        WriteBatchPolicy::FailFast,
+        command_id,
         None,
         Some(owner),
     )
     .await;
+}
+
+async fn persist_external_force_recovery<T: Serialize>(
+    state: &Arc<AppState>,
+    command_id: Option<&str>,
+    recovery: Option<&T>,
+) -> Result<(), String> {
+    let Some(command_id) = command_id else {
+        return Ok(());
+    };
+    let recovery = recovery.ok_or_else(|| {
+        "No verified inverter identity is available; Force control refused for safety".to_string()
+    })?;
+    let recovery = serde_json::to_string(recovery)
+        .map_err(|error| format!("Could not serialize Force recovery baseline: {error}"))?;
+    state.command_ledger.record_recovery(command_id, &recovery)
 }
 
 /// Completion-aware variant for an owned discharge-control batch.
@@ -669,9 +790,22 @@ pub(crate) async fn queue_owned_writes_fail_fast(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
     owner: DischargeControlOwner,
+    command_id: Option<&str>,
 ) -> (tokio::sync::oneshot::Receiver<WriteOutcome>, Duration) {
-    queue_writes_with_completion_budget(state, writes, WriteBatchPolicy::FailFast, Some(owner))
-        .await
+    let write_count = writes.len();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut pending = state.pending_writes.lock().await;
+    let queued_ahead: usize = pending.iter().map(|batch| batch.writes.len()).sum();
+    pending.push(PendingWriteBatch {
+        command_id: command_id.map(str::to_owned),
+        writes,
+        completion: Some(tx),
+        policy: WriteBatchPolicy::FailFast,
+        owner: Some(owner),
+    });
+    drop(pending);
+    state.write_notify.notify_one();
+    (rx, batch_completion_timeout(queued_ahead + write_count))
 }
 
 /// Transactional Timed Export write. If the API request times out, the poll
@@ -725,9 +859,21 @@ pub(crate) async fn queue_writes_with_policy(
     completion: Option<tokio::sync::oneshot::Sender<WriteOutcome>>,
     owner: Option<DischargeControlOwner>,
 ) {
+    queue_writes_with_command_policy(state, writes, policy, None, completion, owner).await;
+}
+
+async fn queue_writes_with_command_policy(
+    state: &Arc<AppState>,
+    writes: Vec<RegisterWrite>,
+    policy: WriteBatchPolicy,
+    command_id: Option<&str>,
+    completion: Option<tokio::sync::oneshot::Sender<WriteOutcome>>,
+    owner: Option<DischargeControlOwner>,
+) {
     let mut pw = state.pending_writes.lock().await;
     tracing::info!("Queued {} register write(s)", writes.len());
     pw.push(PendingWriteBatch {
+        command_id: command_id.map(str::to_owned),
         writes,
         completion,
         policy,
@@ -760,6 +906,7 @@ async fn queue_writes_with_completion_budget(
     let queued_ahead: usize = pending.iter().map(|batch| batch.writes.len()).sum();
     tracing::info!("Queued {} register write(s)", writes.len());
     pending.push(PendingWriteBatch {
+        command_id: None,
         writes,
         completion: Some(tx),
         policy,
@@ -818,7 +965,7 @@ pub(crate) async fn await_write_outcome_with_timeout(
 /// confirmation, a timeout is an error: callers must not persist or report a
 /// schedule whose required physical writes are still deferred. Dropping the
 /// receiver also tells a `FailFastTransactional` batch to cancel.
-async fn await_required_write_outcome_with_timeout(
+pub(crate) async fn await_required_write_outcome_with_timeout(
     rx: tokio::sync::oneshot::Receiver<WriteOutcome>,
     timeout: Duration,
 ) -> Result<(), String> {
@@ -869,6 +1016,7 @@ pub(crate) async fn capture_pause_mode_revert(
     Ok(PauseModeRevert {
         started_at_ms: now_ms,
         expires_at_ms,
+        command_id: None,
         restoring: false,
         restoration_requested_at_ms: None,
         external_owner: None,
@@ -906,6 +1054,78 @@ pub(crate) fn build_pause_mode_writes(mode: u16, start: u16, end: u16) -> Vec<Re
     ]
 }
 
+/// Whether every restoration write is reflected by the decoded snapshot.
+/// Callers additionally enforce causal freshness before releasing ownership.
+///
+/// Writes to the raw pause registers (HR318-320) can only be proven from a
+/// snapshot whose pause registers were freshly read together: carried-forward
+/// raw values survive across cycles with their original observation time, so
+/// a snapshot that merely inherited them must never confirm restoration.
+pub(crate) fn snapshot_matches_writes(
+    snapshot: &InverterSnapshot,
+    writes: &[RegisterWrite],
+) -> bool {
+    use crate::modbus::registers::*;
+
+    let slot_hhmm = |slot: &crate::inverter::model::ScheduleSlot, start: bool| {
+        if !slot.enabled {
+            0
+        } else if start {
+            slot.start_hour as u16 * 100 + slot.start_minute as u16
+        } else {
+            slot.end_hour as u16 * 100 + slot.end_minute as u16
+        }
+    };
+
+    let touches_pause_registers = writes.iter().any(|write| {
+        matches!(
+            write.address,
+            HR_BATTERY_PAUSE_MODE | HR_BATTERY_PAUSE_SLOT_1_START | HR_BATTERY_PAUSE_SLOT_1_END
+        )
+    });
+    if touches_pause_registers
+        && snapshot.battery_pause_registers_observed_at != Some(snapshot.timestamp)
+    {
+        return false;
+    }
+
+    writes.iter().all(|write| match write.address {
+        HR_BATTERY_POWER_MODE => snapshot.battery_power_mode as u16 == write.value,
+        HR_ENABLE_CHARGE => snapshot.enable_charge == (write.value != 0),
+        HR_ENABLE_CHARGE_TARGET => snapshot.enable_charge_target == (write.value != 0),
+        HR_ENABLE_DISCHARGE => snapshot.enable_discharge == (write.value != 0),
+        HR_CHARGE_TARGET_SOC | HR_3PH_CHARGE_TARGET_SOC => {
+            snapshot.target_soc as u16 == write.value
+        }
+        HR_CHARGE_SLOT_1_START | HR_3PH_CHARGE_SLOT_1_START => {
+            slot_hhmm(&snapshot.charge_slots[0], true) == write.value
+        }
+        HR_CHARGE_SLOT_1_END | HR_3PH_CHARGE_SLOT_1_END => {
+            slot_hhmm(&snapshot.charge_slots[0], false) == write.value
+        }
+        HR_DISCHARGE_SLOT_1_START | HR_3PH_DISCHARGE_SLOT_1_START => {
+            slot_hhmm(&snapshot.discharge_slots[0], true) == write.value
+        }
+        HR_DISCHARGE_SLOT_1_END | HR_3PH_DISCHARGE_SLOT_1_END => {
+            slot_hhmm(&snapshot.discharge_slots[0], false) == write.value
+        }
+        HR_DISCHARGE_SLOT_2_START | HR_3PH_DISCHARGE_SLOT_2_START => {
+            slot_hhmm(&snapshot.discharge_slots[1], true) == write.value
+        }
+        HR_DISCHARGE_SLOT_2_END | HR_3PH_DISCHARGE_SLOT_2_END => {
+            slot_hhmm(&snapshot.discharge_slots[1], false) == write.value
+        }
+        HR_3PH_FORCE_CHARGE_ENABLE | HR_3PH_AC_CHARGE_ENABLE => {
+            snapshot.enable_charge == (write.value != 0)
+        }
+        HR_3PH_FORCE_DISCHARGE_ENABLE => snapshot.enable_discharge == (write.value != 0),
+        HR_BATTERY_PAUSE_MODE => snapshot.battery_pause_mode_raw == Some(write.value),
+        HR_BATTERY_PAUSE_SLOT_1_START => snapshot.battery_pause_slot_start_raw == Some(write.value),
+        HR_BATTERY_PAUSE_SLOT_1_END => snapshot.battery_pause_slot_end_raw == Some(write.value),
+        _ => false,
+    })
+}
+
 /// Capture the pre-force-charge state of the inverter into a `ForceChargeRevert`
 /// so the Stop Charge endpoint can restore the inverter to its prior
 /// configuration. Mirrors GivTCP's `revert` dict in `forceCharge` (write.py:1148).
@@ -920,6 +1140,9 @@ async fn capture_force_charge_revert(
     let snap_arc = state.latest_snapshot.clone();
     let snap = snap_arc.lock().await;
     let snap = snap.as_ref()?;
+    if snap.inverter_serial.is_empty() {
+        return None;
+    }
 
     let slot = &snap.charge_slots[0];
     // Only remember the slot if it was actually enabled. An unconfigured
@@ -940,12 +1163,11 @@ async fn capture_force_charge_revert(
         if device_type.uses_three_phase_schedule_slots() {
             // For 3PH, `enable_charge` is the OR of HR 1112 and HR 1123.
             // We can't read them individually from the snapshot (only the
-            // combined `enable_charge` is stored), but we approximate by
-            // reading the raw input blocks if present. Simplest sound default:
-            // treat `enable_charge=true` as "both might be set" and clear
-            // both on restore. The poll loop will resync from the inverter
-            // on the next cycle so any value we don't know is overwritten
-            // with the live reading.
+            // combined `enable_charge` is stored), so we approximate both from
+            // it. Restoring both to that value is deliberate: the stop path
+            // clears them together, and the next poll simply reads back
+            // whatever the inverter now holds — it does not "resync" a value
+            // we failed to capture.
             let was_enabled = snap.enable_charge;
             (Some(was_enabled), Some(was_enabled))
         } else {
@@ -957,6 +1179,10 @@ async fn capture_force_charge_revert(
         external_owner: None,
         force_charge_slot_end_ms: None,
         enable_charge: snap.enable_charge,
+        enable_charge_target: snap.enable_charge_target,
+        device_type: snap.device_type,
+        inverter_serial: snap.inverter_serial.clone(),
+        firmware_version: snap.firmware_version.clone(),
         enable_discharge: snap.enable_discharge,
         target_soc: snap.target_soc,
         battery_power_mode: snap.battery_power_mode,
@@ -976,12 +1202,13 @@ async fn capture_force_charge_revert(
 
 /// Build the writes that restore the inverter to a captured `ForceChargeRevert`.
 /// Mirrors GivTCP's `FCResume` (`write.py:1042-1091`).
-fn build_force_charge_stop_writes(
+pub(crate) fn build_force_charge_stop_writes(
     device_type: DeviceType,
     revert: &ForceChargeRevert,
 ) -> Vec<RegisterWrite> {
     use crate::modbus::registers::{
-        HR_3PH_AC_CHARGE_ENABLE, HR_3PH_FORCE_CHARGE_ENABLE, HR_BATTERY_POWER_MODE,
+        HR_3PH_AC_CHARGE_ENABLE, HR_3PH_CHARGE_SLOT_1_END, HR_3PH_CHARGE_SLOT_1_START,
+        HR_3PH_CHARGE_TARGET_SOC, HR_3PH_FORCE_CHARGE_ENABLE, HR_BATTERY_POWER_MODE,
         HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
         HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
     };
@@ -989,10 +1216,12 @@ fn build_force_charge_stop_writes(
 
     if device_type.uses_three_phase_schedule_slots() {
         // Three-phase path: clear the force-charge and AC-charge enable flags
-        // and restore the battery power mode. The target SOC, charge rate,
-        // and slot registers are read from the HR 1080-1124 block, so the
-        // poll loop will resync them naturally. The user can also set them
-        // via the normal controls.
+        // first (so no stale window can re-arm charging), then put back the
+        // schedule the start overwrote. The authenticated path always writes a
+        // finite charge slot (HR1113/1114) and target SOC (HR1111) before
+        // arming, so a stop that only cleared the flags left the user's own
+        // schedule replaced by the force window and their target pinned at
+        // 100. Polling cannot heal this: it reads whatever the start wrote.
         writes.push(RegisterWrite {
             address: HR_3PH_FORCE_CHARGE_ENABLE,
             value: if revert.three_phase_force_charge_enable.unwrap_or(false) {
@@ -1018,6 +1247,28 @@ fn build_force_charge_stop_writes(
             address: HR_BATTERY_POWER_MODE,
             value: mode as u16,
         });
+        // Restore the captured three-phase schedule. An unconfigured slot is
+        // restored as the explicit 00:00–00:00 "no slot" value, matching the
+        // single-phase branch.
+        let (start_h, start_m) = revert.charge_slot_1_start.unwrap_or((0, 0));
+        let (end_h, end_m) = revert.charge_slot_1_end.unwrap_or((0, 0));
+        writes.push(RegisterWrite {
+            address: HR_3PH_CHARGE_SLOT_1_START,
+            value: encode_hhmm_or_clear(start_h, start_m),
+        });
+        writes.push(RegisterWrite {
+            address: HR_3PH_CHARGE_SLOT_1_END,
+            value: encode_hhmm_or_clear(end_h, end_m),
+        });
+        // Four percent is a valid configured three-phase target, not merely a
+        // decoder default. Restoring it is safer than leaving the Force Charge
+        // value (100%) behind when HR1111/HR242 legitimately contained 4.
+        if (4..=100).contains(&revert.target_soc) {
+            writes.push(RegisterWrite {
+                address: HR_3PH_CHARGE_TARGET_SOC,
+                value: revert.target_soc.clamp(4, 100) as u16,
+            });
+        }
     } else {
         // Single-phase / AC-coupled path: restore all the captured values.
         writes.push(RegisterWrite {
@@ -1028,13 +1279,26 @@ fn build_force_charge_stop_writes(
             address: HR_ENABLE_CHARGE,
             value: if revert.enable_charge { 1 } else { 0 },
         });
+        // Restore the target-arm flag to its own captured pre-state (not
+        // mirrored from enable_charge): with the flag off the decoder reports
+        // the effective target as 100 regardless of HR 116, so the HR 116
+        // restore write below is only provable — and only faithful — when the
+        // flag is restored exactly.
         writes.push(RegisterWrite {
             address: HR_ENABLE_CHARGE_TARGET,
-            value: if revert.enable_charge { 1 } else { 0 },
+            value: if revert.enable_charge_target { 1 } else { 0 },
         });
         writes.push(RegisterWrite {
             address: HR_CHARGE_TARGET_SOC,
-            value: revert.target_soc as u16,
+            value: if !revert.enable_charge_target && !device_type.uses_extended_schedule_slots() {
+                // Flag-off decodes as effective 100 ("no limit") on these
+                // models regardless of the raw HR 116 value: restoring the
+                // captured inert raw value would be meaningless AND
+                // unprovable from any decoded snapshot. Emit 100.
+                100
+            } else {
+                revert.target_soc.clamp(4, 100) as u16
+            },
         });
         // Restore the battery power mode (HR 27) to its pre-force-charge
         // value (0 = export, 1 = eco). `ForceCharge` start writes 1, so a
@@ -1084,6 +1348,9 @@ async fn capture_force_discharge_revert(
 ) -> Option<ForceDischargeRevert> {
     let snap = state.latest_snapshot.lock().await;
     let snap = snap.as_ref()?;
+    if snap.inverter_serial.is_empty() {
+        return None;
+    }
 
     // `(start HHMM, end HHMM)` for a discharge slot, or `None` for both if
     // the slot was unconfigured (write 00:00–00:00 to clear).
@@ -1119,6 +1386,10 @@ async fn capture_force_discharge_revert(
         started_at_ms: 0,
         external_owner: None,
         enable_charge: snap.enable_charge,
+        enable_charge_target: snap.enable_charge_target,
+        device_type: snap.device_type,
+        inverter_serial: snap.inverter_serial.clone(),
+        firmware_version: snap.firmware_version.clone(),
         enable_discharge: snap.enable_discharge,
         discharge_rate: Some(snap.discharge_rate),
         discharge_slot_1_start: d1_start,
@@ -1146,21 +1417,24 @@ async fn capture_force_discharge_revert(
 /// Build the writes that restore the inverter to a captured `ForceDischargeRevert`.
 /// Mirrors GivTCP's `FEResume` (`write.py:1042`-ish, adapted for the
 /// force-discharge case which GivTCP rolls into `forceExport`).
-fn build_force_discharge_stop_writes(
+pub(crate) fn build_force_discharge_stop_writes(
     device_type: DeviceType,
     revert: &ForceDischargeRevert,
 ) -> Vec<RegisterWrite> {
     use crate::modbus::registers::{
-        HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_POWER_MODE,
-        HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END,
-        HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+        HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START, HR_3PH_DISCHARGE_SLOT_2_END,
+        HR_3PH_DISCHARGE_SLOT_2_START, HR_3PH_FORCE_CHARGE_ENABLE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+        HR_BATTERY_POWER_MODE, HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START,
+        HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START, HR_ENABLE_CHARGE,
+        HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
     };
     let mut writes = Vec::new();
 
     if device_type.uses_three_phase_schedule_slots() {
-        // Three-phase path: restore the force-discharge and force-charge
-        // enable flags, then return to eco mode. The poll loop will resync
-        // the slot registers from the HR 1080-1124 block.
+        // Three-phase path: clear the force-discharge and force-charge enable
+        // flags first, then restore the slots the duration path overwrote
+        // (HR1118-1121). Polling cannot restore them: it reads back the force
+        // window the start wrote.
         writes.push(RegisterWrite {
             address: HR_3PH_FORCE_DISCHARGE_ENABLE,
             value: if revert.three_phase_force_discharge_enable.unwrap_or(false) {
@@ -1181,6 +1455,29 @@ fn build_force_discharge_stop_writes(
             address: HR_BATTERY_POWER_MODE,
             value: 1,
         });
+        // Restore both captured three-phase discharge slots; an unconfigured
+        // slot is restored as the explicit 00:00–00:00 "no slot" value,
+        // matching the single-phase branch.
+        let (s1h, s1m) = revert.discharge_slot_1_start.unwrap_or((0, 0));
+        let (e1h, e1m) = revert.discharge_slot_1_end.unwrap_or((0, 0));
+        writes.push(RegisterWrite {
+            address: HR_3PH_DISCHARGE_SLOT_1_START,
+            value: encode_hhmm_or_clear(s1h, s1m),
+        });
+        writes.push(RegisterWrite {
+            address: HR_3PH_DISCHARGE_SLOT_1_END,
+            value: encode_hhmm_or_clear(e1h, e1m),
+        });
+        let (s2h, s2m) = revert.discharge_slot_2_start.unwrap_or((0, 0));
+        let (e2h, e2m) = revert.discharge_slot_2_end.unwrap_or((0, 0));
+        writes.push(RegisterWrite {
+            address: HR_3PH_DISCHARGE_SLOT_2_START,
+            value: encode_hhmm_or_clear(s2h, s2m),
+        });
+        writes.push(RegisterWrite {
+            address: HR_3PH_DISCHARGE_SLOT_2_END,
+            value: encode_hhmm_or_clear(e2h, e2m),
+        });
     } else {
         // Single-phase / AC-coupled path: restore all the captured values.
         writes.push(RegisterWrite {
@@ -1193,7 +1490,7 @@ fn build_force_discharge_stop_writes(
         });
         writes.push(RegisterWrite {
             address: HR_ENABLE_CHARGE_TARGET,
-            value: if revert.enable_charge { 1 } else { 0 },
+            value: if revert.enable_charge_target { 1 } else { 0 },
         });
 
         // Restore the original discharge slots. If there was no prior slot,
@@ -1258,7 +1555,7 @@ fn build_force_discharge_stop_writes(
 /// all. In that restart-recovery case we cannot restore the user's previous
 /// schedule, but we can safely stop the active discharge: clear the discharge
 /// enable/force flag and return to self-consumption.
-fn build_force_discharge_restart_stop_writes(
+pub(crate) fn build_force_discharge_restart_stop_writes(
     device_type: DeviceType,
     snapshot: &InverterSnapshot,
 ) -> Vec<RegisterWrite> {
@@ -3562,6 +3859,9 @@ pub async fn test_reset(State(state): State<Arc<AppState>>) -> (StatusCode, Json
             Json(json!({ "ok": false, "error": "Not found" })),
         );
     }
+    if let Err(error) = state.command_ledger.reset_for_e2e() {
+        return error_response(&error);
+    }
 
     // Hold the Timed Export action lock for the whole reset so an in-flight
     // mutation cannot reapply a schedule (or rearm the detector) between
@@ -3584,7 +3884,6 @@ pub async fn test_reset(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     state
         .timed_export_stop_pending
         .store(false, std::sync::atomic::Ordering::Release);
-
     {
         let mut config = state.timed_export_config.lock().await;
         config.schedule_enabled = false;
@@ -3595,6 +3894,12 @@ pub async fn test_reset(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     crate::inverter::poll::reset_timed_export_rearm_detector(&state).await;
     state.force_charge_revert.lock().await.take();
     state.force_discharge_revert.lock().await.take();
+    // Also drop any in-flight Force restoration freshness barriers: with the
+    // revert gone they would be orphaned (and re-queue nothing, but a stale
+    // barrier could confuse a later assertion).
+    state.force_charge_restoration.lock().await.take();
+    state.force_discharge_restoration.lock().await.take();
+    state.pause_mode_revert.lock().await.take();
     // Drop any still-queued register writes (e.g. a previous test's mode-switch
     // slot-clear burst). The poll loop drains the queue BEFORE its next read,
     // so a multi-second burst would otherwise starve the harness of a fresh
@@ -4985,6 +5290,7 @@ mod force_action_timing_tests {
             let state = Arc::new(AppState::new());
             *state.latest_snapshot.lock().await = Some(InverterSnapshot {
                 device_type: DeviceType::ACCoupled,
+                inverter_serial: "HEM-TEST-001".into(),
                 ..Default::default()
             });
             let now = Local.with_ymd_and_hms(2027, 1, 15, 23, 45, 0).unwrap();
@@ -5012,6 +5318,20 @@ mod force_action_timing_tests {
                     && w.value == (end.hour() * 100 + end.minute()) as u16));
                 let (status, _) = force_charge_stop(State(state.clone())).await;
                 assert_eq!(status, StatusCode::OK);
+                // Ownership is retained until fresh exact readback; confirm
+                // and release so the next loop iteration starts clean.
+                assert!(state.force_charge_revert.lock().await.is_some());
+                let stop_writes: Vec<_> = state
+                    .pending_writes
+                    .lock()
+                    .await
+                    .drain(..)
+                    .flat_map(|b| b.writes)
+                    .collect();
+                let base = state.latest_snapshot.lock().await.clone().unwrap();
+                let fresh_ts = chrono::Utc::now().timestamp() + 2;
+                let snapshot = tests::snapshot_decoding_writes(&base, &stop_writes, fresh_ts);
+                crate::inverter::poll::clear_confirmed_force_restorations(&state, &snapshot).await;
                 assert!(state.force_charge_revert.lock().await.is_none());
                 state.pending_writes.lock().await.clear();
             }
@@ -5027,6 +5347,67 @@ mod force_action_timing_tests {
                     .force_charge_slot_end_ms,
                 None
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn same_direction_force_rearm_preserves_original_baseline() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let mut snapshot = InverterSnapshot {
+                device_type: DeviceType::ACCoupled,
+                inverter_serial: "HEM-TEST-001".into(),
+                enable_discharge: true,
+                battery_power_mode: 0,
+                ..Default::default()
+            };
+            snapshot.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 2,
+                start_minute: 0,
+                end_hour: 4,
+                end_minute: 0,
+                target_soc: 80,
+            };
+            *state.latest_snapshot.lock().await = Some(snapshot);
+            let first = Local.with_ymd_and_hms(2027, 1, 15, 1, 0, 0).unwrap();
+            let second = first + ChronoDuration::hours(1);
+
+            let (first_result, second_result) = tokio::join!(
+                force_charge_at(state.clone(), Some(Json(json!({"minutes": 30}))), first),
+                force_charge_at(state.clone(), Some(Json(json!({"minutes": 60}))), second),
+            );
+            assert_eq!(first_result.0, StatusCode::OK);
+            assert_eq!(second_result.0, StatusCode::OK);
+            state.pending_writes.lock().await.clear();
+
+            let revert = state.force_charge_revert.lock().await.clone().unwrap();
+            assert!(revert.enable_discharge);
+            assert_eq!(revert.battery_power_mode, 0);
+            assert_eq!(revert.charge_slot_1_start, Some((2, 0)));
+            assert_eq!(revert.charge_slot_1_end, Some((4, 0)));
+
+            assert_eq!(
+                force_charge_stop(State(state.clone())).await.0,
+                StatusCode::OK
+            );
+            let writes: Vec<_> = state
+                .pending_writes
+                .lock()
+                .await
+                .drain(..)
+                .flat_map(|batch| batch.writes)
+                .collect();
+            assert!(writes.iter().any(|w| {
+                w.address == crate::modbus::registers::HR_ENABLE_DISCHARGE && w.value == 1
+            }));
+            assert!(writes.iter().any(|w| {
+                w.address == crate::modbus::registers::HR_BATTERY_POWER_MODE && w.value == 0
+            }));
+            assert!(writes.iter().any(|w| {
+                w.address == crate::modbus::registers::HR_CHARGE_SLOT_1_START && w.value == 200
+            }));
         })
         .await;
     }
@@ -5058,8 +5439,25 @@ async fn force_charge_at(
     now: DateTime<Local>,
 ) -> (StatusCode, Json<Value>) {
     let _force_action_guard = state.force_action_lock.lock().await;
+    force_charge_at_unlocked(state.clone(), body, now, None).await
+}
+
+pub(crate) async fn force_charge_at_unlocked(
+    state: Arc<AppState>,
+    body: Option<Json<serde_json::Value>>,
+    now: DateTime<Local>,
+    command_id: Option<&str>,
+) -> (StatusCode, Json<Value>) {
     if state.force_discharge_revert.lock().await.is_some() {
         return error_response("Stop Force Discharge before starting Force Charge");
+    }
+    if state.pause_mode_revert.lock().await.is_some() {
+        return error_response("Stop Battery Pause before starting Force Charge");
+    }
+    if state.force_charge_restoration.lock().await.is_some() {
+        return error_response(
+            "Wait for Force Charge restoration to complete before restarting it",
+        );
     }
     if state.latest_snapshot.lock().await.is_none() {
         return (
@@ -5077,10 +5475,36 @@ async fn force_charge_at(
 
     // Capture the pre-force-charge state BEFORE queuing the force-charge
     // writes, so the stop endpoint can restore the inverter to this point.
-    // This is the Rust equivalent of GivTCP's `revert` dict (write.py:1148).
-    let mut revert = capture_force_charge_revert(&state, device_type).await;
+    // Re-arming the same direction keeps the original baseline: a concurrent
+    // UI/external start must never replace the state that the first owner is
+    // responsible for restoring.
+    let existing_revert = state.force_charge_revert.lock().await.clone();
+    let mut revert = if let Some(existing) = existing_revert {
+        match force_baseline_identity(&state, existing.device_type, &existing.inverter_serial).await
+        {
+            BaselineIdentity::Verified => Some(existing),
+            BaselineIdentity::Unavailable => {
+                return error_response(
+                    "No verified inverter identity is available; existing Force Charge restoration must finish first",
+                );
+            }
+            BaselineIdentity::Foreign => {
+                return error_response(
+                    "The inverter identity changed; stop Force Charge to release its stale restoration baseline",
+                );
+            }
+        }
+    } else {
+        capture_force_charge_revert(&state, device_type).await
+    };
+    if revert.is_none() {
+        return error_response(
+            "No verified inverter identity is available; Force Charge refused for safety",
+        );
+    }
     if let Some(r) = revert.as_mut() {
         r.started_at_ms = now.timestamp_millis();
+        r.force_charge_slot_end_ms = None;
     }
 
     // If minutes provided, write a charge slot first (now → now+minutes).
@@ -5108,9 +5532,23 @@ async fn force_charge_at(
     match cmd.encode() {
         Ok(mut cmd_writes) => {
             writes.append(&mut cmd_writes);
+            if let Err(error) =
+                persist_external_force_recovery(&state, command_id, revert.as_ref()).await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"ok": false, "error": error})),
+                );
+            }
             *state.force_charge_revert.lock().await = revert;
             tracing::info!("ForceCharge encoded: {:?}", writes);
-            queue_owned_writes(&state, writes, DischargeControlOwner::ManualForce).await;
+            queue_owned_writes_with_command(
+                &state,
+                writes,
+                DischargeControlOwner::ManualForce,
+                command_id,
+            )
+            .await;
             ok_response("Force charge enabled")
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -5129,13 +5567,18 @@ async fn force_charge_at(
 /// is `None`) — this prevents the user from accidentally clearing a
 /// working charge schedule they didn't intend to.
 pub async fn force_charge_stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    force_charge_stop_with_command(state, None).await
+}
+
+pub(crate) async fn force_charge_stop_with_command(
+    state: Arc<AppState>,
+    command_id: Option<&str>,
+) -> (StatusCode, Json<Value>) {
     let _force_action_guard = state.force_action_lock.lock().await;
-    // Take the revert so a concurrent force-charge re-arm can't race with
-    // us: the second start will overwrite the field, but the writes we
-    // queue now restore the FIRST start's captured state, which is what
-    // the user is asking to undo. Once consumed, a fresh force-charge
-    // must run to set a new revert.
-    let revert = state.force_charge_revert.lock().await.take();
+    // Keep the revert owned until a causally newer snapshot confirms every
+    // restoration write. A failed or interrupted batch can then be retried by
+    // another Stop, including after external-control permission is revoked.
+    let revert = state.force_charge_revert.lock().await.clone();
     let revert = match revert {
         Some(r) => r,
         None => {
@@ -5143,13 +5586,60 @@ pub async fn force_charge_stop(State(state): State<Arc<AppState>>) -> (StatusCod
         }
     };
 
-    let device_type = latest_device_type(&state).await;
+    // Keep the snapshot lock held from identity validation through enqueueing.
+    // Otherwise the poll loop can publish a different inverter between the
+    // validation and `latest_device_type`, making the stop use the wrong
+    // register layout for the captured baseline.
+    let snapshot = state.latest_snapshot.lock().await;
+    let device_type = snapshot
+        .as_ref()
+        .map(|value| value.device_type)
+        .unwrap_or(DeviceType::Gen2Hybrid);
+    match force_baseline_identity_for_snapshot(
+        snapshot.as_ref(),
+        revert.device_type,
+        &revert.inverter_serial,
+    ) {
+        BaselineIdentity::Verified => {}
+        BaselineIdentity::Unavailable => {
+            drop(snapshot);
+            return error_response(
+                "No verified inverter identity is available; restoration refused for safety",
+            );
+        }
+        BaselineIdentity::Foreign => {
+            drop(snapshot);
+            return release_foreign_force_baseline(&state, "force_charge", &revert.inverter_serial)
+                .await;
+        }
+    }
+
     let writes = build_force_charge_stop_writes(device_type, &revert);
     if writes.is_empty() {
+        drop(snapshot);
         return error_response("No restore writes generated for this device");
     }
     tracing::info!("ForceCharge stop encoded: {:?}", writes);
-    queue_owned_writes(&state, writes, DischargeControlOwner::ManualForce).await;
+    *state.force_charge_restoration.lock().await = Some(ForceRestorationRequest {
+        requested_at_ms: chrono::Utc::now().timestamp_millis(),
+        device_type,
+        inverter_serial: snapshot
+            .as_ref()
+            .map(|value| value.inverter_serial.clone())
+            .unwrap_or_default(),
+        firmware_version: snapshot
+            .as_ref()
+            .map(|value| value.firmware_version.clone())
+            .unwrap_or_default(),
+    });
+    queue_owned_writes_with_command(
+        &state,
+        writes,
+        DischargeControlOwner::ManualForce,
+        command_id,
+    )
+    .await;
+    drop(snapshot);
     ok_response("Force charge stopped")
 }
 
@@ -5189,17 +5679,60 @@ async fn force_discharge_at(
     now: DateTime<Local>,
 ) -> (StatusCode, Json<Value>) {
     let _force_action_guard = state.force_action_lock.lock().await;
+    force_discharge_at_unlocked(state.clone(), body, now, None).await
+}
+
+pub(crate) async fn force_discharge_at_unlocked(
+    state: Arc<AppState>,
+    body: Option<Json<serde_json::Value>>,
+    now: DateTime<Local>,
+    command_id: Option<&str>,
+) -> (StatusCode, Json<Value>) {
     if state.force_charge_revert.lock().await.is_some() {
         return error_response("Stop Force Charge before starting Force Discharge");
+    }
+    if state.pause_mode_revert.lock().await.is_some() {
+        return error_response("Stop Battery Pause before starting Force Discharge");
+    }
+    if state.force_discharge_restoration.lock().await.is_some() {
+        return error_response(
+            "Wait for Force Discharge restoration to complete before restarting it",
+        );
     }
 
     let device_type = latest_device_type(&state).await;
     let is_three_phase = device_type.uses_three_phase_schedule_slots();
 
-    // Capture the pre-force-discharge state BEFORE queuing writes.
-    let mut revert = capture_force_discharge_revert(&state, device_type).await;
+    // Capture the pre-force-discharge state BEFORE queuing writes. A same-
+    // direction re-arm retains the original baseline so concurrent UI and
+    // external callers cannot make Stop restore an intermediate force state.
+    let existing_revert = state.force_discharge_revert.lock().await.clone();
+    let mut revert = if let Some(existing) = existing_revert {
+        match force_baseline_identity(&state, existing.device_type, &existing.inverter_serial).await
+        {
+            BaselineIdentity::Verified => Some(existing),
+            BaselineIdentity::Unavailable => {
+                return error_response(
+                    "No verified inverter identity is available; existing Force Discharge restoration must finish first",
+                );
+            }
+            BaselineIdentity::Foreign => {
+                return error_response(
+                    "The inverter identity changed; stop Force Discharge to release its stale restoration baseline",
+                );
+            }
+        }
+    } else {
+        capture_force_discharge_revert(&state, device_type).await
+    };
+    if revert.is_none() {
+        return error_response(
+            "No verified inverter identity is available; Force Discharge refused for safety",
+        );
+    }
     if let Some(r) = revert.as_mut() {
         r.started_at_ms = now.timestamp_millis();
+        r.force_discharge_slot_end_ms = None;
     }
 
     // If minutes provided, write the duration slot first (slot 1 =
@@ -5302,9 +5835,23 @@ async fn force_discharge_at(
             } else {
                 writes.extend(cmd_writes);
             }
+            if let Err(error) =
+                persist_external_force_recovery(&state, command_id, revert.as_ref()).await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"ok": false, "error": error})),
+                );
+            }
             *state.force_discharge_revert.lock().await = revert;
             tracing::info!("ForceDischarge encoded: {:?}", writes);
-            queue_owned_writes(&state, writes, DischargeControlOwner::ManualForce).await;
+            queue_owned_writes_with_command(
+                &state,
+                writes,
+                DischargeControlOwner::ManualForce,
+                command_id,
+            )
+            .await;
             ok_response("Force discharge enabled")
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -5324,29 +5871,82 @@ async fn force_discharge_at(
 /// based on the latest inverter snapshot instead of returning 400 and
 /// sending no writes.
 pub async fn force_discharge_stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    force_discharge_stop_with_command(state, None).await
+}
+
+pub(crate) async fn force_discharge_stop_with_command(
+    state: Arc<AppState>,
+    command_id: Option<&str>,
+) -> (StatusCode, Json<Value>) {
     let _force_action_guard = state.force_action_lock.lock().await;
-    let device_type = latest_device_type(&state).await;
-    let revert = state.force_discharge_revert.lock().await.take();
+    // Retain the exact baseline until fresh readback confirms restoration.
+    let revert = state.force_discharge_revert.lock().await.clone();
+    // Keep the snapshot lock held from identity validation through enqueueing.
+    // A poll publication must not change the device type after validation but
+    // before the stop writes are built and handed to the poll loop.
+    let snapshot = state.latest_snapshot.lock().await;
+    let device_type = snapshot
+        .as_ref()
+        .map(|value| value.device_type)
+        .unwrap_or(DeviceType::Gen2Hybrid);
 
     let writes = if let Some(revert) = revert {
+        match force_baseline_identity_for_snapshot(
+            snapshot.as_ref(),
+            revert.device_type,
+            &revert.inverter_serial,
+        ) {
+            BaselineIdentity::Verified => {}
+            BaselineIdentity::Unavailable => {
+                drop(snapshot);
+                return error_response(
+                    "No verified inverter identity is available; restoration refused for safety",
+                );
+            }
+            BaselineIdentity::Foreign => {
+                drop(snapshot);
+                return release_foreign_force_baseline(
+                    &state,
+                    "force_discharge",
+                    &revert.inverter_serial,
+                )
+                .await;
+            }
+        }
         build_force_discharge_stop_writes(device_type, &revert)
     } else {
-        let snapshot = state.latest_snapshot.lock().await;
-        let Some(snapshot) = snapshot.as_ref() else {
+        let Some(current_snapshot) = snapshot.as_ref() else {
+            drop(snapshot);
             return error_response("No force discharge in progress to stop");
         };
-        let writes = build_force_discharge_restart_stop_writes(device_type, snapshot);
-        if writes.is_empty() {
-            return error_response("No force discharge in progress to stop");
-        }
-        writes
+        build_force_discharge_restart_stop_writes(device_type, current_snapshot)
     };
 
     if writes.is_empty() {
-        return error_response("No restore writes generated for this device");
+        drop(snapshot);
+        return error_response("No force discharge in progress to stop");
     }
     tracing::info!("ForceDischarge stop encoded: {:?}", writes);
-    queue_owned_writes(&state, writes, DischargeControlOwner::ManualForce).await;
+    *state.force_discharge_restoration.lock().await = Some(ForceRestorationRequest {
+        requested_at_ms: chrono::Utc::now().timestamp_millis(),
+        device_type,
+        inverter_serial: snapshot
+            .as_ref()
+            .map(|value| value.inverter_serial.clone())
+            .unwrap_or_default(),
+        firmware_version: snapshot
+            .as_ref()
+            .map(|value| value.firmware_version.clone())
+            .unwrap_or_default(),
+    });
+    queue_owned_writes_with_command(
+        &state,
+        writes,
+        DischargeControlOwner::ManualForce,
+        command_id,
+    )
+    .await;
+    drop(snapshot);
     ok_response("Force discharge stopped")
 }
 
@@ -8132,7 +8732,7 @@ pub async fn backfill_weather(State(state): State<Arc<AppState>>) -> (StatusCode
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_util::with_isolated_config_dir_async;
     use chrono::TimeZone;
@@ -8538,6 +9138,7 @@ mod tests {
         let state = Arc::new(AppState::new());
         let snapshot = crate::inverter::model::InverterSnapshot {
             device_type,
+            inverter_serial: "HEM-TEST-001".to_string(),
             // Keep API time-window tests hermetic. Production code uses the
             // inverter clock when present, so tests should exercise that path
             // instead of depending on the host wall clock.
@@ -8559,6 +9160,7 @@ mod tests {
         let state = Arc::new(AppState::new());
         let snapshot = crate::inverter::model::InverterSnapshot {
             device_type,
+            inverter_serial: "HEM-TEST-001".to_string(),
             firmware_version: arm_fw.to_string(),
             inverter_time: "2026-06-28 17:00:00".to_string(),
             ..Default::default()
@@ -8574,6 +9176,150 @@ mod tests {
         let batches = std::mem::take(&mut *pw);
         drop(pw);
         batches.into_iter().flat_map(|b| b.writes).collect()
+    }
+
+    /// Build the decoded snapshot the inverter would report after a
+    /// restoration write set landed, mirroring decoder semantics for every
+    /// register the Force/pause writers touch (see `decode_holding_0_59`,
+    /// `decode_holding_60_119`, `decode_holding_1080_1124`,
+    /// `decode_holding_318_320`). If a writer and this mapping ever drift
+    /// apart, `snapshot_matches_writes` stops confirming restorations and the
+    /// tests using this helper fail — exactly the coupling the safety review
+    /// wants pinned. Identity (model/serial/firmware) is inherited from the
+    /// current snapshot so the confirmation cannot be rejected as foreign.
+    pub(crate) fn snapshot_decoding_writes(
+        base: &InverterSnapshot,
+        writes: &[RegisterWrite],
+        timestamp_secs: i64,
+    ) -> InverterSnapshot {
+        use crate::inverter::model::ScheduleSlot;
+        use crate::modbus::registers::*;
+
+        let set_slot = |slot: &mut ScheduleSlot, start: u16, end: u16| {
+            let decode = |value: u16| -> Option<(u8, u8)> {
+                let hour = value / 100;
+                let minute = value % 100;
+                (hour < 24 && minute < 60).then_some((hour as u8, minute as u8))
+            };
+            *slot = match (decode(start), decode(end)) {
+                (Some((sh, sm)), Some((eh, em))) if (sh, sm) != (eh, em) => ScheduleSlot {
+                    enabled: true,
+                    start_hour: sh,
+                    start_minute: sm,
+                    end_hour: eh,
+                    end_minute: em,
+                    target_soc: 4,
+                },
+                _ => ScheduleSlot::default(),
+            };
+        };
+
+        let mut snap = base.clone();
+        snap.timestamp = timestamp_secs;
+        // Three-phase enable_charge is the OR of HR 1112 and HR 1123; track
+        // the written values and combine as the decoder does.
+        let mut ac_charge: Option<bool> = None;
+        let mut force_charge: Option<bool> = None;
+        let mut pause_mode = None;
+        let mut pause_start = None;
+        let mut pause_end = None;
+        for write in writes {
+            match write.address {
+                HR_BATTERY_POWER_MODE => snap.battery_power_mode = (write.value & 0x01) as u8,
+                HR_ENABLE_CHARGE_TARGET => snap.enable_charge_target = write.value != 0,
+                HR_ENABLE_DISCHARGE => snap.enable_discharge = write.value != 0,
+                HR_ENABLE_CHARGE => snap.enable_charge = write.value != 0,
+                HR_3PH_AC_CHARGE_ENABLE => ac_charge = Some(write.value != 0),
+                HR_3PH_FORCE_CHARGE_ENABLE => force_charge = Some(write.value != 0),
+                HR_3PH_FORCE_DISCHARGE_ENABLE => snap.enable_discharge = write.value != 0,
+                HR_CHARGE_TARGET_SOC => {
+                    snap.target_soc = write.value.clamp(4, 100) as u8;
+                    // Mirror decode_holding_60_119: with the target-arm flag
+                    // off, non-extended models decode the effective target
+                    // as 100 ("no limit") whatever the raw register says.
+                    if !snap.enable_charge_target
+                        && !snap.device_type.uses_extended_schedule_slots()
+                        && snap.target_soc != 100
+                    {
+                        snap.target_soc = 100;
+                    }
+                }
+                HR_3PH_CHARGE_TARGET_SOC => {
+                    if write.value > 0 {
+                        snap.target_soc = write.value.clamp(4, 100) as u8;
+                    }
+                }
+                HR_CHARGE_SLOT_1_START | HR_3PH_CHARGE_SLOT_1_START => {
+                    let end = writes
+                        .iter()
+                        .find(|w| w.address == HR_CHARGE_SLOT_1_END)
+                        .or_else(|| {
+                            writes
+                                .iter()
+                                .find(|w| w.address == HR_3PH_CHARGE_SLOT_1_END)
+                        })
+                        .map(|w| w.value)
+                        .unwrap_or(0);
+                    set_slot(&mut snap.charge_slots[0], write.value, end);
+                }
+                HR_DISCHARGE_SLOT_1_START | HR_3PH_DISCHARGE_SLOT_1_START => {
+                    let end = writes
+                        .iter()
+                        .find(|w| w.address == HR_DISCHARGE_SLOT_1_END)
+                        .or_else(|| {
+                            writes
+                                .iter()
+                                .find(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_END)
+                        })
+                        .map(|w| w.value)
+                        .unwrap_or(0);
+                    set_slot(&mut snap.discharge_slots[0], write.value, end);
+                }
+                HR_DISCHARGE_SLOT_2_START | HR_3PH_DISCHARGE_SLOT_2_START => {
+                    let end = writes
+                        .iter()
+                        .find(|w| w.address == HR_DISCHARGE_SLOT_2_END)
+                        .or_else(|| {
+                            writes
+                                .iter()
+                                .find(|w| w.address == HR_3PH_DISCHARGE_SLOT_2_END)
+                        })
+                        .map(|w| w.value)
+                        .unwrap_or(0);
+                    set_slot(&mut snap.discharge_slots[1], write.value, end);
+                }
+                HR_BATTERY_PAUSE_MODE => pause_mode = Some(write.value),
+                HR_BATTERY_PAUSE_SLOT_1_START => pause_start = Some(write.value),
+                HR_BATTERY_PAUSE_SLOT_1_END => pause_end = Some(write.value),
+                _ => {}
+            }
+        }
+        if let Some(ac) = ac_charge {
+            snap.enable_charge = ac || force_charge.unwrap_or(false);
+        } else if let Some(force) = force_charge {
+            snap.enable_charge = force;
+        }
+        if let (Some(mode), Some(start), Some(end)) = (pause_mode, pause_start, pause_end) {
+            snap.battery_pause_mode_raw = Some(mode);
+            snap.battery_pause_slot_start_raw = Some(start);
+            snap.battery_pause_slot_end_raw = Some(end);
+            snap.battery_pause_registers_observed_at = Some(timestamp_secs);
+        }
+        snap
+    }
+
+    /// Simulate the poll loop confirming a Force restoration: publish a
+    /// causally fresh snapshot that decodes exactly the restoration writes.
+    async fn confirm_force_restoration(state: &Arc<AppState>, writes: &[RegisterWrite]) {
+        let base = state
+            .latest_snapshot
+            .lock()
+            .await
+            .clone()
+            .unwrap_or_default();
+        let fresh_ts = chrono::Utc::now().timestamp() + 2;
+        let snapshot = snapshot_decoding_writes(&base, writes, fresh_ts);
+        crate::inverter::poll::clear_confirmed_force_restorations(state, &snapshot).await;
     }
 
     /// Fixed window containing the fixed 17:00 inverter clock above. Issue
@@ -13333,6 +14079,7 @@ mod tests {
         use crate::inverter::model::ScheduleSlot;
         let mut snap = crate::inverter::model::InverterSnapshot {
             device_type: DeviceType::Gen3Hybrid,
+            inverter_serial: "HEM-TEST-001".into(),
             enable_discharge: true,
             battery_power_mode: 1, // eco / self-consumption (Timed Demand)
             inverter_time: "2026-06-28 17:00:00".to_string(),
@@ -14075,6 +14822,11 @@ mod tests {
             };
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
             let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            assert_eq!(
+                state.pending_writes.lock().await[0].policy,
+                WriteBatchPolicy::FailFast,
+                "Force Charge must not arm after a failed duration-slot write"
+            );
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
 
@@ -14114,6 +14866,32 @@ mod tests {
             assert!(response.0["error"]
                 .as_str()
                 .is_some_and(|error| error.contains("snapshot")));
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert!(state.force_charge_revert.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_refuses_unreadable_inverter_identity() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .inverter_serial
+                .clear();
+
+            let (status, response) = force_charge(State(state.clone()), None).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(response["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("identity"));
             assert!(state.pending_writes.lock().await.is_empty());
             assert!(state.force_charge_revert.lock().await.is_none());
         })
@@ -14435,6 +15213,7 @@ mod tests {
         let state = test_state();
         for count in [20usize, 3] {
             state.pending_writes.lock().await.push(PendingWriteBatch {
+                command_id: None,
                 writes: vec![
                     RegisterWrite {
                         address: 1,
@@ -15188,10 +15967,12 @@ mod tests {
         use crate::inverter::model::ScheduleSlot;
         let mut snap = crate::inverter::model::InverterSnapshot {
             device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: "HEM-TEST-001".into(),
             // User was in Timed Demand mode (eco=1, discharge enabled).
             // ForceCharge start will clobber enable_discharge to 0; the
             // stop path must restore it.
             enable_charge: true,
+            enable_charge_target: true,
             enable_discharge: true,
             target_soc: 60,
             charge_rate: 35,
@@ -15256,6 +16037,7 @@ mod tests {
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
             let snap = crate::inverter::model::InverterSnapshot {
                 device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "HEM-TEST-001".into(),
                 enable_charge: true,
                 target_soc: 80,
                 charge_rate: 50,
@@ -15317,7 +16099,7 @@ mod tests {
                 writes
                     .iter()
                     .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1),
-                "stop should restore enable_charge_target to match enable_charge"
+                "stop should restore the charge-target arm flag to its pre-force value (1)"
             );
             assert!(
                 writes
@@ -15348,11 +16130,18 @@ mod tests {
                 "stop should restore charge slot 1 end to 04:00"
             );
 
-            // The revert should be consumed.
+            // The revert is RETAINED until a causally newer snapshot
+            // provably matches every restoration write.
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "stop must retain the revert until fresh readback confirms"
+            );
+            confirm_force_restoration(&state, &writes).await;
             assert!(
                 state.force_charge_revert.lock().await.is_none(),
-                "stop should clear the revert"
+                "fresh exact readback should clear the revert"
             );
+            assert!(state.force_charge_restoration.lock().await.is_none());
         })
         .await;
     }
@@ -15366,6 +16155,7 @@ mod tests {
             // No prior slot.
             let snap = crate::inverter::model::InverterSnapshot {
                 device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "HEM-TEST-001".into(),
                 enable_charge: true,
                 target_soc: 80,
                 charge_rate: 50,
@@ -15411,6 +16201,7 @@ mod tests {
             // stuck in eco.
             let snap = crate::inverter::model::InverterSnapshot {
                 device_type: DeviceType::ThreePhase,
+                inverter_serial: "HEM-TEST-001".into(),
                 enable_charge: true,
                 target_soc: 90,
                 battery_power_mode: 0,
@@ -15450,6 +16241,534 @@ mod tests {
         .await;
     }
 
+    /// The authenticated Force Charge path always writes a finite charge slot
+    /// (HR1113/1114) and target SOC (HR1111) before arming, so Stop must put
+    /// the user's own schedule back on every device family — not just the
+    /// single-phase one. The three-phase branch previously restored only the
+    /// enable flags, leaving the force window and target 100 in place.
+    #[tokio::test]
+    async fn force_charge_stop_three_phase_restores_captured_slot_and_target() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_CHARGE_SLOT_1_END, HR_3PH_CHARGE_SLOT_1_START, HR_3PH_CHARGE_TARGET_SOC,
+            };
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let mut snap = crate::inverter::model::InverterSnapshot {
+                device_type: DeviceType::ThreePhase,
+                inverter_serial: "HEM-TEST-001".into(),
+                enable_charge: false,
+                target_soc: 80,
+                battery_power_mode: 1,
+                ..Default::default()
+            };
+            snap.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 2,
+                start_minute: 0,
+                end_hour: 4,
+                end_minute: 5,
+                target_soc: 80,
+            };
+            *state.latest_snapshot.lock().await = Some(snap);
+
+            // The authenticated path always carries a duration, which is what
+            // overwrites the user's slot and target in the first place.
+            let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let start_writes = drain_pending_writes(&state).await;
+            assert!(
+                start_writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_CHARGE_SLOT_1_START),
+                "the start must overwrite the three-phase charge slot"
+            );
+
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_CHARGE_SLOT_1_START && w.value == 200),
+                "3PH stop must restore the captured charge slot start (02:00)"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_CHARGE_SLOT_1_END && w.value == 405),
+                "3PH stop must restore the captured charge slot end (04:05)"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_CHARGE_TARGET_SOC && w.value == 80),
+                "3PH stop must restore the captured target SOC, not leave the force 100"
+            );
+        })
+        .await;
+    }
+
+    /// The pause-writing three-phase family (ACThreePhase) must also have a
+    /// provable stop write set: its discharge stop emits the HR318-320 pause
+    /// restores in addition to the slot registers, and an unprovable register
+    /// there would pin restoration ownership forever.
+    #[test]
+    fn ac_three_phase_stop_writes_are_provable_including_pause_registers() {
+        let revert = ForceDischargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::ACThreePhase,
+            inverter_serial: "AC3PH-TEST".into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            discharge_rate: Some(40),
+            discharge_slot_1_start: Some((16, 0)),
+            discharge_slot_1_end: Some((19, 0)),
+            discharge_slot_2_start: None,
+            discharge_slot_2_end: None,
+            three_phase_force_discharge_enable: Some(false),
+            three_phase_force_charge_enable: Some(false),
+            force_discharge_slot_end_ms: None,
+            pause_registers_supported: true,
+            battery_pause_mode_raw: Some(0),
+            battery_pause_slot_start_raw: Some(0),
+            battery_pause_slot_end_raw: Some(0),
+            battery_pause_mode: 0,
+            battery_pause_slot: Default::default(),
+        };
+        let writes = build_force_discharge_stop_writes(DeviceType::ACThreePhase, &revert);
+        assert!(
+            writes
+                .iter()
+                .any(|w| w.address == crate::modbus::registers::HR_BATTERY_PAUSE_MODE),
+            "this family's stop must restore the pause registers"
+        );
+
+        let timestamp = 1_800_000_000;
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::ACThreePhase,
+            enable_discharge: false,
+            enable_charge: false,
+            battery_power_mode: 1,
+            battery_pause_mode_raw: Some(0),
+            battery_pause_slot_start_raw: Some(0),
+            battery_pause_slot_end_raw: Some(0),
+            // Raw pause values may only prove a restoration when they were read
+            // together with this snapshot (never carried forward).
+            battery_pause_registers_observed_at: Some(timestamp),
+            timestamp,
+            ..Default::default()
+        };
+        snapshot.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        assert!(
+            snapshot_matches_writes(&snapshot, &writes),
+            "every ACThreePhase stop write (including pause) must be provable"
+        );
+    }
+
+    /// Every write the three-phase stop emits must be provable from a decoded
+    /// snapshot: the exact-readback barrier only releases restoration
+    /// ownership when the snapshot matches the whole write set, so an
+    /// unprovable register would pin ownership forever. This pins the slot and
+    /// target-SOC restores added for the finite-duration paths.
+    #[test]
+    fn three_phase_force_stop_writes_are_all_provable_from_snapshot() {
+        let charge_revert = ForceChargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            force_charge_slot_end_ms: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::ThreePhase,
+            inverter_serial: "3PH-TEST".into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            target_soc: 80,
+            battery_power_mode: 1,
+            charge_rate: Some(30),
+            charge_slot_1_start: Some((2, 0)),
+            charge_slot_1_end: Some((4, 5)),
+            three_phase_force_charge_enable: Some(false),
+            three_phase_ac_charge_enable: Some(false),
+            battery_pause_mode: Some(0),
+        };
+        let mut charge_snapshot = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            enable_charge: false,
+            battery_power_mode: 1,
+            target_soc: 80,
+            ..Default::default()
+        };
+        charge_snapshot.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 4,
+            end_minute: 5,
+            target_soc: 80,
+        };
+        let charge_writes = build_force_charge_stop_writes(DeviceType::ThreePhase, &charge_revert);
+        assert!(
+            snapshot_matches_writes(&charge_snapshot, &charge_writes),
+            "every three-phase charge stop write must be provable from the decoded snapshot"
+        );
+
+        let discharge_revert = ForceDischargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::ThreePhase,
+            inverter_serial: "3PH-TEST".into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            discharge_rate: Some(40),
+            discharge_slot_1_start: Some((16, 0)),
+            discharge_slot_1_end: Some((19, 0)),
+            discharge_slot_2_start: Some((20, 0)),
+            discharge_slot_2_end: Some((22, 0)),
+            three_phase_force_discharge_enable: Some(false),
+            three_phase_force_charge_enable: Some(false),
+            force_discharge_slot_end_ms: None,
+            pause_registers_supported: false,
+            battery_pause_mode_raw: None,
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
+            battery_pause_mode: 0,
+            battery_pause_slot: Default::default(),
+        };
+        let mut discharge_snapshot = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            enable_discharge: false,
+            enable_charge: false,
+            battery_power_mode: 1,
+            ..Default::default()
+        };
+        discharge_snapshot.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 16,
+            start_minute: 0,
+            end_hour: 19,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        discharge_snapshot.discharge_slots[1] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 20,
+            start_minute: 0,
+            end_hour: 22,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        let discharge_writes =
+            build_force_discharge_stop_writes(DeviceType::ThreePhase, &discharge_revert);
+        assert!(
+            snapshot_matches_writes(&discharge_snapshot, &discharge_writes),
+            "every three-phase discharge stop write must be provable from the decoded snapshot"
+        );
+    }
+
+    /// A baseline captured from one inverter must never be written onto a
+    /// different one. After an inverter swap the Stop refuses and queues
+    /// nothing, instead of applying the previous unit's captured schedule to
+    /// the connected hardware.
+    #[tokio::test]
+    async fn force_charge_stop_releases_baseline_after_inverter_identity_change() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            *state.force_charge_revert.lock().await = Some(ForceChargeRevert {
+                started_at_ms: 0,
+                external_owner: None,
+                force_charge_slot_end_ms: None,
+                enable_charge: true,
+                enable_charge_target: true,
+                device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "SN-OLD".into(),
+                firmware_version: "400".into(),
+                enable_discharge: false,
+                target_soc: 80,
+                battery_power_mode: 1,
+                charge_rate: Some(30),
+                charge_slot_1_start: Some((2, 0)),
+                charge_slot_1_end: Some((4, 0)),
+                three_phase_force_charge_enable: None,
+                three_phase_ac_charge_enable: None,
+                battery_pause_mode: Some(0),
+            });
+            // The connected inverter is now a different unit.
+            let mut snapshot = state.latest_snapshot.lock().await.take().unwrap();
+            snapshot.inverter_serial = "SN-NEW".into();
+            snapshot.firmware_version = "400".into();
+            *state.latest_snapshot.lock().await = Some(snapshot);
+
+            let (status, payload) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "restoration onto a different inverter must be refused"
+            );
+            assert!(
+                payload["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("released"),
+                "the refusal must say the stale baseline was released: {}",
+                payload.0
+            );
+            assert!(
+                drain_pending_writes(&state).await.is_empty(),
+                "no restoration writes may reach the new inverter"
+            );
+            assert!(
+                state.force_charge_restoration.lock().await.is_none(),
+                "a refused stop must not open a restoration barrier"
+            );
+            assert!(
+                state.force_charge_revert.lock().await.is_none(),
+                "an unappliable baseline must be released, not retained forever"
+            );
+        })
+        .await;
+    }
+
+    /// Four percent is a valid three-phase target and must be restored rather
+    /// than leaving the Force Charge target (100%) behind.
+    #[test]
+    fn three_phase_stop_restores_a_four_percent_target_soc() {
+        let revert = ForceChargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            force_charge_slot_end_ms: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::ThreePhase,
+            inverter_serial: "3PH-TEST".into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            target_soc: 4,
+            battery_power_mode: 1,
+            charge_rate: None,
+            charge_slot_1_start: Some((2, 0)),
+            charge_slot_1_end: Some((4, 0)),
+            three_phase_force_charge_enable: Some(false),
+            three_phase_ac_charge_enable: Some(false),
+            battery_pause_mode: Some(0),
+        };
+        let writes = build_force_charge_stop_writes(DeviceType::ThreePhase, &revert);
+        assert!(
+            writes.iter().any(|w| {
+                w.address == crate::modbus::registers::HR_3PH_CHARGE_TARGET_SOC && w.value == 4
+            }),
+            "a genuine 4% target must be restored"
+        );
+        // The rest of the restoration is still emitted and provable.
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            battery_power_mode: 1,
+            ..Default::default()
+        };
+        snapshot.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 2,
+            start_minute: 0,
+            end_hour: 4,
+            end_minute: 0,
+            target_soc: 4,
+        };
+        assert!(snapshot_matches_writes(&snapshot, &writes));
+    }
+
+    /// Raw pause values may only prove a restoration when they were read with
+    /// the snapshot; a carried-forward observation must never confirm one.
+    #[test]
+    fn carried_forward_pause_registers_cannot_prove_restoration() {
+        let writes = build_pause_mode_writes(0, 0, 0);
+        let snapshot = InverterSnapshot {
+            battery_pause_mode_raw: Some(0),
+            battery_pause_slot_start_raw: Some(0),
+            battery_pause_slot_end_raw: Some(0),
+            // Observed one cycle earlier: the values were carried forward.
+            battery_pause_registers_observed_at: Some(1_000),
+            timestamp: 2_000,
+            ..Default::default()
+        };
+        assert!(
+            !snapshot_matches_writes(&snapshot, &writes),
+            "carried-forward pause registers must not prove a restoration"
+        );
+    }
+
+    /// An OTA firmware update (same serial, same model, new HR21) must not
+    /// block restoration: firmware is not inverter identity, and refusing for it
+    /// would strand the action permanently.
+    #[tokio::test]
+    async fn force_charge_stop_allows_restoration_after_firmware_change() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            *state.force_charge_revert.lock().await = Some(ForceChargeRevert {
+                started_at_ms: 0,
+                external_owner: None,
+                force_charge_slot_end_ms: None,
+                enable_charge: false,
+                enable_charge_target: false,
+                device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "SN1".into(),
+                firmware_version: "400".into(),
+                enable_discharge: false,
+                target_soc: 100,
+                battery_power_mode: 1,
+                charge_rate: None,
+                charge_slot_1_start: None,
+                charge_slot_1_end: None,
+                three_phase_force_charge_enable: None,
+                three_phase_ac_charge_enable: None,
+                battery_pause_mode: Some(0),
+            });
+            {
+                let mut snapshot = state.latest_snapshot.lock().await.take().unwrap();
+                snapshot.inverter_serial = "SN1".into();
+                snapshot.firmware_version = "500".into(); // ARM updated
+                *state.latest_snapshot.lock().await = Some(snapshot);
+            }
+
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a firmware update must not block a stop"
+            );
+            let writes = drain_pending_writes(&state).await;
+            assert!(writes.iter().any(|w| w.address == 96 && w.value == 0));
+            assert!(state.force_charge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    /// The discharge mirror, plus the two ways a baseline can lack an identity:
+    /// a genuine pre-identity row (unknown model + empty serial) still restores,
+    /// while a modern baseline captured with an unreadable serial is never
+    /// written onto an inverter we can name.
+    #[tokio::test]
+    async fn force_discharge_stop_identity_rules_cover_legacy_and_unverifiable_baselines() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_DISCHARGE_SLOT_1_START;
+
+            let discharge_revert = |serial: &str, device_type: DeviceType| ForceDischargeRevert {
+                started_at_ms: 0,
+                external_owner: None,
+                enable_charge: false,
+                enable_charge_target: false,
+                device_type,
+                inverter_serial: serial.into(),
+                firmware_version: "400".into(),
+                enable_discharge: false,
+                discharge_rate: Some(40),
+                discharge_slot_1_start: Some((16, 0)),
+                discharge_slot_1_end: Some((19, 0)),
+                discharge_slot_2_start: None,
+                discharge_slot_2_end: None,
+                three_phase_force_discharge_enable: None,
+                three_phase_force_charge_enable: None,
+                force_discharge_slot_end_ms: None,
+                pause_registers_supported: false,
+                battery_pause_mode_raw: None,
+                battery_pause_slot_start_raw: None,
+                battery_pause_slot_end_raw: None,
+                battery_pause_mode: 0,
+                battery_pause_slot: Default::default(),
+            };
+
+            // (a) Provably a different inverter: refused, nothing queued, and the
+            // unappliable baseline is released rather than retained forever.
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_revert("SN-OLD", DeviceType::Gen2Hybrid));
+            {
+                let mut snapshot = state.latest_snapshot.lock().await.take().unwrap();
+                snapshot.inverter_serial = "SN-NEW".into();
+                *state.latest_snapshot.lock().await = Some(snapshot);
+            }
+            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(drain_pending_writes(&state).await.is_empty());
+            assert!(state.force_discharge_revert.lock().await.is_none());
+
+            // (b) Genuine pre-identity baseline (unknown model, empty serial),
+            // persisted before the identity fields existed: still restorable.
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .inverter_serial
+                .clear();
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_revert("", DeviceType::Unknown(0)));
+            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a pre-identity baseline must remain restorable after upgrade"
+            );
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 1600),
+                "the legacy baseline's captured slot must still be restored"
+            );
+
+            // (c) Modern baseline whose serial was unreadable at capture: the
+            // inverter IS identifiable, so refuse without releasing — the
+            // baseline may still belong to it on a later cycle.
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_revert("", DeviceType::Gen2Hybrid));
+            {
+                let mut snapshot = state.latest_snapshot.lock().await.take().unwrap();
+                snapshot.inverter_serial = "SN1".into();
+                *state.latest_snapshot.lock().await = Some(snapshot);
+            }
+            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(drain_pending_writes(&state).await.is_empty());
+            assert!(
+                state.force_discharge_revert.lock().await.is_some(),
+                "an unverifiable (not provably foreign) baseline must be retained"
+            );
+
+            // An otherwise modern baseline with an unreadable serial must not
+            // match a replacement session that also reports an empty serial.
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .inverter_serial
+                .clear();
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_revert("", DeviceType::Gen2Hybrid));
+            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(drain_pending_writes(&state).await.is_empty());
+            assert!(state.force_discharge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn force_charge_stop_without_active_force_charge_errors() {
         with_isolated_config_dir_async(|| async {
@@ -15483,6 +16802,7 @@ mod tests {
             // Pre-state: user in Timed Demand (discharge enabled).
             let snap = crate::inverter::model::InverterSnapshot {
                 device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "HEM-TEST-001".into(),
                 enable_charge: true,
                 enable_discharge: true,
                 target_soc: 60,
@@ -15524,6 +16844,7 @@ mod tests {
             // Pre-state: user in Max-Power (export) mode.
             let snap = crate::inverter::model::InverterSnapshot {
                 device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "HEM-TEST-001".into(),
                 enable_charge: true,
                 target_soc: 60,
                 battery_power_mode: 0, // export
@@ -15551,8 +16872,10 @@ mod tests {
     #[tokio::test]
     async fn force_charge_stop_is_one_shot_per_revert() {
         with_isolated_config_dir_async(|| async {
-            // Calling stop a second time should fail because the first
-            // call already consumed the revert.
+            // Stop retains the revert until fresh readback confirms the
+            // restoration writes; a second stop before that re-queues the
+            // same restoration (retry). Only after confirmation is the
+            // revert consumed and the next stop refused.
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
             seed_charging_pre_state(&state).await;
             let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
@@ -15560,12 +16883,31 @@ mod tests {
 
             let (status, _) = force_charge_stop(State(state.clone())).await;
             assert_eq!(status, StatusCode::OK);
-            let _ = drain_pending_writes(&state).await;
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "revert retained until fresh exact readback"
+            );
+
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK, "unconfirmed stop is retryable");
+            let retried = drain_pending_writes(&state).await;
+            assert!(
+                retried.len() == writes.len()
+                    && retried
+                        .iter()
+                        .zip(writes.iter())
+                        .all(|(a, b)| a.address == b.address && a.value == b.value),
+                "retry queues the exact same writes"
+            );
+
+            confirm_force_restoration(&state, &writes).await;
+            assert!(state.force_charge_revert.lock().await.is_none());
 
             let (status, _) = force_charge_stop(State(state.clone())).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            let writes = drain_pending_writes(&state).await;
-            assert!(writes.is_empty(), "second stop should queue no writes");
+            let final_writes = drain_pending_writes(&state).await;
+            assert!(final_writes.is_empty(), "confirmed stop queues no writes");
         })
         .await;
     }
@@ -15583,8 +16925,10 @@ mod tests {
         use crate::inverter::model::ScheduleSlot;
         let mut snap = crate::inverter::model::InverterSnapshot {
             device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: "HEM-TEST-001".into(),
             enable_discharge: true,
             enable_charge: true,
+            enable_charge_target: true,
             discharge_rate: 40,
             discharge_slots: Default::default(),
             ..Default::default()
@@ -15634,6 +16978,155 @@ mod tests {
                 revert.three_phase_force_discharge_enable.is_none(),
                 "single-phase should not capture three-phase flags"
             );
+        })
+        .await;
+    }
+
+    /// Ported from the removed test-only auto-revert writer: the discharge
+    /// stop restores the exact raw HR318-320 baseline whenever the model's
+    /// pause path was confirmed and the raw values were captured, and the
+    /// window registers are written BEFORE the mode so an enabled pause never
+    /// coexists with stale window data.
+    #[tokio::test]
+    async fn force_discharge_stop_writes_restore_exact_pause_baseline() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::ForceDischargeRevert;
+            use crate::modbus::registers::{
+                HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END, HR_BATTERY_PAUSE_SLOT_1_START,
+            };
+
+            let revert = ForceDischargeRevert {
+                started_at_ms: 1_000,
+                external_owner: None,
+                enable_charge: false,
+                enable_charge_target: false,
+                device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "SN1".into(),
+                firmware_version: "400".into(),
+                enable_discharge: false,
+                discharge_rate: None,
+                discharge_slot_1_start: None,
+                discharge_slot_1_end: None,
+                discharge_slot_2_start: None,
+                discharge_slot_2_end: None,
+                three_phase_force_discharge_enable: None,
+                three_phase_force_charge_enable: None,
+                force_discharge_slot_end_ms: None,
+                pause_registers_supported: true,
+                battery_pause_mode_raw: Some(2),
+                battery_pause_slot_start_raw: Some(2000),
+                battery_pause_slot_end_raw: Some(1500),
+                battery_pause_mode: 0,
+                battery_pause_slot: Default::default(),
+            };
+            let writes = build_force_discharge_stop_writes(DeviceType::Gen2Hybrid, &revert);
+
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_PAUSE_MODE && w.value == 2),
+                "HR318 restored to the exact pre-force mode"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_START && w.value == 2000),
+                "HR319 restored to the exact pre-force window start"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_END && w.value == 1500),
+                "HR320 restored to the exact pre-force window end"
+            );
+            let start_idx = writes
+                .iter()
+                .position(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_START)
+                .unwrap();
+            let mode_idx = writes
+                .iter()
+                .position(|w| w.address == HR_BATTERY_PAUSE_MODE)
+                .unwrap();
+            assert!(
+                start_idx < mode_idx,
+                "pause window values must be written before re-enabling the pause mode"
+            );
+
+            // Without a raw capture (legacy revert) the pause registers are
+            // left untouched rather than zeroed.
+            let mut legacy = revert;
+            legacy.battery_pause_mode_raw = None;
+            legacy.battery_pause_slot_start_raw = None;
+            legacy.battery_pause_slot_end_raw = None;
+            let legacy_writes = build_force_discharge_stop_writes(DeviceType::Gen2Hybrid, &legacy);
+            assert!(!legacy_writes.iter().any(|w| {
+                matches!(
+                    w.address,
+                    HR_BATTERY_PAUSE_MODE
+                        | HR_BATTERY_PAUSE_SLOT_1_START
+                        | HR_BATTERY_PAUSE_SLOT_1_END
+                )
+            }));
+        })
+        .await;
+    }
+
+    /// AC-three-phase devices support Timed Discharge too: their stop must
+    /// restore the three-phase force flags AND the pause baseline — the
+    /// pause schedule must not be dropped by the three-phase register route.
+    #[tokio::test]
+    async fn force_discharge_stop_writes_restore_pause_on_three_phase() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::ForceDischargeRevert;
+            use crate::modbus::registers::{
+                HR_3PH_FORCE_DISCHARGE_ENABLE, HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END,
+                HR_BATTERY_PAUSE_SLOT_1_START,
+            };
+
+            let revert = ForceDischargeRevert {
+                started_at_ms: 1_000,
+                external_owner: None,
+                enable_charge: false,
+                enable_charge_target: false,
+                device_type: DeviceType::ACThreePhase,
+                inverter_serial: "SN1".into(),
+                firmware_version: "400".into(),
+                enable_discharge: false,
+                discharge_rate: None,
+                discharge_slot_1_start: None,
+                discharge_slot_1_end: None,
+                discharge_slot_2_start: None,
+                discharge_slot_2_end: None,
+                three_phase_force_discharge_enable: Some(true),
+                three_phase_force_charge_enable: Some(false),
+                force_discharge_slot_end_ms: None,
+                pause_registers_supported: true,
+                battery_pause_mode_raw: Some(2),
+                battery_pause_slot_start_raw: Some(2000),
+                battery_pause_slot_end_raw: Some(1500),
+                battery_pause_mode: 0,
+                battery_pause_slot: Default::default(),
+            };
+            let writes = build_force_discharge_stop_writes(DeviceType::ACThreePhase, &revert);
+
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_FORCE_DISCHARGE_ENABLE && w.value == 1),
+                "three-phase force-discharge flag restored via the 3ph bank"
+            );
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_BATTERY_PAUSE_MODE && w.value == 2),
+                "HR318 restored even on the three-phase path"
+            );
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_START && w.value == 2000));
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_PAUSE_SLOT_1_END && w.value == 1500));
         })
         .await;
     }
@@ -15711,7 +17204,7 @@ mod tests {
                 writes
                     .iter()
                     .any(|w| w.address == HR_ENABLE_CHARGE_TARGET && w.value == 1),
-                "stop should restore enable_charge_target to match enable_charge"
+                "stop should restore the charge-target arm flag to its pre-force value"
             );
             // 17:00 = 1700 HHMM encoded.
             let start = encode_hhmm(17, 0).expect("valid test start time");
@@ -15750,11 +17243,17 @@ mod tests {
                 "stop should set battery power mode to eco (1)"
             );
 
-            // The revert should be consumed.
+            // The revert is retained until fresh readback confirms.
+            assert!(
+                state.force_discharge_revert.lock().await.is_some(),
+                "stop must retain the revert until fresh exact readback"
+            );
+            confirm_force_restoration(&state, &writes).await;
             assert!(
                 state.force_discharge_revert.lock().await.is_none(),
-                "stop should clear the revert"
+                "fresh exact readback should clear the revert"
             );
+            assert!(state.force_discharge_restoration.lock().await.is_none());
         })
         .await;
     }
@@ -15771,6 +17270,7 @@ mod tests {
             // disabled.
             let snap = crate::inverter::model::InverterSnapshot {
                 device_type: DeviceType::ThreePhase,
+                inverter_serial: "HEM-TEST-001".into(),
                 enable_discharge: true,
                 enable_charge: false,
                 ..Default::default()
@@ -15798,6 +17298,73 @@ mod tests {
                     .any(|w| w.address == HR_3PH_FORCE_CHARGE_ENABLE && w.value == 0),
                 "3PH stop should restore HR_3PH_FORCE_CHARGE_ENABLE=0"
             );
+        })
+        .await;
+    }
+
+    /// Mirrors the charge case for discharge: the duration path rewrites
+    /// HR1118-1121, so Stop has to put both captured discharge slots back on
+    /// three-phase models instead of leaving the force window as the schedule.
+    #[tokio::test]
+    async fn force_discharge_stop_three_phase_restores_captured_slots() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{
+                HR_3PH_DISCHARGE_SLOT_1_END, HR_3PH_DISCHARGE_SLOT_1_START,
+                HR_3PH_DISCHARGE_SLOT_2_END, HR_3PH_DISCHARGE_SLOT_2_START,
+            };
+
+            let state = make_state_with_device(DeviceType::ThreePhase).await;
+            let mut snap = crate::inverter::model::InverterSnapshot {
+                device_type: DeviceType::ThreePhase,
+                inverter_serial: "HEM-TEST-001".into(),
+                enable_discharge: false,
+                enable_charge: false,
+                ..Default::default()
+            };
+            snap.discharge_slots[0] = crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 0,
+                target_soc: 100,
+            };
+            snap.discharge_slots[1] = crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 20,
+                start_minute: 0,
+                end_hour: 22,
+                end_minute: 0,
+                target_soc: 100,
+            };
+            *state.latest_snapshot.lock().await = Some(snap);
+
+            let _ =
+                force_discharge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let start_writes = drain_pending_writes(&state).await;
+            assert!(
+                start_writes
+                    .iter()
+                    .any(|w| w.address == HR_3PH_DISCHARGE_SLOT_1_START),
+                "the start must overwrite the three-phase discharge slot"
+            );
+
+            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            for (address, value, label) in [
+                (HR_3PH_DISCHARGE_SLOT_1_START, 1600u16, "slot 1 start 16:00"),
+                (HR_3PH_DISCHARGE_SLOT_1_END, 1900, "slot 1 end 19:00"),
+                (HR_3PH_DISCHARGE_SLOT_2_START, 2000, "slot 2 start 20:00"),
+                (HR_3PH_DISCHARGE_SLOT_2_END, 2200, "slot 2 end 22:00"),
+            ] {
+                assert!(
+                    writes
+                        .iter()
+                        .any(|w| w.address == address && w.value == value),
+                    "3PH stop must restore {label}"
+                );
+            }
         })
         .await;
     }
@@ -15903,12 +17470,19 @@ mod tests {
 
             let (status, _) = force_discharge_stop(State(state.clone())).await;
             assert_eq!(status, StatusCode::OK);
-            let _ = drain_pending_writes(&state).await;
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                state.force_discharge_revert.lock().await.is_some(),
+                "revert retained until fresh exact readback"
+            );
 
             // The restart fallback intentionally allows Stop Discharge to
             // work when there is no in-memory revert but the latest snapshot
-            // still shows discharge armed. Once a post-stop poll has observed
-            // HR59=0, a second stop should return to the old no-op/error path.
+            // still shows discharge armed. Once the stop's restoration has
+            // been confirmed by a causally fresh exact readback, a second
+            // stop returns to the old no-op/error path.
+            confirm_force_restoration(&state, &writes).await;
+            assert!(state.force_discharge_revert.lock().await.is_none());
             {
                 let mut snapshot = state.latest_snapshot.lock().await;
                 let snapshot = snapshot.as_mut().expect("snapshot seeded");
@@ -16389,7 +17963,19 @@ mod tests {
 
             let (status, _) = force_charge_stop(State(state.clone())).await;
             assert_eq!(status, StatusCode::OK);
-            let _ = drain_pending_writes(&state).await;
+            let stop_writes = drain_pending_writes(&state).await;
+            // Ownership is retained until fresh readback confirms the
+            // restoration, so Force Discharge stays rejected: starting it now
+            // would clobber the in-flight charge-restore writes.
+            let (status, body) = force_discharge(State(state.clone()), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body.0["error"],
+                "Stop Force Charge before starting Force Discharge"
+            );
+
+            confirm_force_restoration(&state, &stop_writes).await;
+            assert!(state.force_charge_revert.lock().await.is_none());
 
             let (status, _) = force_discharge(State(state.clone()), None).await;
             assert_eq!(status, StatusCode::OK);
