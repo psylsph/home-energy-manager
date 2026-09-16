@@ -18,6 +18,12 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // 2-core CI runners (windows-latest) can starve workers past the 5s
+    // default while the full suite runs in parallel — even pure-logic lib
+    // tests have timed out there. 15s keeps a hung test failing while
+    // giving heavyweight jsdom/Recharts page tests (History, Logs) the
+    // headroom they need under load.
+    testTimeout: 15_000,
     // Global setup file. Replaces jsdom 29's stub `localStorage` /
     // `sessionStorage` (which lack the actual storage methods) with working
     // in-memory implementations, so persistence tests can run without
