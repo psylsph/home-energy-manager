@@ -709,9 +709,13 @@ fn raw_charge_rate_to_normalized(device_type: DeviceType, raw: u16) -> u8 {
     }
 }
 
+/// Whether an observed raw charge limit is a value this device family's
+/// register can legitimately hold. Mirrors the encoder's write contracts:
+/// the single-phase HR 111 register accepts 0-50 (zero is a valid limit and
+/// maps to 0%, issue #316), while direct-percentage registers require 1-100.
 fn observed_charge_rate_is_valid(device_type: DeviceType, raw: u16) -> bool {
     match adaptive_charge_register(device_type) {
-        Some(HR_BATTERY_CHARGE_LIMIT) => (1..=50).contains(&raw),
+        Some(HR_BATTERY_CHARGE_LIMIT) => (0..=50).contains(&raw),
         Some(_) => (1..=100).contains(&raw),
         None => false,
     }
@@ -3563,7 +3567,9 @@ mod tests {
             state,
             AdaptiveChargeState::Preferred { period: 0, .. }
         ));
-        let write = second.write.expect("preferred rate must raise the zero limit");
+        let write = second
+            .write
+            .expect("preferred rate must raise the zero limit");
         assert_eq!(write.address, HR_BATTERY_CHARGE_LIMIT);
         assert_eq!(write.value, 20);
         assert_eq!(second.desired_rate_percent, Some(40));
@@ -3595,7 +3601,10 @@ mod tests {
             &mut saved,
             9 * 60,
         );
-        assert!(settled.write.is_none(), "observed already matches the 0% rate");
+        assert!(
+            settled.write.is_none(),
+            "observed already matches the 0% rate"
+        );
         assert!(matches!(
             state,
             AdaptiveChargeState::Preferred { low_count: 0, .. }
@@ -3662,6 +3671,8 @@ mod tests {
         assert_eq!(write.value, 20);
         assert_eq!(preferred.desired_rate_percent, Some(40));
 
+        // The register is still stuck at zero, so the preferred write
+        // retries while the low-SOC confirmation counter advances.
         let first_low = check_adaptive_charge(
             &adaptive_snapshot(20, 0),
             &config,
@@ -3670,7 +3681,13 @@ mod tests {
             &mut saved,
             9 * 60,
         );
-        assert!(first_low.write.is_none());
+        assert_eq!(
+            first_low
+                .write
+                .expect("preferred rate retries while stuck at zero")
+                .value,
+            20
+        );
         assert!(matches!(
             state,
             AdaptiveChargeState::Preferred { low_count: 1, .. }
@@ -3767,10 +3784,7 @@ mod tests {
             18 * 60,
         );
         assert_eq!(
-            outside
-                .write
-                .expect("zero baseline must be restored")
-                .value,
+            outside.write.expect("zero baseline must be restored").value,
             0
         );
         assert_eq!(state, AdaptiveChargeState::Restoring);
