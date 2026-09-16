@@ -3454,7 +3454,10 @@ mod tests {
         let mut state = AdaptiveChargeState::Inactive;
         let mut saved = None;
 
-        for raw_rate in [0, 100] {
+        // Raw 51 and 100 exceed the single-phase register's 0-50 write
+        // contract. Raw zero is valid (it maps to a 0% limit) and has its
+        // own lifecycle coverage below.
+        for raw_rate in [51, 100] {
             let outcome = check_adaptive_charge(
                 &adaptive_snapshot(50, raw_rate),
                 &config,
@@ -3500,6 +3503,331 @@ mod tests {
             AdaptiveChargeState::Preferred { period: 0, .. }
         ));
         assert_eq!(second_valid.write.expect("preferred rate write").value, 20);
+    }
+
+    #[test]
+    fn adaptive_charge_rate_validity_matches_write_contract() {
+        // The single-phase register HR 111 accepts the same 0-50 raw range
+        // the encoder validates for SetChargeLimit, including a legitimate
+        // zero limit (issue #316).
+        assert!(observed_charge_rate_is_valid(DeviceType::Gen3Hybrid, 0));
+        assert!(observed_charge_rate_is_valid(DeviceType::Gen3Hybrid, 1));
+        assert!(observed_charge_rate_is_valid(DeviceType::Gen3Hybrid, 50));
+        assert!(!observed_charge_rate_is_valid(DeviceType::Gen3Hybrid, 51));
+        assert!(!observed_charge_rate_is_valid(DeviceType::Gen3Hybrid, 100));
+        // Direct-percentage registers keep their stricter 1-100 write
+        // contract: zero remains invalid there.
+        assert!(!observed_charge_rate_is_valid(DeviceType::ACCoupled, 0));
+        assert!(observed_charge_rate_is_valid(DeviceType::ACCoupled, 1));
+        assert!(observed_charge_rate_is_valid(DeviceType::ACCoupled, 100));
+        assert!(!observed_charge_rate_is_valid(DeviceType::ACCoupled, 101));
+        assert!(!observed_charge_rate_is_valid(DeviceType::ThreePhase, 0));
+        assert!(observed_charge_rate_is_valid(DeviceType::ThreePhase, 1));
+        assert!(observed_charge_rate_is_valid(DeviceType::ThreePhase, 100));
+        // Unsupported devices never validate.
+        assert!(!observed_charge_rate_is_valid(DeviceType::Gateway, 25));
+    }
+
+    #[test]
+    fn adaptive_enable_from_zero_limit_captures_zero_baseline() {
+        // Issue #316: HEM can legitimately write a zero charge limit. Two
+        // stable zero readings must capture a zero baseline and let the
+        // configured preferred rate take over instead of stranding the
+        // inverter at zero.
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Inactive;
+        let mut saved = None;
+
+        let first = check_adaptive_charge(
+            &adaptive_snapshot(50, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(first.write.is_none());
+        assert_eq!(state, AdaptiveChargeState::BaselinePending { raw_value: 0 });
+        assert!(saved.is_none());
+
+        let second = check_adaptive_charge(
+            &adaptive_snapshot(50, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert_eq!(saved.as_ref().map(|value| value.raw_value), Some(0));
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Preferred { period: 0, .. }
+        ));
+        let write = second.write.expect("preferred rate must raise the zero limit");
+        assert_eq!(write.address, HR_BATTERY_CHARGE_LIMIT);
+        assert_eq!(write.value, 20);
+        assert_eq!(second.desired_rate_percent, Some(40));
+    }
+
+    #[test]
+    fn adaptive_zero_preferred_rate_recovers_on_low_soc() {
+        // A configured 0% preferred rate writes raw zero on HR 111. The
+        // zero readback must not be rejected, so the low-SOC confirmations
+        // still advance and the recovery rate is applied (issue #316).
+        let mut config = adaptive_config();
+        config.periods[0].preferred_rate_percent = 0;
+        let mut state = AdaptiveChargeState::Preferred {
+            period: 0,
+            low_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 25,
+        });
+
+        let settled = check_adaptive_charge(
+            &adaptive_snapshot(50, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(settled.write.is_none(), "observed already matches the 0% rate");
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Preferred { low_count: 0, .. }
+        ));
+
+        let first_low = check_adaptive_charge(
+            &adaptive_snapshot(20, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(first_low.write.is_none());
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Preferred { low_count: 1, .. }
+        ));
+
+        let second_low = check_adaptive_charge(
+            &adaptive_snapshot(20, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(matches!(state, AdaptiveChargeState::Recovery { .. }));
+        let write = second_low.write.expect("recovery rate must be written");
+        assert_eq!(write.value, 50);
+        assert_eq!(second_low.desired_rate_percent, Some(100));
+    }
+
+    #[test]
+    fn adaptive_zero_observed_with_existing_baseline_still_acts() {
+        // Ownership already established with a nonzero baseline; an
+        // observed zero inside the window must still drive the preferred
+        // write and SOC recovery rather than bypassing evaluation
+        // (issue #316).
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Preferred {
+            period: 0,
+            low_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 25,
+        });
+
+        let preferred = check_adaptive_charge(
+            &adaptive_snapshot(50, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        let write = preferred
+            .write
+            .expect("zero limit must be raised to the preferred rate");
+        assert_eq!(write.address, HR_BATTERY_CHARGE_LIMIT);
+        assert_eq!(write.value, 20);
+        assert_eq!(preferred.desired_rate_percent, Some(40));
+
+        let first_low = check_adaptive_charge(
+            &adaptive_snapshot(20, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(first_low.write.is_none());
+        assert!(matches!(
+            state,
+            AdaptiveChargeState::Preferred { low_count: 1, .. }
+        ));
+
+        let second_low = check_adaptive_charge(
+            &adaptive_snapshot(20, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(matches!(state, AdaptiveChargeState::Recovery { .. }));
+        assert_eq!(
+            second_low
+                .write
+                .expect("recovery rate must be written")
+                .value,
+            50
+        );
+    }
+
+    #[test]
+    fn adaptive_disable_restores_zero_baseline_after_readback() {
+        // A captured zero baseline is a valid restoration target: disable
+        // must write raw zero back and only clear the baseline once the
+        // readback matches (issue #316).
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Preferred {
+            period: 0,
+            low_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 0,
+        });
+
+        let restoring = check_adaptive_charge(
+            &adaptive_snapshot(50, 20),
+            &config,
+            false,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert_eq!(
+            restoring
+                .write
+                .expect("zero baseline must be restored")
+                .value,
+            0
+        );
+        assert_eq!(state, AdaptiveChargeState::Restoring);
+        assert!(saved.is_some(), "baseline kept until readback confirms");
+
+        let confirmed = check_adaptive_charge(
+            &adaptive_snapshot(50, 0),
+            &config,
+            false,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(confirmed.write.is_none());
+        assert!(saved.is_none());
+        assert_eq!(state, AdaptiveChargeState::Inactive);
+    }
+
+    #[test]
+    fn adaptive_outside_window_restores_zero_baseline() {
+        // Leaving an Adaptive-owned window must restore a zero baseline and
+        // settle in OutsideWindow once the readback confirms it (issue #316).
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Preferred {
+            period: 0,
+            low_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 0,
+        });
+
+        let outside = check_adaptive_charge(
+            &adaptive_snapshot(50, 20),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            18 * 60,
+        );
+        assert_eq!(
+            outside
+                .write
+                .expect("zero baseline must be restored")
+                .value,
+            0
+        );
+        assert_eq!(state, AdaptiveChargeState::Restoring);
+
+        let confirmed = check_adaptive_charge(
+            &adaptive_snapshot(50, 0),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            18 * 60,
+        );
+        assert!(confirmed.write.is_none());
+        assert_eq!(confirmed.desired_rate_percent, Some(0));
+        assert_eq!(state, AdaptiveChargeState::OutsideWindow);
+    }
+
+    #[test]
+    fn adaptive_rejects_unsupported_devices_and_foreign_baselines() {
+        // Gateway has no controllable charge-limit register.
+        let mut state = AdaptiveChargeState::Inactive;
+        let mut saved = None;
+        let gateway = InverterSnapshot {
+            device_type: DeviceType::Gateway,
+            ..adaptive_snapshot(50, 20)
+        };
+        let outcome = check_adaptive_charge(
+            &gateway,
+            &adaptive_config(),
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(outcome.write.is_none());
+        assert!(matches!(state, AdaptiveChargeState::Error { .. }));
+        assert!(saved.is_none());
+
+        // A baseline captured on another inverter must never be restored.
+        let mut state = AdaptiveChargeState::Inactive;
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "OTHER99".to_string(),
+            device_type_code: "2001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 30,
+        });
+        let outcome = check_adaptive_charge(
+            &adaptive_snapshot(50, 30),
+            &adaptive_config(),
+            false,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        assert!(outcome.write.is_none());
+        assert!(matches!(state, AdaptiveChargeState::Error { .. }));
+        assert!(saved.is_some(), "foreign baseline is not consumed");
     }
 
     #[test]
