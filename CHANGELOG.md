@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adaptive Charge no longer stalls when the charge limit is set to zero.** A zero Battery Charge Power Limit is a valid setting, but Adaptive Charge treated every zero reading as invalid and stopped adjusting the limit until something else changed it. Zero limits are now handled like any other value, including restoring them when a period ends or the mode is turned off (#316).
+
 ## [0.83.3] - 2026-09-16
 
 ### Fixed
