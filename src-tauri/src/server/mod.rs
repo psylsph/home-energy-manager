@@ -6,7 +6,7 @@
 pub mod api;
 pub mod audit;
 pub mod authenticated_lifecycle;
-mod control_status;
+pub(crate) mod control_status;
 pub mod external_commands;
 mod external_control;
 pub mod external_snapshot;

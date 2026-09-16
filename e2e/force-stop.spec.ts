@@ -155,7 +155,7 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
     expect(data.error).toMatch(/no force charge/i);
   });
 
-  test('Stop is one-shot — second call also returns 400', async ({
+  test('Stop retains ownership — unconfirmed second call retries', async ({
     baseUrl,
     drainModbusWrites,
   }) => {
@@ -169,10 +169,26 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
 
     const stop1 = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
     expect((await stop1.json()).ok).toBe(true);
-
+    // Ownership of the revert is retained until a causally fresh inverter
+    // snapshot provably matches every restoration write. This mock Modbus
+    // fixture does not feed restored registers back into reads, so no
+    // confirmation arrives and a second stop must safely re-apply the
+    // restoration instead of pretending the action is gone.
     const stop2 = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
-    const data = await stop2.json();
-    expect(data.ok).toBe(false);
+    expect((await stop2.json()).ok).toBe(true);
+
+    // A third call still succeeds, which is the retention contract itself:
+    // ownership is released only by a causally fresh confirming readback, and
+    // this mock never feeds restored registers back into reads. Counting the
+    // retried register writes here would be unreliable (the poll loop can be
+    // mid-reconnect when a battery-probe block goes unanswered) and the old
+    // address-only count passed on the *start's* HR96 write regardless — the
+    // exact retried write set is pinned by the Rust test
+    // `force_charge_stop_is_one_shot_per_revert`.
+    const stop3 = await fetch(`${baseUrl}/api/control/force-charge/stop`, {
+      method: 'POST',
+    });
+    expect((await stop3.json()).ok).toBe(true);
   });
 
   test('Start with minutes produces slot + 5 force-charge flag writes', async ({
@@ -202,7 +218,8 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
     expect(findWrite(writes, 20)!.value).toBe(0);    // enable_charge_target
     expect(findWrite(writes, 116)!.value).toBe(100); // target SOC
 
-    // Stop. Verify the stop is consumed.
+    // Stop. Verify the stop is accepted (ownership is retained until a
+    // confirming readback, so the revert is not consumed here).
     const stop = await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' });
     expect((await stop.json()).ok).toBe(true);
   });
@@ -291,7 +308,8 @@ test.describe('Force Discharge → Stop (mock Modbus)', () => {
     expect(findWrite(writes, 96)!.value).toBe(0);   // clear charge
     expect(findWrite(writes, 20)!.value).toBe(0);   // clear charge target
 
-    // Stop. Verify the stop is consumed.
+    // Stop. Verify the stop is accepted (ownership is retained until a
+    // confirming readback, so the revert is not consumed here).
     const stop = await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' });
     expect((await stop.json()).ok).toBe(true);
   });
@@ -464,7 +482,7 @@ test.describe('Force Discharge auto-revert (issue #129)', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
-    test.setTimeout(60_000);
+    test.setTimeout(90_000);
     await clearWrites(drainModbusWrites);
 
     // No body = until stopped. The revert's slot_end is None, so the
@@ -474,8 +492,11 @@ test.describe('Force Discharge auto-revert (issue #129)', () => {
     });
     expect((await fdResp.json()).ok).toBe(true);
 
-    // Wait for the initial writes to be processed, then drain.
-    await new Promise((r) => setTimeout(r, 15_000));
+    // Wait for the initial writes to actually land (condition-based, not a
+    // blind sleep) and drain them so the quiet window below starts clean.
+    await expect
+      .poll(async () => (await peekModbusWrites()).length, { timeout: 30_000 })
+      .toBeGreaterThan(0);
     await drainModbusWrites();
 
     // Wait 20s — well beyond a typical poll cycle — and verify no

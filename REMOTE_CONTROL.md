@@ -145,7 +145,11 @@ An example acknowledgement is:
 {"ok":true,"message":"Force charge stopped","command_id":"9a8b7c6d5e4f"}
 ```
 
-This acknowledges the handler's work; queued inverter writes and the next status reading can follow later. Poll the command id — `readback_confirmed` means the inverter has actually left the forced mode.
+This acknowledges the handler's work; queued inverter writes and the next status reading can follow later. Poll the command id — `readback_confirmed` means a fresh readback has proved that the captured pre-action baseline was restored. This also confirms when Stop is sent while the force window is still running; an armed normal charge schedule is not evidence that Stop was ignored.
+
+If the connected inverter is demonstrably a *different* unit from the one the action was started on (its serial differs), a stop cannot restore anything: it is refused with `state_unavailable` and the stale baseline is **released** (in-memory and durable), so the action kind is not blocked forever. The release is logged and audited as `stale_ownership_released`. Firmware version is deliberately not part of that identity check, so a firmware update never blocks restoration.
+
+A stop is also valid *after* a timed window has already ended: the inverter may have returned to Eco on its own, but the start temporarily overwrote charge/discharge slot 1, so the stop still restores the schedule and settings captured before the start and confirms once a fresh reading shows that baseline. Until then the stop stays in flight (`queued`/`dispatched`), and a stop sent before a previous stop's restoration is confirmed safely re-applies the same restoration rather than reporting nothing to do. Stop-command readback is strict: it only confirms from a reading taken after the stop, from the same inverter, that matches the restored baseline.
 
 ### Start Force Discharge for 30 minutes
 
@@ -238,6 +242,7 @@ A typical response while Force Charge is active contains these fields (other fie
 | `activity` | Observed `charging`, `discharging`, `idle`, or `unavailable`; not simply the requested action. |
 | `control_source` | Best-known controller: `force_charge`, `force_discharge`, `pause_mode`, `timed_export`, `winter`, `cosy`, `agile`, `adaptive`, `timed_charge`, `inverter`, `safety`, or `unknown`. |
 | `control_phase` | Controller-specific state, such as `pending`, `active`, `restoring`, `expired`, `waiting`, `observed` or `restricted`. Handle unrecognised values gracefully. |
+| `control_capabilities` | Which control operations this model and firmware support: `force_charge`, `force_discharge` (booleans) and `pause_modes` (array of `charge`/`discharge`/`both`, or `null` when the firmware version cannot be read). A `null` capability means "ask again", not "unsupported". |
 | `quick_action` | Known HEM-owned force or native pause action, phase, request time and window end; otherwise `null`. Native pause also reports its mode. Dates can be `null` if unavailable. |
 | `remaining_minutes` | Known Quick Action window time remaining, rounded up; `0` after expiry, or `null` when unknown/not applicable. Not time until the battery is full or empty. |
 | `schedules` | Separate `charge`, `export` and `demand_discharge` states: `off`, `armed`, `active` or `unknown`. `armed` can mean outside the window or not currently performing the action. |

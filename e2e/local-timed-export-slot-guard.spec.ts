@@ -95,6 +95,12 @@ async function resetToEco(baseUrl: string): Promise<void> {
       { timeout: 90_000, intervals: [1_000] },
     )
     .toBe(true);
+
+  // Eco captures the just-cleared physical schedule before removing it. Clear
+  // that intentional backup once the simulator confirms the registers are
+  // empty, so the no-slot invariant also holds in persisted settings.
+  const finalReset = await fetch(`${baseUrl}/api/test/reset`, { method: 'POST' });
+  if (!finalReset.ok) throw new Error(`final test reset failed: ${finalReset.status}`);
 }
 
 test.describe('Real simulator — Timed Export/discharge-slot guard', () => {
