@@ -1367,7 +1367,7 @@ pub(crate) fn new_command_id() -> String {
     // credential; 128 bits of command id is collision-proof for this use.
     use sha2::{Digest, Sha256};
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
+    getrandom::fill(&mut bytes).expect("OS CSPRNG must be available");
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let hash = hasher.finalize();
