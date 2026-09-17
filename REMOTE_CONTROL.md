@@ -427,6 +427,7 @@ These endpoints deliberately reuse the app's Quick Actions; they do not introduc
 
 - **Retries are safe only with the same `Idempotency-Key` and identical payload** — HEM replays the original response and never queues a second command. A retry with a new key is a *new* command: it replaces the original restore point, even while the original action is still running. Generate a fresh key for each new action.
 - Stop restores according to the existing Quick Action logic, not a universal reset-to-Eco policy. Stop Charge can restore a pre-action non-Eco mode.
+- Baselines saved by versions before v0.83.3 have no inverter identity. HEM will not automatically apply or confirm one after an upgrade; an explicit Stop while the intended inverter is connected migrates the baseline to its readable identity, then restores and confirms it normally.
 - At Force Charge window expiry, the previous charge schedule is not automatically restored. The configured slot remains until changed and may matter on a later day.
 - Force Discharge retains the existing poll-loop auto-restoration behaviour at expiry; HEM must remain running and communicate with the inverter for restoration writes.
 - Command tracking survives a HEM restart, but a command that was mid-flight when HEM stopped is marked `unknown`: HEM never re-arms an action on its own, and it is your signal to inspect the inverter.

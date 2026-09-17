@@ -1219,16 +1219,24 @@ const FORCE_RESTORATION_RETRY_DELAY_MS: i64 = 30_000;
 /// by `snapshot`.
 ///
 /// A baseline persisted before the identity fields existed is identifiable by
-/// its legacy `Unknown` device type plus an empty serial and is grandfathered.
-/// A modern baseline with an empty serial is not verifiable and must not be
-/// written onto any inverter, even one whose serial is also unreadable. One
-/// that carries identity must match the connected inverter exactly: writing one
-/// unit's captured schedule onto another would mutate hardware the baseline
-/// never described, and letting a foreign snapshot confirm it would release
-/// ownership while the original action is still in place. Every path that
-/// applies or confirms a Force baseline — the explicit Stop, the bounded retry,
-/// and the exact-readback barrier — must ask this one question so they cannot
-/// drift apart.
+/// its legacy `Unknown` device type plus an empty serial. It is not verifiable,
+/// so it may only be migrated by an explicit Stop while a readable current
+/// inverter is connected. Automatic retries and readback confirmation must
+/// never treat it as a match: doing so could apply or confirm an old baseline
+/// on a replacement inverter. A modern baseline must match the connected
+/// inverter exactly: writing one unit's captured schedule onto another would
+/// mutate hardware the baseline never described, and letting a foreign
+/// snapshot confirm it would release ownership while the original action is
+/// still in place. Every automatic path that confirms a Force baseline — the
+/// bounded retry and exact-readback barrier — must ask this one question so
+/// they cannot drift apart.
+pub(crate) fn force_baseline_is_legacy(
+    captured_device_type: DeviceType,
+    captured_serial: &str,
+) -> bool {
+    captured_serial.is_empty() && matches!(captured_device_type, DeviceType::Unknown(_))
+}
+
 pub(crate) fn force_baseline_identity_matches(
     current_device_type: DeviceType,
     current_serial: &str,
@@ -1236,10 +1244,11 @@ pub(crate) fn force_baseline_identity_matches(
     captured_serial: &str,
 ) -> bool {
     if captured_serial.is_empty() {
-        // Only rows written before identity fields existed are grandfathered.
-        // A modern baseline captured with an unreadable serial must not match
-        // another unreadable session: two empty values prove nothing.
-        return matches!(captured_device_type, DeviceType::Unknown(_)) && current_serial.is_empty();
+        // A legacy baseline has no verifiable owner. It is handled only by an
+        // explicit Stop, which first migrates its identity from the current
+        // readable snapshot. A modern baseline captured with an unreadable
+        // serial is likewise never allowed to match.
+        return false;
     }
     // Firmware is deliberately not part of identity: an OTA update changes
     // HR21 (and can even refine the device class), and refusing restoration
@@ -9002,6 +9011,31 @@ mod tests {
             }),
             DeviceType::Gen2Hybrid,
             "HEM-TEST-001",
+        ));
+    }
+
+    #[test]
+    fn legacy_force_baseline_never_confirms_without_explicit_migration() {
+        assert!(!force_baseline_identity_matches(
+            DeviceType::Gen2Hybrid,
+            "HEM-TEST-001",
+            DeviceType::Unknown(0),
+            "",
+        ));
+        assert!(!force_baseline_identity_matches(
+            DeviceType::Unknown(0),
+            "",
+            DeviceType::Unknown(0),
+            "",
+        ));
+        assert!(!force_baseline_belongs_to_other_inverter(
+            Some(&InverterSnapshot {
+                device_type: DeviceType::Gen2Hybrid,
+                inverter_serial: "HEM-TEST-001".into(),
+                ..Default::default()
+            }),
+            DeviceType::Unknown(0),
+            "",
         ));
     }
 

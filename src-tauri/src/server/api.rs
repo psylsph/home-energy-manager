@@ -128,8 +128,11 @@ async fn latest_arm_fw(state: &Arc<AppState>) -> u16 {
 
 /// What the connected inverter says about a captured Force baseline.
 enum BaselineIdentity {
-    /// The baseline belongs to this inverter (or is unverifiable but harmless).
+    /// The baseline belongs to this inverter.
     Verified,
+    /// The baseline predates persisted inverter identity. It may be migrated
+    /// only by an explicit Stop using a readable current snapshot.
+    Legacy,
     /// The question cannot be answered right now (no snapshot, or an unreadable
     /// serial on either side): refuse, but keep ownership because a later cycle
     /// may verify and restore.
@@ -147,6 +150,13 @@ fn force_baseline_identity_for_snapshot(
     device_type: DeviceType,
     inverter_serial: &str,
 ) -> BaselineIdentity {
+    if crate::inverter::poll::force_baseline_is_legacy(device_type, inverter_serial) {
+        return if snapshot.is_some_and(|snapshot| !snapshot.inverter_serial.is_empty()) {
+            BaselineIdentity::Legacy
+        } else {
+            BaselineIdentity::Unavailable
+        };
+    }
     if crate::inverter::poll::force_baseline_matches_inverter(
         snapshot,
         device_type,
@@ -5483,7 +5493,7 @@ pub(crate) async fn force_charge_at_unlocked(
         match force_baseline_identity(&state, existing.device_type, &existing.inverter_serial).await
         {
             BaselineIdentity::Verified => Some(existing),
-            BaselineIdentity::Unavailable => {
+            BaselineIdentity::Legacy | BaselineIdentity::Unavailable => {
                 return error_response(
                     "No verified inverter identity is available; existing Force Charge restoration must finish first",
                 );
@@ -5579,7 +5589,7 @@ pub(crate) async fn force_charge_stop_with_command(
     // restoration write. A failed or interrupted batch can then be retried by
     // another Stop, including after external-control permission is revoked.
     let revert = state.force_charge_revert.lock().await.clone();
-    let revert = match revert {
+    let mut revert = match revert {
         Some(r) => r,
         None => {
             return error_response("No force charge in progress to stop");
@@ -5601,6 +5611,38 @@ pub(crate) async fn force_charge_stop_with_command(
         &revert.inverter_serial,
     ) {
         BaselineIdentity::Verified => {}
+        BaselineIdentity::Legacy => {
+            // Pre-v0.83.3 baselines have no trustworthy inverter identity.
+            // An explicit Stop is the one operation allowed to adopt the
+            // currently connected, readable inverter before restoring the
+            // captured settings. Automatic expiry and readback paths remain
+            // fail-closed until this migration has happened.
+            let Some(current_snapshot) = snapshot.as_ref() else {
+                drop(snapshot);
+                return error_response(
+                    "No verified inverter identity is available; restoration refused for safety",
+                );
+            };
+            revert.device_type = current_snapshot.device_type;
+            revert.inverter_serial = current_snapshot.inverter_serial.clone();
+            revert.firmware_version = current_snapshot.firmware_version.clone();
+            if let Some(command_id) = command_id {
+                if let Err(error) =
+                    persist_external_force_recovery(&state, Some(command_id), Some(&revert)).await
+                {
+                    drop(snapshot);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"ok": false, "error": error})),
+                    );
+                }
+            }
+            *state.force_charge_revert.lock().await = Some(revert.clone());
+            tracing::info!(
+                inverter = %revert.inverter_serial,
+                "Migrated legacy Force Charge restoration baseline during explicit Stop"
+            );
+        }
         BaselineIdentity::Unavailable => {
             drop(snapshot);
             return error_response(
@@ -5711,7 +5753,7 @@ pub(crate) async fn force_discharge_at_unlocked(
         match force_baseline_identity(&state, existing.device_type, &existing.inverter_serial).await
         {
             BaselineIdentity::Verified => Some(existing),
-            BaselineIdentity::Unavailable => {
+            BaselineIdentity::Legacy | BaselineIdentity::Unavailable => {
                 return error_response(
                     "No verified inverter identity is available; existing Force Discharge restoration must finish first",
                 );
@@ -5890,13 +5932,46 @@ pub(crate) async fn force_discharge_stop_with_command(
         .map(|value| value.device_type)
         .unwrap_or(DeviceType::Gen2Hybrid);
 
-    let writes = if let Some(revert) = revert {
+    let writes = if let Some(mut revert) = revert {
         match force_baseline_identity_for_snapshot(
             snapshot.as_ref(),
             revert.device_type,
             &revert.inverter_serial,
         ) {
             BaselineIdentity::Verified => {}
+            BaselineIdentity::Legacy => {
+                // Pre-v0.83.3 baselines have no trustworthy inverter identity.
+                // An explicit Stop is the one operation allowed to adopt the
+                // currently connected, readable inverter before restoring the
+                // captured settings. Automatic expiry and readback paths remain
+                // fail-closed until this migration has happened.
+                let Some(current_snapshot) = snapshot.as_ref() else {
+                    drop(snapshot);
+                    return error_response(
+                        "No verified inverter identity is available; restoration refused for safety",
+                    );
+                };
+                revert.device_type = current_snapshot.device_type;
+                revert.inverter_serial = current_snapshot.inverter_serial.clone();
+                revert.firmware_version = current_snapshot.firmware_version.clone();
+                if let Some(command_id) = command_id {
+                    if let Err(error) =
+                        persist_external_force_recovery(&state, Some(command_id), Some(&revert))
+                            .await
+                    {
+                        drop(snapshot);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"ok": false, "error": error})),
+                        );
+                    }
+                }
+                *state.force_discharge_revert.lock().await = Some(revert.clone());
+                tracing::info!(
+                    inverter = %revert.inverter_serial,
+                    "Migrated legacy Force Discharge restoration baseline during explicit Stop"
+                );
+            }
             BaselineIdentity::Unavailable => {
                 drop(snapshot);
                 return error_response(
@@ -16540,6 +16615,60 @@ pub(crate) mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn force_charge_stop_migrates_legacy_baseline_on_explicit_stop() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            *state.force_charge_revert.lock().await = Some(ForceChargeRevert {
+                started_at_ms: 0,
+                external_owner: None,
+                force_charge_slot_end_ms: None,
+                enable_charge: false,
+                enable_charge_target: false,
+                device_type: DeviceType::Unknown(0),
+                inverter_serial: String::new(),
+                firmware_version: String::new(),
+                enable_discharge: false,
+                target_soc: 80,
+                battery_power_mode: 1,
+                charge_rate: Some(30),
+                charge_slot_1_start: Some((2, 0)),
+                charge_slot_1_end: Some((4, 0)),
+                three_phase_force_charge_enable: None,
+                three_phase_ac_charge_enable: None,
+                battery_pause_mode: Some(0),
+            });
+
+            let stop_id = match state
+                .command_ledger
+                .reserve_stop("fp", "force_charge", "legacy-stop", 1_800_000_000_000)
+                .unwrap()
+            {
+                crate::server::external_commands::Reservation::Accepted { command_id } => {
+                    command_id
+                }
+                other => panic!("expected accepted stop reservation, got {other:?}"),
+            };
+            let (status, _) = force_charge_stop_with_command(state.clone(), Some(&stop_id)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!drain_pending_writes(&state).await.is_empty());
+            let migrated = state.force_charge_revert.lock().await.clone().unwrap();
+            assert_eq!(migrated.device_type, DeviceType::Gen2Hybrid);
+            assert_eq!(migrated.inverter_serial, "HEM-TEST-001");
+            let persisted = state
+                .command_ledger
+                .get(&stop_id)
+                .unwrap()
+                .unwrap()
+                .detail
+                .expect("the stop must persist its migrated recovery baseline");
+            let persisted: ForceChargeRevert = serde_json::from_str(&persisted).unwrap();
+            assert_eq!(persisted.device_type, DeviceType::Gen2Hybrid);
+            assert_eq!(persisted.inverter_serial, "HEM-TEST-001");
+        })
+        .await;
+    }
+
     /// Four percent is a valid three-phase target and must be restored rather
     /// than leaving the Force Charge target (100%) behind.
     #[test]
@@ -16703,7 +16832,30 @@ pub(crate) mod tests {
             assert!(state.force_discharge_revert.lock().await.is_none());
 
             // (b) Genuine pre-identity baseline (unknown model, empty serial),
-            // persisted before the identity fields existed: still restorable.
+            // persisted before the identity fields existed: an explicit Stop
+            // migrates it to the currently connected inverter and restores it.
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_revert("", DeviceType::Unknown(0)));
+            let (status, _) = force_discharge_stop(State(state.clone())).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an explicit Stop must migrate a pre-identity baseline"
+            );
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes
+                    .iter()
+                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 1600),
+                "the legacy baseline's captured slot must still be restored"
+            );
+            let migrated = state.force_discharge_revert.lock().await.clone().unwrap();
+            assert_eq!(migrated.device_type, DeviceType::Gen2Hybrid);
+            assert_eq!(migrated.inverter_serial, "HEM-TEST-001");
+
+            // A legacy baseline still refuses migration when the current
+            // inverter has no readable serial.
             let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
             state
                 .latest_snapshot
@@ -16716,18 +16868,9 @@ pub(crate) mod tests {
             *state.force_discharge_revert.lock().await =
                 Some(discharge_revert("", DeviceType::Unknown(0)));
             let (status, _) = force_discharge_stop(State(state.clone())).await;
-            assert_eq!(
-                status,
-                StatusCode::OK,
-                "a pre-identity baseline must remain restorable after upgrade"
-            );
-            let writes = drain_pending_writes(&state).await;
-            assert!(
-                writes
-                    .iter()
-                    .any(|w| w.address == HR_DISCHARGE_SLOT_1_START && w.value == 1600),
-                "the legacy baseline's captured slot must still be restored"
-            );
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(drain_pending_writes(&state).await.is_empty());
+            assert!(state.force_discharge_revert.lock().await.is_some());
 
             // (c) Modern baseline whose serial was unreadable at capture: the
             // inverter IS identifiable, so refuse without releasing — the
