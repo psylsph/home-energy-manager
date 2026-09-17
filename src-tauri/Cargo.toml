@@ -50,7 +50,7 @@ base64 = "0.23"
 # Authenticated API credential storage: CSPRNG key generation, SHA-256
 # verifier hashing and constant-time comparison. All three already sit in
 # the dependency tree; these entries only make them direct dependencies.
-getrandom = "0.2"
+getrandom = "0.4"
 sha2 = "0.11"
 subtle = "2"
 
