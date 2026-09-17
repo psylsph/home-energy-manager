@@ -2620,6 +2620,69 @@ mod tests {
         }
     }
 
+    /// A recovery baseline from before v0.83.3 has no inverter identity. A
+    /// readable current snapshot must not confirm the old start until an
+    /// explicit Stop migrates the baseline and establishes ownership.
+    #[test]
+    fn legacy_force_start_readback_requires_explicit_migration() {
+        let ledger = isolated_ledger();
+        let start = match ledger
+            .reserve_start("fp", "force_charge", 10, "legacy-start", 1_784_000_000_000)
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        ledger.mark_state(&start, "queued").unwrap();
+        ledger
+            .record_recovery(
+                &start,
+                r#"{
+                    "started_at_ms":1784000000000,
+                    "force_charge_slot_end_ms":1784000600000,
+                    "enable_charge":false,
+                    "enable_discharge":false,
+                    "target_soc":80,
+                    "battery_power_mode":1,
+                    "charge_rate":30,
+                    "charge_slot_1_start":[2,0],
+                    "charge_slot_1_end":[4,0],
+                    "three_phase_force_charge_enable":null,
+                    "three_phase_ac_charge_enable":null,
+                    "battery_pause_mode":0
+                }"#,
+            )
+            .unwrap();
+        let snapshot = crate::inverter::model::InverterSnapshot {
+            device_type: crate::inverter::model::DeviceType::ACCoupled,
+            inverter_serial: "SA12345678".into(),
+            enable_charge: true,
+            battery_power_mode: 1,
+            ..Default::default()
+        };
+        ledger
+            .advance_readback(&ReadbackEvidence {
+                snapshot_ts_ms: 1_784_000_010_000,
+                charge_active: Some(true),
+                discharge_active: Some(false),
+                pause_mode: None,
+                pause_slot_start: None,
+                pause_slot_end: None,
+                pause_registers_observed_at_ms: None,
+                device_type: crate::inverter::model::DeviceType::ACCoupled,
+                inverter_serial: "SA12345678",
+                firmware_version: "449",
+                snapshot: &snapshot,
+                now_ms: 1_784_000_010_000,
+            })
+            .unwrap();
+        assert_eq!(
+            ledger.get(&start).unwrap().unwrap().state,
+            "queued",
+            "legacy identity-less recovery must not confirm on readable readback"
+        );
+    }
+
     /// A cycle whose force predicate could not be evaluated (no inverter clock,
     /// corrupt slots) must not complete or release a start. `expired` is
     /// documented as "elapsed with confirming readback", and a zeroed HR35-40

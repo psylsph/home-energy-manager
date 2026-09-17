@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.5] - 2026-09-17
+
+### Fixed
+
+- **Battery controls recover after upgrading from older versions.** HEM can now safely stop legacy Force Charge and Force Discharge actions after identity tracking was introduced, without treating an unverified record as confirmed automatically.
+
 ## [0.83.4] - 2026-09-16
 
 ### Fixed
