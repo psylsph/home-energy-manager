@@ -1096,7 +1096,7 @@ fn generate_api_secret() -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     let mut bytes = [0u8; API_SECRET_BYTES];
-    getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
+    getrandom::fill(&mut bytes).expect("OS CSPRNG must be available");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -1119,7 +1119,7 @@ impl ApiCredential {
     pub fn from_secret(secret: &str) -> Self {
         use sha2::{Digest, Sha256};
         let mut salt = [0u8; API_SALT_BYTES];
-        getrandom::getrandom(&mut salt).expect("OS CSPRNG must be available");
+        getrandom::fill(&mut salt).expect("OS CSPRNG must be available");
         let mut hasher = Sha256::new();
         hasher.update(salt);
         hasher.update(secret.as_bytes());
