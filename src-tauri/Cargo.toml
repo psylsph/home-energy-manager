@@ -51,7 +51,7 @@ base64 = "0.23"
 # verifier hashing and constant-time comparison. All three already sit in
 # the dependency tree; these entries only make them direct dependencies.
 getrandom = "0.2"
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2"
 
 # Error handling
