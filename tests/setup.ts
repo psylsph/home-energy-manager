@@ -98,11 +98,23 @@ const sessionStorageShim = createMemoryStorage();
 
 // Replace the bare globals. We also need `window.localStorage` to be the
 // same object (production code reads `window.localStorage.foo`, not just
-// the bare `localStorage` global). jsdom exposes `window` as a getter on
-// globalThis, so defineProperty is the safe way to overwrite its
-// `localStorage` property without losing the rest of the window.
-(globalThis as { localStorage: Storage }).localStorage = localStorageShim;
-(globalThis as { sessionStorage: Storage }).sessionStorage = sessionStorageShim;
+// the bare `localStorage` global). Newer jsdom (via vitest 5) exposes
+// `localStorage`/`sessionStorage` on the global as getter-only accessors,
+// so a plain assignment throws; defineProperty replaces the accessor
+// cleanly and keeps `globalThis.x === window.x === shim`.
+function installStorageShim(key: 'localStorage' | 'sessionStorage', shim: Storage) {
+  try {
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      get: () => shim,
+    });
+  } catch {
+    // Very old jsdom allows plain assignment only.
+    (globalThis as Record<string, Storage>)[key] = shim;
+  }
+}
+installStorageShim('localStorage', localStorageShim);
+installStorageShim('sessionStorage', sessionStorageShim);
 
 try {
   Object.defineProperty(window, 'localStorage', {
