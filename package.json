@@ -74,7 +74,7 @@
     "@rolldown/binding-win32-x64-msvc": "^1.2.6",
     "@tailwindcss/oxide-darwin-arm64": "^4.3.0",
     "@tailwindcss/oxide-darwin-x64": "^4.3.2",
-    "@tailwindcss/oxide-linux-x64-gnu": "^4.3.2",
+    "@tailwindcss/oxide-linux-x64-gnu": "^4.3.3",
     "@tailwindcss/oxide-win32-x64-msvc": "^4.3.3",
     "lightningcss-darwin-arm64": "^1.32.0",
     "lightningcss-darwin-x64": "^1.32.0",
