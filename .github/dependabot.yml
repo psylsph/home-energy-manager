@@ -10,6 +10,12 @@ updates:
       - dependency-name: typescript
         versions:
           - ">=7.0.0 <8.0.0"
+      # recharts 3 retypes the tooltip formatter parameters (ValueType/NameType),
+      # which breaks the Forecast page charts and drags a react-router major in
+      # with it. Staying on 2.x until we migrate deliberately.
+      - dependency-name: recharts
+        versions:
+          - ">=3.0.0 <4.0.0"
 
   - package-ecosystem: cargo
     directory: /src-tauri
