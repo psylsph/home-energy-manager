@@ -295,6 +295,8 @@ minimise-to-tray support enables Tauri's `tray-icon` feature.
 
 To update, simply download and install the latest version from the [**Releases page**](https://github.com/psylsph/home-energy-manager/releases/latest) — your settings and history are preserved automatically.
 
+On a headless Debian or Raspberry Pi OS install there is also a one-command updater, `givenergy-local-update`, which can run itself on a weekly timer — see [Raspberry Pi (headless server)](#raspberry-pi-headless-server).
+
 ### Uninstalling
 
 **Linux (`.deb`):**
@@ -512,7 +514,48 @@ Check it's running:
 sudo journalctl -u givenergy-local -f
 ```
 
-**4. Access the Pi securely from your phone with Tailscale (optional)**
+**4. Keep it updated (optional)**
+
+The package ships a `givenergy-local-update` command that does the whole update
+in one go: it looks up the latest release, downloads the right `.deb`, checks
+the SHA-256 digest published with it, stops the service, installs, and starts it
+again. If the new version does not answer on its port within a few seconds, it
+puts the previous package back and starts that instead.
+
+```bash
+sudo givenergy-local-update            # update now
+sudo givenergy-local-update --check    # report only; exit code 10 means one is available
+```
+
+Your settings and history are not part of the package and are never replaced by
+an update. A copy of `~/.givenergy-local` is still taken to
+`/var/backups/givenergy-local` before each update (the newest three are kept),
+so you can go back by hand if you ever need to.
+
+To let the Pi update itself, enable the weekly timer that comes with the
+package — nothing turns it on for you:
+
+```bash
+sudo systemctl enable --now givenergy-local-update.timer
+```
+
+It runs once a week, with up to a few hours of random delay so every HEM does not
+reach GitHub at the same moment, and catches up on a run that was missed while
+the Pi was off. Check on it with:
+
+```bash
+systemctl list-timers givenergy-local-update.timer
+sudo journalctl -u givenergy-local-update.service
+```
+
+Leave the timer disabled if you would rather decide for yourself: the dashboard
+still tells you when a newer release exists, and the command is always there.
+
+If your unit is called something else, or it runs on a port other than the one
+in its `ExecStart`, say so: `sudo givenergy-local-update --service my-hem.service
+--port 8080`.
+
+**5. Access the Pi securely from your phone with Tailscale (optional)**
 
 Tailscale lets you reach the HEM web interface when your phone is away from
 home without opening port 7337 to the public internet. The Pi remains the one

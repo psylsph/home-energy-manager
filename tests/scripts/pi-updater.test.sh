@@ -524,7 +524,7 @@ RC=0
 run_updater >"$STAGE/configdir.log" 2>&1 || RC=$?
 assert_eq "configured data dir update exits 0" "0" "$RC"
 assert_contains "the configured data dir was copied" "settings.json" "$(tar -tzf "$STAGE/backups"/pre-update-*.tar.gz)"
-assert_contains "the configured data is the copy that was taken" '{"readings":[1]}' "$(tar -xzOf "$STAGE/backups"/pre-update-*.tar.gz '*/settings.json')"
+assert_contains "the configured data is the copy that was taken" '{"readings":[1]}' "$(tar --wildcards -xzOf "$STAGE/backups"/pre-update-*.tar.gz '*/settings.json')"
 
 echo
 echo "16. without a unit a real update refuses, but --check still works"
@@ -591,6 +591,50 @@ HEM_TEST_ARCH=armhf run_updater >"$STAGE/armhf.log" 2>&1 || RC=$?
 assert_nonzero "unsupported arch exits non-zero" "$RC"
 assert_contains "unsupported arch is explained" "arm64" "$(cat "$STAGE/armhf.log")"
 assert_not_contains "nothing was installed" "apt-get" "$(cat "$STAGE/commands.log")"
+
+echo
+echo "21. postinst installs the update command from the packaged copy"
+stage
+POSTRM_PATH="$(conf_value bundle.linux.deb.postRemoveScript)"
+mkdir -p "$STAGE/share/givenergy-local" "$STAGE/usr/bin"
+cp "$UPDATER" "$STAGE/share/givenergy-local/givenergy-local-update.sh"
+sed "s|/usr/share/givenergy-local/givenergy-local-update.sh|$STAGE/share/givenergy-local/givenergy-local-update.sh|g; s|/usr/bin/givenergy-local-update|$STAGE/usr/bin/givenergy-local-update|g" \
+  "$REPO_ROOT/src-tauri/$POSTINST" >"$STAGE/postinst-pi"
+RC=0
+PATH="$STAGE/bin:/usr/bin:/bin" sh "$STAGE/postinst-pi" configure >"$STAGE/pi-postinst.log" 2>&1 || RC=$?
+assert_eq "postinst exits successfully" "0" "$RC"
+assert_eq "the command is on PATH and executable" "yes" "$([ -x "$STAGE/usr/bin/givenergy-local-update" ] && echo yes || echo no)"
+assert_eq "the command matches the packaged copy" "0" "$(cmp -s "$STAGE/usr/bin/givenergy-local-update" "$UPDATER" && echo 0 || echo 1)"
+assert_contains "the install is reported" "installed the givenergy-local-update command" "$(cat "$STAGE/pi-postinst.log")"
+
+printf '#!/bin/sh\necho "something else entirely"\n' >"$STAGE/foreign"
+cp "$STAGE/foreign" "$STAGE/usr/bin/givenergy-local-update"
+RC=0
+PATH="$STAGE/bin:/usr/bin:/bin" sh "$STAGE/postinst-pi" configure >/dev/null 2>&1 || RC=$?
+assert_eq "an unrelated file at the command path is left alone" "0" "$(cmp -s "$STAGE/foreign" "$STAGE/usr/bin/givenergy-local-update" && echo 0 || echo 1)"
+
+if [ -z "$POSTRM_PATH" ] || [ ! -f "$REPO_ROOT/src-tauri/$POSTRM_PATH" ]; then
+  echo "  FAIL  postrm script exists"
+  FAIL=$((FAIL + 1))
+else
+echo
+echo "22. postrm removes only the command it installed"
+  sed "s|/usr/bin/givenergy-local-update|$STAGE/usr/bin/givenergy-local-update|g" \
+    "$REPO_ROOT/src-tauri/$POSTRM_PATH" >"$STAGE/postrm-pi"
+  cp "$UPDATER" "$STAGE/usr/bin/givenergy-local-update"
+  PATH="$STAGE/bin:/usr/bin:/bin" sh "$STAGE/postrm-pi" upgrade >/dev/null 2>&1
+  assert_eq "an upgrade keeps the command" "yes" "$([ -f "$STAGE/usr/bin/givenergy-local-update" ] && echo yes || echo no)"
+  PATH="$STAGE/bin:/usr/bin:/bin" sh "$STAGE/postrm-pi" remove >/dev/null 2>&1
+  assert_eq "a removal deletes the command" "no" "$([ -e "$STAGE/usr/bin/givenergy-local-update" ] && echo yes || echo no)"
+  printf '#!/bin/sh\necho "something else entirely"\n' >"$STAGE/foreign"
+  cp "$STAGE/foreign" "$STAGE/usr/bin/givenergy-local-update"
+  PATH="$STAGE/bin:/usr/bin:/bin" sh "$STAGE/postrm-pi" purge >/dev/null 2>&1
+  assert_eq "a foreign file at the command path survives" "0" "$(cmp -s "$STAGE/foreign" "$STAGE/usr/bin/givenergy-local-update" && echo 0 || echo 1)"
+fi
+
+echo
+echo "23. the deb declares the tools the updater needs"
+assert_contains "the deb depends on curl" "curl" "$DEB_CONFIG_JSON"
 
 echo
 echo "---------------------------------------"
