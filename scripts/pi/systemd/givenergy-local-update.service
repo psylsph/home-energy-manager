@@ -1,0 +1,13 @@
+[Unit]
+Description=Update Home Energy Manager to the latest release
+Documentation=https://github.com/psylsph/home-energy-manager/blob/master/INSTALL.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/givenergy-local-update
+
+# No install target on purpose: packaging Home Energy Manager must not switch
+# automatic updates on for anyone. Opt in with
+#   sudo systemctl enable --now givenergy-local-update.timer

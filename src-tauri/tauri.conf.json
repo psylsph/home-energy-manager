@@ -57,7 +57,8 @@
       "deb": {
         "depends": [
           "libwebkit2gtk-4.1-0",
-          "librsvg2-2"
+          "librsvg2-2",
+          "curl"
         ],
         "provides": [
           "giv-energy-local"
@@ -69,9 +70,13 @@
           "giv-energy-local"
         ],
         "postInstallScript": "deb/postinst.sh",
+        "postRemoveScript": "deb/postrm.sh",
         "files": {
           "/usr/share/givenergy-local/dist": "../dist",
-          "/usr/share/givenergy-local/proxmox-install.sh": "../scripts/proxmox/install.sh"
+          "/usr/share/givenergy-local/proxmox-install.sh": "../scripts/proxmox/install.sh",
+          "/usr/share/givenergy-local/givenergy-local-update.sh": "../scripts/pi/givenergy-local-update.sh",
+          "/usr/lib/systemd/system/givenergy-local-update.service": "../scripts/pi/systemd/givenergy-local-update.service",
+          "/usr/lib/systemd/system/givenergy-local-update.timer": "../scripts/pi/systemd/givenergy-local-update.timer"
         }
       },
       "rpm": {

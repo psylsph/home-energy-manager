@@ -1,0 +1,16 @@
+[Unit]
+Description=Weekly Home Energy Manager update check
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+# Opt-in: nothing enables this timer for you. Turn it on with
+#   sudo systemctl enable --now givenergy-local-update.timer
+# and check on it with
+#   systemctl list-timers givenergy-local-update.timer
+#   journalctl -u givenergy-local-update.service
