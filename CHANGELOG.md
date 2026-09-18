@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.6] - 2026-09-18
+
 ### Added
 
 - **Headless installs can now update themselves in one command.** The Debian package ships `givenergy-local-update`, which downloads the latest release, checks it against the published digest, restarts the service, and puts the previous version back if the new one will not start. Turn the weekly timer on with `sudo systemctl enable --now givenergy-local-update.timer` and it keeps itself current, or leave it off and run the command when the dashboard reports a new release (#315).
