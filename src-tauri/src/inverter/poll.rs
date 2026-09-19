@@ -1377,13 +1377,12 @@ pub(crate) async fn clear_confirmed_force_restorations(
             // discharge flag; do not require a nonexistent revert.
             !snapshot.enable_discharge && snapshot.battery_power_mode == 1,
             |revert| {
-                crate::server::api::snapshot_matches_writes(
-                    snapshot,
-                    &crate::server::api::build_force_discharge_stop_writes(
-                        request.device_type,
-                        revert,
-                    ),
-                )
+                let writes = crate::server::api::build_force_discharge_stop_writes(
+                    snapshot.device_type,
+                    &snapshot.firmware_version,
+                    revert,
+                );
+                !writes.is_empty() && crate::server::api::snapshot_matches_writes(snapshot, &writes)
             },
         );
         if snapshot_ts_ms > request.requested_at_ms
@@ -1516,10 +1515,13 @@ async fn retry_stalled_force_restorations_at(state: &Arc<AppState>, now_ms: i64)
                 );
             }
             (true, Some(revert)) => {
-                let writes = crate::server::api::build_force_discharge_stop_writes(
-                    request.device_type,
-                    &revert,
-                );
+                let writes = snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
+                    crate::server::api::build_force_discharge_stop_writes(
+                        snapshot.device_type,
+                        &snapshot.firmware_version,
+                        &revert,
+                    )
+                });
                 if let Err(error) = state
                     .command_ledger
                     .hold_restoration_ownership("force_discharge")
@@ -1571,8 +1573,11 @@ async fn clear_confirmed_pause_restoration(state: &Arc<AppState>, snapshot: &Inv
             .restoration_requested_at_ms
             .is_some_and(|requested| snapshot_ts_ms > requested)
         && snapshot.battery_pause_mode_raw == Some(revert.battery_pause_mode)
-        && snapshot.battery_pause_slot_start_raw == Some(revert.battery_pause_slot_start)
-        && snapshot.battery_pause_slot_end_raw == Some(revert.battery_pause_slot_end)
+        && (!revert
+            .device_type
+            .supports_pause_registers(revert.firmware_version.parse::<u16>().unwrap_or(0))
+            || (snapshot.battery_pause_slot_start_raw == Some(revert.battery_pause_slot_start)
+                && snapshot.battery_pause_slot_end_raw == Some(revert.battery_pause_slot_end)))
         && snapshot.battery_pause_registers_observed_at == Some(snapshot.timestamp)
         && force_baseline_matches_inverter(
             Some(snapshot),
@@ -1644,6 +1649,32 @@ async fn expire_native_pause_if_needed_at(
             }
             return;
         }
+        // Same-serial model refinement is normally safe for the shared
+        // control register family, but a mode-only pause baseline is more
+        // specific: AC3 Mk2 does not have confirmed HR318 support. Do not
+        // derive a mode-only restoration from the captured AC3 model when the
+        // current snapshot cannot safely accept HR318. Likewise, a current
+        // model must retain full-window support before receiving HR319/320.
+        let baseline_needs_window = revert
+            .device_type
+            .supports_pause_registers(revert.firmware_version.parse::<u16>().unwrap_or(0));
+        let current_supports_baseline = if baseline_needs_window {
+            snapshot
+                .device_type
+                .supports_pause_registers(snapshot.firmware_version.parse::<u16>().unwrap_or(0))
+        } else {
+            snapshot
+                .device_type
+                .supports_pause_mode(snapshot.firmware_version.parse::<u16>().unwrap_or(0))
+        };
+        if !current_supports_baseline {
+            tracing::warn!(
+                captured = ?revert.device_type,
+                current = ?snapshot.device_type,
+                "Native pause restoration withheld: current inverter lacks the captured pause capability"
+            );
+            return;
+        }
         if (!revert.restoring && now_ms < revert.expires_at_ms)
             || (revert.restoring
                 && !revert.restoration_requested_at_ms.is_none_or(|requested| {
@@ -1668,10 +1699,13 @@ async fn expire_native_pause_if_needed_at(
             tracing::warn!("Could not hold pause restoration ownership: {error}");
         }
     }
-    let writes = crate::server::api::build_pause_mode_writes(
+    let writes = crate::server::api::build_pause_mode_writes_for_slots(
         baseline.battery_pause_mode,
         baseline.battery_pause_slot_start,
         baseline.battery_pause_slot_end,
+        baseline
+            .device_type
+            .supports_pause_registers(baseline.firmware_version.parse::<u16>().unwrap_or(0)),
     );
     if equivalent_batch_pending(state, &writes, DischargeControlOwner::ExplicitPause).await {
         tracing::debug!("Pause restoration retry skipped: an identical batch is still queued");
@@ -4697,6 +4731,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 });
                                             let writes = crate::server::api::build_force_discharge_stop_writes(
                                                 snapshot.device_type,
+                                                &snapshot.firmware_version,
                                                 &r,
                                             );
                                             if !writes.is_empty() {
@@ -9876,6 +9911,176 @@ mod tests {
             expire_native_pause_if_needed_at(&state, &pause_test_snapshot(), FIXED_NOW_MS).await;
 
             assert_eq!(state.pending_writes.lock().await.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ac3_pause_expiry_restoration_writes_hr318_only() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.pause_mode_revert.lock().await = Some(PauseModeRevert {
+                started_at_ms: 1_000,
+                expires_at_ms: 2_000,
+                command_id: None,
+                restoring: true,
+                restoration_requested_at_ms: Some(FIXED_NOW_MS - 31_000),
+                external_owner: Some("fp".into()),
+                device_type: DeviceType::ACCoupled,
+                inverter_serial: "AC3-TEST".into(),
+                firmware_version: "400".into(),
+                requested_mode: 2,
+                requested_slot_start: 0,
+                requested_slot_end: 0,
+                battery_pause_mode: 0,
+                battery_pause_slot_start: 2461,
+                battery_pause_slot_end: 9999,
+                registers_observed_at: 1_000,
+            });
+
+            let snapshot = InverterSnapshot {
+                device_type: DeviceType::ACCoupled,
+                inverter_serial: "AC3-TEST".into(),
+                firmware_version: "400".into(),
+                ..Default::default()
+            };
+            expire_native_pause_if_needed_at(&state, &snapshot, FIXED_NOW_MS).await;
+
+            let batch = state.pending_writes.lock().await.pop().unwrap();
+            assert_eq!(
+                batch
+                    .writes
+                    .iter()
+                    .map(|write| (write.address, write.value))
+                    .collect::<Vec<_>>(),
+                vec![(318, 0)]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ac3_pause_expiry_withholds_restore_after_unsupported_model_refinement() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.pause_mode_revert.lock().await = Some(PauseModeRevert {
+                started_at_ms: 1_000,
+                expires_at_ms: 2_000,
+                command_id: None,
+                restoring: true,
+                restoration_requested_at_ms: Some(FIXED_NOW_MS - 31_000),
+                external_owner: Some("fp".into()),
+                device_type: DeviceType::ACCoupled,
+                inverter_serial: "AC3-TEST".into(),
+                firmware_version: "400".into(),
+                requested_mode: 2,
+                requested_slot_start: 0,
+                requested_slot_end: 0,
+                battery_pause_mode: 0,
+                battery_pause_slot_start: 0,
+                battery_pause_slot_end: 0,
+                registers_observed_at: 1_000,
+            });
+
+            // Same serial and the same single-phase register family still
+            // pass the identity refinement, but AC3 Mk2 has no confirmed
+            // HR318 capability and must not receive the captured HR318 write.
+            let snapshot = InverterSnapshot {
+                device_type: DeviceType::ACCoupledMk2,
+                inverter_serial: "AC3-TEST".into(),
+                firmware_version: "400".into(),
+                ..Default::default()
+            };
+            expire_native_pause_if_needed_at(&state, &snapshot, FIXED_NOW_MS).await;
+
+            assert!(
+                state.pending_writes.lock().await.is_empty(),
+                "mode-only restoration must be withheld on a model without HR318 support"
+            );
+            assert!(
+                state.pause_mode_revert.lock().await.is_some(),
+                "the baseline must remain owned for a later verified restoration"
+            );
+        })
+        .await;
+    }
+
+    /// Mode-only restoration confirmation: an ACCoupled baseline carries no
+    /// usable HR319/320 window (its raw values are junk), so confirmation
+    /// must rest on the fresh HR318 read alone. Applying the full-window
+    /// slot comparison here would wedge AC3 pause ownership forever.
+    #[tokio::test]
+    async fn ac3_pause_restoration_confirms_on_fresh_hr318_read_only() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let now_ms = FIXED_NOW_MS;
+            let command_id = match state
+                .command_ledger
+                .reserve_pause_start(
+                    "fp",
+                    "pause_discharge",
+                    "discharge",
+                    30,
+                    "ac3-confirm-key",
+                    now_ms - 31 * 60_000,
+                )
+                .unwrap()
+            {
+                crate::server::external_commands::Reservation::Accepted { command_id } => {
+                    command_id
+                }
+                other => panic!("expected accepted, got {other:?}"),
+            };
+            let revert = PauseModeRevert {
+                started_at_ms: now_ms - 31 * 60_000,
+                expires_at_ms: now_ms - 60_000,
+                command_id: Some(command_id.clone()),
+                restoring: true,
+                restoration_requested_at_ms: Some(now_ms - 31_000),
+                external_owner: Some("fp".into()),
+                device_type: DeviceType::ACCoupled,
+                inverter_serial: "AC3-TEST".into(),
+                firmware_version: "400".into(),
+                requested_mode: 2,
+                requested_slot_start: 0,
+                requested_slot_end: 0,
+                battery_pause_mode: 0,
+                battery_pause_slot_start: 2461,
+                battery_pause_slot_end: 9999,
+                registers_observed_at: now_ms - 32 * 60_000,
+            };
+            *state.pause_mode_revert.lock().await = Some(revert.clone());
+            state
+                .command_ledger
+                .record_recovery(&command_id, &serde_json::to_string(&revert).unwrap())
+                .unwrap();
+            state
+                .command_ledger
+                .mark_state(&command_id, "queued")
+                .unwrap();
+
+            // A causally fresh snapshot whose HR318 readback matches the
+            // baseline confirms the restoration even though the HR319/320
+            // raw values cannot match: they were never part of the AC3
+            // baseline or the restoration contract.
+            let mut snapshot = InverterSnapshot {
+                device_type: DeviceType::ACCoupled,
+                inverter_serial: "AC3-TEST".into(),
+                firmware_version: "400".into(),
+                battery_pause_mode_raw: Some(0),
+                battery_pause_slot_start_raw: None,
+                battery_pause_slot_end_raw: None,
+                timestamp: (now_ms / 1000) + 1,
+                ..Default::default()
+            };
+            snapshot.battery_pause_registers_observed_at = Some(snapshot.timestamp);
+            clear_confirmed_pause_restoration(&state, &snapshot).await;
+
+            assert!(state.pause_mode_revert.lock().await.is_none());
+            assert!(!state
+                .command_ledger
+                .has_active_start("pause_discharge")
+                .unwrap());
         })
         .await;
     }

@@ -98,6 +98,19 @@ pub enum ExternalControlOperation {
     PauseBoth,
 }
 
+/// Which parts of the native battery-pause register family are safe to use.
+///
+/// Legacy AC-coupled AC3 units expose HR318, but their Gen1 firmware ignores or
+/// rejects the HR319/320 window registers. They can therefore use a HEM-timed
+/// mode-only pause, while the other confirmed families can use the inverter's
+/// native pause window as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseRegisterSupport {
+    Unsupported,
+    ModeOnly,
+    ModeAndWindow,
+}
+
 /// Inverter hardware variant, read from holding register HR(0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceType {
@@ -580,55 +593,47 @@ impl DeviceType {
         )
     }
 
-    /// Whether this device supports the portal-style single-slot "Timed
-    /// Discharge" feature, implemented via the battery pause registers
-    /// (`battery_pause_mode` HR 318, `battery_pause_slot` HR 319-320).
+    /// Return the confirmed native battery-pause capability for this model.
     ///
-    /// Those registers live in the HR 300-359 AC-config block. In practice,
-    /// the full timed slot (HR319/320) is confirmed on AC-three-phase and
-    /// residential All-in-One models; legacy AC-coupled models may accept
-    /// HR318 but reject HR319/320 with Modbus exception 1, so they are gated
-    /// out until a safe slot-writing path is confirmed. On every other family
-    /// (DC hybrids incl. Gen1/2/3/4, Polar,
-    /// Gen3+, pure three-phase, AIO Commercial, AIO Hybrid, HV Gen3,
-    /// Gateway, EMS, PV inverter) the block is absent, so the pause
-    /// registers can neither be written nor read back — the toggle would
-    /// silently do nothing and never reflect an enabled state (the exact
-    /// symptom reported on Gen1 Hybrid). GivTCP independently confirms the
-    /// pause slots are absent on the Gen1 Hybrid (`read.py:573`).
-    ///
-    /// The supported set intentionally differs from [`DeviceType::supports_eps`]:
-    /// AC-coupled models expose EPS / HR317, but field logs show HR319/320 are
-    /// rejected for Timed Discharge slot writes.
-    ///
-    /// Used by `set_timed_discharge` to refuse the write with HTTP 400 and
-    /// by the frontend to hide both the Quick Action button and the Timed
-    /// Discharge schedule section.
-    ///
-    /// `arm_fw` is the ARM firmware version (HR 21) — only consulted for the
-    /// Gen3 Hybrid case below; ignored for the AC/AIO families which carry
-    /// the pause registers unconditionally.
-    ///
-    /// Gen3 Hybrid (DTC 0x2001/0x2003, ARM fw century 3) is a deliberate
-    /// exception: the full HR 300-359 AC-config block times out on this
-    /// family (#162 / commit fdd8272), so it never appears in
-    /// `extra_poll_blocks`. But a targeted 3-register read of HR 318-320
-    /// succeeds on ARM firmware >= 312 (reported working on fw 318), so the
-    /// feature is enabled there via a dedicated probe in `poll.rs` rather
-    /// than the block poll. Older Gen3 firmware (< 312) is gated out until
-    /// confirmed.
-    /// Whether the native pause register set (HR 318-320) is confirmed for
-    /// this exact model and firmware. Keep every consumer on this single
-    /// boundary so polling, dashboard Timed Discharge, and authenticated
-    /// control cannot drift into contradictory safety decisions.
-    pub fn supports_pause_registers(&self, arm_fw: u16) -> bool {
+    /// The dashboard Timed Discharge feature requires the full HR318-320
+    /// window. The authenticated API can additionally use a HEM-timed,
+    /// HR318-only pause on the legacy AC3. Gen3 Hybrid is probed separately
+    /// because its full AC-config block is not readable on older dongles.
+    pub fn pause_register_support(&self, arm_fw: u16) -> PauseRegisterSupport {
         if matches!(
             self,
             Self::ACThreePhase | Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW
         ) {
-            return true;
+            return PauseRegisterSupport::ModeAndWindow;
         }
-        matches!(self, Self::Gen3Hybrid) && arm_fw >= 312
+        if matches!(self, Self::Gen3Hybrid) && arm_fw >= 312 {
+            return PauseRegisterSupport::ModeAndWindow;
+        }
+        if matches!(self, Self::ACCoupled) {
+            return PauseRegisterSupport::ModeOnly;
+        }
+        PauseRegisterSupport::Unsupported
+    }
+
+    /// Whether this device supports writing the native pause mode (HR318).
+    pub fn supports_pause_mode(&self, arm_fw: u16) -> bool {
+        !matches!(
+            self.pause_register_support(arm_fw),
+            PauseRegisterSupport::Unsupported
+        )
+    }
+
+    /// Whether this device supports the full portal-style pause window
+    /// (`battery_pause_mode` HR318 plus `battery_pause_slot` HR319-320).
+    ///
+    /// This remains the capability used by the dashboard Timed Discharge
+    /// controls. Legacy AC-coupled AC3 units deliberately return false: field
+    /// evidence shows HR319/320 can be rejected even though HR318 works.
+    pub fn supports_pause_registers(&self, arm_fw: u16) -> bool {
+        matches!(
+            self.pause_register_support(arm_fw),
+            PauseRegisterSupport::ModeAndWindow
+        )
     }
 
     /// Whether an authenticated battery-control operation is confirmed safe
@@ -653,7 +658,7 @@ impl DeviceType {
             }
             ExternalControlOperation::PauseCharge
             | ExternalControlOperation::PauseDischarge
-            | ExternalControlOperation::PauseBoth => self.supports_pause_registers(arm_fw),
+            | ExternalControlOperation::PauseBoth => self.supports_pause_mode(arm_fw),
         }
     }
 
@@ -2178,6 +2183,16 @@ mod tests {
         // for the full pause slot (HR 318-320). arm_fw is ignored for these.
         assert!(!DeviceType::ACCoupled.supports_timed_discharge(0));
         assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(0));
+        assert!(DeviceType::ACCoupled.supports_pause_mode(0));
+        assert!(!DeviceType::ACCoupledMk2.supports_pause_mode(0));
+        for operation in [
+            ExternalControlOperation::PauseCharge,
+            ExternalControlOperation::PauseDischarge,
+            ExternalControlOperation::PauseBoth,
+        ] {
+            assert!(DeviceType::ACCoupled.supports_external_control(operation, 0));
+            assert!(!DeviceType::ACCoupledMk2.supports_external_control(operation, 0));
+        }
         assert!(DeviceType::ACThreePhase.supports_timed_discharge(0));
         assert!(DeviceType::AllInOne6kW.supports_timed_discharge(0));
         assert!(DeviceType::AllInOne3_6kW.supports_timed_discharge(0));
@@ -2240,6 +2255,19 @@ mod tests {
 
     #[test]
     fn native_pause_capabilities_share_the_timed_discharge_register_boundary() {
+        assert_eq!(
+            DeviceType::ACCoupled.pause_register_support(0),
+            PauseRegisterSupport::ModeOnly
+        );
+        assert_eq!(
+            DeviceType::ACThreePhase.pause_register_support(0),
+            PauseRegisterSupport::ModeAndWindow
+        );
+        assert_eq!(
+            DeviceType::Gen2Hybrid.pause_register_support(0),
+            PauseRegisterSupport::Unsupported
+        );
+
         let always_supported = [
             DeviceType::ACThreePhase,
             DeviceType::AllInOne6kW,
@@ -2259,6 +2287,7 @@ mod tests {
                 device.supports_pause_registers(0),
                 device.supports_timed_discharge(0)
             );
+            assert!(device.supports_pause_mode(0));
         }
 
         for firmware in [311, 312] {

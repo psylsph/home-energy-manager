@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.83.7] - 2026-09-19
+
+### Added
+
+- **Authenticated battery pause now works on legacy AC3 inverters.** HEM pauses the battery directly on this hardware, owns the finite pause timer itself, and no longer refuses the action because the newer schedule registers are unusable there.
+
 ## [0.83.6] - 2026-09-18
 
 ### Added

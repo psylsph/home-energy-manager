@@ -2065,9 +2065,17 @@ fn is_in_export_window(slots: &[ScheduleSlot], minute_of_day: u16) -> bool {
 /// An unconfigured pause slot (disabled or zero-length) blocks nothing:
 /// the full day is the allowed demand window. HR318=1 (pause charging
 /// only) never blocks discharge.
+///
+/// Exception — legacy AC-coupled AC3 (0x3001): its Gen1 firmware ignores
+/// or rejects the HR319/320 window registers, so an armed mode 2/3 pause
+/// blocks discharge for as long as the mode is set, with no usable window.
+/// The authenticated pause API relies on exactly this mode-only contract.
 pub fn hr318_blocks_discharge(snapshot: &InverterSnapshot, minute_of_day: u16) -> bool {
     match snapshot.battery_pause_mode {
         2 | 3 => {
+            if matches!(snapshot.device_type, DeviceType::ACCoupled) {
+                return true;
+            }
             let slot = &snapshot.battery_pause_slot;
             if !slot.enabled {
                 return false;
@@ -6657,7 +6665,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!hr318_blocks_discharge(&snap, 12 * 60));
-
         // Zero-length pause window also blocks nothing
         let snap = InverterSnapshot {
             battery_pause_mode: 2,
@@ -6669,6 +6676,92 @@ mod tests {
                 end_minute: 0,
                 target_soc: 4,
             },
+            ..Default::default()
+        };
+        assert!(!hr318_blocks_discharge(&snap, 12 * 60));
+    }
+
+    /// Legacy AC-coupled AC3 (0x3001) honours HR318 alone: its Gen1
+    /// firmware ignores or rejects the HR319/320 window registers, so an
+    /// armed mode 2/3 pause blocks discharge regardless of the (unusable)
+    /// pause slot. Window-capable families keep the existing semantics.
+    #[test]
+    fn hr318_mode_only_ac3_blocks_discharge_without_a_usable_window() {
+        let disabled_slot = ScheduleSlot::default();
+        // A junk slot the AC3 decoder would reject as an invalid HHMM window:
+        // the window logic alone would never block, but the armed mode must.
+        let junk_slot = ScheduleSlot {
+            enabled: true,
+            start_hour: 24,
+            start_minute: 61,
+            end_hour: 99,
+            end_minute: 99,
+            target_soc: 4,
+        };
+
+        let snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            battery_pause_mode: 2,
+            battery_pause_slot: disabled_slot.clone(),
+            ..Default::default()
+        };
+        assert!(hr318_blocks_discharge(&snap, 12 * 60));
+
+        let snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            battery_pause_mode: 2,
+            battery_pause_slot: junk_slot.clone(),
+            ..Default::default()
+        };
+        assert!(hr318_blocks_discharge(&snap, 12 * 60));
+
+        // Mode 3 (pause both) blocks discharge the same way.
+        let snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            battery_pause_mode: 3,
+            battery_pause_slot: disabled_slot.clone(),
+            ..Default::default()
+        };
+        assert!(hr318_blocks_discharge(&snap, 12 * 60));
+    }
+
+    #[test]
+    fn hr318_mode_only_blocking_is_gated_to_confirmed_ac3_models_and_modes() {
+        let disabled_slot = ScheduleSlot::default();
+
+        // AC3 Mk2 has no confirmed HR318 path: nothing blocks discharge.
+        let snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupledMk2,
+            battery_pause_mode: 2,
+            battery_pause_slot: disabled_slot.clone(),
+            ..Default::default()
+        };
+        assert!(!hr318_blocks_discharge(&snap, 12 * 60));
+
+        // Mode 1 pauses charging only; discharge is never blocked.
+        let snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            battery_pause_mode: 1,
+            battery_pause_slot: disabled_slot.clone(),
+            ..Default::default()
+        };
+        assert!(!hr318_blocks_discharge(&snap, 12 * 60));
+
+        // Mode 0 (no pause) blocks nothing, even on AC3.
+        let snap = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            battery_pause_mode: 0,
+            battery_pause_slot: disabled_slot.clone(),
+            ..Default::default()
+        };
+        assert!(!hr318_blocks_discharge(&snap, 12 * 60));
+
+        // A window-capable family keeps its window-based behaviour: an
+        // unconfigured pause slot blocks nothing.
+        let snap = InverterSnapshot {
+            device_type: DeviceType::ACThreePhase,
+            battery_pause_mode: 2,
+            battery_pause_slot: disabled_slot.clone(),
             ..Default::default()
         };
         assert!(!hr318_blocks_discharge(&snap, 12 * 60));

@@ -612,11 +612,35 @@ impl CommandLedger {
     /// Record the recovery baseline captured for a start (serialized revert
     /// snapshot) so a restart can reconcile instead of guessing.
     pub fn record_recovery(&self, command_id: &str, recovery_json: &str) -> Result<(), String> {
+        let mode_only_pause = serde_json::from_str::<Value>(recovery_json)
+            .ok()
+            .and_then(|recovery| {
+                let device_type = serde_json::from_value::<crate::inverter::model::DeviceType>(
+                    recovery.get("device_type")?.clone(),
+                )
+                .ok()?;
+                let firmware = recovery
+                    .get("firmware_version")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .unwrap_or(0);
+                Some(matches!(
+                    device_type.pause_register_support(firmware),
+                    crate::inverter::model::PauseRegisterSupport::ModeOnly
+                ))
+            })
+            .unwrap_or(false);
         self.with_connection(|connection| {
             connection
                 .execute(
-                    "UPDATE external_commands SET recovery = ?2 WHERE id = ?1",
-                    params![command_id, recovery_json],
+                    "UPDATE external_commands
+                     SET recovery = ?2,
+                         recovery_pending = CASE
+                             WHEN ?3 AND is_start = 1
+                               AND action IN ('pause_charge','pause_discharge','pause_both')
+                             THEN 1 ELSE recovery_pending END
+                     WHERE id = ?1",
+                    params![command_id, recovery_json, mode_only_pause],
                 )
                 .map_err(|e| format!("recovery write failed: {e}"))?;
             Ok(())
@@ -771,17 +795,35 @@ impl CommandLedger {
                     let expected_device = target
                         .get("device_type")
                         .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok());
+                        .and_then(|value| {
+                            serde_json::from_value::<crate::inverter::model::DeviceType>(value).ok()
+                        });
                     let expected_serial = target.get("inverter_serial").and_then(Value::as_str);
+                    let firmware = target
+                        .get("firmware_version")
+                        .and_then(Value::as_str)
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .unwrap_or(0);
+                    let slots_match = match expected_device {
+                        Some(device) => match device.pause_register_support(firmware) {
+                            crate::inverter::model::PauseRegisterSupport::ModeAndWindow => {
+                                evidence.pause_slot_start == Some(start)
+                                    && evidence.pause_slot_end == Some(end)
+                            }
+                            crate::inverter::model::PauseRegisterSupport::ModeOnly => true,
+                            crate::inverter::model::PauseRegisterSupport::Unsupported => false,
+                        },
+                        None => false,
+                    };
                     // Firmware updates do not identify a different inverter;
                     // the raw pause registers plus serial/device identity are
-                    // the stable restoration evidence.
+                    // the stable restoration evidence. Legacy AC3 has no safe
+                    // HR319/320 path, so HR318 is the complete evidence set.
                     evidence.pause_registers_observed_at_ms == Some(evidence.snapshot_ts_ms)
                         && expected_device == Some(evidence.device_type)
                         && expected_serial == Some(evidence.inverter_serial)
                         && evidence.pause_mode == Some(mode)
-                        && evidence.pause_slot_start == Some(start)
-                        && evidence.pause_slot_end == Some(end)
+                        && slots_match
                 };
                 let active: Option<bool> = match action.as_str() {
                     "force_charge" => evidence.charge_active,
@@ -867,12 +909,14 @@ impl CommandLedger {
                                 ) && {
                                     let writes = crate::server::api::build_force_discharge_stop_writes(
                                         evidence.device_type,
+                                        evidence.firmware_version,
                                         &revert,
                                     );
-                                    crate::server::api::snapshot_matches_writes(
-                                        evidence.snapshot,
-                                        &writes,
-                                    )
+                                    !writes.is_empty()
+                                        && crate::server::api::snapshot_matches_writes(
+                                            evidence.snapshot,
+                                            &writes,
+                                        )
                                 }
                             },
                         ),
@@ -3206,6 +3250,168 @@ mod tests {
         );
         assert!(!ledger.has_active_start("pause_both").unwrap());
         assert!(ledger.active_recoveries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ac3_pause_readback_requires_only_hr318() {
+        let ledger = isolated_ledger();
+        let command_id = match ledger
+            .reserve_start("fp", "pause_discharge", 30, "ac3-pause-key-1", 1_000)
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        ledger.mark_state(&command_id, "queued").unwrap();
+        ledger
+            .record_recovery(
+                &command_id,
+                r#"{"requested_mode":2,"requested_slot_start":0,"requested_slot_end":0,
+                    "device_type":"ACCoupled","inverter_serial":"AC3-TEST","firmware_version":"400"}"#,
+            )
+            .unwrap();
+        ledger
+            .advance_readback(&pause_evidence(
+                2_000,
+                Some(2_000),
+                "AC3-TEST",
+                "400",
+                crate::inverter::model::DeviceType::ACCoupled,
+                2,
+                2461,
+                9999,
+            ))
+            .unwrap();
+        assert_eq!(
+            ledger.get(&command_id).unwrap().unwrap().state,
+            "readback_confirmed"
+        );
+
+        let stop_id = match ledger
+            .reserve_stop("fp", "pause_mode", "ac3-pause-key-2", 3_000)
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        ledger
+            .record_recovery(
+                &stop_id,
+                r#"{"battery_pause_mode":0,"battery_pause_slot_start":0,"battery_pause_slot_end":0,
+                    "device_type":"ACCoupled","inverter_serial":"AC3-TEST","firmware_version":"400"}"#,
+            )
+            .unwrap();
+        ledger
+            .advance_readback(&pause_evidence(
+                4_000,
+                Some(4_000),
+                "AC3-TEST",
+                "400",
+                crate::inverter::model::DeviceType::ACCoupled,
+                0,
+                1234,
+                9999,
+            ))
+            .unwrap();
+        assert_eq!(
+            ledger.get(&stop_id).unwrap().unwrap().state,
+            "readback_confirmed"
+        );
+    }
+
+    #[test]
+    fn ac3_mode_only_recovery_survives_long_restart_until_restored() {
+        let ledger = isolated_ledger();
+        let started_at = FIXED_NOW_MS;
+        let command_id = match ledger
+            .reserve_pause_start(
+                "fp",
+                "pause_discharge",
+                "discharge",
+                30,
+                "ac3-long-restart",
+                started_at,
+            )
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        let recovery = r#"{"device_type":"ACCoupled","firmware_version":"400","inverter_serial":"AC3-TEST","requested_mode":2,"requested_slot_start":0,"requested_slot_end":0}"#;
+        ledger.record_recovery(&command_id, recovery).unwrap();
+        ledger.mark_state(&command_id, "queued").unwrap();
+        ledger
+            .advance_readback(&pause_evidence(
+                started_at + 1_000,
+                Some(started_at + 1_000),
+                "AC3-TEST",
+                "400",
+                crate::inverter::model::DeviceType::ACCoupled,
+                2,
+                0,
+                0,
+            ))
+            .unwrap();
+        assert_eq!(
+            ledger.get(&command_id).unwrap().unwrap().state,
+            "readback_confirmed"
+        );
+        ledger
+            .with_connection(|connection| {
+                connection
+                    .execute(
+                        "UPDATE external_commands SET updated_ms = ?2 WHERE id = ?1",
+                        params![command_id, started_at + 1_000],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        let after_restart = started_at + RETENTION_MS + 60_000;
+        assert_eq!(
+            ledger.active_recoveries_at(after_restart).unwrap(),
+            vec![("pause_discharge".to_string(), recovery.to_string())]
+        );
+        assert!(ledger.recovery_pending_for_test(&command_id).unwrap());
+
+        ledger.clear_recovery(&command_id).unwrap();
+        assert!(ledger
+            .active_recoveries_at(after_restart)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn pause_readback_rejects_hr318_for_unconfirmed_ac_coupled() {
+        let ledger = isolated_ledger();
+        let command_id = match ledger
+            .reserve_start("fp", "pause_discharge", 30, "ac3-unsupported-key", 1_000)
+            .unwrap()
+        {
+            Reservation::Accepted { command_id } => command_id,
+            other => panic!("expected accepted, got {other:?}"),
+        };
+        ledger.mark_state(&command_id, "queued").unwrap();
+        ledger
+            .record_recovery(
+                &command_id,
+                r#"{"requested_mode":2,"requested_slot_start":0,"requested_slot_end":0,
+                    "device_type":"ACCoupledMk2","inverter_serial":"AC3-TEST","firmware_version":"400"}"#,
+            )
+            .unwrap();
+        ledger
+            .advance_readback(&pause_evidence(
+                2_000,
+                Some(2_000),
+                "AC3-TEST",
+                "400",
+                crate::inverter::model::DeviceType::ACCoupledMk2,
+                2,
+                2461,
+                9999,
+            ))
+            .unwrap();
+        assert_eq!(ledger.get(&command_id).unwrap().unwrap().state, "queued");
     }
 
     #[test]

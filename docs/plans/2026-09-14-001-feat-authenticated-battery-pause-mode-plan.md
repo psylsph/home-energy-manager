@@ -94,13 +94,12 @@ Create one model-aware capability source used by every authenticated mutation ro
 - native Pause Discharge support
 - native Pause Both support
 
-Refactor the existing `supports_timed_discharge(arm_fw)` boundary into a shared HR318-320 register capability so Timed Discharge and external pause cannot maintain conflicting model lists. Mode support remains explicit: proof of mode 2 does not automatically prove modes 1 and 3.
+Refactor the existing `supports_timed_discharge(arm_fw)` boundary into a shared native-pause capability source so Timed Discharge and external pause cannot maintain conflicting model lists. Distinguish HR318 mode support from the full HR318-320 window: mode support remains explicit, and proof of one pause mode does not automatically prove modes 1 and 3.
 
-The existing confirmed HR318-320 boundary includes:
+The confirmed native-pause families are:
 
-- AC Three Phase
-- All-in-One 3.6 kW, 5 kW, and 6 kW
-- Gen3 Hybrid with ARM firmware 312 or newer
+- **Mode and window:** AC Three Phase; All-in-One 3.6 kW, 5 kW, and 6 kW; Gen3 Hybrid with ARM firmware 312 or newer.
+- **Mode only:** legacy AC-coupled AC3 (`0x3001`), where HR318 works but HR319/320 are ignored or rejected. The authenticated API owns the finite timer for this path; dashboard Timed Discharge remains unavailable because it needs the inverter-side window.
 
 Enable each pause mode only on model/firmware rows where that mode is confirmed. Derive Force support from the model-routed writes HEM already knows how to encode safely, then explicitly refuse families without a valid write and readback path. Every unsupported Start or Stop returns `422 unsupported_control`. Future inverter support requires an explicit capability entry and tests, not handler changes.
 
@@ -125,28 +124,32 @@ Before queueing Start:
 1. Authenticate, authorize, and validate the request.
 2. Resolve a connected, fresh model/firmware snapshot and run the shared capability gate. Return `422 unsupported_control` if the known inverter does not support the operation, or `503 state_unavailable` if support cannot be determined.
 3. Reserve the idempotent command.
-4. Require a valid inverter clock; do not fall back to host time.
-5. Require a successful fresh read of HR318-320.
-6. Capture raw HR318, HR319, and HR320 plus inverter serial, device type, firmware, and read generation.
+4. For full-window models, require a valid inverter clock; do not fall back to host time. AC3 mode-only pauses use HEM's finite timer and do not need the inverter clock.
+5. Require a successful fresh read of HR318. Full-window models additionally require HR319-320.
+6. Capture the raw registers supported by that capability plus inverter serial, device type, firmware, and read generation.
 7. Persist that restore point before queueing writes.
 
 The snapshot must retain raw pause-register values. The decoded `ScheduleSlot` is lossy and cannot be used as the restore point. Carried-forward register values cannot capture or confirm an action.
 
 ### Write
 
-For Start, calculate a finite pause window from the inverter's current minute and duration, including midnight wrap. Queue one fail-fast owned batch in this order:
+For full-window models, calculate a finite pause window from the inverter's current minute and duration, including midnight wrap. Queue one fail-fast owned batch in this order:
 
 1. HR319 pause start
 2. HR320 pause end
 3. HR318 pause mode
 
-The batch carries its command ID and raw rollback values. If a slot write fails after an earlier write succeeded, the poll loop restores the captured raw values and never attempts HR318. Failed rollback remains recoverable through Stop; it must not discard the restore point.
+For AC3 mode-only control, queue only HR318 and let HEM's duration timer trigger restoration. The batch carries its command ID and raw rollback values. If a full-window slot write fails after an earlier write succeeds, the poll loop restores the captured raw values and never attempts HR318. Failed rollback remains recoverable through Stop; it must not discard the restore point.
 
 ### Restore
 
-Stop and expiry restore raw HR319/320 first and HR318 last, following the existing pause restoration invariant. Ownership is released only after a newer successful read confirms all three raw values.
+Stop and expiry restore the captured registers supported by the capability, writing HR319/320 first and HR318 last when a window exists. AC3 restores only HR318. Ownership is released only after a newer successful read confirms every write in the selected path.
 
 Persist the pause restore data using the existing command-ledger recovery mechanism. Keep an active or recovery-required command exempt from normal terminal-row trimming until restoration is confirmed. On restart, restore only after a fresh snapshot confirms the same inverter identity.
+
+### Deferred review note
+
+The owner accepted the low likelihood of a same-serial model or pause-capability change during an action. Three review findings remain intentionally deferred: Pause Start can use a newer snapshot than its capability check; explicit Stop and failed-start rollback derive writes from the captured model; and restoration readback can clear ownership without checking the current model's pause capability. The automatic expiry writer already checks the current capability. Revisit these paths if the AC3 user reports a pause that will not stop, an unexpected register-write failure, or recovery ownership clearing incorrectly. No change is planned solely for these model-change scenarios.
 
 ### Arbitration
 

@@ -271,6 +271,11 @@ export function inverterMinuteOfDay(snapshot: InverterSnapshot | null | undefine
  * During an enabled Timed Discharge window (the complement of the pause
  * window), HR318 does not block discharge. A misconfigured pause slot
  * (disabled or zero-length) blocks nothing.
+ *
+ * Exception — legacy AC-coupled AC3 (device code 0x3001): its Gen1
+ * firmware ignores or rejects the HR319/320 window registers, so an armed
+ * mode 2/3 pause blocks discharge for as long as the mode is set, with no
+ * usable window. Mirrors the backend's `hr318_blocks_discharge`.
  */
 export function hr318BlocksDischarge(
     snapshot: InverterSnapshot,
@@ -278,6 +283,10 @@ export function hr318BlocksDischarge(
 ): boolean {
     const mode = snapshot.battery_pause_mode;
     if (mode !== 2 && mode !== 3) return false;
+    // AC3 Gen1 (0x3001; the backend maps 0x30xx to AC3 except 0x3002) is
+    // mode-only: the armed mode blocks regardless of the pause slot.
+    const code = snapshot.device_type_code;
+    if (code && code.startsWith('30') && code !== '3002') return true;
     const slot = snapshot.battery_pause_slot;
     if (!slot || !slot.enabled) return false;
     const start = slot.start_hour * 60 + slot.start_minute;
