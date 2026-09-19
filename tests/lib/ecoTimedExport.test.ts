@@ -548,6 +548,77 @@ describe('hr318BlocksDischarge (shared pause-window logic)', () => {
         });
         expect(hr318BlocksDischarge(state, 20 * 60)).toBe(false);
     });
+
+    // Legacy AC-coupled AC3 (device code 0x3001) honours HR318 alone: its
+    // Gen1 firmware ignores or rejects the HR319/320 window registers, so
+    // an armed mode 2/3 pause blocks discharge with no usable window.
+    it('mode-only AC3 blocks discharge regardless of the unusable pause slot', () => {
+        const disabledSlot = slot({ enabled: false });
+        const state = snapshot({
+            device_type_code: '3001',
+            battery_pause_mode: 2,
+            battery_pause_slot: disabledSlot,
+        });
+        expect(hr318BlocksDischarge(state, 16 * 60)).toBe(true);
+        expect(hr318BlocksDischarge(state, 20 * 60)).toBe(true);
+
+        const both = snapshot({
+            device_type_code: '3001',
+            battery_pause_mode: 3,
+            battery_pause_slot: disabledSlot,
+        });
+        expect(hr318BlocksDischarge(both, 16 * 60)).toBe(true);
+    });
+
+    // The mode-only gate mirrors the backend model map: only 0x3001 (AC3
+    // Gen1) is confirmed; other families keep the window-based behaviour.
+    it('mode-only blocking is gated to the confirmed AC3 model and modes', () => {
+        const disabledSlot = slot({ enabled: false });
+        // AC3 Mk2 (3002) has no confirmed HR318 path.
+        expect(
+            hr318BlocksDischarge(
+                snapshot({
+                    device_type_code: '3002',
+                    battery_pause_mode: 2,
+                    battery_pause_slot: disabledSlot,
+                }),
+                16 * 60
+            )
+        ).toBe(false);
+        // Mode 1 pauses charging only.
+        expect(
+            hr318BlocksDischarge(
+                snapshot({
+                    device_type_code: '3001',
+                    battery_pause_mode: 1,
+                    battery_pause_slot: disabledSlot,
+                }),
+                16 * 60
+            )
+        ).toBe(false);
+        // Mode 0 (no pause) blocks nothing, even on AC3.
+        expect(
+            hr318BlocksDischarge(
+                snapshot({
+                    device_type_code: '3001',
+                    battery_pause_mode: 0,
+                    battery_pause_slot: disabledSlot,
+                }),
+                16 * 60
+            )
+        ).toBe(false);
+        // A window-capable family keeps its window-based behaviour.
+        expect(
+            hr318BlocksDischarge(
+                snapshot({
+                    device_type_code: '6001',
+                    battery_pause_mode: 2,
+                    battery_pause_slot: disabledSlot,
+                }),
+                16 * 60
+            )
+        ).toBe(false);
+    });
 });
 
 describe('deriveTimedExportButton (single toggle, dynamic label)', () => {

@@ -230,7 +230,7 @@ External software can use an authenticated integration API for battery status an
 
 For detailed setup, status-field explanations, curl commands, JavaScript/Python examples and troubleshooting, see the [Remote Battery Control API guide](REMOTE_CONTROL.md).
 
-A separate HTTP server (default port **7338**, Bearer-token authenticated) lets external software read inverter data and — with explicit permission — use the app's battery controls, including Force Charge, Force Discharge and finite native Pause windows. The main dashboard server is unchanged by any of this.
+A separate HTTP server (default port **7338**, Bearer-token authenticated) lets external software read inverter data and — with explicit permission — use the app's battery controls, including Force Charge, Force Discharge and finite native Pause windows. Legacy AC3 units use the confirmed HR318-only pause path, with the finite timer enforced by HEM. The main dashboard server is unchanged by any of this.
 
 ### Setup
 

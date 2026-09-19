@@ -196,16 +196,23 @@ async fn require_operation_capability_inner(
         )));
     }
     let firmware = arm_fw.unwrap_or(0);
-    let needs_pause_baseline = matches!(
+    let pause_operation = matches!(
         operation,
-        ExternalControlOperation::ForceDischarge
-            | ExternalControlOperation::PauseCharge
+        ExternalControlOperation::PauseCharge
             | ExternalControlOperation::PauseDischarge
             | ExternalControlOperation::PauseBoth
-    ) && device_type.supports_pause_registers(firmware);
+    );
+    let pause_mode_supported = device_type.supports_pause_mode(firmware);
+    let needs_pause_baseline = (pause_operation
+        || matches!(operation, ExternalControlOperation::ForceDischarge))
+        && pause_mode_supported;
     if require_pause_baseline
         && needs_pause_baseline
-        && snapshot_pause_baseline_unavailable(state).await
+        && snapshot_pause_baseline_unavailable(
+            state,
+            !device_type.supports_pause_registers(firmware),
+        )
+        .await
     {
         return Err(Box::new(capability_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -223,7 +230,7 @@ async fn require_operation_capability_inner(
     Ok(())
 }
 
-async fn snapshot_pause_baseline_unavailable(state: &Arc<AppState>) -> bool {
+async fn snapshot_pause_baseline_unavailable(state: &Arc<AppState>, mode_only: bool) -> bool {
     fn valid_hhmm(value: u16) -> bool {
         let hour = value / 100;
         let minute = value % 100;
@@ -235,16 +242,17 @@ async fn snapshot_pause_baseline_unavailable(state: &Arc<AppState>) -> bool {
         return true;
     };
     snapshot.battery_pause_mode_raw.is_none()
-        || snapshot.battery_pause_slot_start_raw.is_none()
-        || snapshot.battery_pause_slot_end_raw.is_none()
         || snapshot.battery_pause_registers_observed_at != Some(snapshot.timestamp)
         || snapshot.battery_pause_mode_raw.is_some_and(|mode| mode > 3)
-        || snapshot
-            .battery_pause_slot_start_raw
-            .is_some_and(|value| !valid_hhmm(value))
-        || snapshot
-            .battery_pause_slot_end_raw
-            .is_some_and(|value| !valid_hhmm(value))
+        || (!mode_only
+            && (snapshot.battery_pause_slot_start_raw.is_none()
+                || snapshot.battery_pause_slot_end_raw.is_none()
+                || snapshot
+                    .battery_pause_slot_start_raw
+                    .is_some_and(|value| !valid_hhmm(value))
+                || snapshot
+                    .battery_pause_slot_end_raw
+                    .is_some_and(|value| !valid_hhmm(value))))
 }
 
 /// Fail-open audit for denials (no mutation happens, so a failed audit
@@ -716,7 +724,7 @@ async fn run_pause_start(
     }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let (start, end) = {
+    let (start, end, slots_supported) = {
         let snapshot = state.latest_snapshot.lock().await;
         let Some(snapshot) = snapshot.as_ref() else {
             let body = error_body(
@@ -732,26 +740,38 @@ async fn run_pause_start(
             );
             return (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
         };
-        let Some(start_minute) = crate::inverter::state_machines::inverter_minute_of_day(snapshot)
-        else {
-            let body = error_body(
-                "state_unavailable",
-                "The inverter clock is unavailable; pause request refused for safety",
-            );
-            finish_response(
-                &state,
-                &command_id,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "failed",
-                &body,
-            );
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
-        };
-        let end_minute = (start_minute + minutes as u16) % 1440;
-        (
-            (start_minute / 60) * 100 + start_minute % 60,
-            (end_minute / 60) * 100 + end_minute % 60,
-        )
+        let slots_supported = snapshot
+            .device_type
+            .supports_pause_registers(snapshot.firmware_version.parse::<u16>().unwrap_or(0));
+        if !slots_supported {
+            // Legacy AC3 pause is HR318-only. The finite HEM timer supplies the
+            // duration, so an inverter clock and HR319/320 window are neither
+            // required nor written.
+            (0, 0, false)
+        } else {
+            let Some(start_minute) =
+                crate::inverter::state_machines::inverter_minute_of_day(snapshot)
+            else {
+                let body = error_body(
+                    "state_unavailable",
+                    "The inverter clock is unavailable; pause request refused for safety",
+                );
+                finish_response(
+                    &state,
+                    &command_id,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "failed",
+                    &body,
+                );
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+            };
+            let end_minute = (start_minute + minutes as u16) % 1440;
+            (
+                (start_minute / 60) * 100 + start_minute % 60,
+                (end_minute / 60) * 100 + end_minute % 60,
+                true,
+            )
+        }
     };
     let mut revert =
         match api::capture_pause_mode_revert(&state, now_ms, now_ms + (minutes as i64) * 60_000)
@@ -803,7 +823,8 @@ async fn run_pause_start(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
     }
     *state.pause_mode_revert.lock().await = Some(revert.clone());
-    let writes = api::build_pause_mode_writes(mode.register_value(), start, end);
+    let writes =
+        api::build_pause_mode_writes_for_slots(mode.register_value(), start, end, slots_supported);
     let (rx, budget) = api::queue_owned_writes_fail_fast(
         &state,
         writes,
@@ -834,10 +855,13 @@ async fn run_pause_start(
             // The fail-fast batch may have applied its window before failing.
             // Queue exact rollback while retaining pause ownership; the poll
             // loop retries it until fresh exact readback confirms the baseline.
-            let rollback = api::build_pause_mode_writes(
+            let rollback = api::build_pause_mode_writes_for_slots(
                 rollback_revert.battery_pause_mode,
                 rollback_revert.battery_pause_slot_start,
                 rollback_revert.battery_pause_slot_end,
+                rollback_revert.device_type.supports_pause_registers(
+                    rollback_revert.firmware_version.parse::<u16>().unwrap_or(0),
+                ),
             );
             let _ = api::queue_owned_writes_fail_fast(
                 &state,
@@ -1371,10 +1395,13 @@ pub async fn pause_mode_stop(State(state): State<Arc<AppState>>, request: Reques
         );
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
     }
-    let writes = api::build_pause_mode_writes(
+    let writes = api::build_pause_mode_writes_for_slots(
         revert.battery_pause_mode,
         revert.battery_pause_slot_start,
         revert.battery_pause_slot_end,
+        revert
+            .device_type
+            .supports_pause_registers(revert.firmware_version.parse::<u16>().unwrap_or(0)),
     );
     let restoration_recovery = {
         let mut stored = state.pause_mode_revert.lock().await;
@@ -1623,15 +1650,18 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let timestamp = chrono::Utc::now().timestamp();
         *state.latest_snapshot.lock().await = Some(InverterSnapshot {
             // Capability admission compares against the production wall clock;
             // this fixture intentionally represents a fresh read.
-            timestamp: chrono::Utc::now().timestamp(),
+            timestamp,
             device_type: DeviceType::ACCoupled,
             // A real identity, so these tests exercise the identity barrier
             // rather than short-circuiting through the empty-serial path.
             inverter_serial: "HEM-TEST-001".into(),
             firmware_version: "400".into(),
+            battery_pause_mode_raw: Some(0),
+            battery_pause_registers_observed_at: Some(timestamp),
             ..Default::default()
         });
         *state.connection_state.lock().await = ConnectionState::Connected;
@@ -1649,6 +1679,24 @@ mod tests {
         snapshot.battery_pause_mode_raw = Some(0);
         snapshot.battery_pause_slot_start_raw = Some(0);
         snapshot.battery_pause_slot_end_raw = Some(0);
+        snapshot.battery_pause_registers_observed_at = Some(snapshot.timestamp);
+        drop(snapshot_guard);
+        state
+    }
+
+    async fn setup_ac3_mode_only_pause() -> Arc<AppState> {
+        let state = setup(true).await;
+        let mut snapshot_guard = state.latest_snapshot.lock().await;
+        let snapshot = snapshot_guard.as_mut().unwrap();
+        snapshot.device_type = DeviceType::ACCoupled;
+        snapshot.inverter_serial = "AC3-TEST-001".into();
+        snapshot.firmware_version = "400".into();
+        // AC3 Gen1 does not need a usable inverter clock because HEM owns the
+        // finite timer when only HR318 is used.
+        snapshot.inverter_time.clear();
+        snapshot.battery_pause_mode_raw = Some(0);
+        snapshot.battery_pause_slot_start_raw = Some(2461);
+        snapshot.battery_pause_slot_end_raw = Some(9999);
         snapshot.battery_pause_registers_observed_at = Some(snapshot.timestamp);
         drop(snapshot_guard);
         state
@@ -2450,6 +2498,117 @@ mod tests {
             assert_eq!(writes[2], (318, 3));
             assert!(state.pause_mode_revert.lock().await.is_some());
             state.pending_writes.lock().await.clear();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ac3_pause_mode_uses_hr318_only_and_hem_timer() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_ac3_mode_only_pause().await;
+            let (status, _body, writes) = complete_pause_start(
+                &state,
+                &next_key(),
+                json!({"mode":"discharge","minutes":30}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(writes, vec![(318, 2)]);
+            let revert = state.pause_mode_revert.lock().await.clone().unwrap();
+            assert_eq!(revert.battery_pause_mode, 0);
+            assert_eq!(revert.battery_pause_slot_start, 0);
+            assert_eq!(revert.battery_pause_slot_end, 0);
+            state.pending_writes.lock().await.clear();
+        })
+        .await;
+    }
+
+    /// A failed AC3 mode-only pause start must roll back with a single HR318
+    /// write: the HR319/320 window registers are not a safe path on this
+    /// hardware, and the failure path must not touch them either.
+    #[tokio::test]
+    async fn ac3_pause_start_failure_rolls_back_hr318_only() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_ac3_mode_only_pause().await;
+            let (status, _body) = fail_pause_start_with_dropped_batch(
+                &state,
+                "ac3-fail-key-00001",
+                json!({"mode":"discharge","minutes":30}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+            // The failed start queues an exact rollback batch: HR318 only.
+            assert_eq!(
+                state.pending_writes.lock().await.len(),
+                1,
+                "exactly one rollback batch must be queued"
+            );
+            let rollback = state.pending_writes.lock().await.pop().unwrap();
+            assert_eq!(
+                rollback
+                    .writes
+                    .iter()
+                    .map(|write| (write.address, write.value))
+                    .collect::<Vec<_>>(),
+                vec![(318, 0)],
+                "the rollback must write only HR318, never HR319/320"
+            );
+
+            // Ownership is retained with the captured baseline (AC3 captures
+            // no usable window, so its raw slots are 0) while the poll loop
+            // retries restoration until fresh readback confirms it.
+            let revert = state.pause_mode_revert.lock().await.clone().unwrap();
+            assert!(revert.restoring);
+            assert_eq!(revert.device_type, DeviceType::ACCoupled);
+            assert_eq!(revert.battery_pause_mode, 0);
+            assert_eq!(revert.battery_pause_slot_start, 0);
+            assert_eq!(revert.battery_pause_slot_end, 0);
+            state.pending_writes.lock().await.clear();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn external_force_discharge_clears_mode_only_ac3_pause() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_ac3_mode_only_pause().await;
+            {
+                let mut snapshot = state.latest_snapshot.lock().await;
+                let snapshot = snapshot.as_mut().unwrap();
+                snapshot.battery_pause_mode = 2;
+                snapshot.battery_pause_mode_raw = Some(2);
+            }
+
+            let (status, body) = request(
+                state.clone(),
+                "force-discharge",
+                Some("integration-key"),
+                json!({"minutes":30}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let writes = state
+                .pending_writes
+                .lock()
+                .await
+                .drain(..)
+                .flat_map(|batch| batch.writes)
+                .collect::<Vec<_>>();
+            let pause_index = writes
+                .iter()
+                .position(|write| write.address == crate::modbus::registers::HR_BATTERY_PAUSE_MODE)
+                .expect("Force Discharge must clear an active AC3 HR318 pause");
+            let discharge_index = writes
+                .iter()
+                .position(|write| write.address == crate::modbus::registers::HR_ENABLE_DISCHARGE)
+                .expect("Force Discharge must arm discharge");
+            assert_eq!(writes[pause_index].value, 0);
+            assert!(
+                pause_index < discharge_index,
+                "HR318 must be cleared before Force Discharge is armed"
+            );
         })
         .await;
     }

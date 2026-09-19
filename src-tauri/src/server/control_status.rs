@@ -57,6 +57,7 @@ struct PauseWindow {
     started_at_ms: i64,
     end_ms: i64,
     restoring: bool,
+    slots_supported: bool,
 }
 
 #[derive(Default)]
@@ -98,6 +99,9 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
             started_at_ms: r.started_at_ms,
             end_ms: r.expires_at_ms,
             restoring: r.restoring,
+            slots_supported: r
+                .device_type
+                .supports_pause_registers(r.firmware_version.parse::<u16>().unwrap_or(0)),
         });
     let export_config = state.timed_export_config.lock().await.clone();
     let export_state = state.timed_export_state.lock().await.clone();
@@ -195,6 +199,39 @@ fn window(slots: &[ScheduleSlot], minute: Option<u16>) -> Option<bool> {
     minute.map(|m| export_window_contains(slots, m))
 }
 
+fn pause_slots_supported(snapshot: &InverterSnapshot) -> bool {
+    snapshot
+        .device_type
+        .supports_pause_registers(snapshot.firmware_version.parse::<u16>().unwrap_or(0))
+}
+
+/// Whether the current native pause mode blocks charging or discharging.
+/// Mode-only AC3 pauses are active for the whole HEM-owned duration because
+/// HR319/320 cannot provide a usable inverter-side window on those units.
+fn pause_blocks(snapshot: &InverterSnapshot, minute: Option<u16>, charging: bool) -> Option<bool> {
+    let blocks = if charging {
+        matches!(snapshot.battery_pause_mode, 1 | 3)
+    } else {
+        matches!(snapshot.battery_pause_mode, 2 | 3)
+    };
+    if snapshot.battery_pause_mode > 3 {
+        return None;
+    }
+    if !blocks {
+        return Some(false);
+    }
+    if pause_slots_supported(snapshot) {
+        window(std::slice::from_ref(&snapshot.battery_pause_slot), minute)
+    } else if snapshot
+        .device_type
+        .supports_pause_mode(snapshot.firmware_version.parse::<u16>().unwrap_or(0))
+    {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// The strict "a Force Charge is physically running right now" predicate,
 /// shared by the status endpoint and the external-command readback evidence.
 /// The slot-window conjunct is the part that keeps an *armed* charge schedule
@@ -214,12 +251,12 @@ pub(crate) fn force_charge_active(s: &InverterSnapshot, minute: Option<u16>) -> 
     // its flags can be treated as activity evidence; otherwise a clockless
     // snapshot could incorrectly expire or release ownership.
     let minute = minute?;
-    let pause_window = window(std::slice::from_ref(&s.battery_pause_slot), Some(minute));
     let charge_window = window(&s.charge_slots, Some(minute));
-    let (Some(pause_window), Some(charge_window)) = (pause_window, charge_window) else {
+    let (Some(charge_window), Some(charge_paused)) =
+        (charge_window, pause_blocks(s, Some(minute), true))
+    else {
         return None;
     };
-    let charge_paused = matches!(s.battery_pause_mode, 1 | 3) && pause_window;
     // The legacy no-body endpoint deliberately creates no slot. When the
     // Force Charge owner is present, armed charge flags are the only available
     // evidence for that unbounded action; a normal scheduled charge cannot
@@ -234,12 +271,12 @@ pub(crate) fn force_charge_active(s: &InverterSnapshot, minute: Option<u16>) -> 
 
 /// The Force Discharge mirror of [`force_charge_active`].
 pub(crate) fn force_discharge_active(s: &InverterSnapshot, minute: Option<u16>) -> Option<bool> {
-    let pause_window = window(std::slice::from_ref(&s.battery_pause_slot), minute);
     let discharge_window = window(&s.discharge_slots, minute);
-    let (Some(pause_window), Some(discharge_window)) = (pause_window, discharge_window) else {
+    let (Some(discharge_window), Some(discharge_paused)) =
+        (discharge_window, pause_blocks(s, minute, false))
+    else {
         return None;
     };
-    let discharge_paused = matches!(s.battery_pause_mode, 2 | 3) && pause_window;
     Some(s.enable_discharge && s.battery_power_mode == 0 && discharge_window && !discharge_paused)
 }
 
@@ -368,8 +405,8 @@ fn build_status(
     let charge_window = window(&s.charge_slots, minute);
     let discharge_window = window(&s.discharge_slots, minute);
     let pause_window = window(std::slice::from_ref(&s.battery_pause_slot), minute);
-    let charge_paused = matches!(s.battery_pause_mode, 1 | 3) && pause_window == Some(true);
-    let discharge_paused = matches!(s.battery_pause_mode, 2 | 3) && pause_window == Some(true);
+    let charge_paused = pause_blocks(s, minute, true) == Some(true);
+    let discharge_paused = pause_blocks(s, minute, false) == Some(true);
     let charge = schedule(
         s.enable_charge,
         charge_window,
@@ -390,7 +427,17 @@ fn build_status(
             && !discharge_paused,
     );
     let demand = if matches!(s.battery_pause_mode, 2 | 3) {
-        schedule(true, pause_window.map(|v| !v), activity == "discharging")
+        let allowed_window = if pause_slots_supported(s) {
+            pause_window.map(|v| !v)
+        } else if s
+            .device_type
+            .supports_pause_mode(s.firmware_version.parse::<u16>().unwrap_or(0))
+        {
+            Some(false)
+        } else {
+            None
+        };
+        schedule(true, allowed_window, activity == "discharging")
     } else {
         schedule(
             s.enable_discharge && s.battery_power_mode == 1,
@@ -490,8 +537,12 @@ fn build_status(
         "unknown_pause_mode",
         "Unknown pause mode",
     );
+    let pause_mode_supported = s
+        .device_type
+        .supports_pause_mode(s.firmware_version.parse::<u16>().unwrap_or(0));
     condition(
-        s.battery_pause_mode != 0 && pause_window.is_none(),
+        s.battery_pause_mode != 0
+            && (!pause_mode_supported || (pause_slots_supported(s) && pause_window.is_none())),
         "pause_status_unknown",
         "Pause status unavailable",
     );
@@ -559,7 +610,8 @@ fn build_status(
         let expired = now_ms >= pause.end_ms;
         let readback_after_request = s.timestamp.saturating_mul(1000) > pause.started_at_ms;
         let observed = s.battery_pause_mode_raw == Some(pause.mode)
-            && window(std::slice::from_ref(&s.battery_pause_slot), minute) == Some(true);
+            && (!pause.slots_supported
+                || window(std::slice::from_ref(&s.battery_pause_slot), minute) == Some(true));
         let phase = if pause.restoring {
             "restoring"
         } else if expired {
@@ -762,7 +814,12 @@ mod tests {
     #[test]
     fn status_reports_model_and_firmware_specific_control_capabilities() {
         for (device_type, firmware, force, pause_modes) in [
-            (DeviceType::ACCoupled, "", true, json!([])),
+            (
+                DeviceType::ACCoupled,
+                "",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
             (DeviceType::PvInverter, "", false, json!([])),
             (
                 DeviceType::ACThreePhase,
@@ -789,6 +846,30 @@ mod tests {
             assert_eq!(capabilities["force_discharge"], force, "{device_type:?}");
             assert_eq!(capabilities["pause_modes"], pause_modes, "{device_type:?}");
         }
+    }
+
+    #[test]
+    fn ac3_mode_only_pause_is_reported_without_a_window_unknown_condition() {
+        let mut s = snapshot();
+        s.battery_pause_mode = 2;
+        s.battery_pause_mode_raw = Some(2);
+        s.battery_pause_registers_observed_at = Some(s.timestamp);
+        let value = status(&s);
+        assert_eq!(
+            value["control_capabilities"]["pause_modes"],
+            json!(["charge", "discharge", "both"])
+        );
+        assert!(value["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|condition| condition["code"] == "discharge_pause"));
+        assert!(!value["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|condition| condition["code"] == "pause_status_unknown"));
+        assert_eq!(value["schedules"]["demand_discharge"], "armed");
     }
 
     #[test]
@@ -947,6 +1028,7 @@ mod tests {
     #[test]
     fn raw_pause_window_is_inverted_for_timed_demand() {
         let mut s = snapshot();
+        s.device_type = DeviceType::ACThreePhase;
         s.battery_pause_mode = 2;
         s.battery_pause_slot = slot(13, 11); // pause outside 11:00–13:00
         s.battery_state = BatteryState::Discharging;

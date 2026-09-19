@@ -996,7 +996,11 @@ pub(crate) async fn await_required_write_outcome_with_timeout(
     }
 }
 
-/// Capture exact raw HR318-320 values for an authenticated native pause.
+/// Capture the exact raw pause baseline for an authenticated native pause.
+///
+/// Full-window models require fresh HR318-320 values. Legacy AC3 only has a
+/// confirmed HR318 path, so its ignored/rejected HR319-320 values are not part
+/// of the baseline or the restoration contract.
 pub(crate) async fn capture_pause_mode_revert(
     state: &Arc<AppState>,
     now_ms: i64,
@@ -1006,18 +1010,29 @@ pub(crate) async fn capture_pause_mode_revert(
     let snapshot = snapshot
         .as_ref()
         .ok_or_else(|| "No inverter snapshot is available".to_string())?;
+    let slots_supported = snapshot
+        .device_type
+        .supports_pause_registers(snapshot.firmware_version.parse::<u16>().unwrap_or(0));
     let mode = snapshot
         .battery_pause_mode_raw
-        .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?;
-    let start = snapshot
-        .battery_pause_slot_start_raw
-        .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?;
-    let end = snapshot
-        .battery_pause_slot_end_raw
-        .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?;
+        .ok_or_else(|| "No fresh HR318 readback is available".to_string())?;
+    let start = if slots_supported {
+        snapshot
+            .battery_pause_slot_start_raw
+            .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?
+    } else {
+        0
+    };
+    let end = if slots_supported {
+        snapshot
+            .battery_pause_slot_end_raw
+            .ok_or_else(|| "No complete HR318-320 readback is available".to_string())?
+    } else {
+        0
+    };
     let observed_at = snapshot
         .battery_pause_registers_observed_at
-        .ok_or_else(|| "No HR318-320 read timestamp is available".to_string())?;
+        .ok_or_else(|| "No HR318 read timestamp is available".to_string())?;
     if observed_at != snapshot.timestamp || snapshot.inverter_serial.is_empty() {
         return Err(
             "The native pause baseline is not fresh or lacks inverter identity".to_string(),
@@ -1045,9 +1060,27 @@ pub(crate) async fn capture_pause_mode_revert(
 
 /// Build the native pause writes in safe order: window first, then mode.
 pub(crate) fn build_pause_mode_writes(mode: u16, start: u16, end: u16) -> Vec<RegisterWrite> {
+    build_pause_mode_writes_for_slots(mode, start, end, true)
+}
+
+/// Build pause writes for a confirmed register capability. AC3 Gen1 accepts
+/// HR318 but ignores/rejects HR319-320, so it uses a mode-only write and HEM's
+/// finite timer; all other callers retain the window-before-mode ordering.
+pub(crate) fn build_pause_mode_writes_for_slots(
+    mode: u16,
+    start: u16,
+    end: u16,
+    slots_supported: bool,
+) -> Vec<RegisterWrite> {
     use crate::modbus::registers::{
         HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END, HR_BATTERY_PAUSE_SLOT_1_START,
     };
+    if !slots_supported {
+        return vec![RegisterWrite {
+            address: HR_BATTERY_PAUSE_MODE,
+            value: mode,
+        }];
+    }
     vec![
         RegisterWrite {
             address: HR_BATTERY_PAUSE_SLOT_1_START,
@@ -1424,11 +1457,23 @@ async fn capture_force_discharge_revert(
     })
 }
 
+/// Whether the captured inverter can safely have HR318 restored after Force
+/// Discharge. Legacy AC3 has a mode-only pause path, so its `pause_registers`+
+/// flag is false even though HR318 itself must be cleared while discharge is
+/// running and restored when it stops.
+fn force_discharge_pause_mode_supported(revert: &ForceDischargeRevert) -> bool {
+    revert.pause_registers_supported
+        || revert
+            .device_type
+            .supports_pause_mode(revert.firmware_version.parse::<u16>().unwrap_or(0))
+}
+
 /// Build the writes that restore the inverter to a captured `ForceDischargeRevert`.
 /// Mirrors GivTCP's `FEResume` (`write.py:1042`-ish, adapted for the
 /// force-discharge case which GivTCP rolls into `forceExport`).
 pub(crate) fn build_force_discharge_stop_writes(
     device_type: DeviceType,
+    firmware_version: &str,
     revert: &ForceDischargeRevert,
 ) -> Vec<RegisterWrite> {
     use crate::modbus::registers::{
@@ -1439,6 +1484,22 @@ pub(crate) fn build_force_discharge_stop_writes(
         HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
     };
     let mut writes = Vec::new();
+
+    // Identity may still match after a same-serial model refinement. If the
+    // captured baseline needs pause registers, the current model must support
+    // that exact write shape before any part of the restore can be queued.
+    // Otherwise the non-pause writes could confirm a partial restoration.
+    if revert.battery_pause_mode_raw.is_some() && force_discharge_pause_mode_supported(revert) {
+        let current_firmware = firmware_version.parse::<u16>().unwrap_or(0);
+        let supported = if revert.pause_registers_supported {
+            device_type.supports_pause_registers(current_firmware)
+        } else {
+            device_type.supports_pause_mode(current_firmware)
+        };
+        if !supported {
+            return Vec::new();
+        }
+    }
 
     if device_type.uses_three_phase_schedule_slots() {
         // Three-phase path: clear the force-discharge and force-charge enable
@@ -1538,17 +1599,21 @@ pub(crate) fn build_force_discharge_stop_writes(
         });
     }
 
-    // Restore pause registers only when this model's HR318-320 path was
-    // confirmed and the exact raw baseline was captured. Never emit these
-    // writes for AC single-phase or another family that merely defaults the
-    // normalized fields to zero.
-    if revert.pause_registers_supported {
-        if let (Some(mode), Some(start), Some(end)) = (
-            revert.battery_pause_mode_raw,
-            revert.battery_pause_slot_start_raw,
-            revert.battery_pause_slot_end_raw,
-        ) {
-            writes.extend(build_pause_mode_writes(mode, start, end));
+    // Restore the pause mode only when this model's HR318 path is confirmed
+    // and its raw baseline was captured. Full-window models restore HR319/320
+    // before HR318; legacy AC3 deliberately restores HR318 only.
+    if force_discharge_pause_mode_supported(revert) {
+        if let Some(mode) = revert.battery_pause_mode_raw {
+            if revert.pause_registers_supported {
+                if let (Some(start), Some(end)) = (
+                    revert.battery_pause_slot_start_raw,
+                    revert.battery_pause_slot_end_raw,
+                ) {
+                    writes.extend(build_pause_mode_writes(mode, start, end));
+                }
+            } else {
+                writes.extend(build_pause_mode_writes_for_slots(mode, 0, 0, false));
+            }
         }
     }
 
@@ -5812,10 +5877,9 @@ pub(crate) async fn force_discharge_at_unlocked(
     // HR318/319/320 state. Mode 1 (pause charging) does not block
     // discharge and is left alone.
     if revert.as_ref().is_some_and(|r| {
-        r.pause_registers_supported
-            && crate::inverter::state_machines::should_disable_pause_for_force_discharge(
-                r.battery_pause_mode,
-            )
+        force_discharge_pause_mode_supported(r)
+            && r.battery_pause_mode_raw
+                .is_some_and(|mode| matches!(mode, 2 | 3))
     }) {
         writes.push(RegisterWrite {
             address: crate::modbus::registers::HR_BATTERY_PAUSE_MODE,
@@ -5988,7 +6052,20 @@ pub(crate) async fn force_discharge_stop_with_command(
                 .await;
             }
         }
-        build_force_discharge_stop_writes(device_type, &revert)
+        let writes = build_force_discharge_stop_writes(
+            device_type,
+            snapshot
+                .as_ref()
+                .map_or("", |value| value.firmware_version.as_str()),
+            &revert,
+        );
+        if writes.is_empty() {
+            drop(snapshot);
+            return error_response(
+                "Current inverter lacks the pause capability needed to restore Force Discharge",
+            );
+        }
+        writes
     } else {
         let Some(current_snapshot) = snapshot.as_ref() else {
             drop(snapshot);
@@ -9374,10 +9451,12 @@ pub(crate) mod tests {
         } else if let Some(force) = force_charge {
             snap.enable_charge = force;
         }
-        if let (Some(mode), Some(start), Some(end)) = (pause_mode, pause_start, pause_end) {
+        if let Some(mode) = pause_mode {
             snap.battery_pause_mode_raw = Some(mode);
-            snap.battery_pause_slot_start_raw = Some(start);
-            snap.battery_pause_slot_end_raw = Some(end);
+            if let (Some(start), Some(end)) = (pause_start, pause_end) {
+                snap.battery_pause_slot_start_raw = Some(start);
+                snap.battery_pause_slot_end_raw = Some(end);
+            }
             snap.battery_pause_registers_observed_at = Some(timestamp_secs);
         }
         snap
@@ -16413,7 +16492,7 @@ pub(crate) mod tests {
             battery_pause_mode: 0,
             battery_pause_slot: Default::default(),
         };
-        let writes = build_force_discharge_stop_writes(DeviceType::ACThreePhase, &revert);
+        let writes = build_force_discharge_stop_writes(DeviceType::ACThreePhase, "400", &revert);
         assert!(
             writes
                 .iter()
@@ -16545,7 +16624,7 @@ pub(crate) mod tests {
             target_soc: 100,
         };
         let discharge_writes =
-            build_force_discharge_stop_writes(DeviceType::ThreePhase, &discharge_revert);
+            build_force_discharge_stop_writes(DeviceType::ThreePhase, "400", &discharge_revert);
         assert!(
             snapshot_matches_writes(&discharge_snapshot, &discharge_writes),
             "every three-phase discharge stop write must be provable from the decoded snapshot"
@@ -16714,6 +16793,18 @@ pub(crate) mod tests {
             target_soc: 4,
         };
         assert!(snapshot_matches_writes(&snapshot, &writes));
+    }
+
+    /// AC3 Gen1 has a confirmed HR318 mode path but no safe HR319/320 window.
+    #[test]
+    fn ac3_pause_mode_only_writes_hr318() {
+        let writes = build_pause_mode_writes_for_slots(2, 1234, 1304, false);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0].address,
+            crate::modbus::registers::HR_BATTERY_PAUSE_MODE
+        );
+        assert_eq!(writes[0].value, 2);
     }
 
     /// Raw pause values may only prove a restoration when they were read with
@@ -17143,7 +17234,7 @@ pub(crate) mod tests {
                 external_owner: None,
                 enable_charge: false,
                 enable_charge_target: false,
-                device_type: DeviceType::Gen2Hybrid,
+                device_type: DeviceType::AllInOne3_6kW,
                 inverter_serial: "SN1".into(),
                 firmware_version: "400".into(),
                 enable_discharge: false,
@@ -17162,7 +17253,8 @@ pub(crate) mod tests {
                 battery_pause_mode: 0,
                 battery_pause_slot: Default::default(),
             };
-            let writes = build_force_discharge_stop_writes(DeviceType::Gen2Hybrid, &revert);
+            let writes =
+                build_force_discharge_stop_writes(DeviceType::AllInOne3_6kW, "400", &revert);
 
             assert!(
                 writes
@@ -17201,7 +17293,8 @@ pub(crate) mod tests {
             legacy.battery_pause_mode_raw = None;
             legacy.battery_pause_slot_start_raw = None;
             legacy.battery_pause_slot_end_raw = None;
-            let legacy_writes = build_force_discharge_stop_writes(DeviceType::Gen2Hybrid, &legacy);
+            let legacy_writes =
+                build_force_discharge_stop_writes(DeviceType::Gen2Hybrid, "400", &legacy);
             assert!(!legacy_writes.iter().any(|w| {
                 matches!(
                     w.address,
@@ -17212,6 +17305,109 @@ pub(crate) mod tests {
             }));
         })
         .await;
+    }
+
+    #[test]
+    fn force_discharge_stop_writes_restore_mode_only_ac3_pause() {
+        use crate::inverter::poll::ForceDischargeRevert;
+        use crate::modbus::registers::{
+            HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END, HR_BATTERY_PAUSE_SLOT_1_START,
+        };
+
+        let revert = ForceDischargeRevert {
+            started_at_ms: 1_000,
+            external_owner: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::ACCoupled,
+            inverter_serial: "AC3-TEST".into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            discharge_rate: None,
+            discharge_slot_1_start: None,
+            discharge_slot_1_end: None,
+            discharge_slot_2_start: None,
+            discharge_slot_2_end: None,
+            three_phase_force_discharge_enable: None,
+            three_phase_force_charge_enable: None,
+            force_discharge_slot_end_ms: None,
+            pause_registers_supported: false,
+            battery_pause_mode_raw: Some(2),
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
+            battery_pause_mode: 2,
+            battery_pause_slot: Default::default(),
+        };
+
+        let writes = build_force_discharge_stop_writes(DeviceType::ACCoupled, "400", &revert);
+
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| write.address == HR_BATTERY_PAUSE_MODE)
+                .map(|write| write.value)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "AC3 stop must restore HR318 even without a pause window"
+        );
+        assert!(!writes.iter().any(|write| {
+            matches!(
+                write.address,
+                HR_BATTERY_PAUSE_SLOT_1_START | HR_BATTERY_PAUSE_SLOT_1_END
+            )
+        }));
+    }
+
+    #[test]
+    fn force_discharge_stop_withholds_ac3_pause_on_unsupported_model_refinement() {
+        let revert = ForceDischargeRevert {
+            started_at_ms: 1_000,
+            external_owner: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::ACCoupled,
+            inverter_serial: "AC3-TEST".into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            discharge_rate: None,
+            discharge_slot_1_start: None,
+            discharge_slot_1_end: None,
+            discharge_slot_2_start: None,
+            discharge_slot_2_end: None,
+            three_phase_force_discharge_enable: None,
+            three_phase_force_charge_enable: None,
+            force_discharge_slot_end_ms: None,
+            pause_registers_supported: false,
+            battery_pause_mode_raw: Some(2),
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
+            battery_pause_mode: 2,
+            battery_pause_slot: Default::default(),
+        };
+        assert!(
+            build_force_discharge_stop_writes(DeviceType::ACCoupledMk2, "400", &revert).is_empty(),
+            "the entire restoration must wait until the current model can restore HR318"
+        );
+
+        let mut full_window = revert.clone();
+        full_window.device_type = DeviceType::Gen3Hybrid;
+        full_window.firmware_version = "312".into();
+        full_window.pause_registers_supported = true;
+        full_window.battery_pause_slot_start_raw = Some(0);
+        full_window.battery_pause_slot_end_raw = Some(0);
+        assert!(
+            build_force_discharge_stop_writes(DeviceType::Gen3Hybrid, "311", &full_window)
+                .is_empty(),
+            "a firmware downgrade must not receive a full-window restoration"
+        );
+
+        let mut no_pause_baseline = revert;
+        no_pause_baseline.battery_pause_mode_raw = None;
+        assert!(
+            !build_force_discharge_stop_writes(DeviceType::ACCoupledMk2, "400", &no_pause_baseline)
+                .is_empty(),
+            "a Force Discharge without a captured pause mode can still be stopped"
+        );
     }
 
     /// AC-three-phase devices support Timed Discharge too: their stop must
@@ -17250,7 +17446,8 @@ pub(crate) mod tests {
                 battery_pause_mode: 0,
                 battery_pause_slot: Default::default(),
             };
-            let writes = build_force_discharge_stop_writes(DeviceType::ACThreePhase, &revert);
+            let writes =
+                build_force_discharge_stop_writes(DeviceType::ACThreePhase, "400", &revert);
 
             assert!(
                 writes
