@@ -5116,8 +5116,8 @@ pub async fn set_active_power_rate(
 /// POST /api/control/export-limit — set the inverter export power limit.
 ///
 /// Routes the write to the correct register based on the active device type:
-///   - EMS / Gateway / EmsCommercial → HR 2071 (`SetEmsExportLimit`, raw W)
-///   - Three-phase / HV / AIO        → HR 1063 (`SetThreePhaseExportLimit`, deci-W)
+///   - EMS / Gateway → HR 2071 (`SetEmsExportLimit`, raw W)
+///   - Three-phase / HV / AIO → HR 1063 (`SetThreePhaseExportLimit`, deci-W)
 ///   - All other models                → 400 (single-phase models have no
 ///     user-writable export limit register in the givenergy-modbus reference;
 ///
@@ -5141,8 +5141,7 @@ pub async fn set_export_limit(
     };
 
     let device_type = latest_device_type(&state).await;
-    let cmd = if device_type.needs_gateway_input_blocks()
-        || matches!(device_type, DeviceType::Ems | DeviceType::EmsCommercial)
+    let cmd = if device_type.needs_gateway_input_blocks() || matches!(device_type, DeviceType::Ems)
     {
         // EMS / Gateway plant-level (HR 2071).
         ControlCommand::SetEmsExportLimit { watts }
@@ -9034,7 +9033,7 @@ pub(crate) mod tests {
             }
         ));
         assert!(matches!(
-            charge_slot_command_for_device(DeviceType::AioCommercial, 2, true, 600, 900).unwrap(),
+            charge_slot_command_for_device(DeviceType::AllInOneHybrid, 2, true, 600, 900).unwrap(),
             ControlCommand::SetThreePhaseChargeSlot2 {
                 start: 600,
                 end: 900
@@ -13497,10 +13496,8 @@ pub(crate) mod tests {
                 DeviceType::ThreePhase,
                 DeviceType::HybridHvGen3,
                 DeviceType::AllInOneHybrid,
-                DeviceType::AioCommercial,
                 DeviceType::Gateway,
                 DeviceType::Ems,
-                DeviceType::EmsCommercial,
                 DeviceType::PvInverter,
             ] {
                 let state = make_state_with_device(dt).await;
@@ -14804,7 +14801,6 @@ pub(crate) mod tests {
                 (DeviceType::ACCoupledMk2, true, false),
                 (DeviceType::ThreePhase, false, true),
                 (DeviceType::ACThreePhase, false, true),
-                (DeviceType::AioCommercial, false, true),
                 (DeviceType::HybridHvGen3, false, true),
                 (DeviceType::AllInOneHybrid, false, true),
                 // Gateway is single-phase-class for control (issue #149): not
@@ -15989,7 +15985,6 @@ pub(crate) mod tests {
                 DeviceType::PolarHybrid,
                 DeviceType::Gen3PlusHybrid,
                 DeviceType::ThreePhase,
-                DeviceType::AioCommercial,
                 DeviceType::HybridHvGen3,
                 DeviceType::AllInOneHybrid,
                 DeviceType::Gateway,

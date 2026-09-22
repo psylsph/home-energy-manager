@@ -123,10 +123,8 @@ pub enum DeviceType {
     ACCoupled,
     ACCoupledMk2,
     ThreePhase,
-    AioCommercial,
     ACThreePhase,
     Ems,
-    EmsCommercial,
     Gateway,
     AllInOne6kW,
     AllInOne3_6kW,
@@ -156,9 +154,7 @@ impl DeviceType {
             0x3001 => Self::ACCoupled,
             0x3002 => Self::ACCoupledMk2,
             0x4001..=0x40ff => Self::ThreePhase,
-            0x4101..=0x41ff => Self::AioCommercial,
             0x5001..=0x50ff => Self::Ems,
-            0x5101..=0x51ff => Self::EmsCommercial,
             0x6001..=0x60ff => Self::ACThreePhase,
             0x7001..=0x70ff => Self::Gateway,
             0x8001 => Self::AllInOne6kW,
@@ -177,9 +173,7 @@ impl DeviceType {
                     0x23 => Self::PvInverter,
                     0x30 => Self::ACCoupled,
                     0x40 => Self::ThreePhase,
-                    0x41 => Self::AioCommercial,
                     0x50 => Self::Ems,
-                    0x51 => Self::EmsCommercial,
                     0x60 => Self::ACThreePhase,
                     0x70 => Self::Gateway,
                     0x80 => Self::AllInOne6kW,
@@ -213,7 +207,7 @@ impl DeviceType {
     pub fn nominal_battery_voltage(&self) -> f32 {
         match self {
             Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW => 307.0,
-            Self::ThreePhase | Self::ACThreePhase | Self::AioCommercial => 76.8,
+            Self::ThreePhase | Self::ACThreePhase => 76.8,
             // Stackable HV batteries (GIV-BAT-3.4-HV modules) use 76.8V per
             // module; the capacity formula multiplies by module count. The AIO
             // and Gen4 hybrids are fixed single-unit batteries at 307.0V.
@@ -238,10 +232,8 @@ impl DeviceType {
             Self::ACCoupled => "AC Coupled",
             Self::ACCoupledMk2 => "AC Coupled Mk2",
             Self::ThreePhase => "Three Phase",
-            Self::AioCommercial => "AIO Commercial",
             Self::ACThreePhase => "AC Three Phase",
             Self::Ems => "EMS",
-            Self::EmsCommercial => "EMS Commercial",
             Self::Gateway => "Gateway",
             Self::AllInOne6kW => "All-in-One 6kW",
             Self::AllInOne3_6kW => "All-in-One 3.6kW",
@@ -262,12 +254,12 @@ impl DeviceType {
             Self::Gen1Hybrid | Self::PolarHybrid | Self::Gen3PlusHybrid | Self::PvInverter => 2600,
             Self::Gen2Hybrid | Self::Gen3Hybrid => 3600,
             Self::ACCoupled | Self::ACCoupledMk2 => 3000,
-            Self::ThreePhase | Self::AioCommercial | Self::ACThreePhase => 6000,
+            Self::ThreePhase | Self::ACThreePhase => 6000,
             Self::AllInOne6kW => 6000,
             Self::AllInOne3_6kW => 3600,
             Self::AllInOne5kW => 5000,
             Self::HybridHvGen3 | Self::AllInOneHybrid | Self::Gen4Hybrid => 6000,
-            Self::Ems | Self::EmsCommercial | Self::Gateway | Self::Unknown(_) => 0,
+            Self::Ems | Self::Gateway | Self::Unknown(_) => 0,
         }
     }
 
@@ -278,14 +270,14 @@ impl DeviceType {
             Self::PolarHybrid | Self::Gen3PlusHybrid | Self::PvInverter => 5000,
             Self::ACCoupled => 3000,
             Self::ACCoupledMk2 => 3600,
-            Self::ThreePhase | Self::AioCommercial | Self::ACThreePhase => 6000,
+            Self::ThreePhase | Self::ACThreePhase => 6000,
             Self::Gateway => 12000,
             Self::AllInOne6kW | Self::HybridHvGen3 | Self::AllInOneHybrid | Self::Gen4Hybrid => {
                 6000
             }
             Self::AllInOne3_6kW => 3600,
             Self::AllInOne5kW => 5000,
-            Self::Ems | Self::EmsCommercial | Self::Unknown(_) => 0,
+            Self::Ems | Self::Unknown(_) => 0,
         }
     }
 
@@ -324,7 +316,7 @@ impl DeviceType {
     /// source, so a non-zero read from them is treated as invalid.
     pub fn max_eps_power_w(&self, rated_ac_power_w: u32) -> u32 {
         match self {
-            Self::Gateway | Self::Ems | Self::EmsCommercial | Self::PvInverter => 0,
+            Self::Gateway | Self::Ems | Self::PvInverter => 0,
             Self::Unknown(_) => rated_ac_power_w.max(10_000),
             _ if rated_ac_power_w > 0 => rated_ac_power_w,
             _ => self.max_ac_power_w(),
@@ -384,11 +376,7 @@ impl DeviceType {
         // routing).
         matches!(
             self,
-            Self::ThreePhase
-                | Self::ACThreePhase
-                | Self::AioCommercial
-                | Self::HybridHvGen3
-                | Self::AllInOneHybrid
+            Self::ThreePhase | Self::ACThreePhase | Self::HybridHvGen3 | Self::AllInOneHybrid
         )
     }
 
@@ -448,7 +436,7 @@ impl DeviceType {
         };
         match self {
             Self::ACThreePhase => AC_EXTENDED_AND_THREE_PHASE_BLOCKS,
-            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase | Self::AioCommercial => {
+            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase => {
                 EXTENDED_AND_THREE_PHASE_BLOCKS
             }
             // Residential All-in-One models carry an AC output stage and expose
@@ -474,11 +462,7 @@ impl DeviceType {
     pub fn needs_three_phase_input_blocks(&self) -> bool {
         matches!(
             self,
-            Self::ThreePhase
-                | Self::ACThreePhase
-                | Self::AioCommercial
-                | Self::HybridHvGen3
-                | Self::AllInOneHybrid
+            Self::ThreePhase | Self::ACThreePhase | Self::HybridHvGen3 | Self::AllInOneHybrid
         )
     }
 
@@ -487,8 +471,7 @@ impl DeviceType {
     ///
     /// Mirrors givenergy-modbus `_HV_MODELS` / `PlantCapabilities.is_hv`:
     /// coarse families "4" (HYBRID_3PH), "6" (AC_3PH) and "8" (ALL_IN_ONE and
-    /// variants) all use HV stacks. AIO Commercial (family "41") is excluded —
-    /// it resolves to its own specific model, not the coarse HV family.
+    /// variants) all use HV stacks.
     ///
     /// For these models the LV BMS read at 0x32 will not respond; battery
     /// temperature/capacity must come from the BCU cluster read at 0x70.
@@ -507,7 +490,7 @@ impl DeviceType {
 
     /// Whether schedule (charge/discharge slot) writes/reads are supported for this device.
     pub fn supports_schedule_slots(&self) -> bool {
-        !matches!(self, Self::Ems | Self::EmsCommercial | Self::PvInverter)
+        !matches!(self, Self::Ems | Self::PvInverter)
     }
 
     /// Preferred Modbus slave address for operational inverter register reads.
@@ -548,7 +531,7 @@ impl DeviceType {
     pub fn is_batteryless(&self) -> bool {
         matches!(
             self,
-            Self::Gateway | Self::Ems | Self::EmsCommercial | Self::PvInverter | Self::Gen4Hybrid
+            Self::Gateway | Self::Ems | Self::PvInverter | Self::Gen4Hybrid
         )
     }
 
@@ -585,7 +568,6 @@ impl DeviceType {
             Self::ACCoupled
                 | Self::ACCoupledMk2
                 | Self::ThreePhase
-                | Self::AioCommercial
                 | Self::ACThreePhase
                 | Self::Gateway
                 | Self::HybridHvGen3
@@ -1706,9 +1688,7 @@ mod tests {
             (0x3001, DeviceType::ACCoupled, "AC Coupled", 51.2),
             (0x3002, DeviceType::ACCoupledMk2, "AC Coupled Mk2", 51.2),
             (0x4001, DeviceType::ThreePhase, "Three Phase", 76.8),
-            (0x4101, DeviceType::AioCommercial, "AIO Commercial", 76.8),
             (0x5001, DeviceType::Ems, "EMS", 51.2),
-            (0x5101, DeviceType::EmsCommercial, "EMS Commercial", 51.2),
             (0x6001, DeviceType::ACThreePhase, "AC Three Phase", 76.8),
             (0x7001, DeviceType::Gateway, "Gateway", 51.2),
             (0x8001, DeviceType::AllInOne6kW, "All-in-One 6kW", 307.0),
@@ -1735,6 +1715,17 @@ mod tests {
                 code
             );
             assert!((dt.nominal_battery_voltage() - expected_voltage).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn unvalidated_commercial_dtc_families_remain_unknown() {
+        for code in [0x4101, 0x41ff, 0x5101, 0x51ff] {
+            assert_eq!(
+                DeviceType::from_register(code),
+                DeviceType::Unknown(code),
+                "unsupported DTC 0x{code:04X} must not gain speculative model routing"
+            );
         }
     }
 
@@ -1829,7 +1820,6 @@ mod tests {
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::ACThreePhase,
             DeviceType::Gateway,
             DeviceType::HybridHvGen3,
@@ -1848,7 +1838,6 @@ mod tests {
             DeviceType::Gen4Hybrid,
             DeviceType::PvInverter,
             DeviceType::Ems,
-            DeviceType::EmsCommercial,
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,
@@ -1890,7 +1879,6 @@ mod tests {
 
         for dt in [
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::ACThreePhase,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
@@ -2042,9 +2030,6 @@ mod tests {
         assert!(!DeviceType::Gen1Hybrid.uses_hv_battery());
         assert!(!DeviceType::ACCoupled.uses_hv_battery());
         assert!(!DeviceType::ACCoupledMk2.uses_hv_battery());
-        // AIO Commercial (0x41xx) resolves to its own specific model, not the
-        // coarse HV family 4 — excluded per the reference.
-        assert!(!DeviceType::AioCommercial.uses_hv_battery());
     }
 
     #[test]
@@ -2062,7 +2047,6 @@ mod tests {
         // Gateway aggregates battery data from child AIOs — no direct battery.
         assert!(DeviceType::Gateway.is_batteryless());
         assert!(DeviceType::Ems.is_batteryless());
-        assert!(DeviceType::EmsCommercial.is_batteryless());
         assert!(DeviceType::PvInverter.is_batteryless());
         assert!(DeviceType::Gen4Hybrid.is_batteryless());
 
@@ -2108,19 +2092,16 @@ mod tests {
         assert!(!DeviceType::PolarHybrid.supports_eps());
         assert!(!DeviceType::Gen3PlusHybrid.supports_eps());
 
-        // Pure three-phase (no AC-coupled prefix) and AIO Commercial lack
-        // HR 317 — they expose EPS telemetry in IR 1180-1239 but not the
-        // enable register. Confirm via the reference library's
-        // _AC_CONFIG_BLOCK_MODELS exclusion.
+        // Pure three-phase (no AC-coupled prefix) lacks HR 317 — it exposes
+        // EPS telemetry in IR 1180-1239 but not the enable register. Confirm
+        // via the reference library's _AC_CONFIG_BLOCK_MODELS exclusion.
         assert!(!DeviceType::ThreePhase.supports_eps());
-        assert!(!DeviceType::AioCommercial.supports_eps());
         assert!(!DeviceType::HybridHvGen3.supports_eps());
         assert!(!DeviceType::AllInOneHybrid.supports_eps());
 
         // Devices with no inverter control surface at all.
         assert!(!DeviceType::Gateway.supports_eps());
         assert!(!DeviceType::Ems.supports_eps());
-        assert!(!DeviceType::EmsCommercial.supports_eps());
         assert!(!DeviceType::PvInverter.supports_eps());
 
         // Unknown is conservatively rejected so the API returns a clear
@@ -2148,7 +2129,6 @@ mod tests {
             DeviceType::AllInOneHybrid,
             DeviceType::HybridHvGen3,
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::Gateway,
         ];
         for dt in ac_block_models {
@@ -2210,7 +2190,6 @@ mod tests {
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::ACThreePhase,
             DeviceType::Gateway,
             DeviceType::AllInOne6kW,
@@ -2222,7 +2201,6 @@ mod tests {
         let unsupported = [
             DeviceType::PvInverter,
             DeviceType::Ems,
-            DeviceType::EmsCommercial,
             DeviceType::Gen4Hybrid,
             DeviceType::Unknown(0),
         ];
@@ -2350,12 +2328,10 @@ mod tests {
         assert!(!DeviceType::ACCoupled.supports_timed_discharge(318));
         assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(318));
         assert!(!DeviceType::ThreePhase.supports_timed_discharge(318));
-        assert!(!DeviceType::AioCommercial.supports_timed_discharge(318));
         assert!(!DeviceType::HybridHvGen3.supports_timed_discharge(318));
         assert!(!DeviceType::AllInOneHybrid.supports_timed_discharge(318));
         assert!(!DeviceType::Gateway.supports_timed_discharge(318));
         assert!(!DeviceType::Ems.supports_timed_discharge(318));
-        assert!(!DeviceType::EmsCommercial.supports_timed_discharge(318));
         assert!(!DeviceType::PvInverter.supports_timed_discharge(318));
         assert!(!DeviceType::Unknown(0).supports_timed_discharge(318));
     }
@@ -2384,7 +2360,6 @@ mod tests {
             DeviceType::Gen1Hybrid,
             DeviceType::Gen2Hybrid,
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
             DeviceType::Gateway,
@@ -2431,10 +2406,8 @@ mod tests {
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::ACThreePhase,
             DeviceType::Ems,
-            DeviceType::EmsCommercial,
             DeviceType::Gateway,
         ];
         for dt in non_extended {
@@ -2454,7 +2427,6 @@ mod tests {
         let three_phase: &[DeviceType] = &[
             DeviceType::ThreePhase,
             DeviceType::ACThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
         ];
@@ -2479,7 +2451,6 @@ mod tests {
             DeviceType::AllInOne5kW,
             DeviceType::Gen4Hybrid,
             DeviceType::Ems,
-            DeviceType::EmsCommercial,
             // Gateway is single-phase-class for control (issue #149): it
             // forwards standard HR 94/95/56/57/96/116 writes to its child
             // AIO(s) and has no three-phase control bank.
@@ -2519,10 +2490,8 @@ mod tests {
             DeviceType::Gen3PlusHybrid,
             DeviceType::PvInverter,
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::ACThreePhase,
             DeviceType::Ems,
-            DeviceType::EmsCommercial,
             DeviceType::Gateway,
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
@@ -2558,10 +2527,8 @@ mod tests {
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::ACThreePhase,
             DeviceType::Ems,
-            DeviceType::EmsCommercial,
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,

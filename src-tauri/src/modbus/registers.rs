@@ -793,7 +793,7 @@ pub const GATEWAY_INPUT_BLOCKS: &[RegisterBlock] = &[
 //   HR 2072  CAR_CHARGE_MODE
 //   HR 2073  CAR_CHARGE_BOOST
 //
-// Only polled on EMS / Gateway / EmsCommercial devices — see the device-type
+// Only polled on EMS / Gateway devices — see the device-type
 // extra_poll_blocks() routing in `inverter::model`.
 //
 // 36-register block starting at HR 2040 covers HR 2040-2075 inclusive.

@@ -16,12 +16,11 @@ export function isAcCoupledDevice(code: string | null | undefined): boolean {
 
 /**
  * Whether the device uses the three-phase-bank charge/discharge power limit
- * registers (already 1-100%): 0x40/41/60/70/81/82 families.
+ * registers (already 1-100%): 0x40/60/70/81/82 families.
  */
 export function isThreePhaseLimitModel(code: string | null | undefined): boolean {
   return !!code
     && (code.startsWith('40')
-      || code.startsWith('41')
       || code.startsWith('60')
       || code.startsWith('70')
       || code.startsWith('81')
@@ -80,9 +79,7 @@ export function deviceSupportsEps(
  *
  *   - 0x70xx — Gateway        → HR 2071 (plant-level export limit, raw W)
  *   - 0x50xx — EMS            → HR 2071
- *   - 0x51xx — EMS Commercial → HR 2071
  *   - 0x40xx — three-phase    → HR 1063 (`p_export_limit`, deci-W)
- *   - 0x41xx — AIO Commercial → HR 1063
  *   - 0x60xx — AC three-phase → HR 1063
  *   - 0x81xx — HV Gen3 hybrid → HR 1063
  *   - 0x82xx — All-in-One hybrid → HR 1063
@@ -103,9 +100,7 @@ export function deviceSupportsExportLimit(
   if (!code) return false;
   return (
     code.startsWith('40')
-    || code.startsWith('41')
     || code.startsWith('50')
-    || code.startsWith('51')
     || code.startsWith('60')
     || code.startsWith('70')
     || code.startsWith('81')
@@ -124,8 +119,8 @@ export function deviceSupportsExportLimit(
  * expose the AC-config block for EPS, but field logs show HR319/320 reject
  * Timed Discharge slot writes with Modbus exception 1, so they are gated out
  * until a safe write path is confirmed. On every other family (AC-coupled,
- * DC hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, AIO Commercial,
- * AIO Hybrid, HV Gen3, Gateway, EMS, PV inverter) the registers don't exist:
+ * DC hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, AIO Hybrid,
+ * HV Gen3, Gateway, EMS, PV inverter) the registers don't exist:
  * the write is dropped/times out and `battery_pause_mode` never reflects an
  * enabled state, so the toggle appeared broken (the originally reported
  * Gen1 Hybrid symptom).

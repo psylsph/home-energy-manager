@@ -341,7 +341,7 @@ pub(crate) fn carry_forward_optional_block_values(
         }
     }
 
-    // Three-phase/commercial/HV models get limit/reserve values from optional
+    // Three-phase/HV models get limit/reserve values from optional
     // HR(1080-1124). If that optional block is skipped for one poll, keep the
     // previous values rather than flashing defaults/zeros in the UI.
     if !has_three_phase_config_block
@@ -349,7 +349,6 @@ pub(crate) fn carry_forward_optional_block_values(
             snap.device_type,
             DeviceType::ThreePhase
                 | DeviceType::ACThreePhase
-                | DeviceType::AioCommercial
                 | DeviceType::HybridHvGen3
                 | DeviceType::AllInOneHybrid
         )
@@ -416,10 +415,7 @@ pub(crate) fn carry_forward_optional_block_values(
     // block is missed, carry forward the export limit (HR 2071) so the UI
     // doesn't flash "unconfigured" for one cycle.
     if !has_ems_plant_block
-        && matches!(
-            snap.device_type,
-            DeviceType::Gateway | DeviceType::Ems | DeviceType::EmsCommercial
-        )
+        && matches!(snap.device_type, DeviceType::Gateway | DeviceType::Ems)
         && snap.device_type == prev.device_type
         && snap.export_limit_w == 0
         && prev.export_limit_w > 0
@@ -548,8 +544,8 @@ pub(crate) fn carry_forward_battery_modules_with(
 // Three-phase / HV battery field derivation from BMS
 // ===========================================================================
 
-/// Derive battery temperature, capacity and max power for three-phase / HV /
-/// commercial inverters from the BMS data.
+/// Derive battery temperature, capacity and max power for three-phase / HV
+/// inverters from the BMS data.
 ///
 /// The three-phase inverter register blocks (IR 1000-1413, HR 1080-1124) do
 /// NOT expose battery pack temperature or capacity - only converter heatsink
@@ -573,9 +569,9 @@ pub(crate) fn carry_forward_battery_modules_with(
 /// are the authoritative source - their per-module cell-group maxima are
 /// always more accurate than the inverter's single register.
 ///
-/// For three-phase / HV / commercial inverters, also derives battery
-/// capacity and max power from the BMS data (since their inverter register
-/// blocks lack this information entirely). Single-phase gets those from
+/// For three-phase / HV inverters, also derives battery capacity and max power
+/// from the BMS data (since their inverter register blocks lack this
+/// information entirely). Single-phase gets those from
 /// the standard HR(55)/IR decode paths.
 pub(crate) fn derive_battery_fields_from_bms(
     snap: &mut InverterSnapshot,
@@ -1624,7 +1620,7 @@ pub(crate) fn sanitize_snapshot(
             ) as i32;
             (rated_ac * 3 / 2).max(10_000)
         }
-        DeviceType::ThreePhase | DeviceType::AioCommercial | DeviceType::ACThreePhase => {
+        DeviceType::ThreePhase | DeviceType::ACThreePhase => {
             // Larger three-phase installations can legitimately exceed the
             // residential 10 kW ceiling. Preserve the full-DTC rated AC
             // value when available and allow 150% PV oversizing, with a
@@ -1637,7 +1633,7 @@ pub(crate) fn sanitize_snapshot(
             ) as i32;
             (rated_ac * 3 / 2).max(15_000)
         }
-        DeviceType::Ems | DeviceType::EmsCommercial => {
+        DeviceType::Ems => {
             // EMS devices aggregate plant-level PV and do not expose a
             // useful inverter-rated AC fallback in DeviceType.
             25_000
@@ -2819,7 +2815,6 @@ pub(crate) fn sanitize_snapshot(
         crate::inverter::model::DeviceType::AllInOne6kW
         | crate::inverter::model::DeviceType::AllInOne3_6kW
         | crate::inverter::model::DeviceType::AllInOne5kW
-        | crate::inverter::model::DeviceType::AioCommercial
         | crate::inverter::model::DeviceType::AllInOneHybrid => 400.0,
         // GIV-HY-10.0-G3-HV is rated for a 120-510 V battery range. Use the
         // same 600 V safety ceiling as the other stackable-HV families.
@@ -6178,9 +6173,9 @@ mod tests {
     }
 
     #[test]
-    fn optional_three_phase_config_carries_forward_for_aio_commercial() {
+    fn optional_three_phase_config_carries_forward_for_three_phase() {
         let prev = InverterSnapshot {
-            device_type: DeviceType::AioCommercial,
+            device_type: DeviceType::ThreePhase,
             charge_rate: 70,
             discharge_rate: 60,
             battery_reserve: 10,
@@ -6188,7 +6183,7 @@ mod tests {
             ..Default::default()
         };
         let mut snap = InverterSnapshot {
-            device_type: DeviceType::AioCommercial,
+            device_type: DeviceType::ThreePhase,
             ..Default::default()
         };
 
