@@ -305,7 +305,7 @@ pub enum ControlCommand {
     /// HR 1118/1119. Idempotent.
     ThreePhaseAgileClearActiveSlot,
     /// Set EMS/Gateway plant-level export power limit (HR 2071, W).
-    /// Only present on EMS / Gateway / EmsCommercial hardware.
+    /// Only present on EMS / Gateway hardware.
     SetEmsExportLimit { watts: u16 },
     /// Set three-phase plant-level export power limit (HR 1063, deci-W).
     /// Distinct from single-phase HR(26) (raw W) and EMS HR(2071).

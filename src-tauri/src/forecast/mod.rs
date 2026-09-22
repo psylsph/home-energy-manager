@@ -1029,7 +1029,6 @@ mod tests {
         // of the hardware maximum, not the DC-hybrid doubled value.
         for device_type in [
             DeviceType::ThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::ACThreePhase,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,

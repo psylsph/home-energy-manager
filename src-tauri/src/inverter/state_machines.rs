@@ -682,11 +682,9 @@ pub fn adaptive_charge_register(device_type: DeviceType) -> Option<u16> {
     }
     match device_type {
         DeviceType::ACCoupled | DeviceType::ACCoupledMk2 => Some(HR_AC_BATTERY_CHARGE_LIMIT),
-        DeviceType::PvInverter
-        | DeviceType::Ems
-        | DeviceType::EmsCommercial
-        | DeviceType::Gateway
-        | DeviceType::Unknown(_) => None,
+        DeviceType::PvInverter | DeviceType::Ems | DeviceType::Gateway | DeviceType::Unknown(_) => {
+            None
+        }
         _ => Some(HR_BATTERY_CHARGE_LIMIT),
     }
 }

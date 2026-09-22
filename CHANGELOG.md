@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.84.0] - 2026-09-21
+
+### Fixed
+
+- **Commercial AIO systems are no longer advertised as supported.** HEM now leaves Commercial AIO/EMS devices unclassified instead of routing them through residential or three-phase support, while residential AIO and ordinary EMS support remain unchanged.
+
 ## [0.83.7] - 2026-09-19
 
 ### Added
@@ -1240,7 +1246,7 @@ All notable changes to this project will be documented in this file.
 
 - **Switching to Eco no longer erases your discharge schedule.** On Gen3 inverters the app has to clear the discharge slot registers for Eco to stick — the firmware otherwise keeps re-arming discharge the moment any slot register is non-zero — but doing so used to wipe your configured schedule and then lock the Timed toggle out, because there was no longer a slot to switch back to. You had to re-enter the whole schedule by hand every time you popped into Eco. The app now backs your schedule up the moment you switch to Eco (or Pause, or Export Paused), still shows the saved slots in the Eco-mode slot editor so you can see they haven't gone anywhere, and restores them automatically when you switch back to Timed. The backup survives an app restart too, so a crash mid-Eco no longer loses your schedule. See #137.
 
-- **AC Charge Power Limit / AC Discharge Power Limit sliders now read back correctly when Minimal Telemetry Mode is on.** On AC-coupled inverters those limits live in HR 313/314, which sit inside the optional AC config block (HR 300-359) — the very block Minimal Telemetry Mode was skipping to cut per-cycle timeouts. The dongle was happily accepting the writes, and the GivEnergy app would show the new value, but HEM's own slider read 0% on the next refresh because the read-back never happened. The same problem applied to three-phase / HV / AIO commercial / AIO hybrid inverters, where the active limits live in HR 1108/1110 inside the optional three-phase config block (HR 1080-1124). Minimal Telemetry Mode now still skips extended slots, three-phase telemetry, and the gateway input banks — the trade-off it was originally designed for — but keeps polling the one block per device type that actually holds the limit register, so the slider reflects what the user just set without re-introducing the timeout exposure the mode was built to avoid.
+- **AC Charge Power Limit / AC Discharge Power Limit sliders now read back correctly when Minimal Telemetry Mode is on.** On AC-coupled inverters those limits live in HR 313/314, which sit inside the optional AC config block (HR 300-359) — the very block Minimal Telemetry Mode was skipping to cut per-cycle timeouts. The dongle was happily accepting the writes, and the GivEnergy app would show the new value, but HEM's own slider read 0% on the next refresh because the read-back never happened. The same problem applied to three-phase / HV / AIO hybrid inverters, where the active limits live in HR 1108/1110 inside the optional three-phase config block (HR 1080-1124). Minimal Telemetry Mode now still skips extended slots, three-phase telemetry, and the gateway input banks — the trade-off it was originally designed for — but keeps polling the one block per device type that actually holds the limit register, so the slider reflects what the user just set without re-introducing the timeout exposure the mode was built to avoid.
 
 ## [0.40.12] - 2026-06-25
 
@@ -3139,9 +3145,9 @@ chart reliability, and UI polish.**
   ([#41](https://github.com/psylsph/home-energy-manager/issues/41))
 - **AC-coupled battery controls**: Charge/discharge limit sliders now use the
   correct 1-100% range for AC-coupled inverters (was 0-50%).
-- **Three-phase and commercial battery controls**: Discharge limits, charge
-  limits, SOC reserve, and force charge/discharge now work on three-phase,
-  commercial, and high-voltage hybrid inverters.
+- **Three-phase battery controls**: Discharge limits, charge limits, SOC
+  reserve, and force charge/discharge now work on three-phase and
+  high-voltage hybrid inverters.
 - **Both firmware versions shown**: Inverter details page now displays ARM
   and DSP firmware versions (helpful for diagnosing partial updates).
 - **Smarter inverter detection**: Uses GivEnergy's standard address first,

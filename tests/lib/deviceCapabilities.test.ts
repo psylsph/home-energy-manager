@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deviceSupportsEps,
+  deviceSupportsExportLimit,
   deviceSupportsTimedDischarge,
   isAcCoupledDevice,
   isThreePhaseLimitModel,
@@ -37,9 +38,9 @@ describe('deviceSupportsEps', () => {
       ['2101', 'Polar hybrid'],
       ['2201', 'Gen3+ hybrid'],
       ['4001', 'Three-phase'],
-      ['4101', 'AIO Commercial'],
+      ['4101', 'unvalidated device family'],
       ['5001', 'EMS'],
-      ['5101', 'EMS Commercial'],
+      ['5101', 'unvalidated device family'],
       ['7001', 'Gateway'],
       ['8101', 'Hybrid HV Gen3 6kW (HR1105 write unverified)'],
       ['8102', 'Hybrid HV Gen3 8kW (HR1105 write unverified)'],
@@ -94,12 +95,11 @@ describe('isAcCoupledDevice', () => {
 });
 
 /**
- * Three-phase-bank charge/discharge limit register models: 0x40/41/60/70/81/82.
+ * Three-phase-bank charge/discharge limit register models: 0x40/60/70/81/82.
  */
 describe('isThreePhaseLimitModel', () => {
   it.each([
     ['4001', 'ThreePhase'],
-    ['4101', 'AIO Commercial'],
     ['6001', 'AC three-phase'],
     ['7001', 'Gateway'],
     ['8101', 'Hybrid HV Gen3'],
@@ -111,6 +111,7 @@ describe('isThreePhaseLimitModel', () => {
   it.each([
     ['3001', 'AC-coupled uses AC-config block, not three-phase bank'],
     ['2001', 'Gen hybrid'],
+    ['4101', 'unvalidated device family'],
     ['8001', 'AIO'],
   ])('returns false for %s (%s)', (code) => {
     expect(isThreePhaseLimitModel(code)).toBe(false);
@@ -132,7 +133,6 @@ describe('usesDirectChargeLimit', () => {
     ['3002', 'AC-coupled Mk2'],
     ['3050', 'unlisted 30xx AC-coupled'],
     ['4001', 'ThreePhase'],
-    ['4101', 'AIO Commercial'],
     ['6001', 'AC three-phase'],
     ['7001', 'Gateway'],
     ['8101', 'Hybrid HV Gen3'],
@@ -144,6 +144,7 @@ describe('usesDirectChargeLimit', () => {
   it.each([
     ['1001', 'Gen1 hybrid'],
     ['2001', 'Gen hybrid (HR111/112 are 0-50)'],
+    ['4101', 'unvalidated device family'],
     ['8001', 'AIO'],
     ['8301', 'Gen4 hybrid'],
   ])('returns false for %s (%s)', (code) => {
@@ -154,6 +155,17 @@ describe('usesDirectChargeLimit', () => {
     expect(usesDirectChargeLimit(undefined)).toBe(false);
     expect(usesDirectChargeLimit(null)).toBe(false);
   });
+});
+
+describe('deviceSupportsExportLimit', () => {
+  it.each(['4101', '41FF', '5101', '51FF'])(
+    'does not expose controls for unvalidated device code %s',
+    (code) => {
+      expect(
+        deviceSupportsExportLimit({ device_type_code: code } as never),
+      ).toBe(false);
+    },
+  );
 });
 
 /**
@@ -188,9 +200,9 @@ describe('deviceSupportsTimedDischarge', () => {
       ['2101', 'Polar hybrid'],
       ['2201', 'Gen3+ hybrid'],
       ['4001', 'Three-phase'],
-      ['4101', 'AIO Commercial'],
+      ['4101', 'unvalidated device family'],
       ['5001', 'EMS'],
-      ['5101', 'EMS Commercial'],
+      ['5101', 'unvalidated device family'],
       ['7001', 'Gateway'],
       ['8101', 'Hybrid HV Gen3 6kW'],
       ['8102', 'Hybrid HV Gen3 8kW'],

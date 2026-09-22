@@ -162,7 +162,7 @@ fn model_specific_blocks_in_poll_order(
     }
 
     // EMS / Gateway plant-level holding registers (HR 2040-2075) — read on
-    // any batteryless device (Gateway, EMS, EmsCommercial) so the
+    // any batteryless device (Gateway, EMS) so the
     // round-trip on the export limit (HR 2071) and other plant-level
     // config (plant enable, discharge/charge/export slots, car-charge
     // mode/boost) actually populates the snapshot. Gateway reads this only
@@ -2263,7 +2263,6 @@ pub(crate) mod tests {
             DeviceType::Gateway,
             DeviceType::ThreePhase,
             DeviceType::ACThreePhase,
-            DeviceType::AioCommercial,
             DeviceType::AllInOneHybrid,
         ] {
             let lean = preview_standard_blocks(Some(&dt), None);

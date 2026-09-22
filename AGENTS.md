@@ -22,6 +22,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) and [GivTCP](https://github.com/dewet22/giv_tcp)
 - **Testing**: inline Rust unit tests + mock-TCP integration tests + Playwright E2E (local-only E2E use the [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator))
 - **References**: local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding
+- **Commercial AIO/EMS boundary**: Commercial AIO/CAIO and EMS Commercial (`0x41xx`/`0x51xx`) are not supported. Do not advertise, classify, poll, decode, or control those products. They use the EMS-C standard Modbus TCP interface on NET1 and a distinct register map, not HEM's proprietary data-adapter protocol on port 8899. Keep residential AIO (`0x80xx`) and ordinary EMS (`0x50xx`) support separate. Unknown `0x41xx`/`0x51xx` codes must remain unknown until real-hardware captures support a dedicated, initially read-only implementation.
 
 ## Prerequisites
 

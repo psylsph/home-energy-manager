@@ -2265,7 +2265,6 @@ mod tests {
             for device in [
                 DeviceType::PvInverter,
                 DeviceType::Ems,
-                DeviceType::EmsCommercial,
                 DeviceType::Gen4Hybrid,
                 DeviceType::Unknown(0x9999),
             ] {

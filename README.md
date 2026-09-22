@@ -161,15 +161,16 @@ Home Energy Manager connects directly to your inverter over your home network. I
 
 ### Compatibility
 
-- **Works with every GivEnergy inverter model** — Gen 1, Gen 2, Gen 3, Gen 4, Three Phase, AC Three Phase, HV Gen 3, All-in-One, AIO Hybrid, AIO Commercial, and **Gateway**
-- **Three-phase and commercial systems** — fully supported, including the GIV-3HY family and All-in-One units
+- **Works with supported GivEnergy inverter models** — Gen 1, Gen 2, Gen 3, Gen 4, Three Phase, AC Three Phase, HV Gen 3, residential All-in-One, AIO Hybrid, and **Gateway**
+- **Three-phase systems** — supported, including the GIV-3HY family and residential All-in-One units
+- **Commercial AIO/EMS systems are not currently supported** — their EMS-C uses a different standard Modbus TCP interface and register map.
 - **Smart meter detection** — handles LoRA-linked meters and slow-responding CT clamps so nothing gets missed at startup
 
 ---
 
 ## Supported Inverters
 
-Home Energy Manager works with all known GivEnergy inverter models. Real-time monitoring, Force Charge/Discharge, Cosy and Agile automation, and Auto Winter Mode work on every model. The main difference between models is how many charge/discharge schedule slots you can set:
+Home Energy Manager supports the inverter models listed below. Real-time monitoring, Force Charge/Discharge, Cosy and Agile automation, and Auto Winter Mode are available according to each model's capabilities. The main difference between models is how many charge/discharge schedule slots you can set:
 
 ### 10-slot schedules ✅
 
@@ -182,9 +183,8 @@ Home Energy Manager works with all known GivEnergy inverter models. Real-time mo
 | **Three Phase** (e.g. GIV-3HY-11 11kW) | Full three-phase support |
 | **AC Three Phase** | AC-coupled three-phase |
 | **HV Gen 3** | High-voltage hybrid |
-| **All-in-One** (3.6kW/5kW/6kW) | Commercial all-in-one units |
+| **All-in-One** (3.6kW/5kW/6kW) | Residential All-in-One units |
 | **All-in-One Hybrid** | Combined hybrid + AIO |
-| **AIO Commercial** | Commercial three-phase variant |
 | **Gateway** *(experimental)* | System controller / AC hub for 1–3 AIO units. Full schedule, mode, and rate-limit control via the three-phase register set. |
 
 ### 2-slot schedules ✅
