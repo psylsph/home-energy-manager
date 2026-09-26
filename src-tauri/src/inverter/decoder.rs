@@ -607,12 +607,14 @@ fn apply_model_and_solar_corrections(
     // DTC 3001 field data shows IR(44) rising almost exactly with battery
     // discharge after the charge lock ends; under heavy grid-fed EV/immersion
     // load it can also creep while both PV counters remain zero. On AC-coupled
-    // firmware it is inverter-output-today, not PV-generation-today. The
-    // mirrored per-string counters (or CT authority applied later in poll.rs)
-    // are the valid solar source.
+    // firmware it is inverter-output-today, not PV-generation-today. Gen3
+    // hybrid field data (#338) likewise shows IR(44) rising at dawn before
+    // either per-string energy counter moves, then dropping when we switch
+    // sources at the first PV1 tick. Both families have working per-string
+    // counters; leave the IR(44) fallback for older hybrids that need it.
     if matches!(
         snap.device_type,
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::Gen3Hybrid
     ) {
         snap.today_solar_kwh = per_string_today;
     }
@@ -4628,7 +4630,13 @@ mod tests {
             input[26] = 10; // Import is 1.0 kWh throughout.
             decode_snapshot(&[
                 make_block(RegisterType::Input, 0, 60, "input_0_59", input),
-                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding.clone()),
+                make_block(
+                    RegisterType::Holding,
+                    0,
+                    60,
+                    "holding_0_59",
+                    holding.clone(),
+                ),
             ])
         };
 
