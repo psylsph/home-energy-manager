@@ -4656,6 +4656,56 @@ mod tests {
     }
 
     #[test]
+    fn gen3_hybrid_uses_available_strings_even_when_ir44_is_unreliable() {
+        // Model correction must also work when the holding block arrives
+        // first, without a configured solar location and after sunset.
+        // PV2-only dawn is significant: IR(19) requires IR(44) corroboration
+        // when the string is dark, but IR(44) must never become the total.
+        let cases = [
+            (0, 0, 5, 0.0),        // False aggregate before either string ticks.
+            (0, 1, 5, 0.1),        // PV2 is first to generate.
+            (1, 0, u16::MAX, 0.1), // Corrupt aggregate must not replace PV1.
+            (3, 4, 7, 0.7),        // Both strings contribute.
+            (5_000, 0, 5, 0.0),    // Corrupt PV1 is not real generation.
+        ];
+        for position in [
+            None,
+            Some(SolarPosition {
+                elevation_deg: -20.0,
+                hour_angle_deg: 120.0, // after sunset, not pre-dawn
+            }),
+        ] {
+            for holding_first in [false, true] {
+                for (pv1, pv2, ir44, expected) in cases {
+                    let mut input = vec![0u16; 60];
+                    input[17] = pv1;
+                    input[19] = pv2;
+                    input[26] = 10; // 1.0 kWh import, to check derived consumption.
+                    input[44] = ir44;
+                    let mut holding = vec![0u16; 60];
+                    holding[0] = 0x2001;
+                    holding[21] = 300;
+                    let input = make_block(RegisterType::Input, 0, 60, "input_0_59", input);
+                    let holding = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding);
+                    let blocks = if holding_first {
+                        vec![holding, input]
+                    } else {
+                        vec![input, holding]
+                    };
+                    let snap = decode_snapshot_with_solar_position(&blocks, position);
+                    assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+                    assert!(
+                        (snap.today_solar_kwh - expected).abs() < 0.01,
+                        "PV1={pv1} PV2={pv2} IR44={ir44} holding_first={holding_first}: {}",
+                        snap.today_solar_kwh
+                    );
+                    assert!((snap.home_energy_today_kwh - (1.0 + expected)).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ac_coupled_ir44_inverter_output_is_never_solar_fallback() {
         // DTC 3001 field capture, 2 Sep 2026: while PV1/PV2 daily counters
         // remained zero, IR(44) rose with grid-fed immersion/EV load and then
