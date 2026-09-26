@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.84.1] - 2026-09-26
+
+### Fixed
+
+- **Solar generation starts at the right value on Gen3 hybrid inverters.** A separate inverter reading could make the History chart count energy before the panels had generated it, then drop back when the panel counters started moving. HEM now uses those panel counters from the beginning of the day, so the chart and period total no longer overcount the false rise (#338).
+
 ## [0.84.0] - 2026-09-21
 
 ### Fixed
