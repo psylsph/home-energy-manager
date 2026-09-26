@@ -4611,6 +4611,43 @@ mod tests {
     }
 
     #[test]
+    fn gen3_hybrid_dawn_does_not_switch_from_phantom_ir44_to_pv_strings() {
+        // Issue #338: IR(44) crept to 0.5 kWh while the inverter's PV1/PV2
+        // daily counters and the third-party generated total remained zero.
+        // Once a string reached 0.1 kWh, switching sources made the chart
+        // drop and the History period summary double-counted the first ramp.
+        let mut holding = vec![0u16; 60];
+        holding[0] = 0x2001;
+        holding[21] = 300; // ARM firmware identifies a Gen3 hybrid.
+
+        let decode = |pv1: u16, pv2: u16, aggregate: u16| {
+            let mut input = vec![0u16; 60];
+            input[17] = pv1;
+            input[19] = pv2;
+            input[44] = aggregate;
+            input[26] = 10; // Import is 1.0 kWh throughout.
+            decode_snapshot(&[
+                make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding.clone()),
+            ])
+        };
+
+        let before_sunrise = decode(0, 0, 1);
+        let before_first_tick = decode(0, 0, 5);
+        let first_tick = decode(1, 0, 5);
+        let later = decode(5, 4, 14);
+        for snap in [&before_sunrise, &before_first_tick, &first_tick, &later] {
+            assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+            let per_string = snap.today_pv1_kwh + snap.today_pv2_kwh;
+            assert!((snap.today_solar_kwh - per_string).abs() < 0.01);
+            assert!((snap.today_consumption_kwh - (1.0 + per_string)).abs() < 0.01);
+        }
+        assert_eq!(before_first_tick.today_solar_kwh, 0.0);
+        assert!((first_tick.today_solar_kwh - 0.1).abs() < 0.01);
+        assert!((later.today_solar_kwh - 0.9).abs() < 0.01);
+    }
+
+    #[test]
     fn ac_coupled_ir44_inverter_output_is_never_solar_fallback() {
         // DTC 3001 field capture, 2 Sep 2026: while PV1/PV2 daily counters
         // remained zero, IR(44) rose with grid-fed immersion/EV load and then
