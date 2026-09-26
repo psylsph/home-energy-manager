@@ -4551,6 +4551,117 @@ mod tests {
     }
 
     #[test]
+    fn gen3_dawn_decode_sanitize_and_history_agree_on_pv_generation() {
+        use crate::inverter::decoder::decode_snapshot;
+        use crate::inverter::model::DeviceType;
+        use crate::inverter::sanitizer::{
+            sanitize_snapshot, ConsecutiveSuspectCounts, DeltaCorrectionCounts, RateReleaseCounts,
+        };
+        use crate::modbus::client::BlockRead;
+        use crate::modbus::registers::{RegisterBlock, RegisterType};
+
+        let db = test_db();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-09-26T06:00:00Z")
+            .unwrap()
+            .timestamp();
+        let mut previous = None;
+        let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+        let mut suspect_counts = ConsecutiveSuspectCounts::default();
+        let mut rate_release_counts = RateReleaseCounts::default();
+
+        // IR(44) rises to 0.5 kWh before either string has produced 0.1 kWh.
+        // Then the real per-string counters rise to 0.9 kWh, as in #338.
+        for (offset, pv1, pv2, ir44) in [
+            (0, 0, 0, 0),
+            (300, 0, 0, 1),
+            (600, 0, 0, 3),
+            (900, 0, 0, 5),
+            (1200, 1, 0, 5),
+            (2400, 2, 2, 8),
+            (3600, 5, 4, 14),
+        ] {
+            let mut input = vec![0u16; 60];
+            input[5] = 2300;
+            input[13] = 5000;
+            input[17] = pv1;
+            input[19] = pv2;
+            input[44] = ir44;
+            input[59] = 50;
+            let mut holding = vec![0u16; 60];
+            holding[0] = 0x2001;
+            holding[21] = 300; // Gen3 hybrid ARM firmware.
+            let input_block = Box::leak(Box::new(RegisterBlock {
+                start: 0,
+                count: 60,
+                register_type: RegisterType::Input,
+                name: "input_0_59",
+            }));
+            let holding_block = Box::leak(Box::new(RegisterBlock {
+                start: 0,
+                count: 60,
+                register_type: RegisterType::Holding,
+                name: "holding_0_59",
+            }));
+            let mut snap = decode_snapshot(&[
+                BlockRead {
+                    block: input_block,
+                    data: input,
+                },
+                BlockRead {
+                    block: holding_block,
+                    data: holding,
+                },
+            ]);
+            snap.timestamp = start + offset;
+            assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+            sanitize_snapshot(
+                &mut snap,
+                previous.as_ref(),
+                false,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+                &mut rate_release_counts,
+            );
+            assert!((snap.today_solar_kwh - (pv1 + pv2) as f32 * 0.1).abs() < 1e-5);
+            db.insert_reading(&snap);
+            previous = Some(snap);
+        }
+
+        let fields = ["today_solar_kwh", "today_pv1_kwh", "today_pv2_kwh"]
+            .map(str::to_string)
+            .to_vec();
+        let chart = db
+            .query_history(3601, 300, 0, &fields, Some((start, start + 3601)))
+            .unwrap();
+        let total: Vec<TimePoint> =
+            serde_json::from_value(chart["today_solar_kwh"].clone()).unwrap();
+        let pv1: Vec<TimePoint> = serde_json::from_value(chart["today_pv1_kwh"].clone()).unwrap();
+        let pv2: Vec<TimePoint> = serde_json::from_value(chart["today_pv2_kwh"].clone()).unwrap();
+        assert_eq!(total.len(), 7);
+        assert_eq!(pv1.len(), 7);
+        assert_eq!(pv2.len(), 7);
+        for (index, expected) in [0.0, 0.0, 0.0, 0.0, 0.1, 0.4, 0.9].into_iter().enumerate() {
+            assert!((total[index].v - expected).abs() < 1e-5, "bucket {index}");
+            assert!((total[index].v - pv1[index].v - pv2[index].v).abs() < 1e-5);
+        }
+        assert!(pv1[..4].iter().all(|point| point.v == 0.0));
+        assert!(pv2[..4].iter().all(|point| point.v == 0.0));
+        let summary = db
+            .query_energy_summary(&HistoryWindow {
+                range_secs: 0,
+                offset: 0,
+                explicit_window: Some((start, start + 3601)),
+            })
+            .unwrap();
+        assert!(
+            (summary.solar_generated_kwh - 0.9).abs() < 1e-5,
+            "phantom IR(44) ramp must not be added to generated energy: {summary:?}"
+        );
+    }
+
+    #[test]
     fn energy_summary_ignores_a_repeated_near_zero_reset_within_the_day() {
         let db = test_db();
         let start = 1_700_100_000i64;
