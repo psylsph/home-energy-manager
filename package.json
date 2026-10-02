@@ -33,7 +33,7 @@
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.1",
     "@testing-library/jest-dom": "^7.0.1",
-    "@testing-library/react": "^16.3.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^26.6.2",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
