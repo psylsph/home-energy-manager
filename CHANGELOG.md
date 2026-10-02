@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.85.0] - 2026-10-02
+
+### Added
+
+- **History charts can show the average of each plotted series.** Enable History Chart Averages in Settings to add a fixed dotted line per series over the selected period, and to surface the same window average in the chart tooltip (#345).
+
 ## [0.84.1] - 2026-09-26
 
 ### Fixed
