@@ -237,6 +237,8 @@ export default function SettingsPage() {
     setVisualNoiseThreshold,
     gridLineWeight,
     setGridLineWeight,
+    showHistoryAverages,
+    setShowHistoryAverages,
     gridMeterAddress,
     setGridMeterAddress,
     snapshot,
@@ -2596,6 +2598,25 @@ export default function SettingsPage() {
                 </button>
               );
             })}
+          </div>
+        </div>
+
+        {/* ── Sub-section: History Chart Averages ── */}
+        {/* Draws a fixed horizontal average line per series on every History
+            graph (issue #345). Off by default so existing users see no
+            change; persisted via the store so it survives reloads. */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">History Chart Averages</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Draw a horizontal line on each History graph showing the average of that series over the selected period.
+          </p>
+          <div className="flex items-center justify-between">
+            <span className="text-text-primary text-sm font-sans">Show average lines</span>
+            <Toggle
+              checked={showHistoryAverages}
+              onChange={setShowHistoryAverages}
+              ariaLabel="Show average lines on History charts"
+            />
           </div>
         </div>
 
