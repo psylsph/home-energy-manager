@@ -166,6 +166,19 @@ TAG_GUARD_COUNT="$(count_matches "startsWith(github.ref, 'refs/tags/v')")"
 assert_eq "tag guard on upload, docker, version-check and publish jobs" "6" "$TAG_GUARD_COUNT"
 
 echo
+echo "5. the release gate fails fast on drifted Tauri plugin versions"
+# tauri-cli aborts `tauri build` when an @tauri-apps/plugin-* npm package
+# and its Rust crate drift apart by a minor release. That killed every
+# platform job of the v0.85.0 release (run 37033633298) during setup, so
+# the gate must reject the tag before any platform runner starts.
+VERIFY_JOB_BLOCK="$(job_block 'verify-versions')"
+assert_contains \
+  "version gate checks the Tauri npm packages against their Rust crates" \
+  "bash scripts/check-tauri-plugin-versions.sh" \
+  "$VERIFY_JOB_BLOCK"
+
+
+echo
 echo "---------------------------------------"
 echo "Passed: $PASS    Failed: $FAIL"
 echo "---------------------------------------"

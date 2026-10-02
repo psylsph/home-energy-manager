@@ -24,6 +24,10 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **References**: local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding
 - **Commercial AIO/EMS boundary**: Commercial AIO/CAIO and EMS Commercial (`0x41xx`/`0x51xx`) are not supported. Do not advertise, classify, poll, decode, or control those products. They use the EMS-C standard Modbus TCP interface on NET1 and a distinct register map, not HEM's proprietary data-adapter protocol on port 8899. Keep residential AIO (`0x80xx`) and ordinary EMS (`0x50xx`) support separate. Unknown `0x41xx`/`0x51xx` codes must remain unknown until real-hardware captures support a dedicated, initially read-only implementation.
 
+## Tauri plugin pairing
+
+Every `@tauri-apps/plugin-*` npm package must share a major/minor release with its `tauri-plugin-*` Rust crate. `tauri build` aborts before compiling when they drift, which is how every platform job of the v0.85.0 release died after Dependabot bumped the crates alone. Dependabot updates one side at a time, so pair them in the same commit: the npm packages are pinned with `~` (not `^`) for this reason. `scripts/check-tauri-plugin-versions.sh` compares the two lockfiles and fails on drift — it runs in `npm test` and in the release workflow's `verify-versions` job.
+
 ## Prerequisites
 
 - Node.js + npm; Rust toolchain (stable); Tauri CLI (`cargo install tauri-cli`)
