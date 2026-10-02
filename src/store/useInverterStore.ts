@@ -61,6 +61,12 @@ interface InverterState {
    * user's choice survives reloads.
    */
   gridLineWeight: GridLineWeight;
+  /**
+   * Whether History charts draw a fixed horizontal average line per series
+   * (issue #345). Off by default so existing users see no change; persisted
+   * to localStorage so the choice survives reloads.
+   */
+  showHistoryAverages: boolean;
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
   pendingDischargeSlots: Record<number, ScheduleSlot>;
   /**
@@ -184,6 +190,7 @@ interface InverterState {
   setPanelGraphsYLock: (enabled: boolean) => void;
   setPanelGraphsYLockMax: (max: number) => void;
   setGridLineWeight: (weight: GridLineWeight) => void;
+  setShowHistoryAverages: (enabled: boolean) => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
   /**
@@ -411,6 +418,21 @@ function saveGridLineWeight(weight: GridLineWeight) {
   } catch { /* ignore */ }
 }
 
+function loadShowHistoryAverages(): boolean {
+  try {
+    // Only the literal "true" enables the average lines; any other stored
+    // value (or no entry) stays off, matching the opt-in default (issue #345).
+    return localStorage.getItem('showHistoryAverages') === 'true';
+  } catch { /* ignore */ }
+  return false;
+}
+
+function saveShowHistoryAverages(enabled: boolean) {
+  try {
+    localStorage.setItem('showHistoryAverages', enabled ? 'true' : 'false');
+  } catch { /* ignore */ }
+}
+
 function loadPendingDischargeSlots(): Record<number, ScheduleSlot> {
   try {
     const stored = localStorage.getItem('pendingDischargeSlots');
@@ -447,6 +469,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
+  showHistoryAverages: loadShowHistoryAverages(),
   latestVersionInfo: null,
   dismissedUpdateVersion: loadDismissedUpdateVersion(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
@@ -555,6 +578,10 @@ export const useInverterStore = create<InverterState>((set) => ({
     if (weight !== 'standard' && weight !== 'subtle') return;
     saveGridLineWeight(weight);
     set({ gridLineWeight: weight });
+  },
+  setShowHistoryAverages: (enabled) => {
+    saveShowHistoryAverages(enabled);
+    set({ showHistoryAverages: enabled });
   },
   setPendingDischargeSlots: (slots) => {
     savePendingDischargeSlots(slots);

@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { removeSpikes, isCumulativeField, SPIKE_THRESHOLDS } from '../../src/lib/chartSeries';
+import {
+  removeSpikes,
+  isCumulativeField,
+  SPIKE_THRESHOLDS,
+  computeSeriesAverage,
+  formatHistoryValue,
+} from '../../src/lib/chartSeries';
 import type { TimePoint } from '../../src/lib/types';
 
 /** Build a `TimePoint[]` from bare values at 1s spacing (ts is irrelevant to the maths). */
@@ -164,5 +170,57 @@ describe('removeSpikes', () => {
     const snapshot = input.map((p) => ({ ...p }));
     removeSpikes(input, 'today_solar_kwh');
     expect(input).toEqual(snapshot);
+  });
+});
+
+describe('computeSeriesAverage (issue #345)', () => {
+  it('averages the plotted values', () => {
+    expect(computeSeriesAverage([10, 20, 30])).toBe(20);
+  });
+
+  it('skips null and undefined gaps', () => {
+    expect(computeSeriesAverage([10, null, 20, undefined, 30])).toBe(20);
+  });
+
+  it('skips non-finite values', () => {
+    expect(computeSeriesAverage([10, NaN, Infinity, -Infinity, 20])).toBe(15);
+  });
+
+  it('returns null for an empty series', () => {
+    expect(computeSeriesAverage([])).toBeNull();
+  });
+
+  it('returns null when every point is a gap', () => {
+    expect(computeSeriesAverage([null, undefined, NaN])).toBeNull();
+  });
+
+  it('returns the single value for a one-point series', () => {
+    expect(computeSeriesAverage([42])).toBe(42);
+  });
+
+  it('handles negative values', () => {
+    // Temperature differentials and signed power series can go below zero.
+    expect(computeSeriesAverage([-5, 5])).toBe(0);
+    expect(computeSeriesAverage([-10, -20, -30])).toBe(-20);
+  });
+});
+
+describe('formatHistoryValue (issue #345)', () => {
+  it('formats currency to two decimals', () => {
+    expect(formatHistoryValue(1.234, '£')).toBe('£1.23');
+  });
+
+  it('formats energy to one decimal with unit', () => {
+    expect(formatHistoryValue(12.34, 'kWh')).toBe('12.3 kWh');
+  });
+
+  it('formats temperature to one decimal with unit', () => {
+    expect(formatHistoryValue(21.05, '°C')).toBe('21.1 °C');
+  });
+
+  it('rounds integer-unit values (%, W, V)', () => {
+    expect(formatHistoryValue(55.6, '%')).toBe('56 %');
+    expect(formatHistoryValue(349.6, 'W')).toBe('350 W');
+    expect(formatHistoryValue(240.4, 'V')).toBe('240 V');
   });
 });

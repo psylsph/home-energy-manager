@@ -6,6 +6,7 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
+  ReferenceLine,
   ResponsiveContainer,
 } from 'recharts';
 import { apiGet, fetchHistory, fetchHistorySummary, isTauri } from '../lib/api';
@@ -25,7 +26,7 @@ import {
   shouldRefreshHistoryRange,
   supportsHistoryDate,
 } from '../lib/historyRangeConfig';
-import { getSeriesOpacity, removeSpikes } from '../lib/chartSeries';
+import { computeSeriesAverage, formatHistoryValue, getSeriesOpacity, removeSpikes } from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
@@ -424,13 +425,66 @@ function formatWindowLabel(range: HistoryRange, offset: number): string {
 
 import type { GridLineWeight } from '../lib/historyRangeConfig';
 
-function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
+interface TooltipSeriesMeta {
+  /** Series mean over the window, or null when averages are off / unavailable. */
+  average: number | null;
+  /** Series hidden via the legend — its average is likewise suppressed. */
+  muted: boolean;
+}
+
+/**
+ * Tooltip for the History charts. Replaces Recharts' default box so each
+ * series row can carry its window average (issue #345) alongside the hovered
+ * value, in the same colour and unit. The average is only shown when the
+ * setting is on and the series isn't muted, matching the drawn average lines.
+ */
+export function HistoryTooltip({ active, payload, label, unit, seriesMeta }: {
+  active?: boolean;
+  payload?: Array<{ value?: number | string; color?: string; dataKey?: string | number }>;
+  label?: number | string;
+  unit: string;
+  seriesMeta: Record<string, TooltipSeriesMeta>;
+}) {
+  if (!active || !payload?.length) return null;
+  const ts = typeof label === 'number' ? label : Number(label);
+  return (
+    <div
+      className="px-3 py-2 font-sans"
+      style={{
+        backgroundColor: '#21262D',
+        border: '1px solid rgba(255,255,255,0.1)',
+        borderRadius: '8px',
+        fontSize: '12px',
+        color: '#F0F6FC',
+      }}
+    >
+      <div className="mb-1 font-bold">{new Date(ts).toLocaleString()}</div>
+      {payload.map((entry, i) => {
+        const value = typeof entry.value === 'number' ? entry.value : Number(entry.value ?? 0);
+        const meta = entry.dataKey != null ? seriesMeta[String(entry.dataKey)] : undefined;
+        const average = meta?.average;
+        const showAvg = average !== null && average !== undefined && !meta?.muted;
+        return (
+          <div key={i} style={{ color: entry.color }}>
+            {formatHistoryValue(value, unit)}
+            {showAvg && (
+              <span className="opacity-60"> (avg {formatHistoryValue(average, unit)})</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ChartCard({ chart, data, range, domain, ticks, gridLineWeight, showAverages }: {
   chart: ChartDef;
   data: Record<string, TimePoint[]>;
   range: HistoryRange;
   domain: [number, number];
   ticks?: number[];
   gridLineWeight: GridLineWeight;
+  showAverages: boolean;
 }) {
   const [mutedSeries, setMutedSeries] = useState<Partial<Record<string, boolean>>>({});
   const allFields = [...chart.fields.map((f) => f.field), ...(chart.requires ?? [])];
@@ -481,6 +535,23 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
       out[name] = row[f.field] ?? null;
     });
     return out;
+  });
+
+  // One fixed horizontal average line per plotted series (issue #345). The
+  // mean is taken over the same post-spike, post-preprocess values the areas
+  // draw, so it always agrees with what's on screen.
+  const seriesAverages = chart.fields.map((_, i) =>
+    computeSeriesAverage(seriesData.map((row) => row[seriesNames[i]])),
+  );
+
+  // Look-up for the tooltip: per-series window average (null when the
+  // setting is off) and whether the series is muted in the legend.
+  const seriesMeta: Record<string, TooltipSeriesMeta> = {};
+  chart.fields.forEach((_, i) => {
+    seriesMeta[seriesNames[i]] = {
+      average: showAverages ? seriesAverages[i] : null,
+      muted: mutedSeries[seriesNames[i]] ?? false,
+    };
   });
 
   // Charts use their declared yDomain (e.g. SOC fixed at 0-100) or Recharts
@@ -558,27 +629,7 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
                 : `${Math.round(v)}`
             }
           />
-          <Tooltip
-            contentStyle={{
-              backgroundColor: '#21262D',
-              border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '8px',
-              fontSize: '12px',
-              color: '#F0F6FC',
-            }}
-            labelFormatter={(v) => {
-              const n = typeof v === 'number' ? v : Number(v);
-              return new Date(n).toLocaleString();
-            }}
-            separator=""
-            formatter={(value) => {
-              const n = typeof value === 'number' ? value : 0;
-              if (chart.unit === '£') return [`£${n.toFixed(2)}`, ''];
-              if (chart.unit === 'kWh') return [`${n.toFixed(1)} ${chart.unit}`, ''];
-              if (chart.unit === '°C') return [`${n.toFixed(1)} °C`, ''];
-              return [`${Math.round(n)} ${chart.unit}`, ''];
-            }}
-          />
+          <Tooltip content={<HistoryTooltip unit={chart.unit} seriesMeta={seriesMeta} />} />
           {chart.fields.map((f, i) => (
             <Area
               key={i}
@@ -594,6 +645,24 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight }: {
               connectNulls
             />
           ))}
+          {showAverages &&
+            chart.fields.map((f, i) => {
+              const average = seriesAverages[i];
+              // Empty series and muted series have no average line — a line
+              // to a value the user can't see would be misleading.
+              if (average === null || (mutedSeries[seriesNames[i]] ?? false)) return null;
+              // The value itself lives in the tooltip (issue #345 follow-up),
+              // so the line stays a clean, unlabelled dashed marker.
+              return (
+                <ReferenceLine
+                  key={`avg-${i}`}
+                  y={average}
+                  stroke={f.color}
+                  strokeDasharray="2 4"
+                  strokeWidth={1.5}
+                />
+              );
+            })}
         </AreaChart>
       </ResponsiveContainer>
     </div>
@@ -695,6 +764,7 @@ export default function HistoryPage() {
   const range = useInverterStore((state) => state.chartRange);
   const setChartRange = useInverterStore((state) => state.setChartRange);
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
+  const showHistoryAverages = useInverterStore((state) => state.showHistoryAverages);
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
@@ -1026,6 +1096,7 @@ export default function HistoryPage() {
               domain={displayDomain}
               ticks={getHistoryXAxisTicks(range, displayDomain)}
               gridLineWeight={gridLineWeight}
+              showAverages={showHistoryAverages}
             />
           ))}
           {tab === 'temperature' && (

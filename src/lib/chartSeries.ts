@@ -5,6 +5,42 @@ export function getSeriesOpacity(muted: boolean): number {
 }
 
 /**
+ * Arithmetic mean of a series' plotted values, ignoring gaps (issue #345).
+ *
+ * History buckets have a fixed width per range (see `resolve_history_window`
+ * in the backend), so averaging the per-bucket values is equivalent to a
+ * time-weighted mean over the window — not a raw reading count, which would
+ * bias toward whichever period happened to record more often.
+ *
+ * `null`/`undefined` gaps (buckets with no reading for that field) and
+ * non-finite values are skipped. An all-gap series returns `null` so the
+ * caller can omit its average line entirely rather than draw one at zero.
+ */
+export function computeSeriesAverage(values: Array<number | null | undefined>): number | null {
+  let sum = 0;
+  let count = 0;
+  for (const v of values) {
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      sum += v;
+      count += 1;
+    }
+  }
+  return count === 0 ? null : sum / count;
+}
+
+/**
+ * Unit-aware History chart value formatting, shared by the tooltip's live
+ * values and its average read-outs so both use the same precision
+ * (e.g. `£1.23`, `12.3 kWh`, `21.0 °C`, `350 W`).
+ */
+export function formatHistoryValue(value: number, unit: string): string {
+  if (unit === '£') return `£${value.toFixed(2)}`;
+  if (unit === 'kWh') return `${value.toFixed(1)} kWh`;
+  if (unit === '°C') return `${value.toFixed(1)} °C`;
+  return `${Math.round(value)} ${unit}`;
+}
+
+/**
  * Per-field spike detection thresholds. A point is considered a spike if its
  * value differs from both neighbors by more than the threshold while the
  * neighbors differ by less than half the threshold.
