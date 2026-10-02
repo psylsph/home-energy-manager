@@ -24,6 +24,13 @@ jobs:
       - name: Check package.json / Cargo.toml / tauri.conf.json agree
         run: bash scripts/check-versions.sh
 
+      # tauri-cli aborts `tauri build` when an @tauri-apps/plugin-* npm
+      # package and its Rust crate drift apart, and Dependabot bumps one
+      # side at a time. Check the lockfiles here so a drifted release tag
+      # fails in seconds instead of after every platform runner's setup.
+      - name: Check Tauri npm packages match their Rust crates
+        run: bash scripts/check-tauri-plugin-versions.sh
+
       - name: Verify release tag matches application version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
