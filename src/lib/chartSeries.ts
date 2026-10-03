@@ -99,6 +99,39 @@ export function isCumulativeField(field: string): boolean {
 }
 
 /**
+ * Series the backend derives by integrating the daily counters against the
+ * tariff, so they ramp up across the window just like the counters do. The
+ * spike-repair predicate deliberately leaves them out (they're not raw
+ * registers, and interpolating a corrupted cost point is the lesser evil),
+ * but they are cumulative for the purposes of the average line.
+ */
+const CUMULATIVE_DERIVED_FIELDS = new Set([
+  '_import_cost',
+  '_import_energy_cost',
+  '_import_standing_charge',
+  '_export_income',
+]);
+
+/**
+ * Whether a series' mean over the selected window is worth showing
+ * (issue #345).
+ *
+ * Instantaneous rates and gauges — power, SOC, voltage, temperature and the
+ * derived differentials — answer "what was the typical value while I was
+ * looking?", which is exactly what the average line is for. Cumulative series
+ * (the daily `today_*_kwh` counters, `home_energy_today_kwh`, and the
+ * server-integrated cost/income series) only ever climb from midnight to
+ * their final total, so the mean of the plotted values is an artefact of
+ * where the window happens to start and stop: it drifts with the range,
+ * changes when midnight enters the window, and matches neither the daily
+ * total nor an hourly rate. Those charts get no average line and no average
+ * read-out in the tooltip.
+ */
+export function hasMeaningfulAverage(field: string): boolean {
+  return !isCumulativeField(field) && !CUMULATIVE_DERIVED_FIELDS.has(field);
+}
+
+/**
  * Replace single-point spikes with the average of their neighbours. Shared
  * between the History page charts and any other chart that renders raw polled
  * series (e.g. the Battery tab's today-SOC chart). Keeps post-query spike
