@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Force Charge works on 10-slot inverters even when the battery is already above your first charge slot's target.** Gen 3, Gen 4, All-in-One and HV inverters stop charging at the lower of the overall target and the first slot's own target, so Force Charge could do nothing. It now raises the first slot's target for the duration and puts your value back when you stop.
+- **Battery lifetime charge and discharge totals are filled in for Gen 1, Gen 2, Gen 3 and AC-coupled inverters.** They come from the first battery, falling back to the inverter's own value, and a battery that briefly stops answering keeps the last total instead of dropping to zero.
+
+### Added
+
+- **A warning in the Logs when the inverter's clock is five or more minutes out.** The inverter resets its Today counters at midnight by its own clock, so a clock left on GMT through summer resets them an hour late. Use Sync Time to correct it.
+
 ## [0.85.2] - 2026-10-03
 
 ### Fixed
