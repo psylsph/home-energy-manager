@@ -1715,6 +1715,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 60,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: Some(30),
                 charge_slot_1_start: None,

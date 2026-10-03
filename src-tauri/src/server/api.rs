@@ -1239,6 +1239,7 @@ async fn capture_force_charge_revert(
         firmware_version: snap.firmware_version.clone(),
         enable_discharge: snap.enable_discharge,
         target_soc: snap.target_soc,
+        charge_slot_1_target_soc: None,
         battery_power_mode: snap.battery_power_mode,
         charge_rate: Some(snap.charge_rate),
         charge_slot_1_start,
@@ -9432,6 +9433,7 @@ pub(crate) mod tests {
                         .unwrap_or(0);
                     set_slot(&mut snap.discharge_slots[1], write.value, end);
                 }
+                HR_CHARGE_TARGET_SOC_1 => snap.raw_charge_slot_1_target_soc = Some(write.value),
                 HR_BATTERY_PAUSE_MODE => pause_mode = Some(write.value),
                 HR_BATTERY_PAUSE_SLOT_1_START => pause_start = Some(write.value),
                 HR_BATTERY_PAUSE_SLOT_1_END => pause_end = Some(write.value),
@@ -16568,6 +16570,274 @@ pub(crate) mod tests {
         .await;
     }
 
+    // ---- Force Charge and slot 1's own target SOC (HR 242) -----------------
+    //
+    // On 10-slot inverters the firmware stops charging at the LOWER of the
+    // global target and slot 1's target, so Force Charge that only raises the
+    // global one does nothing when the SOC is already above slot 1's stored
+    // target (GivTCP #576). Start must raise HR 242 and Stop must put it back,
+    // and the restoration must be provable from a snapshot or ownership of the
+    // Force Charge would be pinned forever.
+
+    const TEN_SLOT_MODELS: [DeviceType; 5] = [
+        DeviceType::Gen3Hybrid,
+        DeviceType::AllInOne6kW,
+        DeviceType::Gen4Hybrid,
+        DeviceType::HybridHvGen3,
+        DeviceType::ThreePhase,
+    ];
+
+    /// Seed a snapshot for `device_type` whose HR 242 reads `raw_hr242`, with
+    /// slot 1 enabled or not (the capture must not depend on it).
+    async fn seed_slot1_target_pre_state(
+        state: &Arc<AppState>,
+        device_type: DeviceType,
+        raw_hr242: Option<u16>,
+        slot_1_enabled: bool,
+    ) {
+        let mut snap = crate::inverter::model::InverterSnapshot {
+            device_type,
+            inverter_serial: "HEM-TEST-001".into(),
+            enable_charge_target: true,
+            target_soc: 80,
+            battery_power_mode: 1,
+            raw_charge_slot_1_target_soc: raw_hr242,
+            ..Default::default()
+        };
+        snap.charge_slots[0].enabled = slot_1_enabled;
+        *state.latest_snapshot.lock().await = Some(snap);
+    }
+
+    #[tokio::test]
+    async fn force_charge_start_raises_slot_1_target_on_ten_slot_models() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            for device_type in TEN_SLOT_MODELS {
+                for body in [None, Some(Json(json!({ "minutes": 30 })))] {
+                    let with_minutes = body.is_some();
+                    let state = make_state_with_device(device_type).await;
+                    seed_slot1_target_pre_state(&state, device_type, Some(30), true).await;
+                    let (status, _) = force_charge(State(state.clone()), body).await;
+                    assert_eq!(status, StatusCode::OK);
+                    let writes = drain_pending_writes(&state).await;
+                    assert_all_whitelisted(&writes);
+                    let per_slot: Vec<_> = writes
+                        .iter()
+                        .filter(|w| w.address == HR_CHARGE_TARGET_SOC_1)
+                        .collect();
+                    assert_eq!(
+                        per_slot.len(),
+                        1,
+                        "{device_type:?} (minutes={with_minutes}) must write HR 242 exactly once"
+                    );
+                    assert_eq!(
+                        per_slot[0].value, 100,
+                        "{device_type:?} (minutes={with_minutes}) must raise slot 1's target to 100"
+                    );
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_start_leaves_slot_1_target_alone_on_other_models() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            for device_type in [
+                DeviceType::Gen1Hybrid,
+                DeviceType::Gen2Hybrid,
+                DeviceType::ACCoupled,
+                DeviceType::Gateway,
+            ] {
+                let state = make_state_with_device(device_type).await;
+                let (status, _) = force_charge(State(state.clone()), None).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                assert!(
+                    writes.iter().all(|w| w.address != HR_CHARGE_TARGET_SOC_1),
+                    "{device_type:?} has no per-slot target block; HR 242 must not be written"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_captures_slot_1_target_even_when_slot_is_disabled() {
+        with_isolated_config_dir_async(|| async {
+            for device_type in TEN_SLOT_MODELS {
+                let state = make_state_with_device(device_type).await;
+                seed_slot1_target_pre_state(&state, device_type, Some(30), false).await;
+                let _ = force_charge(State(state.clone()), None).await;
+                let revert = state.force_charge_revert.lock().await.clone().unwrap();
+                assert_eq!(
+                    revert.charge_slot_1_target_soc,
+                    Some(30),
+                    "{device_type:?}: the raw HR 242 must be captured whatever slot 1's enable state"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_does_not_capture_unusable_slot_1_target() {
+        with_isolated_config_dir_async(|| async {
+            // Unset (None / 0) and out-of-range values cannot be written back
+            // (the encoder accepts 4..=100), so they must not become a baseline.
+            for raw in [None, Some(0), Some(3), Some(101)] {
+                let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+                seed_slot1_target_pre_state(&state, DeviceType::Gen3Hybrid, raw, true).await;
+                let _ = force_charge(State(state.clone()), None).await;
+                let revert = state.force_charge_revert.lock().await.clone().unwrap();
+                assert_eq!(
+                    revert.charge_slot_1_target_soc, None,
+                    "raw HR 242 = {raw:?}"
+                );
+            }
+
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_slot1_target_pre_state(&state, DeviceType::Gen2Hybrid, Some(30), true).await;
+            let _ = force_charge(State(state.clone()), None).await;
+            let revert = state.force_charge_revert.lock().await.clone().unwrap();
+            assert_eq!(
+                revert.charge_slot_1_target_soc, None,
+                "models without the HR 240-299 block never capture a slot 1 target"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_stop_restores_slot_1_target() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            for device_type in TEN_SLOT_MODELS {
+                let state = make_state_with_device(device_type).await;
+                seed_slot1_target_pre_state(&state, device_type, Some(30), false).await;
+                let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 }))))
+                    .await;
+                let _ = drain_pending_writes(&state).await;
+
+                let (status, _) = force_charge_stop(State(state.clone())).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert!(
+                    writes
+                        .iter()
+                        .any(|w| w.address == HR_CHARGE_TARGET_SOC_1 && w.value == 30),
+                    "{device_type:?}: stop must put slot 1's target back to the captured 30, got {writes:?}"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_stop_skips_slot_1_target_when_none_was_captured() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_slot1_target_pre_state(&state, DeviceType::Gen3Hybrid, None, true).await;
+            let _ = force_charge(State(state.clone()), None).await;
+            let _ = drain_pending_writes(&state).await;
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes.iter().all(|w| w.address != HR_CHARGE_TARGET_SOC_1),
+                "no baseline means no HR 242 restore write"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_slot_1_target_restoration_only_confirms_once_read_back() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_slot1_target_pre_state(&state, DeviceType::Gen3Hybrid, Some(30), false).await;
+            let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let _ = drain_pending_writes(&state).await;
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+
+            // Everything restored EXCEPT HR 242, which still reads the forced
+            // 100: ownership must be retained.
+            let mut stale = writes.clone();
+            stale.retain(|w| w.address != HR_CHARGE_TARGET_SOC_1);
+            stale.push(RegisterWrite {
+                address: HR_CHARGE_TARGET_SOC_1,
+                value: 100,
+            });
+            confirm_force_restoration(&state, &stale).await;
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "a stale HR 242 must not release the Force Charge baseline"
+            );
+
+            // The exact restoration read back releases it.
+            confirm_force_restoration(&state, &writes).await;
+            assert!(state.force_charge_revert.lock().await.is_none());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[test]
+    fn snapshot_matches_writes_checks_the_raw_slot_1_target() {
+        use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+        let write = [RegisterWrite {
+            address: HR_CHARGE_TARGET_SOC_1,
+            value: 30,
+        }];
+        let mut snap = crate::inverter::model::InverterSnapshot::default();
+        assert!(
+            !snapshot_matches_writes(&snap, &write),
+            "an unread HR 242 cannot prove a restore"
+        );
+        snap.raw_charge_slot_1_target_soc = Some(100);
+        assert!(!snapshot_matches_writes(&snap, &write));
+        snap.raw_charge_slot_1_target_soc = Some(30);
+        assert!(snapshot_matches_writes(&snap, &write));
+    }
+
+    #[test]
+    fn force_charge_revert_without_slot_1_target_field_still_deserialises() {
+        let revert = ForceChargeRevert {
+            started_at_ms: 1,
+            external_owner: None,
+            force_charge_slot_end_ms: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::Gen3Hybrid,
+            inverter_serial: "HEM-TEST-001".into(),
+            firmware_version: String::new(),
+            enable_discharge: false,
+            target_soc: 80,
+            charge_slot_1_target_soc: Some(30),
+            battery_power_mode: 1,
+            charge_rate: None,
+            charge_slot_1_start: None,
+            charge_slot_1_end: None,
+            three_phase_force_charge_enable: None,
+            three_phase_ac_charge_enable: None,
+            battery_pause_mode: None,
+        };
+        let mut json = serde_json::to_value(&revert).unwrap();
+        assert_eq!(json["charge_slot_1_target_soc"], 30);
+        json.as_object_mut()
+            .unwrap()
+            .remove("charge_slot_1_target_soc");
+        let legacy: ForceChargeRevert = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.charge_slot_1_target_soc, None);
+        assert_eq!(legacy.target_soc, 80);
+    }
+
     /// The pause-writing three-phase family (ACThreePhase) must also have a
     /// provable stop write set: its discharge stop emits the HR318-320 pause
     /// restores in addition to the slot registers, and an unprovable register
@@ -16653,6 +16923,7 @@ pub(crate) mod tests {
             firmware_version: "400".into(),
             enable_discharge: false,
             target_soc: 80,
+            charge_slot_1_target_soc: None,
             battery_power_mode: 1,
             charge_rate: Some(30),
             charge_slot_1_start: Some((2, 0)),
@@ -16756,6 +17027,7 @@ pub(crate) mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 80,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: Some(30),
                 charge_slot_1_start: Some((2, 0)),
@@ -16815,6 +17087,7 @@ pub(crate) mod tests {
                 firmware_version: String::new(),
                 enable_discharge: false,
                 target_soc: 80,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: Some(30),
                 charge_slot_1_start: Some((2, 0)),
@@ -16869,6 +17142,7 @@ pub(crate) mod tests {
             firmware_version: "400".into(),
             enable_discharge: false,
             target_soc: 4,
+            charge_slot_1_target_soc: None,
             battery_power_mode: 1,
             charge_rate: None,
             charge_slot_1_start: Some((2, 0)),
@@ -16951,6 +17225,7 @@ pub(crate) mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,

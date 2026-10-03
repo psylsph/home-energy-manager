@@ -4306,6 +4306,81 @@ mod tests {
     }
 
     #[test]
+    fn raw_slot_1_target_is_exposed_whether_or_not_the_slot_is_enabled() {
+        for device_type in [
+            DeviceType::Gen3Hybrid,
+            DeviceType::AllInOne6kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::ThreePhase,
+        ] {
+            let mut data = vec![0u16; 60];
+            data[242 - 240] = 30;
+            let mut snapshot = InverterSnapshot {
+                device_type,
+                ..Default::default()
+            };
+
+            decode_holding_240_299(&data, &mut snapshot);
+
+            assert_eq!(
+                snapshot.raw_charge_slot_1_target_soc,
+                Some(30),
+                "{device_type:?}"
+            );
+            assert!(!snapshot.charge_slots[0].enabled, "{device_type:?}");
+        }
+    }
+
+    #[test]
+    fn raw_slot_1_target_keeps_an_unset_zero_distinct_from_unread() {
+        let data = vec![0u16; 60];
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        decode_holding_240_299(&data, &mut snapshot);
+
+        assert_eq!(snapshot.raw_charge_slot_1_target_soc, Some(0));
+    }
+
+    #[test]
+    fn raw_slot_1_target_is_not_set_for_models_without_the_block() {
+        for device_type in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::ACCoupled,
+            DeviceType::Gateway,
+        ] {
+            let mut data = vec![0u16; 60];
+            data[242 - 240] = 30;
+            let mut snapshot = InverterSnapshot {
+                device_type,
+                ..Default::default()
+            };
+
+            decode_holding_240_299(&data, &mut snapshot);
+
+            assert_eq!(
+                snapshot.raw_charge_slot_1_target_soc, None,
+                "{device_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_slot_1_target_is_not_set_from_a_truncated_block() {
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        decode_holding_240_299(&[0u16; 2], &mut snapshot);
+
+        assert_eq!(snapshot.raw_charge_slot_1_target_soc, None);
+    }
+
+    #[test]
     fn truncated_extended_charge_block_does_not_create_partial_slot() {
         let mut data = vec![0u16; 28];
         // HR 267 is the final slot-10 start register. Its end and target

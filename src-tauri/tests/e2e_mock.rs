@@ -1031,6 +1031,7 @@ async fn test_reset_clears_schedule_state_and_force_reverts() {
             firmware_version: String::new(),
             enable_discharge: false,
             target_soc: 100,
+            charge_slot_1_target_soc: None,
             battery_power_mode: 1,
             charge_rate: Some(100),
             charge_slot_1_start: Some((0, 0)),

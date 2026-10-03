@@ -5539,6 +5539,43 @@ mod tests {
     }
 
     #[test]
+    fn missed_extended_block_carries_forward_the_raw_slot_1_target() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            raw_charge_slot_1_target_soc: Some(30),
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        let changed =
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true, true);
+
+        assert!(changed);
+        assert_eq!(snap.raw_charge_slot_1_target_soc, Some(30));
+    }
+
+    #[test]
+    fn present_extended_block_keeps_its_own_raw_slot_1_target() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            raw_charge_slot_1_target_soc: Some(30),
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            raw_charge_slot_1_target_soc: Some(100),
+            ..Default::default()
+        };
+
+        carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
+
+        assert_eq!(snap.raw_charge_slot_1_target_soc, Some(100));
+    }
+
+    #[test]
     fn optional_ac_config_does_not_carry_forward_when_block_present() {
         let prev = InverterSnapshot {
             device_type: DeviceType::ACCoupled,
