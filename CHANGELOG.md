@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The charge and discharge power limits behave consistently across every inverter.** The Inverter page now shows the same percentage as the Control page instead of half of it on hybrid inverters, the sliders on those models move in steps they can actually save, and they follow changes made elsewhere instead of sticking on an old value (#346).
+- **Gateways save and read back their charge and discharge limits correctly.** HEM now uses the same limit settings for the Gateway as GivTCP does, so a value above 50% is accepted and shown at the right level.
+- **The Inverter Active Power Limit is only offered where it works.** On three-phase and HV models the slider wrote a setting those inverters never read back, so it is now hidden there and the API refuses the request rather than reporting a success that changed nothing.
+
 ## [0.85.0] - 2026-10-02
 
 ### Added

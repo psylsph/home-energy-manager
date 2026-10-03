@@ -7,10 +7,13 @@ import { apiPost, apiGet } from '../lib/api';
 import {
   deviceSupportsEps,
   deviceSupportsTimedDischarge,
+  deviceUsesHr50ActivePowerRate,
   isAcCoupledDevice,
   isThreePhaseLimitModel,
   usesDirectChargeLimit,
 } from '../lib/deviceCapabilities';
+import { formatPowerLimitLabel, percentToRawLimit, percentToWatts, rawLimitToPercent, resolveLimitDraft } from '../lib/powerLimit';
+import type { LimitDraft } from '../lib/powerLimit';
 import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
 import { fillScheduleSlots } from '../lib/scheduleSlots';
 import {
@@ -781,13 +784,14 @@ function AdaptiveChargeSection() {
 
   // Whether the charge-rate registers are a direct 1-100% percentage for this
   // device family — see lib/deviceCapabilities.ts (single source of truth).
+  // It no longer changes the watt arithmetic: once a DC-hybrid 0-50 register is
+  // doubled for display, both families express a percentage of the inverter's
+  // maximum battery power (issue #346). It still sets the slider floor, because
+  // the backend's `adaptive_charge_register` rejects 0 on the direct registers
+  // (1-100) while HR 111 accepts 0-50.
   const usesDirectLimit = usesDirectChargeLimit(snapshot?.device_type_code);
-  const estimatedWatts = (percent: number) => {
-    const maxPower = snapshot?.max_battery_power_w ?? 0;
-    if (usesDirectLimit) return Math.round(percent / 100 * maxPower);
-    const capacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
-    return Math.min(Math.round(percent / 200 * capacityW), maxPower);
-  };
+  const rateLabel = (percent: number) =>
+    formatPowerLimitLabel(percent, percentToWatts(percent, snapshot?.max_battery_power_w));
 
   const save = async () => {
     const validationError = validateAdaptiveChargeConfig(config);
@@ -903,7 +907,7 @@ function AdaptiveChargeSection() {
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-text-secondary">{label}</span>
                     <span className="font-mono text-text-primary">
-                      {period[field]}% ({(estimatedWatts(period[field]) / 1000).toFixed(1)} kW)
+                      {rateLabel(period[field])}
                     </span>
                   </div>
                   <input
@@ -2550,9 +2554,9 @@ export default function ControlPage() {
 
   // Battery limits: local draft state while dragging, otherwise from snapshot
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
-  const [draftCharge, setDraftCharge] = useState<number | null>(null);
-  const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
-  const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
+  const [draftCharge, setDraftCharge] = useState<LimitDraft | null>(null);
+  const [draftDischarge, setDraftDischarge] = useState<LimitDraft | null>(null);
+  const [draftActivePower, setDraftActivePower] = useState<LimitDraft | null>(null);
   // ChargeMode is defined at module scope so it can be referenced by
   // the `CosyChargingSection` component declared earlier in this file.
   const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
@@ -2923,6 +2927,12 @@ export default function ControlPage() {
   // backend refuses the write with HTTP 400.
   const supportsTimedDischarge = deviceSupportsTimedDischarge(snapshot);
 
+  // Whether the Inverter Active Power Limit is offered at all. HEM only writes
+  // HR 50, but the 1000-range-layout families read the value back from
+  // HR 1002, so there the save would land nowhere and the slider would snap
+  // back — see lib/deviceCapabilities.ts (issue #346).
+  const supportsHr50ActivePowerRate = deviceUsesHr50ActivePowerRate(snapshot?.device_type_code);
+
   // ARM firmware version as integer (e.g. 318, 352, 449). Used for firmware-gating
   // the extended schedule block on Gen3 hybrids.
   const armFwNum = snapshot?.firmware_version != null && snapshot.firmware_version !== ''
@@ -2950,47 +2960,38 @@ export default function ControlPage() {
   const isThreePhaseLimitModelDevice = isThreePhaseLimitModel(snapshot?.device_type_code);
   // Three-phase-bank models use HR1113-1121 for charge/discharge schedules;
   // the backend now selects that register map automatically.
-  const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModelDevice;
-  // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%.
-  // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%, so display directly.
-  const rateRegisterMax = usesDirectPowerLimit ? 100 : 50;
-  const rateDisplayMultiplier = usesDirectPowerLimit ? 1 : 2;
+  const usesDirectPowerLimit = usesDirectChargeLimit(snapshot?.device_type_code);
+  // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%;
+  // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%. The
+  // scale lives in lib/powerLimit.ts so the Inverter page and Adaptive Charge
+  // editor cannot drift from these sliders.
   const rateDisplayMin = usesDirectPowerLimit ? 1 : 0;
+  // The half-scale register holds whole units of 2%, so an odd percentage could
+  // never be read back and the slider would stay on its stale draft.
+  const rateDisplayStep = usesDirectPowerLimit ? 1 : 2;
   const snapshotChargeRate = snapshot?.charge_rate != null
-    ? Math.max(0, Math.min(rateRegisterMax, snapshot.charge_rate))
+    ? rawLimitToPercent(snapshot.charge_rate, usesDirectPowerLimit)
     : undefined;
   const snapshotDischargeRate = snapshot?.discharge_rate != null
-    ? Math.max(0, Math.min(rateRegisterMax, snapshot.discharge_rate))
+    ? rawLimitToPercent(snapshot.discharge_rate, usesDirectPowerLimit)
     : undefined;
-  const chargeRate = (draftCharge != null && (snapshotChargeRate == null || snapshotChargeRate * rateDisplayMultiplier !== draftCharge))
-    ? Math.max(rateDisplayMin, Math.min(100, draftCharge))
-    : snapshotChargeRate != null ? snapshotChargeRate * rateDisplayMultiplier : undefined;
-  const dischargeRate = (draftDischarge != null && (snapshotDischargeRate == null || snapshotDischargeRate * rateDisplayMultiplier !== draftDischarge))
-    ? Math.max(rateDisplayMin, Math.min(100, draftDischarge))
-    : snapshotDischargeRate != null ? snapshotDischargeRate * rateDisplayMultiplier : undefined;
-  const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
-  const activePowerWatts = activePowerRate != null && snapshot?.max_ac_power_w
-    ? Math.round(activePowerRate / 100 * snapshot.max_ac_power_w)
-    : null;
-  const activePowerKw = activePowerWatts != null
-    ? `${Number((activePowerWatts / 1000).toFixed(1))}kW`
-    : null;
+  const chargeRate = resolveLimitDraft(draftCharge, snapshotChargeRate);
+  const dischargeRate = resolveLimitDraft(draftDischarge, snapshotDischargeRate);
+  const activePowerRate = resolveLimitDraft(draftActivePower, snapshot?.active_power_rate);
+  const activePowerWatts = percentToWatts(activePowerRate, snapshot?.max_ac_power_w);
 
-  // DC hybrid HR111/112 are 0-50, using the GivTCP formula:
-  // display_rate / 200 × battery_capacity. AC-coupled HR313/314 and three-phase
-  // HR1110/1108 are direct 1-100% percentages of inverter battery power rating.
+  // Both limit families are a percentage of the inverter's maximum once the
+  // DC-hybrid 0-50 register is doubled for display, so the kilowatt figure is
+  // simply percent / 100 × the stated maximum. Battery capacity is not an
+  // input: deriving it from capacity and clamping to the maximum pinned the
+  // readout at the maximum across the top of the slider on packs larger than
+  // about half the inverter's rating (issue #346).
   const maxBatteryPowerW = snapshot?.max_battery_power_w ?? 0;
-  const batteryCapacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
-  const chargeWatts = chargeRate != null
-    ? usesDirectPowerLimit
-      ? Math.round(chargeRate / 100 * maxBatteryPowerW)
-      : Math.min(Math.round(chargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
-    : null;
-  const dischargeWatts = dischargeRate != null
-    ? usesDirectPowerLimit
-      ? Math.round(dischargeRate / 100 * maxBatteryPowerW)
-      : Math.min(Math.round(dischargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
-    : null;
+  const chargeWatts = percentToWatts(chargeRate, maxBatteryPowerW);
+  const dischargeWatts = percentToWatts(dischargeRate, maxBatteryPowerW);
+  const chargeLimitLabel = formatPowerLimitLabel(chargeRate, chargeWatts);
+  const dischargeLimitLabel = formatPowerLimitLabel(dischargeRate, dischargeWatts);
+  const activePowerLabel = formatPowerLimitLabel(activePowerRate, activePowerWatts);
 
   // Derive force charge/discharge state from live snapshot registers so the
   // progress indicators remain visible until the inverter confirms each
@@ -3383,7 +3384,7 @@ export default function ControlPage() {
     if (chargeRate == null) return;
     setChargeRateSaving(true);
     try {
-      await apiPost('/api/control/charge-rate', { limit: Math.round(chargeRate / rateDisplayMultiplier) });
+      await apiPost('/api/control/charge-rate', { limit: percentToRawLimit(chargeRate, usesDirectPowerLimit) });
       setPowerControlSaveError(null);
     } catch (e: unknown) {
       console.warn("Charge power limit save failed:", e);
@@ -3397,7 +3398,7 @@ export default function ControlPage() {
     if (dischargeRate == null) return;
     setDischargeRateSaving(true);
     try {
-      await apiPost('/api/control/discharge-rate', { limit: Math.round(dischargeRate / rateDisplayMultiplier) });
+      await apiPost('/api/control/discharge-rate', { limit: percentToRawLimit(dischargeRate, usesDirectPowerLimit) });
       setPowerControlSaveError(null);
     } catch (e: unknown) {
       console.warn("Discharge power limit save failed:", e);
@@ -4066,16 +4067,16 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
-              <span className="font-mono text-text-primary text-sm">{chargeRate != null ? `${chargeRate}%` : '—'}{chargeWatts != null && chargeWatts > 0 ? ` (${(chargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
+              <span className="font-mono text-text-primary text-sm">{chargeLimitLabel}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
                 type="range"
                 min={rateDisplayMin}
                 max={100}
-                step={1}
+                step={rateDisplayStep}
                 value={chargeRate ?? rateDisplayMin}
-                onChange={(e) => setDraftCharge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
+                onChange={(e) => setDraftCharge({ value: Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))), base: snapshotChargeRate })}
                 disabled={adaptiveOwnsChargeRate}
                 className="flex-1 disabled:opacity-50"
               />
@@ -4100,16 +4101,16 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
-              <span className="font-mono text-text-primary text-sm">{dischargeRate != null ? `${dischargeRate}%` : '—'}{dischargeWatts != null && dischargeWatts > 0 ? ` (${(dischargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
+              <span className="font-mono text-text-primary text-sm">{dischargeLimitLabel}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
                 type="range"
                 min={rateDisplayMin}
                 max={100}
-                step={1}
+                step={rateDisplayStep}
                 value={dischargeRate ?? rateDisplayMin}
-                onChange={(e) => setDraftDischarge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
+                onChange={(e) => setDraftDischarge({ value: Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))), base: snapshotDischargeRate })}
                 className="flex-1"
               />
               <button
@@ -4122,31 +4123,35 @@ export default function ControlPage() {
             </div>
           </div>
 
-          {/* Inverter Active Power Limit */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">Inverter Active Power Limit</span>
-              <span className="font-mono text-text-primary text-sm whitespace-nowrap">{activePowerRate ?? '—'}%{activePowerKw != null && activePowerWatts != null && activePowerWatts > 0 ? `(${activePowerKw})` : ''}</span>
+          {/* Inverter Active Power Limit — HR 50 only. The 1000-range-layout
+              families read this value back from HR 1002, which HEM does not
+              write, so the control would snap back on save (issue #346). */}
+          {supportsHr50ActivePowerRate && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Inverter Active Power Limit</span>
+                <span className="font-mono text-text-primary text-sm whitespace-nowrap">{activePowerLabel}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={activePowerRate ?? 100}
+                  onChange={(e) => setDraftActivePower({ value: Number(e.target.value), base: snapshot?.active_power_rate })}
+                  className="flex-1"
+                />
+                <button
+                  onClick={handleActivePowerSave}
+                  disabled={activePowerSaving}
+                  className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
+                >
+                  {activePowerSaving ? 'Applying…' : 'Save'}
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={activePowerRate ?? 100}
-                onChange={(e) => setDraftActivePower(Number(e.target.value))}
-                className="flex-1"
-              />
-              <button
-                onClick={handleActivePowerSave}
-                disabled={activePowerSaving}
-                className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
-              >
-                {activePowerSaving ? 'Applying…' : 'Save'}
-              </button>
-            </div>
-          </div>
+          )}
         </div>
         {developerMode && <DischargeFloorSection refreshKey={loadLimiterRefreshKey} />}
         {/* Load Discharge Limiter — always visible when battery is in Eco mode */}

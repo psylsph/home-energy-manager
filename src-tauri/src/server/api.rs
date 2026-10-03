@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
-use crate::inverter::model::{DeviceType, InverterSnapshot};
+use crate::inverter::model::{DeviceType, InverterSnapshot, PowerLimitBank};
 use crate::inverter::poll::{
     stamp_solar_array_fields, AppState, ConnectionState, ForceChargeRevert, ForceDischargeRevert,
     ForceRestorationRequest, PauseModeRevert, PendingWriteBatch, PollMessage, PollSettings,
@@ -88,7 +88,7 @@ fn server_error(error: &str) -> (StatusCode, Json<Value>) {
 /// Lock the latest snapshot once and resolve the current [`DeviceType`].
 ///
 /// Every control handler that routes behaviour on device type MUST obtain it
-/// through this helper (or [`device_type_flags`]) so each derived flag comes
+/// through this helper so each derived flag comes
 /// from a single consistent view of the snapshot. Locking the snapshot
 /// independently per check — e.g. once for AC-coupled, again for three-phase —
 /// lets the poll loop update the snapshot between the two locks, so the flags
@@ -230,23 +230,34 @@ async fn release_foreign_force_baseline(
     error_response("The inverter identity changed; the stale restoration baseline was released")
 }
 
-/// Resolve the AC-coupled and three-phase routing flags from a single lock,
-/// returning `(is_ac_coupled, is_three_phase)`.
-///
-/// `is_three_phase` takes priority over `is_ac_coupled` in the command
-/// selection (matching the original `if is_three_phase { … } else if
-/// is_ac_coupled { … }` ordering) — no real device is both, but computing them
-/// from one locked view guarantees they can never transiently disagree.
-///
-/// Handlers that need the full [`DeviceType`] (e.g. for
-/// `clear_discharge_slot_writes`) should call [`latest_device_type`] directly
-/// instead of discarding the enum.
-async fn device_type_flags(state: &Arc<AppState>) -> (bool, bool) {
-    let dt = latest_device_type(state).await;
-    (
-        matches!(dt, DeviceType::ACCoupled | DeviceType::ACCoupledMk2),
-        dt.uses_three_phase_schedule_slots(),
-    )
+/// The charge power-limit write for a register bank. One mapping shared by the
+/// manual endpoint, the forecast/plan apply path and the tests, so the register
+/// a limit is written to always matches the one the decoder reads back.
+fn charge_limit_command(bank: PowerLimitBank, limit: u16) -> ControlCommand {
+    match bank {
+        PowerLimitBank::ThreePhase => ControlCommand::SetThreePhaseChargeLimit { limit },
+        PowerLimitBank::AcBank => ControlCommand::SetAcChargeLimit { limit },
+        PowerLimitBank::HalfScale => ControlCommand::SetChargeLimit { limit },
+    }
+}
+
+/// The discharge power-limit write for a register bank; see
+/// [`charge_limit_command`].
+fn discharge_limit_command(bank: PowerLimitBank, limit: u16) -> ControlCommand {
+    match bank {
+        PowerLimitBank::ThreePhase => ControlCommand::SetThreePhaseDischargeLimit { limit },
+        PowerLimitBank::AcBank => ControlCommand::SetAcDischargeLimit { limit },
+        PowerLimitBank::HalfScale => ControlCommand::SetDischargeLimit { limit },
+    }
+}
+
+/// Human label for the bank in API responses.
+fn power_limit_bank_label(bank: PowerLimitBank) -> &'static str {
+    match bank {
+        PowerLimitBank::ThreePhase => "Three-phase",
+        PowerLimitBank::AcBank => "AC",
+        PowerLimitBank::HalfScale => "Battery",
+    }
 }
 
 fn charge_slot_command_for_device(
@@ -4280,18 +4291,8 @@ pub(crate) fn build_charge_slot_writes(
             }
         }
         if let Some(rate_pct) = requested_charge_rate_pct {
-            let raw_limit = if device_type.uses_direct_charge_limit() {
-                rate_pct
-            } else {
-                (rate_pct as f64 / 2.0).round() as u16
-            };
-            let rate_command = if device_type.uses_three_phase_schedule_slots() {
-                ControlCommand::SetThreePhaseChargeLimit { limit: raw_limit }
-            } else if device_type.uses_direct_charge_limit() {
-                ControlCommand::SetAcChargeLimit { limit: raw_limit }
-            } else {
-                ControlCommand::SetChargeLimit { limit: raw_limit }
-            };
+            let bank = device_type.power_limit_bank();
+            let rate_command = charge_limit_command(bank, bank.percent_to_raw(rate_pct));
             match rate_command.encode() {
                 Ok(rate_writes) => writes.extend(rate_writes),
                 Err(e) => return Err(format!("Validation error: {}", e)),
@@ -4991,26 +4992,17 @@ pub async fn set_charge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let (is_ac_coupled, is_three_phase) = device_type_flags(&state).await;
-    let cmd = if is_three_phase {
-        ControlCommand::SetThreePhaseChargeLimit { limit }
-    } else if is_ac_coupled {
-        ControlCommand::SetAcChargeLimit { limit }
-    } else {
-        ControlCommand::SetChargeLimit { limit }
-    };
+    let bank = latest_device_type(&state).await.power_limit_bank();
+    let cmd = charge_limit_command(bank, limit);
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetChargeLimit encoded: {:?}", writes);
             queue_owned_writes(&state, writes, DischargeControlOwner::ManualMode).await;
-            let label = if is_three_phase {
-                "Three-phase"
-            } else if is_ac_coupled {
-                "AC-coupled"
-            } else {
-                "Battery"
-            };
-            ok_response(&format!("{} charge limit set to {}%", label, limit))
+            ok_response(&format!(
+                "{} charge limit set to {}%",
+                power_limit_bank_label(bank),
+                limit
+            ))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
@@ -5029,26 +5021,17 @@ pub async fn set_discharge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let (is_ac_coupled, is_three_phase) = device_type_flags(&state).await;
-    let cmd = if is_three_phase {
-        ControlCommand::SetThreePhaseDischargeLimit { limit }
-    } else if is_ac_coupled {
-        ControlCommand::SetAcDischargeLimit { limit }
-    } else {
-        ControlCommand::SetDischargeLimit { limit }
-    };
+    let bank = latest_device_type(&state).await.power_limit_bank();
+    let cmd = discharge_limit_command(bank, limit);
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetDischargeLimit encoded: {:?}", writes);
             queue_owned_writes(&state, writes, DischargeControlOwner::ManualMode).await;
-            let label = if is_three_phase {
-                "Three-phase"
-            } else if is_ac_coupled {
-                "AC-coupled"
-            } else {
-                "Battery"
-            };
-            ok_response(&format!("{} discharge limit set to {}%", label, limit))
+            ok_response(&format!(
+                "{} discharge limit set to {}%",
+                power_limit_bank_label(bank),
+                limit
+            ))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
@@ -5101,6 +5084,16 @@ pub async fn set_active_power_rate(
         },
         None => return error_response("Missing 'rate' field"),
     };
+
+    // `SetActivePowerRate` encodes HR 50, which the 1000-range-layout families
+    // (and unknown models) ignore — reporting success there would be a lie.
+    let device_type = latest_device_type(&state).await;
+    if !device_type.uses_hr50_active_power_rate() {
+        return error_response(&format!(
+            "Active power rate is not supported on {} inverters",
+            device_type.display_name()
+        ));
+    }
 
     let cmd = ControlCommand::SetActivePowerRate { rate };
     match cmd.encode() {
@@ -14764,11 +14757,11 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Device-type routing: every control handler must derive its AC-coupled /
-    // three-phase flags from a SINGLE locked view of the snapshot (via
-    // latest_device_type / device_type_flags) rather than two independent
-    // locks that can race with the poll loop. These tests lock in the routing
-    // per device family end-to-end and cover the helper defaults.
+    // Device-type routing: every control handler must derive its register
+    // bank from a SINGLE locked view of the snapshot (via latest_device_type /
+    // DeviceType::power_limit_bank) rather than independent locks that can
+    // race with the poll loop. These tests lock in the routing per device
+    // family end-to-end and cover the helper defaults.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -14781,52 +14774,58 @@ pub(crate) mod tests {
                 DeviceType::Gen2Hybrid,
                 "no-snapshot default must be Gen2Hybrid (neither AC nor 3-phase)"
             );
-            // The flags derived from that default are both false.
-            let (ac, tp) = device_type_flags(&state).await;
-            assert!(!ac);
-            assert!(!tp);
+            // The default routes to the DC-hybrid half-scale bank.
+            assert_eq!(
+                latest_device_type(&state).await.power_limit_bank(),
+                PowerLimitBank::HalfScale
+            );
         })
         .await;
     }
 
     #[tokio::test]
-    async fn device_type_flags_matches_each_device_family() {
+    async fn power_limit_bank_matches_each_device_family() {
         with_isolated_config_dir_async(|| async {
-            // (device, is_ac_coupled, is_three_phase)
             let cases = [
-                (DeviceType::Gen2Hybrid, false, false),
-                (DeviceType::Gen3Hybrid, false, false),
-                (DeviceType::Gen1Hybrid, false, false),
-                (DeviceType::ACCoupled, true, false),
-                (DeviceType::ACCoupledMk2, true, false),
-                (DeviceType::ThreePhase, false, true),
-                (DeviceType::ACThreePhase, false, true),
-                (DeviceType::HybridHvGen3, false, true),
-                (DeviceType::AllInOneHybrid, false, true),
-                // Gateway is single-phase-class for control (issue #149): not
-                // AC-coupled, and not three-phase for schedule-slot routing.
-                (DeviceType::Gateway, false, false),
+                (DeviceType::Gen1Hybrid, PowerLimitBank::HalfScale),
+                (DeviceType::Gen2Hybrid, PowerLimitBank::HalfScale),
+                (DeviceType::Gen3Hybrid, PowerLimitBank::HalfScale),
+                (DeviceType::AllInOne6kW, PowerLimitBank::HalfScale),
+                (DeviceType::ACCoupled, PowerLimitBank::AcBank),
+                (DeviceType::ACCoupledMk2, PowerLimitBank::AcBank),
+                (DeviceType::ThreePhase, PowerLimitBank::ThreePhase),
+                (DeviceType::ACThreePhase, PowerLimitBank::ThreePhase),
+                (DeviceType::HybridHvGen3, PowerLimitBank::ThreePhase),
+                (DeviceType::AllInOneHybrid, PowerLimitBank::ThreePhase),
+                // Gateway is single-phase-class for schedule slots (issue
+                // #149) but keeps its power limits in the AC bank, HR 313/314.
+                (DeviceType::Gateway, PowerLimitBank::AcBank),
             ];
-            for (dt, want_ac, want_tp) in cases {
+            for (dt, want) in cases {
                 let state = make_state_with_device(dt).await;
-                let (ac, tp) = device_type_flags(&state).await;
-                assert_eq!(
-                    (ac, tp),
-                    (want_ac, want_tp),
-                    "device_type_flags wrong for {:?}",
-                    dt
-                );
-                // Consistency: the helper's flag must equal deriving it from
-                // the same single-locked device type.
                 let resolved = latest_device_type(&state).await;
-                assert_eq!(
-                    ac,
-                    matches!(resolved, DeviceType::ACCoupled | DeviceType::ACCoupledMk2)
-                );
-                assert_eq!(tp, resolved.uses_three_phase_schedule_slots());
+                assert_eq!(resolved.power_limit_bank(), want, "{dt:?}");
             }
         })
         .await;
+    }
+
+    /// The command builders must write the register the bank names, for both
+    /// directions, so the write side can never disagree with the decoder.
+    #[test]
+    fn limit_command_builders_write_the_register_their_bank_names() {
+        for bank in [
+            PowerLimitBank::HalfScale,
+            PowerLimitBank::AcBank,
+            PowerLimitBank::ThreePhase,
+        ] {
+            let charge = charge_limit_command(bank, 30).encode().unwrap();
+            assert_eq!(charge.len(), 1, "{bank:?}");
+            assert_eq!(charge[0].address, bank.charge_register(), "{bank:?}");
+            let discharge = discharge_limit_command(bank, 30).encode().unwrap();
+            assert_eq!(discharge.len(), 1, "{bank:?}");
+            assert_eq!(discharge[0].address, bank.discharge_register(), "{bank:?}");
+        }
     }
 
     #[tokio::test]
@@ -14847,9 +14846,9 @@ pub(crate) mod tests {
                 (DeviceType::AllInOne6kW, HR_BATTERY_CHARGE_LIMIT),
                 (DeviceType::AllInOne3_6kW, HR_BATTERY_CHARGE_LIMIT),
                 (DeviceType::AllInOne5kW, HR_BATTERY_CHARGE_LIMIT),
-                // Gateway is single-phase-class for control, so charge-rate
-                // writes use the standard HR 111 path.
-                (DeviceType::Gateway, HR_BATTERY_CHARGE_LIMIT),
+                // Gateway charge-rate writes go to the AC-limit bank, matching
+                // GivTCP's `set_battery_charge_limit_ac` routing.
+                (DeviceType::Gateway, HR_AC_BATTERY_CHARGE_LIMIT),
             ];
             for (dt, want_reg) in cases {
                 let state = make_state_with_device(dt).await;
@@ -14864,6 +14863,116 @@ pub(crate) mod tests {
                     dt
                 );
                 assert_eq!(writes[0].value, 30);
+            }
+        })
+        .await;
+    }
+
+    /// `SetActivePowerRate` writes HR 50, which the 1000-range-layout
+    /// families and unknown models (including the unsupported commercial
+    /// 0x41xx/0x51xx codes) ignore — the endpoint must refuse rather than
+    /// report a success that never lands.
+    #[tokio::test]
+    async fn set_active_power_rate_rejects_devices_without_hr50() {
+        with_isolated_config_dir_async(|| async {
+            for dt in [
+                DeviceType::ThreePhase,
+                DeviceType::ACThreePhase,
+                DeviceType::HybridHvGen3,
+                DeviceType::AllInOneHybrid,
+                DeviceType::from_register(0x4101),
+                DeviceType::from_register(0x5101),
+            ] {
+                let state = make_state_with_device(dt).await;
+                let (status, Json(body)) = set_active_power_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "rate": 60 })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{dt:?}");
+                assert_eq!(body["ok"], false, "{dt:?}");
+                assert!(
+                    drain_pending_writes(&state).await.is_empty(),
+                    "{dt:?} must not queue an HR 50 write"
+                );
+            }
+        })
+        .await;
+    }
+
+    /// Issue #346 was reported on a Gen1 Hybrid. The Control page sends the
+    /// halved 0-50 register value; the backend must write it verbatim to
+    /// HR 111/112 and refuse anything the register cannot hold, without
+    /// queueing a partial write.
+    #[tokio::test]
+    async fn gen1_hybrid_charge_and_discharge_limits_write_hr111_112_on_the_half_scale() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT};
+            for limit in [0u16, 1, 17, 33, 50] {
+                let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+                let (status, _) = set_charge_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "limit": limit })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "charge limit {limit}");
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].address, HR_BATTERY_CHARGE_LIMIT);
+                assert_eq!(writes[0].value, limit);
+
+                let (status, _) = set_discharge_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "limit": limit })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "discharge limit {limit}");
+                let writes = drain_pending_writes(&state).await;
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].address, HR_BATTERY_DISCHARGE_LIMIT);
+                assert_eq!(writes[0].value, limit);
+            }
+
+            // An unhalved display percentage must be rejected, not clamped.
+            let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            let (status, _) = set_charge_rate(
+                State(state.clone()),
+                Json(serde_json::json!({ "limit": 66 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, _) = set_discharge_rate(
+                State(state.clone()),
+                Json(serde_json::json!({ "limit": 51 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(drain_pending_writes(&state).await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_active_power_rate_writes_hr50_on_single_phase_layouts() {
+        with_isolated_config_dir_async(|| async {
+            for dt in [
+                DeviceType::Gen3Hybrid,
+                DeviceType::ACCoupled,
+                DeviceType::AllInOne6kW,
+                DeviceType::Gateway,
+            ] {
+                let state = make_state_with_device(dt).await;
+                let (status, _) = set_active_power_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "rate": 60 })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{dt:?}");
+                let writes = drain_pending_writes(&state).await;
+                assert_eq!(writes.len(), 1, "{dt:?}");
+                assert_eq!(writes[0].address, 50, "{dt:?}");
+                assert_eq!(writes[0].value, 60, "{dt:?}");
             }
         })
         .await;
@@ -14887,6 +14996,8 @@ pub(crate) mod tests {
                 (DeviceType::AllInOne6kW, HR_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::AllInOne3_6kW, HR_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::AllInOne5kW, HR_BATTERY_DISCHARGE_LIMIT),
+                // Gateway keeps its limits in the AC bank (GivTCP routing).
+                (DeviceType::Gateway, HR_AC_BATTERY_DISCHARGE_LIMIT),
             ];
             for (dt, want_reg) in cases {
                 let state = make_state_with_device(dt).await;

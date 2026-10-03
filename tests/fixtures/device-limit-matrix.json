@@ -1,0 +1,25 @@
+{
+  "_comment": "Single source of truth for per-family charge/discharge limit routing (issue #346). Checked by Rust (src-tauri/src/inverter/model.rs) and TypeScript (tests/lib/deviceCapabilities.test.ts) so the two classifiers cannot drift. bank: half = HR 111/112 (0-50, UI doubles), ac = HR 313/314 (direct 1-100), threephase = HR 1110/1108 (direct 1-100). hr50: Inverter Active Power Limit is read and written at HR 50.",
+  "devices": [
+    { "code": "1001", "family": "Gen1 hybrid", "bank": "half", "hr50": true },
+    { "code": "2001", "family": "Gen2/3 hybrid", "bank": "half", "hr50": true },
+    { "code": "2101", "family": "Polar hybrid", "bank": "half", "hr50": true },
+    { "code": "2201", "family": "Gen3 Plus hybrid", "bank": "half", "hr50": true },
+    { "code": "2301", "family": "PV inverter", "bank": "half", "hr50": true },
+    { "code": "3001", "family": "AC-coupled", "bank": "ac", "hr50": true },
+    { "code": "3002", "family": "AC-coupled Mk2", "bank": "ac", "hr50": true },
+    { "code": "4001", "family": "Three-phase", "bank": "threephase", "hr50": false },
+    { "code": "5001", "family": "EMS", "bank": "half", "hr50": true },
+    { "code": "6001", "family": "AC three-phase", "bank": "threephase", "hr50": false },
+    { "code": "7001", "family": "Gateway", "bank": "ac", "hr50": true },
+    { "code": "8001", "family": "AIO 6kW", "bank": "half", "hr50": true },
+    { "code": "8002", "family": "AIO 3.6kW", "bank": "half", "hr50": true },
+    { "code": "8003", "family": "AIO 5kW", "bank": "half", "hr50": true },
+    { "code": "8101", "family": "Hybrid HV Gen3", "bank": "threephase", "hr50": false },
+    { "code": "8201", "family": "AIO Hybrid", "bank": "threephase", "hr50": false },
+    { "code": "8301", "family": "Gen4 hybrid", "bank": "half", "hr50": true },
+    { "code": "4101", "family": "unsupported commercial AIO", "bank": "half", "hr50": false },
+    { "code": "5101", "family": "unsupported commercial EMS", "bank": "half", "hr50": false },
+    { "code": "9999", "family": "unknown", "bank": "half", "hr50": false }
+  ]
+}

@@ -111,6 +111,64 @@ pub enum PauseRegisterSupport {
     ModeAndWindow,
 }
 
+/// Which register bank holds a device's battery charge/discharge power
+/// limits. The single classification every layer derives from — API routing,
+/// decoder, forecast, Adaptive Charge, and (through the shared fixture in
+/// `tests/fixtures/device-limit-matrix.json`) the front end — so the register
+/// written, the register read back and the displayed scale cannot drift apart
+/// (issue #346).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerLimitBank {
+    /// DC-hybrid HR 111/112: 0–50, the UI doubles it for display.
+    HalfScale,
+    /// Single-phase AC bank HR 313/314: direct 1–100%. AC-coupled models and
+    /// the Gateway.
+    AcBank,
+    /// Three-phase bank HR 1110/1108: direct 1–100%.
+    ThreePhase,
+}
+
+impl PowerLimitBank {
+    /// Register the charge power limit is written to and read back from.
+    pub fn charge_register(self) -> u16 {
+        use crate::modbus::registers::{
+            HR_3PH_BATTERY_CHARGE_LIMIT, HR_AC_BATTERY_CHARGE_LIMIT, HR_BATTERY_CHARGE_LIMIT,
+        };
+        match self {
+            Self::HalfScale => HR_BATTERY_CHARGE_LIMIT,
+            Self::AcBank => HR_AC_BATTERY_CHARGE_LIMIT,
+            Self::ThreePhase => HR_3PH_BATTERY_CHARGE_LIMIT,
+        }
+    }
+
+    /// Register the discharge power limit is written to and read back from.
+    pub fn discharge_register(self) -> u16 {
+        use crate::modbus::registers::{
+            HR_3PH_BATTERY_DISCHARGE_LIMIT, HR_AC_BATTERY_DISCHARGE_LIMIT,
+            HR_BATTERY_DISCHARGE_LIMIT,
+        };
+        match self {
+            Self::HalfScale => HR_BATTERY_DISCHARGE_LIMIT,
+            Self::AcBank => HR_AC_BATTERY_DISCHARGE_LIMIT,
+            Self::ThreePhase => HR_3PH_BATTERY_DISCHARGE_LIMIT,
+        }
+    }
+
+    /// Whether the register is already a direct 1–100% percentage.
+    pub fn is_direct(self) -> bool {
+        !matches!(self, Self::HalfScale)
+    }
+
+    /// Convert a 0–100 display percentage into the raw register value.
+    pub fn percent_to_raw(self, percent: u16) -> u16 {
+        if self.is_direct() {
+            percent
+        } else {
+            percent.div_ceil(2)
+        }
+    }
+}
+
 /// Inverter hardware variant, read from holding register HR(0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceType {
@@ -451,6 +509,9 @@ impl DeviceType {
                 EXTENDED_AND_AC_CONFIG_BLOCKS
             }
             dt if dt.supports_gen3_extended() => &[EXTENDED_SLOTS_BLOCK],
+            // The Gateway also reads HR 300-359 for its charge/discharge limits
+            // (see `uses_ac_limit_registers`), but only on detail polls — the
+            // poll client adds it there, so it is not listed here.
             Self::ACCoupled | Self::ACCoupledMk2 => &[AC_CONFIG_BLOCK],
             _ => &[],
         }
@@ -560,18 +621,72 @@ impl DeviceType {
     ///
     /// Mirrors `deviceCapabilities.ts::usesDirectChargeLimit` so backend
     /// kW derivations (forecast SOC projection) agree with the Control
-    /// page's rate maths. Gateway (0x70xx) is included per the frontend
-    /// classification; the AIO kW variants (0x80xx) are not.
+    /// page's rate maths. The AIO kW variants (0x80xx) are not included.
+    ///
+    /// The Gateway (0x70xx) is included even though it is single-phase-class
+    /// for schedule slots (issue #149): GivTCP writes its charge/discharge
+    /// rate to HR 313/314 (`write.py` routes "gateway" through
+    /// `set_battery_charge_limit_ac`) and reads it back from the same
+    /// registers, so it uses the AC-limit bank — see
+    /// [`Self::uses_ac_limit_registers`].
     pub fn uses_direct_charge_limit(&self) -> bool {
-        matches!(
+        self.power_limit_bank().is_direct()
+    }
+
+    /// The register bank holding this device's charge/discharge power limits.
+    ///
+    /// Three-phase-layout families use HR 1108/1110; AC-coupled models and the
+    /// Gateway use HR 313/314; everything else — DC hybrids, the residential
+    /// AIO, PV inverters, EMS and unknown models — uses HR 111/112.
+    pub fn power_limit_bank(&self) -> PowerLimitBank {
+        if self.uses_three_phase_schedule_slots() {
+            PowerLimitBank::ThreePhase
+        } else if self.uses_ac_limit_registers() {
+            PowerLimitBank::AcBank
+        } else {
+            PowerLimitBank::HalfScale
+        }
+    }
+
+    /// Whether the charge/discharge power limits live in the single-phase
+    /// AC-limit bank (HR 313/314, direct 1–100%) rather than the DC-hybrid
+    /// HR 111/112 or the three-phase HR 1108/1110 registers.
+    ///
+    /// AC-coupled models, plus the Gateway: GivTCP polls HR 300-359 for the
+    /// Gateway (`Model.add_regs` family '7') and routes its charge/discharge
+    /// rate through `set_battery_charge_limit_ac`, reading it back from
+    /// `battery_charge_limit_ac` (`read.py`, parallel-AIO controls). Prefer
+    /// [`Self::power_limit_bank`]; this exists for the decoder's HR 313/314
+    /// copy.
+    pub fn uses_ac_limit_registers(&self) -> bool {
+        matches!(self, Self::ACCoupled | Self::ACCoupledMk2 | Self::Gateway)
+    }
+
+    /// Whether `active_power_rate` is read from (and written to) HR 50.
+    ///
+    /// The 1000-range-layout families store the inverter's max-output
+    /// percentage at HR 1002 (`active_rate`), which
+    /// `decode_holding_1000_1079` decodes *after* HR 50 and therefore
+    /// supersedes it. The write path has no matching branch —
+    /// `SetActivePowerRate` encodes HR 50 unconditionally — and HR 1002 is not
+    /// in `SAFE_WRITE_REGS`, with neither reference library shipping a setter
+    /// for it. So on these models an Active Power Limit control would write a
+    /// register the layout ignores and then read the previous value back: the
+    /// front end hides it via
+    /// `deviceCapabilities.ts::deviceUsesHr50ActivePowerRate` and
+    /// `POST /api/control/active-power-rate` refuses it (issue #346).
+    ///
+    /// Unknown device codes — including the unsupported commercial
+    /// 0x41xx/0x51xx families — are excluded: their register map is not HEM's,
+    /// so no HR 50 write is offered or accepted for them.
+    pub fn uses_hr50_active_power_rate(&self) -> bool {
+        !matches!(
             self,
-            Self::ACCoupled
-                | Self::ACCoupledMk2
-                | Self::ThreePhase
+            Self::ThreePhase
                 | Self::ACThreePhase
-                | Self::Gateway
                 | Self::HybridHvGen3
                 | Self::AllInOneHybrid
+                | Self::Unknown(_)
         )
     }
 
@@ -1813,9 +1928,10 @@ mod tests {
 
     #[test]
     fn uses_direct_charge_limit_mirrors_frontend_classification() {
-        // Mirrors deviceCapabilities.ts `usesDirectChargeLimit`: AC-coupled
-        // (0x30xx) and the three-phase-limit banks (0x40/41/60/70/81/82)
-        // store charge/discharge limits as a direct 1–100% percentage.
+        // Mirrors deviceCapabilities.ts `usesDirectChargeLimit`: the AC-limit
+        // bank (AC-coupled 0x30xx and the Gateway 0x70xx) and the three-phase
+        // banks (0x40/60/81/82) store charge/discharge limits as a direct
+        // 1–100% percentage.
         for dt in [
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,
@@ -1848,6 +1964,316 @@ mod tests {
                 "{dt:?} should not be direct"
             );
         }
+    }
+
+    /// Issue #346: the Inverter Active Power Limit is only offered where HEM
+    /// both reads and writes HR 50. `decode_holding_1000_1079` overwrites
+    /// `active_power_rate` with HR 1002 on every 1000-range-layout device, and
+    /// `SetActivePowerRate` encodes HR 50 unconditionally — so on those
+    /// families the slider wrote a register the layout ignores and read the
+    /// previous value back.
+    #[test]
+    fn uses_hr50_active_power_rate_excludes_the_three_phase_layout() {
+        for dt in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::Gen4Hybrid,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            // The Gateway keeps the single-phase HR 50 layout: its lean poll set
+            // includes holding_0_59 and never reads HR 1002.
+            DeviceType::Gateway,
+        ] {
+            assert!(dt.uses_hr50_active_power_rate(), "{dt:?} should use HR 50");
+        }
+        // Exactly the families that poll THREE_PHASE_HIGH_CONFIG_BLOCK, where
+        // HR 1002 supersedes HR 50.
+        for dt in [
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ] {
+            assert!(
+                !dt.uses_hr50_active_power_rate(),
+                "{dt:?} should not use HR 50"
+            );
+            assert!(
+                dt.needs_three_phase_input_blocks(),
+                "{dt:?} is the 1000-range layout"
+            );
+        }
+        // Unknown codes, including the unsupported commercial 0x41xx/0x51xx
+        // families, use a register map HEM does not implement.
+        for code in [0x4101, 0x5101, 0x9999] {
+            let dt = DeviceType::from_register(code);
+            assert!(
+                !dt.uses_hr50_active_power_rate(),
+                "0x{code:04x} ({dt:?}) must not be offered an HR 50 write"
+            );
+        }
+    }
+
+    /// Every [`DeviceType`] variant, including the fallback, in one place. The
+    /// register matrices below iterate this list, and
+    /// `device_type_matrix_is_exhaustive` cross-checks it against every DTC
+    /// prefix `from_register` accepts, so adding a variant or a DTC mapping
+    /// forces the new row to be considered.
+    fn all_device_types() -> Vec<DeviceType> {
+        vec![
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::PvInverter,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::Ems,
+            DeviceType::Gateway,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gen4Hybrid,
+            DeviceType::Unknown(0x9999),
+        ]
+    }
+
+    /// The register every family's charge limit is written to. Routed through
+    /// the same `power_limit_bank` classifier the API handlers use.
+    fn charge_limit_write_register(dt: DeviceType) -> u16 {
+        dt.power_limit_bank().charge_register()
+    }
+
+    /// The cross-language contract: `tests/fixtures/device-limit-matrix.json`
+    /// is also asserted by `tests/lib/deviceCapabilities.test.ts`, so the
+    /// backend and front-end classifiers cannot drift apart (issue #346).
+    #[test]
+    fn device_limit_matrix_fixture_matches_the_backend_classifier() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/device-limit-matrix.json"
+        ))
+        .expect("fixture is valid JSON");
+        let devices = fixture["devices"].as_array().expect("devices array");
+        assert!(devices.len() >= 20, "fixture lost rows");
+        for row in devices {
+            let code = row["code"].as_str().unwrap();
+            let dtc = u16::from_str_radix(code, 16).unwrap();
+            let dt = DeviceType::from_register(dtc);
+            let bank = match row["bank"].as_str().unwrap() {
+                "half" => PowerLimitBank::HalfScale,
+                "ac" => PowerLimitBank::AcBank,
+                "threephase" => PowerLimitBank::ThreePhase,
+                other => panic!("unknown bank {other}"),
+            };
+            assert_eq!(dt.power_limit_bank(), bank, "{code} ({dt:?})");
+            assert_eq!(
+                dt.uses_hr50_active_power_rate(),
+                row["hr50"].as_bool().unwrap(),
+                "{code} ({dt:?})"
+            );
+            assert_eq!(dt.uses_direct_charge_limit(), bank.is_direct(), "{code}");
+        }
+    }
+
+    /// The bank owns the scale: halving only on the half-scale register, and
+    /// never beyond what the register can hold.
+    #[test]
+    fn power_limit_bank_scale_and_registers() {
+        use crate::modbus::registers::{HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT};
+        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(66), 33);
+        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(67), 34);
+        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(100), 50);
+        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(0), 0);
+        assert_eq!(PowerLimitBank::AcBank.percent_to_raw(66), 66);
+        assert_eq!(PowerLimitBank::ThreePhase.percent_to_raw(100), 100);
+        assert_eq!(
+            PowerLimitBank::HalfScale.charge_register(),
+            HR_BATTERY_CHARGE_LIMIT
+        );
+        assert_eq!(
+            PowerLimitBank::HalfScale.discharge_register(),
+            HR_BATTERY_DISCHARGE_LIMIT
+        );
+        for bank in [
+            PowerLimitBank::HalfScale,
+            PowerLimitBank::AcBank,
+            PowerLimitBank::ThreePhase,
+        ] {
+            assert_ne!(bank.charge_register(), bank.discharge_register());
+        }
+    }
+
+    /// The all-device list must cover every DTC prefix `from_register` maps,
+    /// and the ARM-firmware refinement of the 0x20xx family, so a new model
+    /// cannot slip past the register matrices.
+    #[test]
+    fn device_type_matrix_is_exhaustive() {
+        let known = all_device_types();
+        for dtc in [
+            0x1001, 0x2001, 0x2101, 0x2201, 0x2301, 0x3001, 0x3002, 0x4001, 0x5001, 0x6001, 0x7001,
+            0x8001, 0x8002, 0x8003, 0x8101, 0x8201, 0x8301, 0x9999,
+        ] {
+            let dt = DeviceType::from_register(dtc);
+            assert!(
+                known.contains(&dt),
+                "0x{dtc:04x} maps to {dt:?}, which is missing from all_device_types()"
+            );
+        }
+        // The 0x20xx family is refined by ARM firmware, producing three
+        // distinct variants from one DTC prefix.
+        for (arm_fw, expected) in [
+            (318u16, DeviceType::Gen3Hybrid),
+            (818, DeviceType::Gen2Hybrid),
+            (918, DeviceType::Gen2Hybrid),
+            (449, DeviceType::Gen1Hybrid),
+        ] {
+            let dt = DeviceType::from_register(0x2001).refine_with_arm_fw(0x2001, arm_fw);
+            assert_eq!(dt, expected, "ARM fw {arm_fw}");
+            assert!(
+                known.contains(&dt),
+                "{dt:?} missing from all_device_types()"
+            );
+        }
+    }
+
+    /// Issue #346: every family must read its charge/discharge limit from the
+    /// same register it writes, on the same scale. A family that writes HR 111
+    /// (0-50) but decodes HR 1110 (1-100), or vice versa, would make the saved
+    /// value snap back or display at half.
+    #[test]
+    fn every_device_type_decodes_the_charge_limit_from_the_register_it_writes() {
+        use crate::modbus::registers::{
+            AC_CONFIG_BLOCK, HR_3PH_BATTERY_CHARGE_LIMIT, HR_AC_BATTERY_CHARGE_LIMIT,
+            HR_BATTERY_CHARGE_LIMIT, STANDARD_POLL_BLOCKS, STANDARD_POLL_BLOCKS_3PH,
+            THREE_PHASE_CONFIG_BLOCK,
+        };
+        for dt in all_device_types() {
+            let write = charge_limit_write_register(dt);
+            // The full model-specific detail-poll set, which includes blocks
+            // the client adds outside `extra_poll_blocks` (the Gateway's
+            // HR 300-359).
+            let detail = crate::modbus::client::preview_model_specific_blocks(
+                &dt,
+                crate::modbus::client::GatewayPollScope::Detail,
+            );
+            let polls = |block: &crate::modbus::registers::RegisterBlock| {
+                detail.iter().any(|b| b.start == block.start)
+            };
+            match write {
+                HR_BATTERY_CHARGE_LIMIT => {
+                    // HR 111/112 sit in holding_60_119, present in both standard
+                    // sets (single-phase and the lean three-phase/Gateway set).
+                    assert!(
+                        STANDARD_POLL_BLOCKS.iter().any(|b| b.start == 60)
+                            && STANDARD_POLL_BLOCKS_3PH.iter().any(|b| b.start == 60),
+                        "HR 111 must be in every standard poll set"
+                    );
+                    assert!(
+                        !dt.uses_direct_charge_limit(),
+                        "{dt:?} writes the 0-50 HR 111 but is classified direct"
+                    );
+                    // The AC-config block may still be polled for EPS / pause /
+                    // export priority (residential AIO), but the decoder only
+                    // copies HR 313/314 for the AC-limit bank, so HR 111 wins.
+                }
+                HR_AC_BATTERY_CHARGE_LIMIT => {
+                    assert!(
+                        polls(&AC_CONFIG_BLOCK),
+                        "{dt:?} writes HR 313 but does not poll HR 300-359"
+                    );
+                    assert!(
+                        dt.uses_ac_limit_registers(),
+                        "{dt:?} writes HR 313 but the decoder does not copy it"
+                    );
+                    assert!(dt.uses_direct_charge_limit(), "{dt:?}");
+                }
+                HR_3PH_BATTERY_CHARGE_LIMIT => {
+                    assert!(
+                        polls(&THREE_PHASE_CONFIG_BLOCK),
+                        "{dt:?} writes HR 1110 but does not poll HR 1080-1124"
+                    );
+                    assert!(
+                        dt.uses_three_phase_schedule_slots(),
+                        "{dt:?} writes HR 1110 without three-phase routing"
+                    );
+                    assert!(dt.uses_direct_charge_limit(), "{dt:?}");
+                }
+                other => panic!("unexpected charge-limit write register {other} for {dt:?}"),
+            }
+        }
+    }
+
+    /// Issue #346: `SetActivePowerRate` always writes HR 50. Every family that
+    /// polls `THREE_PHASE_HIGH_CONFIG_BLOCK` has that value overwritten with
+    /// HR 1002 by `decode_holding_1000_1079`, so the control is only valid on
+    /// the known families that do not poll the block. Unknown codes are
+    /// excluded outright.
+    #[test]
+    fn every_device_type_reads_active_power_rate_from_the_register_it_writes() {
+        use crate::modbus::registers::THREE_PHASE_HIGH_CONFIG_BLOCK;
+        for dt in all_device_types() {
+            let polls_hr1002 = dt
+                .extra_poll_blocks()
+                .iter()
+                .any(|b| b.start == THREE_PHASE_HIGH_CONFIG_BLOCK.start);
+            let known = !matches!(dt, DeviceType::Unknown(_));
+            assert_eq!(
+                dt.uses_hr50_active_power_rate(),
+                known && !polls_hr1002,
+                "{dt:?}: writes HR 50 but polls_hr1002={polls_hr1002}"
+            );
+            assert_eq!(
+                dt.uses_hr50_active_power_rate(),
+                known && !dt.needs_three_phase_input_blocks(),
+                "{dt:?}: the HR 50 boundary must match the 1000-range layout"
+            );
+        }
+    }
+
+    /// The rated battery power each family reports when the DTC has no special
+    /// entry. Guards the scale the Control page multiplies by: an unknown or
+    /// batteryless family must stay at 0 so the UI hides the watt figure rather
+    /// than inventing one.
+    #[test]
+    fn every_device_type_reports_a_known_max_battery_power() {
+        for (dt, expected) in [
+            (DeviceType::Gen1Hybrid, 2600),
+            (DeviceType::Gen2Hybrid, 3600),
+            (DeviceType::Gen3Hybrid, 3600),
+            (DeviceType::PolarHybrid, 2600),
+            (DeviceType::Gen3PlusHybrid, 2600),
+            (DeviceType::PvInverter, 2600),
+            (DeviceType::ACCoupled, 3000),
+            (DeviceType::ACCoupledMk2, 3000),
+            (DeviceType::ThreePhase, 6000),
+            (DeviceType::ACThreePhase, 6000),
+            (DeviceType::Ems, 0),
+            (DeviceType::Gateway, 0),
+            (DeviceType::AllInOne6kW, 6000),
+            (DeviceType::AllInOne3_6kW, 3600),
+            (DeviceType::AllInOne5kW, 5000),
+            (DeviceType::HybridHvGen3, 6000),
+            (DeviceType::AllInOneHybrid, 6000),
+            (DeviceType::Gen4Hybrid, 6000),
+            (DeviceType::Unknown(0x9999), 0),
+        ] {
+            assert_eq!(dt.max_battery_power_w(), expected, "{dt:?}");
+        }
+        // Special DTC overrides, mirroring givenergy-modbus `_DTC_BATPOWER`.
+        assert_eq!(DeviceType::max_battery_power_for_dtc(0x2201, 0, 0), 5400);
+        assert_eq!(DeviceType::max_battery_power_for_dtc(0x8102, 0, 0), 8000);
+        assert_eq!(DeviceType::max_battery_power_for_dtc(0x8103, 0, 0), 10000);
     }
 
     #[test]

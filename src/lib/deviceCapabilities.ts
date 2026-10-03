@@ -16,27 +16,73 @@ export function isAcCoupledDevice(code: string | null | undefined): boolean {
 
 /**
  * Whether the device uses the three-phase-bank charge/discharge power limit
- * registers (already 1-100%): 0x40/60/70/81/82 families.
+ * registers (HR 1108/1110, already 1-100%): 0x40/60/81/82 families.
+ *
+ * The Gateway (0x70xx) is not one of them: it keeps its limits in the
+ * single-phase AC-limit bank, HR 313/314 — see {@link usesAcLimitRegisters}.
+ *
+ * Mirrors the backend's `DeviceType::uses_three_phase_schedule_slots`, which
+ * routes these limits to HR 1108/1110 (decoded from
+ * `THREE_PHASE_CONFIG_BLOCK`, HR 1080-1124).
  */
 export function isThreePhaseLimitModel(code: string | null | undefined): boolean {
   return !!code
     && (code.startsWith('40')
       || code.startsWith('60')
-      || code.startsWith('70')
       || code.startsWith('81')
       || code.startsWith('82'));
 }
 
 /**
+ * Whether the device keeps its charge/discharge power limits in the
+ * single-phase AC-limit bank (HR 313/314, direct 1-100%): AC-coupled models
+ * plus the Gateway (0x70xx). GivTCP writes the Gateway's rate with
+ * `set_battery_charge_limit_ac` and reads it back from HR 313/314.
+ * Mirrors the backend's `DeviceType::uses_ac_limit_registers`.
+ */
+export function usesAcLimitRegisters(code: string | null | undefined): boolean {
+  return isAcCoupledDevice(code) || (!!code && code.startsWith('70'));
+}
+
+/**
  * Whether the charge/discharge power limit registers for this device are
- * already a direct 1-100% percentage (AC-coupled HR313/314 and three-phase
+ * already a direct 1-100% percentage (AC-limit bank HR313/314 and three-phase
  * HR1110/1108), rather than the 0-50 DC-hybrid HR111/112 scale that the UI
  * doubles for display. Used by ControlPage's rate sliders and the Adaptive
  * charge section's kW estimates so both agree with the registers the
  * backend actually writes.
  */
 export function usesDirectChargeLimit(code: string | null | undefined): boolean {
-  return isAcCoupledDevice(code) || isThreePhaseLimitModel(code);
+  return usesAcLimitRegisters(code) || isThreePhaseLimitModel(code);
+}
+
+/** DTC prefixes the backend maps to a known family outside the 1000-range layout. */
+const HR50_ACTIVE_POWER_RATE_PREFIXES = ['10', '20', '21', '22', '23', '30', '50', '70', '80', '83'];
+
+/**
+ * Whether `active_power_rate` lives at HR 50 for this device — the only place
+ * HEM both reads and writes it, so the only place the Inverter Active Power
+ * Limit control can work.
+ *
+ * The 1000-range-layout families (`isThreePhaseLimitModel`) store the
+ * inverter's max-output percentage at HR 1002, which
+ * `decode_holding_1000_1079` decodes *after* HR 50 and therefore supersedes
+ * it. `SetActivePowerRate` encodes HR 50 unconditionally, and HR 1002 is not in
+ * the backend's `SAFE_WRITE_REGS` — `givenergy-modbus` ships only an HR 50
+ * setter (`commands.py::set_active_power_rate`). On those families the slider
+ * would write a register the layout ignores and then read the previous value
+ * back, so the control is hidden there and the backend refuses the write
+ * (issue #346). Mirrors the backend's `DeviceType::uses_hr50_active_power_rate`.
+ *
+ * Only the DTC families the backend recognises qualify. Unknown codes —
+ * including the unsupported commercial 0x41xx/0x51xx families — use a
+ * register map HEM does not implement, so they get no control.
+ *
+ * Returns false when the device type code is missing (pre-snapshot state) so
+ * the slider doesn't flash before the backend would accept a write.
+ */
+export function deviceUsesHr50ActivePowerRate(code: string | null | undefined): boolean {
+  return !!code && HR50_ACTIVE_POWER_RATE_PREFIXES.some((prefix) => code.startsWith(prefix));
 }
 
 /**

@@ -233,4 +233,34 @@ describe('<ControlPage/> — Adaptive Charge Low SOC caption', () => {
     expect(within(card).getByText(/does not stop discharge/i)).toBeDefined();
     expect(within(card).getByText(/target soc/i)).toBeDefined();
   });
+
+  // The rate readouts share formatPowerLimitLabel with the main sliders:
+  // percent of the inverter maximum, and no "(0.0 kW)" when the maximum is
+  // unknown, which would read as a disabled limit.
+  it('labels the period charge rates as a share of the inverter maximum', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ max_battery_power_w: 3600 }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const card = await adaptiveSection();
+    expect(within(card).getByText('50% (1.8 kW)')).toBeDefined();
+    expect(within(card).getByText('100% (3.6 kW)')).toBeDefined();
+  });
+
+  it('omits the watt figure on the period charge rates when the maximum is unknown', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ max_battery_power_w: 0 }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const card = await adaptiveSection();
+    expect(within(card).getByText('50%')).toBeDefined();
+    expect(within(card).getByText('100%')).toBeDefined();
+    expect(within(card).queryByText(/0\.0 kW/)).toBeNull();
+  });
 });
