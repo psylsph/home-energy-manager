@@ -46,6 +46,14 @@ assert_eq() {
   fi
 }
 
+# The `apt install …*.deb` lines from a mocked command log. Assertions match on
+# the package name instead of the staging path: the installer downloads into
+# $TMPDIR, so a hard-coded `/tmp/` prefix only holds where TMPDIR is unset and
+# silently fails everywhere else (e.g. TMPDIR=$HOME/tmp).
+apt_deb_installs() {
+  grep '^apt install' "$1" 2>/dev/null | grep '\.deb$' || true
+}
+
 assert_nonzero() {
   local label="$1" actual="$2"
   if [ "$actual" -ne 0 ]; then
@@ -414,7 +422,7 @@ set -e
 assert_eq "installer exits successfully" "0" "$MIGRATE_RC"
 assert_contains "removes legacy update path" "no" "$([ -e "$STAGE/root/usr/local/sbin/home-energy-manager-update" ] && echo yes || echo no)"
 assert_contains "installs the new update command" "yes" "$([ -x "$STAGE/root/usr/local/bin/update" ] && echo yes || echo no)"
-assert_not_contains "does not reinstall the package" "apt install -y /tmp/" "$(cat "$STAGE/commands.log")"
+assert_not_contains "does not reinstall the package" ".deb" "$(apt_deb_installs "$STAGE/commands.log")"
 
 echo
 echo "4. update command is a no-op when the latest version is installed"
@@ -434,7 +442,7 @@ UPDATE_OUTPUT="$(cat "$STAGE/update-output.log")"
 assert_eq "update exits successfully" "0" "$UPDATE_RC"
 assert_contains "reports already current" "already installed" "$UPDATE_OUTPUT"
 assert_not_contains "does not download the package" "https://example.invalid/hem.deb" "$UPDATE_COMMANDS"
-assert_not_contains "does not reinstall the package" "apt install -y /tmp/" "$UPDATE_COMMANDS"
+assert_not_contains "does not reinstall the package" ".deb" "$(apt_deb_installs "$STAGE/commands.log")"
 
 echo
 echo "5. update stops the service and backs up persistent data"
@@ -460,7 +468,9 @@ UPGRADED_SERVICE="$(cat "$STAGE/root/etc/systemd/system/home-energy-manager.serv
 BACKUPS=("$STAGE/root/var/backups/home-energy-manager"/pre-update-*.tar.gz)
 assert_eq "upgrade exits successfully" "0" "$UPGRADE_RC"
 assert_contains "stops service before replacing package" "systemctl stop home-energy-manager.service" "$UPGRADE_COMMANDS"
-assert_contains "installs newer package" "apt install -y /tmp/" "$UPGRADE_COMMANDS"
+UPGRADE_APT_INSTALLS="$(apt_deb_installs "$STAGE/commands.log")"
+assert_contains "installs newer package" "-Home-Energy-Manager-v1.2.3.deb" "$UPGRADE_APT_INSTALLS"
+assert_not_contains "does not reinstall the retained package" "v1.2.2.deb" "$UPGRADE_APT_INSTALLS"
 assert_contains "creates pre-update data backup" "yes" "$([ -f "${BACKUPS[0]}" ] && echo yes || echo no)"
 assert_contains "retains only three newest backups" "3" "${#BACKUPS[@]}"
 assert_contains "preserves the configured port" "ExecStart=/usr/bin/givenergy-local --headless --port 7444" "$UPGRADED_SERVICE"
@@ -489,7 +499,7 @@ set -e
 BACKUP_FAILURE_COMMANDS="$(cat "$FAIL_STAGE/commands.log")"
 assert_eq "backup failure reports non-zero" "42" "$BACKUP_FAILURE_RC"
 assert_contains "restarts the existing service" "systemctl enable --now home-energy-manager.service" "$BACKUP_FAILURE_COMMANDS"
-assert_not_contains "does not replace the package" "apt install -y /tmp/" "$BACKUP_FAILURE_COMMANDS"
+assert_not_contains "does not replace the package" ".deb" "$(apt_deb_installs "$FAIL_STAGE/commands.log")"
 rm -rf "$FAIL_STAGE"
 
 echo
@@ -557,7 +567,10 @@ ROLLBACK_COMMANDS="$(cat "$STAGE/commands.log")"
 ROLLBACK_OUTPUT="$(cat "$STAGE/rollback-output.log")"
 assert_eq "failed update reports non-zero" "1" "$ROLLBACK_RC"
 assert_contains "downloads previous release package" "Linux-Debian-x86_64-Home-Energy-Manager-v1.2.2.deb" "$ROLLBACK_COMMANDS"
-assert_contains "reinstalls previous package with downgrade allowed" "apt install -y --allow-downgrades /tmp/" "$ROLLBACK_COMMANDS"
+ROLLBACK_APT_INSTALLS="$(apt_deb_installs "$STAGE/commands.log" | grep -- '--allow-downgrades' || true)"
+assert_contains "reinstalls previous package with downgrade allowed" "apt install -y --allow-downgrades" "$ROLLBACK_APT_INSTALLS"
+assert_contains "reinstalls the retained previous package" "-Home-Energy-Manager-v1.2.2.deb" "$ROLLBACK_APT_INSTALLS"
+assert_not_contains "does not downgrade back to the failed package" "v1.2.3.deb" "$ROLLBACK_APT_INSTALLS"
 assert_contains "reports successful rollback" "Previous version restored" "$ROLLBACK_OUTPUT"
 
 echo
