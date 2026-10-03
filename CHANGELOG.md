@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Average lines are gone from the cumulative History graphs.** They still appear on the power, SOC, temperature and grid voltage charts, but the daily energy counters and the Import Cost / Export Income totals no longer draw one — a running total has no meaningful average, and the number changed with the range you picked (#345).
+
 ## [0.85.1] - 2026-10-03
 
 ### Fixed

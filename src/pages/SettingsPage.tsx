@@ -2602,13 +2602,16 @@ export default function SettingsPage() {
         </div>
 
         {/* ── Sub-section: History Chart Averages ── */}
-        {/* Draws a fixed horizontal average line per series on every History
-            graph (issue #345). Off by default so existing users see no
-            change; persisted via the store so it survives reloads. */}
+        {/* Draws a fixed horizontal average line per series on the History
+            graphs (issue #345). Cumulative graphs — the daily Energy (kWh)
+            totals and the Import Cost / Export Income running totals — are
+            left out: the average of a running total isn't a useful number.
+            Off by default so existing users see no change; persisted via the
+            store so it survives reloads. */}
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
           <h3 className="text-text-primary text-sm font-sans font-medium">History Chart Averages</h3>
           <p className="text-text-secondary text-xs font-sans">
-            Draw a horizontal line on each History graph showing the average of that series over the selected period.
+            Draw a horizontal line on each History graph showing the average of that series over the selected period. Daily energy and cost graphs are left out, because the average of a running total doesn't tell you much.
           </p>
           <div className="flex items-center justify-between">
             <span className="text-text-primary text-sm font-sans">Show average lines</span>

@@ -26,7 +26,13 @@ import {
   shouldRefreshHistoryRange,
   supportsHistoryDate,
 } from '../lib/historyRangeConfig';
-import { computeSeriesAverage, formatHistoryValue, getSeriesOpacity, removeSpikes } from '../lib/chartSeries';
+import {
+  computeSeriesAverage,
+  formatHistoryValue,
+  getSeriesOpacity,
+  hasMeaningfulAverage,
+  removeSpikes,
+} from '../lib/chartSeries';
 import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
@@ -539,13 +545,20 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight, showAver
 
   // One fixed horizontal average line per plotted series (issue #345). The
   // mean is taken over the same post-spike, post-preprocess values the areas
-  // draw, so it always agrees with what's on screen.
-  const seriesAverages = chart.fields.map((_, i) =>
-    computeSeriesAverage(seriesData.map((row) => row[seriesNames[i]])),
+  // draw, so it always agrees with what's on screen. Cumulative series (the
+  // daily energy counters and the cost/income totals) get `null` instead of a
+  // number: their mean is an artefact of where the window starts, so the line
+  // — and the tooltip read-out fed from the same array — is omitted
+  // (issue #345 follow-up).
+  const seriesAverages = chart.fields.map((f, i) =>
+    hasMeaningfulAverage(f.field)
+      ? computeSeriesAverage(seriesData.map((row) => row[seriesNames[i]]))
+      : null,
   );
 
   // Look-up for the tooltip: per-series window average (null when the
-  // setting is off) and whether the series is muted in the legend.
+  // setting is off, or when the series is cumulative and has no meaningful
+  // average) and whether the series is muted in the legend.
   const seriesMeta: Record<string, TooltipSeriesMeta> = {};
   chart.fields.forEach((_, i) => {
     seriesMeta[seriesNames[i]] = {
