@@ -878,6 +878,13 @@ pub struct BatteryModule {
     /// Raw LV BMS warning bytes warning_1..warning_2 split from IR 94.
     #[serde(default)]
     pub bms_warnings: Vec<u8>,
+    /// Lifetime energy charged into this battery in kWh (IR 106, deci-kWh,
+    /// "Battery charge energy total" in the v4.1.6 register doc).
+    #[serde(default)]
+    pub charge_energy_total_kwh: f32,
+    /// Lifetime energy discharged from this battery in kWh (IR 105, deci-kWh).
+    #[serde(default)]
+    pub discharge_energy_total_kwh: f32,
 }
 
 /// A single charge or discharge schedule slot.

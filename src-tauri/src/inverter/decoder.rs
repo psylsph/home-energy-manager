@@ -1992,6 +1992,8 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
         bms_status_registers,
         bms_status,
         bms_warnings,
+        charge_energy_total_kwh: 0.0,
+        discharge_energy_total_kwh: 0.0,
     }
 }
 
@@ -2005,6 +2007,16 @@ pub fn decode_battery_block_into(
 ) {
     let module = decode_battery_block(data, block_index);
     snapshot.battery_modules.push(module);
+}
+
+/// Fill the snapshot's lifetime battery charge/discharge totals from the
+/// first LV battery's BMS (IR 105/106), the way GivTCP does.
+///
+/// Placeholder: behaviour lands in the next commit.
+pub(crate) fn apply_lv_bms_lifetime_totals(
+    _snapshot: &mut InverterSnapshot,
+    _prev: Option<&InverterSnapshot>,
+) {
 }
 
 // ===========================================================================
@@ -2547,6 +2559,8 @@ pub fn decode_hv_bmu_block(data: &[u16], index: usize) -> crate::inverter::model
         bms_status_registers: Vec::new(),
         bms_status: Vec::new(),
         bms_warnings: Vec::new(),
+        charge_energy_total_kwh: 0.0,
+        discharge_energy_total_kwh: 0.0,
     }
 }
 
@@ -4383,6 +4397,205 @@ mod tests {
         decode_holding_240_299(&[0u16; 2], &mut snapshot);
 
         assert_eq!(snapshot.raw_charge_slot_1_target_soc, None);
+    }
+
+    // ---- LV BMS lifetime battery totals (IR 105/106) ----------------------
+
+    fn module_with_totals(index: usize, charge: f32, discharge: f32) -> BatteryModule {
+        BatteryModule {
+            index,
+            charge_energy_total_kwh: charge,
+            discharge_energy_total_kwh: discharge,
+            ..Default::default()
+        }
+    }
+
+    fn lv_snapshot(device_type: DeviceType, modules: Vec<BatteryModule>) -> InverterSnapshot {
+        InverterSnapshot {
+            device_type,
+            battery_modules: modules,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lv_battery_block_decodes_lifetime_totals_from_ir105_and_ir106() {
+        let mut data = vec![0u16; 60];
+        data[105 - 60] = 12_345; // IR(105) discharge total, deci-kWh
+        data[106 - 60] = 20_000; // IR(106) charge total, deci-kWh
+
+        let module = decode_battery_block(&data, 0);
+
+        assert!((module.discharge_energy_total_kwh - 1_234.5).abs() < 0.01);
+        assert!((module.charge_energy_total_kwh - 2_000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn lv_bms_totals_populate_the_snapshot_on_single_phase_models() {
+        for device_type in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::ACCoupled,
+        ] {
+            let mut snap = lv_snapshot(device_type, vec![module_with_totals(0, 2_000.0, 1_234.5)]);
+
+            apply_lv_bms_lifetime_totals(&mut snap, None);
+
+            assert!(
+                (snap.total_charge_kwh - 2_000.0).abs() < 0.01,
+                "{device_type:?}"
+            );
+            assert!(
+                (snap.total_discharge_kwh - 1_234.5).abs() < 0.01,
+                "{device_type:?}"
+            );
+            assert!(
+                (snap.total_throughput_kwh - 3_234.5).abs() < 0.01,
+                "{device_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lv_bms_totals_win_over_the_inverter_alt1_registers() {
+        let mut snap = lv_snapshot(
+            DeviceType::Gen1Hybrid,
+            vec![module_with_totals(0, 2_000.0, 1_000.0)],
+        );
+        snap.total_charge_kwh = 500.0; // from IR(180/181)
+        snap.total_discharge_kwh = 400.0;
+
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+
+        assert!((snap.total_charge_kwh - 2_000.0).abs() < 0.01);
+        assert!((snap.total_discharge_kwh - 1_000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn zero_bms_totals_fall_back_to_the_inverter_alt1_registers() {
+        let mut snap = lv_snapshot(
+            DeviceType::Gen1Hybrid,
+            vec![module_with_totals(0, 0.0, 0.0)],
+        );
+        snap.total_charge_kwh = 500.0;
+        snap.total_discharge_kwh = 400.0;
+        snap.total_throughput_kwh = 900.0;
+
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+
+        assert_eq!(snap.total_charge_kwh, 500.0);
+        assert_eq!(snap.total_discharge_kwh, 400.0);
+        assert_eq!(snap.total_throughput_kwh, 900.0);
+    }
+
+    #[test]
+    fn only_the_first_battery_feeds_the_snapshot_totals() {
+        let mut snap = lv_snapshot(
+            DeviceType::Gen2Hybrid,
+            vec![
+                module_with_totals(1, 9_000.0, 8_000.0),
+                module_with_totals(0, 2_000.0, 1_000.0),
+            ],
+        );
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+        assert!((snap.total_charge_kwh - 2_000.0).abs() < 0.01);
+        assert!((snap.total_discharge_kwh - 1_000.0).abs() < 0.01);
+
+        // Battery #1 absent (only #2 answered): its totals are not a system total.
+        let mut snap = lv_snapshot(
+            DeviceType::Gen2Hybrid,
+            vec![module_with_totals(1, 9_000.0, 8_000.0)],
+        );
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+        assert_eq!(snap.total_charge_kwh, 0.0);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
+    }
+
+    #[test]
+    fn hv_and_gateway_models_keep_their_own_totals() {
+        for device_type in [
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::AllInOne6kW,
+            DeviceType::Gateway,
+        ] {
+            let mut snap = lv_snapshot(device_type, vec![module_with_totals(0, 2_000.0, 1_000.0)]);
+            snap.total_charge_kwh = 7.0;
+            snap.total_discharge_kwh = 8.0;
+            snap.total_throughput_kwh = 15.0;
+
+            apply_lv_bms_lifetime_totals(&mut snap, None);
+
+            assert_eq!(snap.total_charge_kwh, 7.0, "{device_type:?}");
+            assert_eq!(snap.total_discharge_kwh, 8.0, "{device_type:?}");
+            assert_eq!(snap.total_throughput_kwh, 15.0, "{device_type:?}");
+        }
+    }
+
+    #[test]
+    fn a_bms_dropout_keeps_the_previous_totals_instead_of_publishing_zero() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen2Hybrid,
+            total_charge_kwh: 2_000.0,
+            total_discharge_kwh: 1_000.0,
+            total_throughput_kwh: 3_000.0,
+            ..Default::default()
+        };
+        // Battery #1 did not answer this cycle: no module, inverter totals 0.
+        let mut snap = lv_snapshot(DeviceType::Gen2Hybrid, vec![]);
+
+        apply_lv_bms_lifetime_totals(&mut snap, Some(&prev));
+
+        assert_eq!(snap.total_charge_kwh, 2_000.0);
+        assert_eq!(snap.total_discharge_kwh, 1_000.0);
+        assert_eq!(snap.total_throughput_kwh, 3_000.0);
+    }
+
+    #[test]
+    fn a_bms_dropout_does_not_borrow_totals_from_another_inverter_model() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            total_charge_kwh: 2_000.0,
+            total_discharge_kwh: 1_000.0,
+            ..Default::default()
+        };
+        let mut snap = lv_snapshot(DeviceType::Gen2Hybrid, vec![]);
+
+        apply_lv_bms_lifetime_totals(&mut snap, Some(&prev));
+
+        assert_eq!(snap.total_charge_kwh, 0.0);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
+    }
+
+    #[test]
+    fn a_dropout_never_overrides_totals_the_inverter_itself_reported() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen1Hybrid,
+            total_charge_kwh: 2_000.0,
+            total_discharge_kwh: 1_000.0,
+            ..Default::default()
+        };
+        let mut snap = lv_snapshot(DeviceType::Gen1Hybrid, vec![]);
+        snap.total_charge_kwh = 2_001.0; // fresh IR(180/181) reading
+        snap.total_discharge_kwh = 1_001.0;
+
+        apply_lv_bms_lifetime_totals(&mut snap, Some(&prev));
+
+        assert_eq!(snap.total_charge_kwh, 2_001.0);
+        assert_eq!(snap.total_discharge_kwh, 1_001.0);
+    }
+
+    #[test]
+    fn no_bms_and_no_history_leaves_the_totals_at_zero() {
+        let mut snap = lv_snapshot(DeviceType::Gen3Hybrid, vec![]);
+
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+
+        assert_eq!(snap.total_charge_kwh, 0.0);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
     }
 
     #[test]
