@@ -2123,21 +2123,20 @@ pub const INVERTER_CLOCK_SKEW_WARN_MINUTES: i64 = 5;
 ///
 /// `inverter_time` is the `YYYY-MM-DD HH:MM:SS` string the decoder emits from
 /// HR 35-40; `None` when it is empty or not a valid date-time.
-///
-/// Placeholder: behaviour lands in the next commit.
 pub fn inverter_clock_skew_minutes(
-    _inverter_time: &str,
-    _host_now: chrono::NaiveDateTime,
+    inverter_time: &str,
+    host_now: chrono::NaiveDateTime,
 ) -> Option<i64> {
-    None
+    let inverter_now =
+        chrono::NaiveDateTime::parse_from_str(inverter_time, "%Y-%m-%d %H:%M:%S").ok()?;
+    Some(inverter_now.signed_duration_since(host_now).num_minutes())
 }
 
 /// Whether to log the clock-skew warning now: the skew is known, at or past
 /// the threshold, and it has not been logged yet on this connection.
-///
-/// Placeholder: behaviour lands in the next commit.
-pub fn clock_skew_warning_due(_skew_minutes: Option<i64>, _already_logged: bool) -> bool {
-    false
+pub fn clock_skew_warning_due(skew_minutes: Option<i64>, already_logged: bool) -> bool {
+    !already_logged
+        && skew_minutes.is_some_and(|skew| skew.abs() >= INVERTER_CLOCK_SKEW_WARN_MINUTES)
 }
 
 /// Choose the scheduling minute shared by all time-driven automations.
