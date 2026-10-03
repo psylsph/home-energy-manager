@@ -246,11 +246,14 @@ test.describe('Force Discharge → Stop API', () => {
     // A stop retains ownership until a confirming readback, so clearing the
     // revert for this assertion needs the harness reset.
     await resetHarness(baseUrl);
-    // Drain any in-flight state (see the charge counterpart above).
-    const preResp = await fetch(`${baseUrl}/api/control/force-discharge/stop`, {
-      method: 'POST',
-    });
-    await preResp.json();
+    // With no captured revert, Stop falls back to disarming whatever the
+    // latest snapshot shows armed, so the simulator must first be observed
+    // disarmed. A preceding test's Stop writes may not have been read back
+    // yet; draining with another Stop only re-queued them and raced the next
+    // poll (the assertion below then saw a still-armed snapshot).
+    await setMode(baseUrl, 'eco');
+    const settled = await waitForSnapshot(baseUrl, (d) => d.enable_discharge === false, 15_000);
+    expect(settled.enable_discharge).toBe(false);
 
     const stopResp = await fetch(`${baseUrl}/api/control/force-discharge/stop`, {
       method: 'POST',
