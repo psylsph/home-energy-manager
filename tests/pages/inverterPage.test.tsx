@@ -149,3 +149,67 @@ describe('<InverterPage/> Power row sign convention', () => {
     expect(rowValue(container, 'Grid Power')).toBe('2.2kW');
   });
 });
+describe('<InverterPage/> charge/discharge rate scale', () => {
+  function rowValue(container: HTMLElement, label: string): string {
+    const labelEl = Array.from(container.querySelectorAll('span.text-text-secondary'))
+      .find((r) => r.textContent === label);
+    const value = labelEl?.nextElementSibling?.textContent;
+    if (!value) throw new Error(`row not found: ${label}`);
+    return value;
+  }
+
+  // Issue #346: HR 111/112 run 0-50 and the UI doubles them; HR 313/314 and
+  // HR 1108/1110 already run 1-100. The Inverter page used to render the raw
+  // register, so a DC-hybrid user who set 66% on the Control page saw "33%".
+  it('doubles the half-scale register on a DC hybrid', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '2201', charge_rate: 33, discharge_rate: 25 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Charge Rate')).toBe('66%');
+    expect(rowValue(container, 'Discharge Rate')).toBe('50%');
+  });
+
+  it('passes the direct register through on a three-phase model', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '4001', charge_rate: 66, discharge_rate: 100 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Charge Rate')).toBe('66%');
+    expect(rowValue(container, 'Discharge Rate')).toBe('100%');
+  });
+
+  it('passes the direct register through on an AC-coupled model', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '3001', charge_rate: 66 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Charge Rate')).toBe('66%');
+  });
+
+  it('doubles the half-scale register on the Gen1 Hybrid the bug was reported on', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '1001', charge_rate: 33, discharge_rate: 25 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Charge Rate')).toBe('66%');
+    expect(rowValue(container, 'Discharge Rate')).toBe('50%');
+  });
+
+  it('passes the Gateway HR 313/314 register through unchanged', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '7001', charge_rate: 66, discharge_rate: 40 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Charge Rate')).toBe('66%');
+    expect(rowValue(container, 'Discharge Rate')).toBe('40%');
+  });
+
+  it('clamps a corrupt half-scale register to 100%', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '2201', charge_rate: 200 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Charge Rate')).toBe('100%');
+  });
+});

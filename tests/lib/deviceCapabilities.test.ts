@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import fixture from '../fixtures/device-limit-matrix.json';
 import {
   deviceSupportsEps,
   deviceSupportsExportLimit,
   deviceSupportsTimedDischarge,
+  deviceUsesHr50ActivePowerRate,
   isAcCoupledDevice,
   isThreePhaseLimitModel,
+  usesAcLimitRegisters,
   usesDirectChargeLimit,
 } from '../../src/lib/deviceCapabilities';
 
@@ -95,13 +98,16 @@ describe('isAcCoupledDevice', () => {
 });
 
 /**
- * Three-phase-bank charge/discharge limit register models: 0x40/60/70/81/82.
+ * Three-phase-bank charge/discharge limit register models: 0x40/60/81/82.
+ *
+ * The Gateway (0x70xx) is NOT one of them: it keeps its limits in the
+ * single-phase AC-limit bank (HR 313/314), like GivTCP's
+ * `set_battery_charge_limit_ac` routing.
  */
 describe('isThreePhaseLimitModel', () => {
   it.each([
     ['4001', 'ThreePhase'],
     ['6001', 'AC three-phase'],
-    ['7001', 'Gateway'],
     ['8101', 'Hybrid HV Gen3'],
     ['8201', 'AIO Hybrid'],
   ])('returns true for %s (%s)', (code) => {
@@ -109,6 +115,7 @@ describe('isThreePhaseLimitModel', () => {
   });
 
   it.each([
+    ['7001', 'Gateway uses the AC-limit bank, not the three-phase bank'],
     ['3001', 'AC-coupled uses AC-config block, not three-phase bank'],
     ['2001', 'Gen hybrid'],
     ['4101', 'unvalidated device family'],
@@ -134,7 +141,7 @@ describe('usesDirectChargeLimit', () => {
     ['3050', 'unlisted 30xx AC-coupled'],
     ['4001', 'ThreePhase'],
     ['6001', 'AC three-phase'],
-    ['7001', 'Gateway'],
+    ['7001', 'Gateway (HR 313/314)'],
     ['8101', 'Hybrid HV Gen3'],
     ['8201', 'AIO Hybrid'],
   ])('returns true for %s (%s)', (code) => {
@@ -154,6 +161,47 @@ describe('usesDirectChargeLimit', () => {
   it('returns false when the code is missing', () => {
     expect(usesDirectChargeLimit(undefined)).toBe(false);
     expect(usesDirectChargeLimit(null)).toBe(false);
+  });
+});
+
+/**
+ * Issue #346: the Inverter Active Power Limit is only offered where HEM both
+ * writes and reads back HR 50. `decode_holding_1000_1079` overwrites
+ * `active_power_rate` with HR 1002 on every 1000-range-layout device, and the
+ * write path has no matching branch (HR 1002 is not in `SAFE_WRITE_REGS` and
+ * neither reference library ships a setter for it), so on those families the
+ * slider wrote a register the layout ignores and then read the old value back.
+ */
+describe('deviceUsesHr50ActivePowerRate', () => {
+  it.each([
+    ['2001', 'Gen hybrid'],
+    ['3001', 'AC-coupled'],
+    ['8001', 'AIO 6kW'],
+    ['8301', 'Gen4 hybrid'],
+    ['7001', 'Gateway keeps the single-phase HR50 layout'],
+    ['5001', 'EMS'],
+    ['2301', 'PV inverter'],
+  ])('returns true for %s (%s)', (code) => {
+    expect(deviceUsesHr50ActivePowerRate(code)).toBe(true);
+  });
+
+  it.each([
+    ['4001', 'ThreePhase reads HR1002'],
+    ['6001', 'AC three-phase reads HR1002'],
+    ['8101', 'Hybrid HV Gen3 reads HR1002'],
+    ['8201', 'AIO Hybrid reads HR1002'],
+    ['4101', 'unsupported commercial AIO'],
+    ['5101', 'unsupported commercial EMS'],
+    ['9999', 'unknown family'],
+  ])('returns false for %s (%s)', (code) => {
+    expect(deviceUsesHr50ActivePowerRate(code)).toBe(false);
+  });
+
+  it('returns false when the code is missing', () => {
+    // No code means no confirmed register layout, so the control stays hidden
+    // rather than flashing a slider the backend would reject.
+    expect(deviceUsesHr50ActivePowerRate(undefined)).toBe(false);
+    expect(deviceUsesHr50ActivePowerRate(null)).toBe(false);
   });
 });
 
@@ -269,5 +317,65 @@ describe('deviceSupportsTimedDischarge', () => {
       expect(deviceSupportsEps(snap)).toBe(true);
       expect(deviceSupportsTimedDischarge(snap)).toBe(false);
     }
+  });
+});
+
+/**
+ * Issue #346: the three predicates above must agree with the backend for every
+ * device family, because together they decide which register the slider writes
+ * and what scale it displays. The table mirrors `DeviceType` in
+ * `src-tauri/src/inverter/model.rs`; the Rust
+ * `every_device_type_decodes_the_charge_limit_from_the_register_it_writes` and
+ * `every_device_type_reads_active_power_rate_from_the_register_it_writes`
+ * tests assert the other half of the contract against the actual poll blocks.
+ *
+ * `direct` -> the limit register is already 1-100 (HR 313/314, HR 1108/1110).
+ * `hr50`   -> the Inverter Active Power Limit is valid (HEM reads and writes
+ *             HR 50); false where the decoder overwrites it with HR 1002.
+ */
+describe('device classification matches the shared backend fixture', () => {
+  // tests/fixtures/device-limit-matrix.json is also asserted by the Rust test
+  // `device_limit_matrix_fixture_matches_the_backend_classifier`, so a change
+  // to either classifier fails one side until the fixture is updated.
+  const BANK_FLAGS = {
+    half: { direct: false, ac: false, threePhase: false },
+    ac: { direct: true, ac: true, threePhase: false },
+    threephase: { direct: true, ac: false, threePhase: true },
+  } as const;
+
+  it('covers every family', () => {
+    expect(fixture.devices.length).toBeGreaterThanOrEqual(20);
+  });
+
+  it.each(fixture.devices)('$code ($family)', ({ code, bank, hr50 }) => {
+    const want = BANK_FLAGS[bank as keyof typeof BANK_FLAGS];
+    expect(usesDirectChargeLimit(code)).toBe(want.direct);
+    expect(usesAcLimitRegisters(code)).toBe(want.ac);
+    expect(isThreePhaseLimitModel(code)).toBe(want.threePhase);
+    expect(deviceUsesHr50ActivePowerRate(code)).toBe(hr50);
+  });
+});
+
+describe('usesAcLimitRegisters', () => {
+  it.each([
+    ['3001', 'AC-coupled'],
+    ['3002', 'AC-coupled Mk2'],
+    ['7001', 'Gateway'],
+  ])('returns true for %s (%s)', (code) => {
+    expect(usesAcLimitRegisters(code)).toBe(true);
+  });
+
+  it.each([
+    ['2001', 'Gen hybrid (HR 111/112)'],
+    ['4001', 'Three-phase (HR 1108/1110)'],
+    ['8001', 'AIO (HR 111/112)'],
+    ['4101', 'unsupported commercial AIO'],
+  ])('returns false for %s (%s)', (code) => {
+    expect(usesAcLimitRegisters(code)).toBe(false);
+  });
+
+  it('returns false when the code is missing', () => {
+    expect(usesAcLimitRegisters(undefined)).toBe(false);
+    expect(usesAcLimitRegisters(null)).toBe(false);
   });
 });

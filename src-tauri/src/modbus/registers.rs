@@ -710,10 +710,21 @@ pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[
 pub const EXTENDED_AND_AC_CONFIG_BLOCKS: &[RegisterBlock] =
     &[EXTENDED_SLOTS_BLOCK, AC_CONFIG_BLOCK];
 
-/// Extra blocks for AC three-phase models: AC config plus full three-phase schedule/config.
+/// Extra blocks for AC three-phase models: AC config plus the full
+/// three-phase high/schedule/config banks.
+///
+/// `THREE_PHASE_HIGH_CONFIG_BLOCK` matters here even though the name suggests
+/// HV/DC models: givenergy-modbus classifies `AC_3PH` (0x60xx) as a
+/// three-phase model (`THREE_PHASE_MODELS` in `inverter_threephase.py`), so its
+/// `active_rate` lives at HR 1002 and `p_export_limit` at HR 1063 — the same
+/// registers the other three-phase-layout families use. Without the block the
+/// decoder fell back to single-phase HR 50 for `active_power_rate` and never
+/// read the HR 1063 export limit that `deviceSupportsExportLimit` already
+/// offers to write, so both readings diverged from the hardware (issue #346).
 pub const AC_EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[
     AC_CONFIG_BLOCK,
     EXTENDED_SLOTS_BLOCK,
+    THREE_PHASE_HIGH_CONFIG_BLOCK,
     THREE_PHASE_CONFIG_BLOCK,
 ];
 

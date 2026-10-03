@@ -1087,12 +1087,10 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     raw.battery_soc_reserve = snap.battery_reserve as u16;
 
     // Battery charge/discharge limits for DC-coupled hybrids: HR(111/112).
-    // AC-coupled inverters use HR(313/314) from the AC config block instead;
-    // HR(111/112) can read as 0 on AC models and must not overwrite the real limits.
-    if !matches!(
-        snap.device_type,
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
-    ) {
+    // AC-coupled inverters and the Gateway use HR(313/314) from the AC config
+    // block instead; HR(111/112) can read as 0 on AC models and must not
+    // overwrite the real limits.
+    if !snap.device_type.uses_ac_limit_registers() {
         snap.charge_rate = get_reg(data, 111 - 60) as u8;
         snap.discharge_rate = get_reg(data, 112 - 60) as u8;
     }
@@ -1308,20 +1306,18 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
     // HR 311: export priority (0=battery, 1=grid, 2=load)
     snap.ac_export_priority = get_reg(data, 311 - 300) as u8;
 
-    // HR 313/314: AC-coupled charge/discharge power percentage limits.
-    // Only AC-coupled inverters expose their real limits here — their DC-hybrid
-    // HR 111/112 registers read as 0 (see decode_holding_60_119). The
+    // HR 313/314: AC-limit-bank charge/discharge power percentage limits.
+    // AC-coupled inverters expose their real limits here — their DC-hybrid
+    // HR 111/112 registers read as 0 (see decode_holding_60_119) — and so does
+    // the Gateway, whose rate GivTCP both writes and reads at HR 313/314. The
     // All-in-One family also polls this block (for EPS / pause / export
     // priority) but keys its real charge/discharge limit off HR 111/112 —
     // confirmed by GivTCP read.py, which uses `battery_charge_limit` (HR 111)
     // for every non-3-phase / non-Gateway model including the AIO. On the AIO
     // HR 313 reads ~100, so copying it unconditionally would overwrite the
     // correct HR 111 value and make the charge-power limit always revert to
-    // max. Gate the copy on actual AC-coupled models only.
-    if matches!(
-        snap.device_type,
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
-    ) {
+    // max. Gate the copy on `uses_ac_limit_registers`.
+    if snap.device_type.uses_ac_limit_registers() {
         snap.charge_rate = get_reg(data, 313 - 300) as u8;
         snap.discharge_rate = get_reg(data, 314 - 300) as u8;
     }
@@ -5559,6 +5555,141 @@ mod tests {
             "AIO charge limit must come from HR 111, not the AC-config HR 313"
         );
         assert_eq!(snap.discharge_rate, 30);
+    }
+
+    /// Issue #346 was reported on a Gen1 Hybrid. Both DTC routes to Gen1
+    /// (0x1001, and 0x20xx with ARM firmware century 12) must read the limits
+    /// raw from HR 111/112 on the 0-50 scale, ignore any HR 313/314 values, and
+    /// report the 2600 W rating the Control page multiplies by.
+    #[test]
+    fn gen1_hybrid_charge_limits_come_from_hr111_112() {
+        for (dtc, arm_fw) in [(0x1001u16, 0u16), (0x2001, 1234)] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            holding_data[21] = arm_fw;
+
+            let mut holding_60_data = vec![0u16; 60];
+            holding_60_data[111 - 60] = 33; // displayed as 66%
+            holding_60_data[112 - 60] = 25; // displayed as 50%
+
+            let mut ac_config = vec![0u16; 60];
+            ac_config[313 - 300] = 100; // must NOT override
+            ac_config[314 - 300] = 100;
+
+            let blocks = vec![
+                make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(
+                    RegisterType::Holding,
+                    60,
+                    60,
+                    "holding_60_119",
+                    holding_60_data,
+                ),
+                make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+            ];
+            let snap = decode_snapshot(&blocks);
+            assert_eq!(snap.device_type, DeviceType::Gen1Hybrid, "0x{dtc:04x}");
+            assert_eq!(
+                snap.charge_rate, 33,
+                "0x{dtc:04x} charge limit is raw HR 111"
+            );
+            assert_eq!(
+                snap.discharge_rate, 25,
+                "0x{dtc:04x} discharge limit is raw HR 112"
+            );
+            assert_eq!(snap.max_battery_power_w, 2600, "0x{dtc:04x}");
+            assert!(!snap.device_type.uses_direct_charge_limit());
+        }
+    }
+
+    /// The Gateway keeps its charge/discharge limits in the AC-limit bank:
+    /// GivTCP writes them with `set_battery_charge_limit_ac` (HR 313/314) and
+    /// reads them back from `battery_charge_limit_ac`. HR 111/112 must not
+    /// overwrite them.
+    #[test]
+    fn gateway_charge_limits_come_from_hr313_314_not_hr111_112() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x7001; // Gateway
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 25; // not the Gateway's limit
+        holding_60_data[112 - 60] = 30;
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[313 - 300] = 80;
+        ac_config[314 - 300] = 70;
+
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::Gateway);
+        assert_eq!(snap.charge_rate, 80, "Gateway charge limit is HR 313");
+        assert_eq!(snap.discharge_rate, 70, "Gateway discharge limit is HR 314");
+    }
+
+    /// Without the AC config block the Gateway's limits stay unset rather than
+    /// being filled from HR 111/112, which is not where the Gateway keeps them.
+    #[test]
+    fn gateway_without_ac_config_block_ignores_hr111_112() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x7001;
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 25;
+        holding_60_data[112 - 60] = 30;
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.charge_rate, 0);
+        assert_eq!(snap.discharge_rate, 0);
+    }
+
+    /// AC three-phase (0x60xx) uses the three-phase HR 1000-1079 layout, so
+    /// HR 1002 supersedes the single-phase HR 50 active power rate, and the
+    /// HR 1063 export limit and HR 1078 battery cutoff are decoded too.
+    #[test]
+    fn ac_three_phase_decodes_the_hr1000_high_config_block() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x6001; // AC three-phase
+        holding_data[50] = 100; // single-phase HR 50 — superseded
+
+        let mut high_config = vec![0u16; 80];
+        high_config[1002 - 1000] = 60;
+        high_config[1063 - 1000] = 36_000; // deci-watts → 3600 W
+        high_config[1078 - 1000] = 80;
+
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                1000,
+                80,
+                "holding_1000_1079",
+                high_config,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ACThreePhase);
+        assert_eq!(snap.active_power_rate, 60, "HR 1002 must supersede HR 50");
+        assert_eq!(snap.export_limit_w, 3600);
+        assert_eq!(snap.battery_power_cutoff, 80);
     }
 
     /// The All-in-One discharge limit must come from HR 112, not the AC-config

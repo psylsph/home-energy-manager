@@ -2,7 +2,8 @@ import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, finiteAbs } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryModeSummary from '../components/BatteryModeSummary';
-import { deviceSupportsExportLimit } from '../lib/deviceCapabilities';
+import { deviceSupportsExportLimit, usesDirectChargeLimit } from '../lib/deviceCapabilities';
+import { rawLimitToPercent } from '../lib/powerLimit';
 import { hasGridFault, hasInverterTrip, hasBatteryOverTemp, gridFaultTitle } from '../lib/gridFault';
 import AwaitingConnection from '../components/AwaitingConnection';
 
@@ -17,6 +18,10 @@ export default function InverterPage() {
   }
 
   const s = snapshot;
+
+  // DC-hybrid charge/discharge limit registers (HR 111/112) run 0-50 and are
+  // doubled for display; the direct registers run 1-100. See lib/powerLimit.ts.
+  const usesDirectLimit = usesDirectChargeLimit(s.device_type_code);
 
   return (
     <div className="flex flex-col gap-4 max-w-4xl mx-auto">
@@ -299,9 +304,9 @@ export default function InverterPage() {
           <span className="text-text-secondary">Target SOC</span>
           <span className="text-text-primary font-mono text-right">{formatPercent(s.target_soc)}</span>
           <span className="text-text-secondary">Charge Rate</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(s.charge_rate)}</span>
+          <span className="text-text-primary font-mono text-right">{formatPercent(rawLimitToPercent(s.charge_rate, usesDirectLimit))}</span>
           <span className="text-text-secondary">Discharge Rate</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(s.discharge_rate)}</span>
+          <span className="text-text-primary font-mono text-right">{formatPercent(rawLimitToPercent(s.discharge_rate, usesDirectLimit))}</span>
           <span className="text-text-secondary">Enable Charge</span>
           <span className={`font-mono text-right ${s.enable_charge ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_charge ? 'Yes' : 'No'}</span>
           <span className="text-text-secondary">Enable Charge Target</span>

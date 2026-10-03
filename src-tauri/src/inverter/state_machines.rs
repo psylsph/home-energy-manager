@@ -23,10 +23,10 @@ use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot, ScheduleSlot};
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
-    encode_hhmm, HR_3PH_BATTERY_CHARGE_LIMIT, HR_3PH_BATTERY_SOC_RESERVE,
-    HR_3PH_FORCE_DISCHARGE_ENABLE, HR_AC_BATTERY_CHARGE_LIMIT, HR_BATTERY_CHARGE_LIMIT,
-    HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START,
-    HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+    encode_hhmm, HR_3PH_BATTERY_SOC_RESERVE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+    HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END,
+    HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+    HR_ENABLE_DISCHARGE,
 };
 
 /// The owner of the inverter's shared discharge-control registers.
@@ -677,15 +677,12 @@ pub struct AdaptiveChargeOutcome {
 
 /// Charge-limit register for device families with a controllable battery.
 pub fn adaptive_charge_register(device_type: DeviceType) -> Option<u16> {
-    if device_type.uses_three_phase_schedule_slots() {
-        return Some(HR_3PH_BATTERY_CHARGE_LIMIT);
-    }
     match device_type {
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2 => Some(HR_AC_BATTERY_CHARGE_LIMIT),
+        // No controllable battery here (or an unrecognised model).
         DeviceType::PvInverter | DeviceType::Ems | DeviceType::Gateway | DeviceType::Unknown(_) => {
             None
         }
-        _ => Some(HR_BATTERY_CHARGE_LIMIT),
+        _ => Some(device_type.power_limit_bank().charge_register()),
     }
 }
 
@@ -3417,6 +3414,26 @@ mod tests {
             Some(41)
         );
         assert_eq!(normalized_charge_rate_to_raw(DeviceType::Gateway, 41), None);
+    }
+
+    /// Issue #346 was reported on a Gen1 Hybrid: its HR 111 is the 0-50 half
+    /// scale, so every display percentage must halve on the way out and double
+    /// on the way back without drifting.
+    #[test]
+    fn adaptive_rate_conversion_round_trips_on_the_gen1_half_scale() {
+        let dt = DeviceType::Gen1Hybrid;
+        assert_eq!(adaptive_charge_register(dt), Some(HR_BATTERY_CHARGE_LIMIT));
+        assert_eq!(normalized_charge_rate_to_raw(dt, 66), Some(33));
+        assert_eq!(normalized_charge_rate_to_raw(dt, 67), Some(34));
+        assert_eq!(normalized_charge_rate_to_raw(dt, 100), Some(50));
+        assert_eq!(normalized_charge_rate_to_raw(dt, 0), Some(0));
+        for percent in (0..=100u8).step_by(2) {
+            let raw = normalized_charge_rate_to_raw(dt, percent).unwrap();
+            assert!(raw <= 50, "{percent}% exceeds HR 111's 0-50 range");
+            assert_eq!(raw_charge_rate_to_normalized(dt, raw), percent);
+            assert!(observed_charge_rate_is_valid(dt, raw));
+        }
+        assert!(!observed_charge_rate_is_valid(dt, 51));
     }
 
     #[test]

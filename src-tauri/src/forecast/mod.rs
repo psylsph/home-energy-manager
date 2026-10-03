@@ -1057,6 +1057,40 @@ mod tests {
         }
     }
 
+    /// Issue #346 regression, reported on a Gen1 Hybrid: a 2600 W inverter
+    /// with HR 111 = 33 (displayed 66%) must project 66% of 2600 W, not the
+    /// full rating, and the Gateway's direct HR 313/314 must not be doubled.
+    #[test]
+    fn rate_limits_for_the_gen1_hybrid_reporter_and_the_gateway() {
+        use crate::inverter::model::DeviceType;
+        let mut snap = rate_snapshot();
+        snap.device_type = DeviceType::Gen1Hybrid;
+        snap.max_battery_power_w = 2600;
+        snap.charge_rate = 33;
+        snap.discharge_rate = 25;
+        let (charge, discharge) = battery_rate_limits_kw(&snap);
+        assert!((charge - 1.716).abs() < 1e-9, "66% of 2.6 kW, got {charge}");
+        assert!(
+            (discharge - 1.3).abs() < 1e-9,
+            "50% of 2.6 kW, got {discharge}"
+        );
+
+        // Every even display percentage round-trips through the half scale.
+        for raw in 1..=50u8 {
+            snap.charge_rate = raw;
+            let (charge, _) = battery_rate_limits_kw(&snap);
+            let expected = raw as f64 * 2.0 / 100.0 * 2.6;
+            assert!((charge - expected).abs() < 1e-9, "raw {raw}");
+        }
+
+        snap.device_type = DeviceType::Gateway;
+        snap.max_battery_power_w = 6000;
+        snap.charge_rate = 66;
+        snap.discharge_rate = 66;
+        let (charge, _) = battery_rate_limits_kw(&snap);
+        assert!((charge - 3.96).abs() < 1e-9, "Gateway HR 313 is direct");
+    }
+
     #[test]
     fn store_and_calibrate_persists_pr_to_meta() {
         let db = test_db();

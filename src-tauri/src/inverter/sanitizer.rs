@@ -288,13 +288,16 @@ pub(crate) fn carry_forward_optional_block_values(
     let Some(prev) = prev else { return false };
     let mut changed = false;
 
-    // AC-coupled config is read from optional HR(300-359). If that optional
-    // block is skipped for one poll, keep the previous AC config values rather
-    // than flashing defaults/zeros in the UI.
+    // AC-coupled (and Gateway) config is read from optional HR(300-359). If
+    // that optional block is skipped for one poll, keep the previous AC config
+    // values rather than flashing defaults/zeros in the UI.
     if !has_ac_config_block
         && matches!(
             snap.device_type,
-            DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::ACThreePhase
+            DeviceType::ACCoupled
+                | DeviceType::ACCoupledMk2
+                | DeviceType::ACThreePhase
+                | DeviceType::Gateway
         )
         && snap.device_type == prev.device_type
     {
@@ -6115,6 +6118,48 @@ mod tests {
             assert_eq!(snap.active_power_rate, 83, "DTC {code}");
             assert_eq!(snap.battery_power_cutoff, 17, "DTC {code}");
             assert_eq!(snap.export_limit_w, 5_000, "DTC {code}");
+        }
+    }
+
+    /// AC three-phase (0x60xx) reads HR 1002/1063/1078 from the same optional
+    /// block as the other 1000-range families: a missed block must keep the
+    /// previous values rather than fall back to the single-phase HR 50, and a
+    /// present block must leave the fresh values alone.
+    #[test]
+    fn optional_three_phase_high_config_carries_forward_for_ac_three_phase() {
+        for code in ["6001", "6002"] {
+            let prev = InverterSnapshot {
+                device_type: DeviceType::ACThreePhase,
+                device_type_code: code.to_string(),
+                active_power_rate: 60,
+                battery_power_cutoff: 80,
+                export_limit_w: 3_600,
+                ..Default::default()
+            };
+            let fresh = || InverterSnapshot {
+                device_type: DeviceType::ACThreePhase,
+                device_type_code: code.to_string(),
+                active_power_rate: 100, // stale standard-bank HR 50
+                ..Default::default()
+            };
+
+            let mut missed = fresh();
+            assert!(carry_forward_three_phase_high_config_values(
+                &mut missed,
+                Some(&prev),
+                false,
+            ));
+            assert_eq!(missed.active_power_rate, 60, "DTC {code}");
+            assert_eq!(missed.battery_power_cutoff, 80, "DTC {code}");
+            assert_eq!(missed.export_limit_w, 3_600, "DTC {code}");
+
+            let mut present = fresh();
+            assert!(!carry_forward_three_phase_high_config_values(
+                &mut present,
+                Some(&prev),
+                true,
+            ));
+            assert_eq!(present.active_power_rate, 100, "DTC {code}");
         }
     }
 

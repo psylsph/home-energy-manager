@@ -176,6 +176,14 @@ fn model_specific_blocks_in_poll_order(
         blocks.push(&super::registers::EMS_PLANT_HOLDING_BLOCK);
     }
 
+    // The Gateway keeps its charge/discharge limits at HR 313/314 (GivTCP
+    // polls HR 300 for family '7'). They change only on user action, so read
+    // them on detail polls alone; the sanitizer carries them forward between.
+    if device_type.needs_gateway_input_blocks() && matches!(gateway_scope, GatewayPollScope::Detail)
+    {
+        blocks.push(&super::registers::AC_CONFIG_BLOCK);
+    }
+
     blocks.extend(device_type.extra_poll_blocks().iter());
     blocks
 }
@@ -2085,6 +2093,38 @@ pub(crate) mod tests {
         assert!(names.contains(&"holding_1080_1124"));
     }
 
+    /// Both reference libraries read HR 1000-1119 for AC three-phase
+    /// (givenergy-modbus `caps.is_three_phase`, GivTCP `add_regs` family '6'),
+    /// and HEM decodes HR 1002/1063/1078 from it, so the block must stay in
+    /// the poll set — ahead of the HR 1080-1124 bank — for every
+    /// 1000-range-layout family.
+    #[test]
+    fn ac_three_phase_polls_the_hr1000_high_config_block() {
+        use crate::inverter::model::DeviceType;
+
+        for dt in [
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+        ] {
+            let blocks = model_specific_blocks_in_poll_order(&dt, GatewayPollScope::Detail);
+            let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
+            let high = names.iter().position(|n| *n == "holding_1000_1079");
+            let config = names.iter().position(|n| *n == "holding_1080_1124");
+            assert!(
+                high.is_some() && config.is_some() && high < config,
+                "{dt:?} must poll holding_1000_1079 before holding_1080_1124; got {names:?}"
+            );
+        }
+        let ac3: Vec<&str> =
+            model_specific_blocks_in_poll_order(&DeviceType::ACThreePhase, GatewayPollScope::Fast)
+                .iter()
+                .map(|b| b.name)
+                .collect();
+        assert!(ac3.contains(&"holding_300_359"), "AC config stays polled");
+    }
+
     #[test]
     fn gateway_fast_poll_order_reads_only_live_gateway_blocks() {
         use crate::inverter::model::DeviceType;
@@ -2306,10 +2346,14 @@ pub(crate) mod tests {
             names.contains(&"holding_2040_2075"),
             "Gateway detail polls must read the EMS plant holding block; got {names:?}"
         );
+        // The charge/discharge limits live at HR 313/314 on the Gateway.
+        assert!(
+            names.contains(&"holding_300_359"),
+            "Gateway detail polls must read the HR 313/314 limits; got {names:?}"
+        );
         // No three-phase or Gen3 extras for a Gateway.
         assert!(!names.contains(&"holding_1080_1124"));
         assert!(!names.contains(&"holding_240_299"));
-        assert!(!names.contains(&"holding_300_359"));
 
         // Belt-and-braces: every block should be a register type the runtime
         // can actually request.
