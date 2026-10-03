@@ -1992,8 +1992,11 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
         bms_status_registers,
         bms_status,
         bms_warnings,
-        charge_energy_total_kwh: 0.0,
-        discharge_energy_total_kwh: 0.0,
+        // IR(105)/IR(106): lifetime discharge/charge energy, deci-kWh
+        // (givenergy-modbus battery.py `e_battery_discharge_total` /
+        // `e_battery_charge_total`).
+        charge_energy_total_kwh: get_reg(data, 106 - 60) as f32 * 0.1,
+        discharge_energy_total_kwh: get_reg(data, 105 - 60) as f32 * 0.1,
     }
 }
 
@@ -2010,13 +2013,57 @@ pub fn decode_battery_block_into(
 }
 
 /// Fill the snapshot's lifetime battery charge/discharge totals from the
-/// first LV battery's BMS (IR 105/106), the way GivTCP does.
+/// first LV battery's BMS (IR 105/106), the way GivTCP 3.6 does (#600).
 ///
-/// Placeholder: behaviour lands in the next commit.
+/// Only single-phase LV models are touched: three-phase/HV and Gateway have
+/// their own lifetime totals in other register banks. Order of preference:
+///
+/// 1. battery #1's BMS totals, when non-zero (a different battery's total is
+///    not the system total, so only module index 0 counts);
+/// 2. whatever the inverter itself already reported (Gen1's IR 180/181);
+/// 3. the previous snapshot's totals, when this cycle has neither. A dropped
+///    BMS read must not publish 0: the sanitizer would reject the apparent
+///    drop in a lifetime counter as corruption on every poll.
 pub(crate) fn apply_lv_bms_lifetime_totals(
-    _snapshot: &mut InverterSnapshot,
-    _prev: Option<&InverterSnapshot>,
+    snapshot: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
 ) {
+    let device_type = snapshot.device_type;
+    if device_type.uses_hv_battery()
+        || device_type.needs_gateway_input_blocks()
+        || device_type == DeviceType::Ems
+    {
+        return;
+    }
+
+    let bms_totals = snapshot
+        .battery_modules
+        .iter()
+        .find(|module| module.index == 0)
+        .map(|module| {
+            (
+                module.charge_energy_total_kwh,
+                module.discharge_energy_total_kwh,
+            )
+        })
+        .filter(|(charge, discharge)| *charge > 0.0 || *discharge > 0.0);
+
+    if let Some((charge, discharge)) = bms_totals {
+        snapshot.total_charge_kwh = charge;
+        snapshot.total_discharge_kwh = discharge;
+    } else if snapshot.total_charge_kwh == 0.0 && snapshot.total_discharge_kwh == 0.0 {
+        match prev.filter(|prev| prev.device_type == device_type) {
+            Some(prev) => {
+                snapshot.total_charge_kwh = prev.total_charge_kwh;
+                snapshot.total_discharge_kwh = prev.total_discharge_kwh;
+            }
+            None => return,
+        }
+    } else {
+        // The inverter supplied its own totals this cycle (Gen1 IR 180/181).
+        return;
+    }
+    snapshot.total_throughput_kwh = snapshot.total_charge_kwh + snapshot.total_discharge_kwh;
 }
 
 // ===========================================================================

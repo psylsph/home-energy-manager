@@ -3708,6 +3708,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // as such made Gateway installs re-poll
                                     // back-to-back with no sleep (~10× the
                                     // intended poll rate).
+                                    crate::inverter::decoder::apply_lv_bms_lifetime_totals(
+                                        &mut snapshot,
+                                        prev.as_ref(),
+                                    );
                                     let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts, &mut rate_release_counts);
                                     let _ = carry_forward_optional_block_values(
                                         &mut snapshot,
