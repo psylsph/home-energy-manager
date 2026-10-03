@@ -1151,6 +1151,7 @@ pub(crate) fn snapshot_matches_writes(
         HR_CHARGE_TARGET_SOC | HR_3PH_CHARGE_TARGET_SOC => {
             snapshot.target_soc as u16 == write.value
         }
+        HR_CHARGE_TARGET_SOC_1 => snapshot.raw_charge_slot_1_target_soc == Some(write.value),
         HR_CHARGE_SLOT_1_START | HR_3PH_CHARGE_SLOT_1_START => {
             slot_hhmm(&snapshot.charge_slots[0], true) == write.value
         }
@@ -1239,7 +1240,15 @@ async fn capture_force_charge_revert(
         firmware_version: snap.firmware_version.clone(),
         enable_discharge: snap.enable_discharge,
         target_soc: snap.target_soc,
-        charge_slot_1_target_soc: None,
+        charge_slot_1_target_soc: if device_type.uses_extended_schedule_slots() {
+            // Only a value the encoder can write back (4..=100) is a usable
+            // baseline; 0 means "no per-slot target set".
+            snap.raw_charge_slot_1_target_soc
+                .filter(|raw| (4..=100).contains(raw))
+                .map(|raw| raw as u8)
+        } else {
+            None
+        },
         battery_power_mode: snap.battery_power_mode,
         charge_rate: Some(snap.charge_rate),
         charge_slot_1_start,
@@ -1383,6 +1392,20 @@ pub(crate) fn build_force_charge_stop_writes(
             address: HR_CHARGE_SLOT_1_END,
             value: end_hhmm,
         });
+    }
+
+    // 10-slot models: put slot 1's own target back (the start raised it to
+    // 100). Skipped when no usable baseline was captured.
+    if device_type.uses_extended_schedule_slots() {
+        if let Some(target) = revert
+            .charge_slot_1_target_soc
+            .filter(|target| (4..=100).contains(target))
+        {
+            writes.push(RegisterWrite {
+                address: crate::modbus::registers::HR_CHARGE_TARGET_SOC_1,
+                value: target as u16,
+            });
+        }
     }
 
     writes
@@ -5600,6 +5623,15 @@ pub(crate) async fn force_charge_at_unlocked(
     match cmd.encode() {
         Ok(mut cmd_writes) => {
             writes.append(&mut cmd_writes);
+            // On 10-slot models the inverter stops charging at the lower of the
+            // global target and slot 1's own target (HR 242), so raise that to
+            // 100 as well or Force Charge does nothing above slot 1's target.
+            if device_type.uses_extended_schedule_slots() {
+                match (ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 100 }).encode() {
+                    Ok(mut slot_target_writes) => writes.append(&mut slot_target_writes),
+                    Err(e) => return error_response(&format!("Validation error: {}", e)),
+                }
+            }
             if let Err(error) =
                 persist_external_force_recovery(&state, command_id, revert.as_ref()).await
             {

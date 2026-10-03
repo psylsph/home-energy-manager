@@ -1229,6 +1229,11 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
     // clamping.
     let t1 = get_reg(data, 242 - 240) as u8;
     let t2 = get_reg(data, 245 - 240) as u8;
+    // Keep the exact HR 242 too: Force Charge has to raise and later restore
+    // it, and the enabled-guard below hides it while slot 1 is disabled.
+    if snap.device_type.uses_extended_schedule_slots() && data.len() > 242 - 240 {
+        snap.raw_charge_slot_1_target_soc = Some(get_reg(data, 242 - 240));
+    }
     if snap.device_type.uses_three_phase_schedule_slots() {
         // HV/three-phase firmware writes the global "Target SOC" to HR 242
         // (per-slot for slot 1) rather than HR 1111, and the three-phase

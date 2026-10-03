@@ -407,6 +407,12 @@ pub(crate) fn carry_forward_optional_block_values(
                 changed = true;
             }
         }
+        if snap.raw_charge_slot_1_target_soc.is_none()
+            && prev.raw_charge_slot_1_target_soc.is_some()
+        {
+            snap.raw_charge_slot_1_target_soc = prev.raw_charge_slot_1_target_soc;
+            changed = true;
+        }
         if changed {
             tracing::warn!(
                 "Extended schedule block missing - carrying forward previous extended slot data"
