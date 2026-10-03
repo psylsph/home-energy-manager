@@ -253,6 +253,13 @@ pub struct ForceChargeRevert {
     pub enable_discharge: bool,
     /// The charge target SOC (HR 116 / HR 1111) before force charge.
     pub target_soc: u8,
+    /// Charge slot 1's own target SOC (HR 242) before force charge, on
+    /// 10-slot models only. The inverter stops at the lower of this and the
+    /// global target, so Force Charge raises it to 100 and Stop puts it back.
+    /// `None` (older baselines, other models, or an unset/invalid register)
+    /// means no restore write is emitted.
+    #[serde(default)]
+    pub charge_slot_1_target_soc: Option<u8>,
     /// Battery power mode (HR 27) before force charge: 0 = export, 1 = eco.
     /// `ForceCharge` start writes `HR_BATTERY_POWER_MODE=1`, so on stop we
     /// must restore the pre-value (e.g. 0 for users in Max-Power/Timed
@@ -10107,6 +10114,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,
@@ -10196,6 +10204,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,
@@ -10338,6 +10347,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: true,
                 target_soc: 60,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: Some(30),
                 charge_slot_1_start: None,
@@ -10586,6 +10596,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: Some((2, 0)),
@@ -10778,6 +10789,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 60,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,

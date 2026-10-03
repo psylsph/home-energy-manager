@@ -1311,6 +1311,13 @@ pub struct InverterSnapshot {
     /// Snapshot timestamp at which HR318-320 were read together.
     #[serde(default)]
     pub battery_pause_registers_observed_at: Option<i64>,
+    /// Exact raw HR242 (charge slot 1's own target SOC) from the latest read
+    /// of the HR240-299 block, kept whether or not slot 1 is enabled. On
+    /// 10-slot inverters the firmware stops charging at the lower of the
+    /// global target and this value, so Force Charge must set and restore it.
+    /// `None` on models that do not poll the block or when it was not read.
+    #[serde(default)]
+    pub raw_charge_slot_1_target_soc: Option<u16>,
 
     // -- External CT configuration (single-phase only) --
     /// Whether the external CT ammeter is enabled — HR(7).
@@ -1509,6 +1516,7 @@ impl InverterSnapshot {
             battery_pause_slot_start_raw: None,
             battery_pause_slot_end_raw: None,
             battery_pause_registers_observed_at: None,
+            raw_charge_slot_1_target_soc: None,
             enable_ammeter: false,
             enable_reversed_ct_clamp: false,
             meter_type: 0,
