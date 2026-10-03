@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // HistoryPage average-line coverage (issue #345).
@@ -11,13 +11,20 @@ import { render, screen, cleanup, waitFor } from '@testing-library/react';
 // setting wiring.
 // ---------------------------------------------------------------------------
 
-const { referenceLines } = vi.hoisted(() => ({
+const { referenceLines, areaChartData } = vi.hoisted(() => ({
   referenceLines: [] as Array<Record<string, unknown>>,
+  // Every <AreaChart> row set the page renders, so tests can wait for the
+  // fetched data to actually flush into a chart before asserting on the
+  // average <ReferenceLine>s.
+  areaChartData: [] as Array<Array<Record<string, unknown>>>,
 }));
 
 vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  AreaChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  AreaChart: (props: { children?: React.ReactNode; data?: Array<Record<string, unknown>> }) => {
+    if (props.data) areaChartData.push(props.data);
+    return <div>{props.children}</div>;
+  },
   Area: () => null,
   CartesianGrid: () => null,
   Tooltip: () => null,
@@ -29,19 +36,51 @@ vi.mock('recharts', () => ({
   },
 }));
 
+// Data for both an instantaneous series (SOC, mean 50 %) and cumulative ones
+// (daily kWh counters and the server-integrated cost/income series, all of
+// which ramp up across the window). The cumulative series' means (2.5, 4.5,
+// £1.50, £0.50) must never reach an average line or a tooltip read-out.
+const readings: Record<string, Array<{ t: number; v: number }>> = {
+  soc: [
+    { t: 1_700_000_000_000, v: 40 },
+    { t: 1_700_000_003_600_000, v: 60 },
+  ],
+  today_charge_kwh: [
+    { t: 1_700_000_000_000, v: 1 },
+    { t: 1_700_000_003_600_000, v: 4 },
+  ],
+  today_discharge_kwh: [
+    { t: 1_700_000_000_000, v: 2 },
+    { t: 1_700_000_003_600_000, v: 7 },
+  ],
+  _import_cost: [
+    { t: 1_700_000_000_000, v: 0.5 },
+    { t: 1_700_000_003_600_000, v: 2.5 },
+  ],
+  _export_income: [
+    { t: 1_700_000_000_000, v: 0.2 },
+    { t: 1_700_000_003_600_000, v: 0.8 },
+  ],
+};
+
 const fetchHistoryMock = vi.fn(async (...args: unknown[]) => {
   const fields = args[1] as string[];
   const result: Record<string, { t: number; v: number }[]> = {};
-  // Only SOC has readings on the default Battery tab, so it is the only
-  // series with an average; the other fields stay empty (no line drawn).
-  if (fields.includes('soc')) {
-    result.soc = [
-      { t: 1_700_000_000_000, v: 40 },
-      { t: 1_700_000_003_600_000, v: 60 },
-    ];
+  for (const field of fields) {
+    if (readings[field]) result[field] = readings[field];
   }
   return result;
 });
+
+/** Wait until a chart row set carries a real value for `field`. */
+async function waitForChartData(field: string) {
+  await waitFor(() => {
+    expect(
+      areaChartData.some((rows) => rows.some((row) => row[field] != null)),
+      `no chart data for ${field}`,
+    ).toBe(true);
+  });
+}
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async () => ({ ok: true, data: {} })),
@@ -79,6 +118,7 @@ describe('<HistoryPage/> — chart average lines (issue #345)', () => {
   beforeEach(() => {
     silenceConsoleError();
     referenceLines.length = 0;
+    areaChartData.length = 0;
     fetchHistoryMock.mockClear();
     localStorage.removeItem('showHistoryAverages');
     useInverterStore.setState({
@@ -104,10 +144,14 @@ describe('<HistoryPage/> — chart average lines (issue #345)', () => {
     expect(referenceLines).toHaveLength(0);
   });
 
-  it('draws a horizontal average line per series when enabled', async () => {
+  it('draws a horizontal average line per instantaneous series when enabled', async () => {
     useInverterStore.getState().setShowHistoryAverages(true);
     render(<HistoryPage />);
 
+    // The Energy (kWh) chart's cumulative counters have data by now, so their
+    // means (2.5 / 4.5 kWh) would have produced two more lines before the
+    // cumulative series were excluded (#345 follow-up).
+    await waitForChartData('today_charge_kwh');
     await waitFor(() => {
       expect(referenceLines).toHaveLength(1);
     });
@@ -116,6 +160,21 @@ describe('<HistoryPage/> — chart average lines (issue #345)', () => {
     expect(referenceLines[0].strokeDasharray).toBe('2 4');
     // The value lives in the tooltip now, not as a static line label.
     expect(referenceLines[0].label).toBeUndefined();
+  });
+
+  it('draws no average line on the cumulative cost chart', async () => {
+    useInverterStore.getState().setShowHistoryAverages(true);
+    render(<HistoryPage />);
+    // Let the Battery tab settle first, then drop its lines so this test only
+    // sees what the Cost tab draws.
+    await waitForChartData('today_charge_kwh');
+    fireEvent.click(screen.getByRole('button', { name: 'Cost', exact: true }));
+    referenceLines.length = 0;
+
+    // Import Cost and Export Income are running totals integrated by the
+    // server, so their window means (£1.50 / £0.50) mean nothing to the user.
+    await waitForChartData('_import_cost');
+    expect(referenceLines).toHaveLength(0);
   });
 
   it('persists the toggle to localStorage', () => {

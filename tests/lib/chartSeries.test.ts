@@ -5,6 +5,7 @@ import {
   SPIKE_THRESHOLDS,
   computeSeriesAverage,
   formatHistoryValue,
+  hasMeaningfulAverage,
 } from '../../src/lib/chartSeries';
 import type { TimePoint } from '../../src/lib/types';
 
@@ -202,6 +203,73 @@ describe('computeSeriesAverage (issue #345)', () => {
     // Temperature differentials and signed power series can go below zero.
     expect(computeSeriesAverage([-5, 5])).toBe(0);
     expect(computeSeriesAverage([-10, -20, -30])).toBe(-20);
+  });
+});
+
+describe('hasMeaningfulAverage (issue #345 follow-up)', () => {
+  // Daily energy counters ramp monotonically across the window and reset at
+  // midnight, so their mean describes no real quantity — the reporter's
+  // confusion on the Energy (kWh) and cost graphs (issue #345 comment).
+  it('rejects the cumulative daily kWh counters', () => {
+    for (const f of [
+      'today_charge_kwh',
+      'today_discharge_kwh',
+      'today_pv1_kwh',
+      'today_pv2_kwh',
+      'today_solar_kwh',
+      'today_import_kwh',
+      'today_export_kwh',
+      'today_consumption_kwh',
+      'home_energy_today_kwh',
+    ]) {
+      expect(hasMeaningfulAverage(f), `${f} has no meaningful average`).toBe(false);
+    }
+  });
+
+  it('rejects the server-integrated cost and income series', () => {
+    for (const f of [
+      '_import_cost',
+      '_import_energy_cost',
+      '_import_standing_charge',
+      '_export_income',
+    ]) {
+      expect(hasMeaningfulAverage(f), `${f} has no meaningful average`).toBe(false);
+    }
+  });
+
+  it('accepts instantaneous rates, gauges and derived differentials', () => {
+    for (const f of [
+      'soc',
+      'solar_power',
+      'pv1_power',
+      'pv2_power',
+      'pv1_pct',
+      'pv2_pct',
+      'grid_voltage',
+      'grid_temperature',
+      'battery_temperature',
+      'inverter_temperature',
+      'external_temperature',
+      '_charge_power',
+      '_discharge_power',
+      '_grid_import_power',
+      '_grid_export_power',
+      '_temp_diff',
+      '_batt_ext_diff',
+      'home_power',
+    ]) {
+      expect(hasMeaningfulAverage(f), `${f} should keep its average`).toBe(true);
+    }
+  });
+
+  it('keeps the cost fields out of the spike-repair predicate', () => {
+    // hasMeaningfulAverage is a separate concern from isCumulativeField: the
+    // latter drives carry-forward spike repair, which the cost series have
+    // always handled by interpolation. Folding them together would silently
+    // change removeSpikes()'s repair behaviour.
+    for (const f of ['_import_cost', '_import_energy_cost', '_export_income']) {
+      expect(isCumulativeField(f), `${f} stays non-cumulative for spike repair`).toBe(false);
+    }
   });
 });
 
