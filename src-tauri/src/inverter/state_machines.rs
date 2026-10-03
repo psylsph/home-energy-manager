@@ -2113,6 +2113,33 @@ pub fn inverter_minute_of_day(snapshot: &InverterSnapshot) -> Option<u16> {
     }
 }
 
+/// Clock skew, in whole minutes, from which the inverter clock is reported as
+/// wrong. The inverter resets its Today counters at midnight by its own clock,
+/// so a clock left on GMT in summer resets them an hour late.
+pub const INVERTER_CLOCK_SKEW_WARN_MINUTES: i64 = 5;
+
+/// Signed difference in whole minutes between the inverter clock and the host
+/// clock (positive = inverter ahead), truncated toward zero.
+///
+/// `inverter_time` is the `YYYY-MM-DD HH:MM:SS` string the decoder emits from
+/// HR 35-40; `None` when it is empty or not a valid date-time.
+///
+/// Placeholder: behaviour lands in the next commit.
+pub fn inverter_clock_skew_minutes(
+    _inverter_time: &str,
+    _host_now: chrono::NaiveDateTime,
+) -> Option<i64> {
+    None
+}
+
+/// Whether to log the clock-skew warning now: the skew is known, at or past
+/// the threshold, and it has not been logged yet on this connection.
+///
+/// Placeholder: behaviour lands in the next commit.
+pub fn clock_skew_warning_due(_skew_minutes: Option<i64>, _already_logged: bool) -> bool {
+    false
+}
+
 /// Choose the scheduling minute shared by all time-driven automations.
 ///
 /// The inverter wall clock is authoritative because it is the clock that
@@ -7757,6 +7784,94 @@ mod tests {
         // Simulate a UTC host at 00:30 while the inverter/user clock is still
         // 23:30. Every schedule evaluator must receive 23:30.
         assert_eq!(authoritative_minute_of_day(&snap, 30), 23 * 60 + 30);
+    }
+
+    fn host_at(date_time: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(date_time, "%Y-%m-%d %H:%M:%S").unwrap()
+    }
+
+    #[test]
+    fn clock_skew_is_zero_when_the_clocks_agree() {
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 12:00:00", host_at("2026-08-29 12:00:00")),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn clock_skew_is_signed_inverter_minus_host() {
+        let host = host_at("2026-08-29 12:00:00");
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 12:05:00", host),
+            Some(5)
+        );
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 11:54:00", host),
+            Some(-6)
+        );
+    }
+
+    #[test]
+    fn clock_skew_truncates_toward_zero_to_whole_minutes() {
+        let host = host_at("2026-08-29 12:00:00");
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 12:04:59", host),
+            Some(4)
+        );
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 11:55:01", host),
+            Some(-4)
+        );
+    }
+
+    #[test]
+    fn clock_skew_spans_midnight_and_gmt_bst_offsets() {
+        // Inverter just past midnight, host just before it the previous day.
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-07-01 00:02:00", host_at("2026-06-30 23:58:00")),
+            Some(4)
+        );
+        // A clock left on GMT through British Summer Time runs an hour behind.
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-07-01 11:00:00", host_at("2026-07-01 12:00:00")),
+            Some(-60)
+        );
+    }
+
+    #[test]
+    fn clock_skew_is_unknown_for_a_missing_or_malformed_inverter_time() {
+        let host = host_at("2026-08-29 12:00:00");
+        for bad in [
+            "",
+            "garbage",
+            "2026-08-29",
+            "2026-13-45 99:00:00",
+            "12:00:00",
+        ] {
+            assert_eq!(inverter_clock_skew_minutes(bad, host), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn clock_skew_warning_is_due_from_five_minutes_either_way() {
+        assert!(!clock_skew_warning_due(Some(0), false));
+        assert!(!clock_skew_warning_due(Some(4), false));
+        assert!(!clock_skew_warning_due(Some(-4), false));
+        assert!(clock_skew_warning_due(
+            Some(INVERTER_CLOCK_SKEW_WARN_MINUTES),
+            false
+        ));
+        assert!(clock_skew_warning_due(
+            Some(-INVERTER_CLOCK_SKEW_WARN_MINUTES),
+            false
+        ));
+        assert!(clock_skew_warning_due(Some(-60), false));
+    }
+
+    #[test]
+    fn clock_skew_warning_is_not_due_when_unknown_or_already_logged() {
+        assert!(!clock_skew_warning_due(None, false));
+        assert!(!clock_skew_warning_due(Some(60), true));
     }
 
     #[test]
