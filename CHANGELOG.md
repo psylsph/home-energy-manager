@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.85.1] - 2026-10-03
+
 ### Fixed
 
 - **The charge and discharge power limits behave consistently across every inverter.** The Inverter page now shows the same percentage as the Control page instead of half of it on hybrid inverters, the sliders on those models move in steps they can actually save, and they follow changes made elsewhere instead of sticking on an old value (#346).
