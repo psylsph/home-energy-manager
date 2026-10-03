@@ -2668,6 +2668,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // Whether we already warned that the inverter clock is
                 // unavailable (once per connection, not once per poll).
                 let mut inverter_time_fallback_logged = false;
+                // Whether we already warned that the inverter clock is out
+                // (once per connection, not once per poll).
+                let mut inverter_clock_skew_logged = false;
                 // A reconnect makes the HR59 re-arm detector's evidence
                 // ambiguous — any register state may predate the reconnect.
                 // Reset it to Idle so stale evidence can't classify the
@@ -3811,6 +3814,28 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         "Automation: inverter clock unavailable — falling back to host local time"
                                     );
                                     inverter_time_fallback_logged = true;
+                                }
+                                // The inverter resets its Today counters at
+                                // midnight by its own clock, so a wrong clock
+                                // makes them reset at the wrong time. Diagnostic
+                                // only: nothing is corrected automatically.
+                                let clock_skew =
+                                    crate::inverter::state_machines::inverter_clock_skew_minutes(
+                                        &snapshot.inverter_time,
+                                        host_now.naive_local(),
+                                    );
+                                if crate::inverter::state_machines::clock_skew_warning_due(
+                                    clock_skew,
+                                    inverter_clock_skew_logged,
+                                ) {
+                                    tracing::warn!(
+                                        inverter_time = %snapshot.inverter_time,
+                                        host_time = %host_now.format("%Y-%m-%d %H:%M:%S"),
+                                        skew_minutes = clock_skew.unwrap_or_default(),
+                                        "Inverter clock is out by {} minutes - its Today energy counters will reset at the wrong time. Use Sync Time to correct it.",
+                                        clock_skew.unwrap_or_default()
+                                    );
+                                    inverter_clock_skew_logged = true;
                                 }
                                 // ---- Auto winter mode ----
                                 {
