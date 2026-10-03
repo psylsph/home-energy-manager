@@ -1,6 +1,6 @@
 # Plan — apply selected GivTCP 3.6.0-beta fixes to HEM
 
-Source: https://github.com/britkat1980/giv_tcp/releases (`3.6.0-beta1/2/3`). Local GivTCP clone is on
+Source: <https://github.com/britkat1980/giv_tcp/releases> (`3.6.0-beta1/2/3`). Local GivTCP clone is on
 `3.5`, so fixes were read from the `3.6.0-beta3` tag. The reference library clone `~/repos/givenergy-modbus`
 is older (v2.1.2); where relevant, v2.13.0 sources were read from GitHub.
 
@@ -8,6 +8,10 @@ Scope agreed with owner: implement **items 1, 2 and 5** below. Item 3 (HV Gen 3 
 cross-checking (see its section) and item 4 (Gateway 10-slot) is deliberately excluded — it contradicts HEM's
 documented decision (issue #149) and needs hardware evidence. Line numbers below are approximate; they had
 drifted from the code when the plan was cross-checked.
+
+Status: items 1, 2 and 5 implemented on `master` (RED/GREEN commit pairs); item 3 dropped; item 4 not
+attempted. Item 5's threshold is `>= 5` minutes, matching GivTCP's release note. The snapshot/`BatteryModule`
+fields added for items 1 and 2 are `#[serde(default)]` and not surfaced in `src/lib/types.ts`.
 
 | # | Fix | HEM status | Priority |
 |---|---|---|---|
@@ -66,6 +70,7 @@ only the global target, so Force Charge can do nothing when SOC is already above
    captured HR 242 may be stale there. The decoder already trusts it; accepted.
 
 **Tests (RED first)**
+
 - Encoder/register-sequence test: a force-charge start for an extended-slot device emits HR 242 = 100.
 - `api.rs` start/stop round-trip test: capture pre-value (e.g. 30), start writes 100, stop restores 30.
 - `ForceChargeRevert` serde test: a baseline JSON without the new field deserialises (`None`).
@@ -104,6 +109,7 @@ the BMS reads 0, and omits the value rather than publishing 0. The current refer
      GivTCP, which omits the value rather than publishing 0.
 
 **Tests (RED first)**
+
 - LV battery block with IR 105/106 set → snapshot totals reflect BMS values.
 - BMS totals 0 and Gen1 alt1 set → alt1 value retained (GivTCP fallback order).
 - Three-phase/HV decoder with battery blocks present → IR 1394/1395 totals unchanged by item 2.
@@ -136,6 +142,7 @@ time-driven automations (`state_machines::authoritative_minute_of_day`) but only
 *unavailable* (`poll.rs:3793-3803`), not when it is wrong.
 
 **Files & change**
+
 1. `src-tauri/src/inverter/state_machines.rs`
    - Add a pure, testable helper:
      `pub fn inverter_clock_skew_minutes(inverter_time: &str, host: chrono::NaiveDateTime) -> Option<i64>`
@@ -144,11 +151,13 @@ time-driven automations (`state_machines::authoritative_minute_of_day`) but only
 2. `src-tauri/src/inverter/poll.rs`
    - Alongside `inverter_time_fallback_logged` (~2661), add `inverter_clock_skew_logged: bool`.
    - In the poll loop near ~3786 (where `host_now` is computed), if the skew is known and
-     `skew.abs() > 5` and not yet logged this connection, emit one `tracing::warn!` naming both times and
+     `skew.abs() >= 5` (GivTCP's release note says "5 minutes or more") and not yet logged this connection, emit one `tracing::warn!` naming both times and
      explaining that Today counters reset at the wrong time. Diagnostics only — no behaviour change.
 
 **Tests (RED first)** in `state_machines.rs`:
+
 - Exact match → `Some(0)`; `+5`/`-6` boundary; malformed string → `None`; date rollover across midnight.
+- A separate pure `clock_skew_warning_due(skew, already_logged)` decides when to warn (threshold `>= 5` either way, once per connection).
 
 ---
 
@@ -173,7 +182,7 @@ time-driven automations (`state_machines::authoritative_minute_of_day`) but only
 
 ---
 
-# Appendix — full findings for future reference
+## Appendix — full findings for future reference
 
 Investigation date: 2026-10-03. Reference release: GivTCP `3.6.0-beta3` (commit `a84179b`, released
 03 Oct 00:11), with `3.6.0-beta2` / `3.6.0-beta1` where relevant.
@@ -190,6 +199,7 @@ so charge/discharge slots 3-10 and every slot's target SOC can be read and set. 
 says values left over from 3.5, published as 0, were rejected by HA as out of range.)
 
 **HEM current behaviour (deliberate exclusion):**
+
 - `src-tauri/src/inverter/model.rs:362-386` — `uses_three_phase_schedule_slots()` and
   `uses_extended_schedule_slots()` explicitly exclude `DeviceType::Gateway`, citing dewet22/givenergy-modbus
   `slot_map` (Gateway → `SINGLE_PHASE_SLOTS`) and the old GivTCP write routing ("gateway is not 3ph").
@@ -209,6 +219,7 @@ not honour writes there; or it genuinely supports slots 3-10 and HEM under-serve
 silent no-op that issue #149 fixed.
 
 **If confirmed as a real 10-slot device, the work would be:**
+
 - Add Gateway to `supports_gen3_extended()` (or a dedicated Gateway arm) so `max_*_slots()` = 10 and
   `EXTENDED_SLOTS_BLOCK` is polled; verify write routing still forwards the single-phase registers for
   slots 1-2.
