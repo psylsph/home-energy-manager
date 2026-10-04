@@ -3678,11 +3678,7 @@ mod tests {
     // ==================================================================
 
     fn open_temp_history() -> std::sync::Arc<crate::history::HistoryDb> {
-        let id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("givenergy-alerts-test-{id}/history.db"));
+        let path = crate::test_util::make_unique_test_dir("alerts").join("history.db");
         std::sync::Arc::new(crate::history::HistoryDb::open(&path).unwrap())
     }
 

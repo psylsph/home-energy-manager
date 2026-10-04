@@ -53,15 +53,16 @@ pub fn ensure_fallback_config_dir() -> std::path::PathBuf {
 /// Create a unique throwaway directory for test artifacts (e.g. audit
 /// databases). Removed only by the caller when practical; the OS temp
 /// cleaner is the backstop.
+///
+/// Unique by construction: the process id separates processes and a
+/// process-wide counter separates calls within one. The clock is NOT part of
+/// the name: macOS timestamps only have microsecond resolution, so two tests
+/// starting together got the same directory and raced on one SQLite file
+/// ("database is locked").
 pub fn make_unique_test_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "hem-test-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("hem-test-{label}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create unique test dir");
     dir
 }
@@ -126,6 +127,45 @@ impl Drop for IsolationGuard {
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    #[test]
+    fn unique_test_dirs_never_collide_under_concurrency() {
+        // Many threads asking at once, as parallel tests do.
+        let handles: Vec<_> = (0..32)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..50)
+                        .map(|_| make_unique_test_dir("collide"))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let all: Vec<_> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "every call must get its own directory"
+        );
+        for dir in all {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn unique_test_dirs_are_created_and_named_for_their_label() {
+        let dir = make_unique_test_dir("named");
+        assert!(dir.is_dir());
+        assert!(dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("hem-test-named-"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn sync_helper_uses_and_removes_temp_dir() {

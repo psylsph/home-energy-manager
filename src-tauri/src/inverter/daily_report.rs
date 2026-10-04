@@ -277,12 +277,7 @@ mod tests {
     // ---- build_daily_report / run_daily_report ----------------------------
 
     fn open_history() -> Arc<HistoryDb> {
-        let id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("givenergy-daily-report-test-{id}/history.db"));
+        let path = crate::test_util::make_unique_test_dir("daily-report").join("history.db");
         Arc::new(HistoryDb::open(&path).unwrap())
     }
 
