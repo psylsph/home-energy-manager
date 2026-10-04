@@ -1352,9 +1352,13 @@ fn build_mode_message(snapshot: &InverterSnapshot) -> String {
         "Reserve: <b>{}%</b> · Target SOC: <b>{}%</b>\n",
         snapshot.battery_reserve, snapshot.target_soc
     ));
+    // The raw register is a percentage of battery capacity on DC hybrids, not of
+    // the inverter's maximum, so show it the way the UI does (issue #346).
+    let limit_scale = crate::inverter::power_limit::PowerLimitScale::from_snapshot(snapshot);
     msg.push_str(&format!(
         "Charge rate: <b>{}%</b> · Discharge rate: <b>{}%</b>\n",
-        snapshot.charge_rate, snapshot.discharge_rate
+        limit_scale.raw_to_percent(u16::from(snapshot.charge_rate)),
+        limit_scale.raw_to_percent(u16::from(snapshot.discharge_rate))
     ));
 
     // Active automation / status flags
@@ -3332,6 +3336,35 @@ mod tests {
         let mut offline = snap;
         offline.grid_online = false;
         assert!(build_status_message(&offline).contains("🔴 Offline"));
+    }
+
+    /// Issue #346: on a DC hybrid HR 111/112 holds a percentage of battery
+    /// capacity, so the raw register is not the percentage the UI shows. A
+    /// 9.5 kWh Gen1 limited to 62% of its 2.6 kW holds register 17.
+    #[test]
+    fn test_build_mode_message_shows_the_limit_as_a_share_of_the_inverter_maximum() {
+        let mut snap = make_snapshot();
+        snap.device_type = crate::inverter::model::DeviceType::Gen1Hybrid;
+        snap.battery_capacity_kwh = 9.5;
+        snap.max_battery_power_w = 2600;
+        snap.charge_rate = 17;
+        snap.discharge_rate = 50;
+        let msg = build_mode_message(&snap);
+        assert!(
+            msg.contains("Charge rate: <b>62%</b> · Discharge rate: <b>100%</b>"),
+            "unexpected rates in: {msg}"
+        );
+
+        // A direct bank is already a percentage of the maximum.
+        snap.device_type = crate::inverter::model::DeviceType::ACCoupled;
+        snap.max_battery_power_w = 3000;
+        snap.charge_rate = 66;
+        snap.discharge_rate = 40;
+        let msg = build_mode_message(&snap);
+        assert!(
+            msg.contains("Charge rate: <b>66%</b> · Discharge rate: <b>40%</b>"),
+            "unexpected rates in: {msg}"
+        );
     }
 
     #[test]

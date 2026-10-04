@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **The Battery Charge and Discharge Power Limits now really limit the power on single-phase hybrid inverters.** The slider is a share of the inverter's maximum, but these inverters read the setting as a share of the battery's size, so on a large battery a limit like 62% still charged at full power. HEM now works out the right setting from your battery size, and the forecast and Adaptive Charge use the same conversion (#346). If you set a limit with an earlier version, set it again.
+- **Saving a power limit now waits for the inverter to confirm it.** The "Applying changes to inverter" notice used to vanish after a few milliseconds, before the inverter had taken the new value. It now stays until the inverter reports the change, and says so if it hasn't been applied within about 20 seconds, for example because a Force Charge is holding limit changes.
+- **The power limit sliders move in 1% steps and show what the inverter will actually hold.** Neighbouring percentages can map to the same inverter setting, so the figure beside the slider is the value a save will really apply.
+
 ## [0.85.3] - 2026-10-03
 
 ### Fixed

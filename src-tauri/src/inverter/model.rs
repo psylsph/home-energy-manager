@@ -119,7 +119,8 @@ pub enum PauseRegisterSupport {
 /// (issue #346).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerLimitBank {
-    /// DC-hybrid HR 111/112: 0–50, the UI doubles it for display.
+    /// DC-hybrid HR 111/112: 0–50, a percentage of battery capacity (50 =
+    /// 0.5C); see `inverter::power_limit`.
     HalfScale,
     /// Single-phase AC bank HR 313/314: direct 1–100%. AC-coupled models and
     /// the Gateway.
@@ -157,15 +158,6 @@ impl PowerLimitBank {
     /// Whether the register is already a direct 1–100% percentage.
     pub fn is_direct(self) -> bool {
         !matches!(self, Self::HalfScale)
-    }
-
-    /// Convert a 0–100 display percentage into the raw register value.
-    pub fn percent_to_raw(self, percent: u16) -> u16 {
-        if self.is_direct() {
-            percent
-        } else {
-            percent.div_ceil(2)
-        }
     }
 }
 
@@ -2106,12 +2098,8 @@ mod tests {
     #[test]
     fn power_limit_bank_scale_and_registers() {
         use crate::modbus::registers::{HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT};
-        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(66), 33);
-        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(67), 34);
-        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(100), 50);
-        assert_eq!(PowerLimitBank::HalfScale.percent_to_raw(0), 0);
-        assert_eq!(PowerLimitBank::AcBank.percent_to_raw(66), 66);
-        assert_eq!(PowerLimitBank::ThreePhase.percent_to_raw(100), 100);
+        // The percent-to-register conversion lives in `inverter::power_limit`:
+        // the half-scale register depends on the pack size.
         assert_eq!(
             PowerLimitBank::HalfScale.charge_register(),
             HR_BATTERY_CHARGE_LIMIT

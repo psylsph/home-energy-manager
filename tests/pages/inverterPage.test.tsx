@@ -196,6 +196,24 @@ describe('<InverterPage/> charge/discharge rate scale', () => {
     expect(rowValue(container, 'Discharge Rate')).toBe('50%');
   });
 
+  it('reads the Gen1 register through the pack size, matching the Control page', () => {
+    // 9.5 kWh behind a 2600 W inverter (the reporter's setup): register 17 is
+    // 17% of 9500 Wh = 1615 W = 62% of the inverter maximum, and anything above
+    // register 27 already reaches it (GivTCP read.py).
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        device_type_code: '1001',
+        battery_capacity_kwh: 9.5,
+        max_battery_power_w: 2600,
+        charge_rate: 17,
+        discharge_rate: 50,
+      }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'Charge Rate')).toBe('62%');
+    expect(rowValue(container, 'Discharge Rate')).toBe('100%');
+  });
+
   it('passes the Gateway HR 313/314 register through unchanged', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ device_type_code: '7001', charge_rate: 66, discharge_rate: 40 }),

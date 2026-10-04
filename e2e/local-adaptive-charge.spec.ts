@@ -227,7 +227,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
     expect((await modeResponse.json()).mode).toBe('standard');
   });
 
-  test('preferred rate applies the half-power DC limit in simulator physics', async () => {
+  test('preferred rate applies half the inverter maximum in simulator physics', async () => {
     test.setTimeout(80_000);
 
     const config = await postJson('/api/adaptive-charge', {
@@ -250,10 +250,20 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
     expect(config.ok).toBe(true);
     expect((await postJson('/api/charging-mode', { mode: 'adaptive' })).ok).toBe(true);
 
+    // 50% of the inverter's maximum, as a percentage of battery capacity
+    // (GivTCP write.py: watts / (capacity / 2) * 50). The register is not simply
+    // half of 50 any more: it depends on the pack size (issue #346).
+    const pack = await getSnapshot();
+    const expectedRaw = Math.round(
+      0.5 * (pack.max_battery_power_w as number) / ((pack.battery_capacity_kwh as number) * 1000) * 100,
+    );
+    expect(expectedRaw).toBeGreaterThan(0);
+    expect(expectedRaw).toBeLessThan(50);
+
     await waitForSnapshot((value) =>
       value.adaptive_charge_state === 'preferred'
       && value.adaptive_charge_desired_rate_percent === 50
-      && value.charge_rate === 25,
+      && value.charge_rate === expectedRaw,
     );
 
     expect((await postJson('/api/control/force-charge', { minutes: 30 })).ok).toBe(true);
@@ -264,7 +274,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
     );
 
     const value = await getSnapshot();
-    expect(value.charge_rate).toBe(25); // normalized 50% -> HR111 raw 25
+    expect(value.charge_rate).toBe(expectedRaw); // normalized 50% -> HR111 via the pack size
     expect(value.battery_power).toBeLessThanOrEqual(-1_600);
     expect(value.battery_power).toBeGreaterThanOrEqual(-2_000);
 

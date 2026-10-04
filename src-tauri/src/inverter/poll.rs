@@ -4087,7 +4087,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                             start_hhmm,
                                                             end_hhmm,
                                                             crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
-                                                            Some(crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT),
+                                                            Some(crate::inverter::power_limit::ChargeRateRequest::for_snapshot(
+                                                                crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT,
+                                                                &snapshot,
+                                                            )),
                                                         ) {
                                                             Ok(writes) => {
                                                                 tracing::info!(
@@ -4298,7 +4301,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                                 start_hhmm,
                                                                 end_hhmm,
                                                                 crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
-                                                                Some(crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT),
+                                                                Some(crate::inverter::power_limit::ChargeRateRequest::for_snapshot(
+                                                                    crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT,
+                                                                    &snapshot,
+                                                                )),
                                                             ) {
                                                                 Ok(writes) => {
                                                                     tracing::info!(

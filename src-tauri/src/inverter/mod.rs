@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod encoder;
 pub mod model;
 pub mod poll;
+pub mod power_limit;
 pub mod reconnect;
 pub mod sanitizer;
 pub(crate) mod solar_position;

@@ -2,23 +2,34 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
-// Issue #346: the bracketed kW figure beside the Battery Charge / Battery
-// Discharge Power Limit sliders was `min(display / 200 * battery_capacity_w,
-// max_battery_power_w)`. On any pack above roughly half the inverter's rating
-// the clamp swallowed the answer, so the figure read the inverter's maximum for
-// the whole top of the slider. A reporter with a 2600 W inverter set 66% and
-// was shown "66% (2.6 kW)" — the maximum — instead of 1.7 kW, and the History
-// page appeared to confirm it.
+// Issue #346: a Gen1 Hybrid user (9.5 kWh behind a 2.6 kW inverter) set the
+// Battery Charge Power Limit to 62% and the battery kept charging at the
+// inverter's maximum. The slider means "% of the inverter's maximum", but the
+// DC-hybrid HR 111/112 register holds a percentage of battery CAPACITY (GivTCP
+// `write.py`: target = watts / (capacity / 2) * 50; `read.py`: watts =
+// min(reg / 100 * capacity_w, inverter_max)). Writing 62% / 2 = 31 asked for
+// 2945 W, above what the inverter can deliver, so it limited nothing, while the
+// label (which had been "fixed" to percent-of-maximum) claimed 1.6 kW.
 //
-// The limit registers are a percentage in both families once the DC-hybrid
-// 0-50 register is doubled for display, so the figure must be
-// percent / 100 * the inverter's maximum battery power.
+// So these tests pin both halves: what the page SENDS for a slider position and
+// what it SHOWS for a register value, with expectations taken from the GivTCP
+// formulas rather than from this app's own arithmetic.
 //
-// Also covered here: the Gateway uses the direct 1-100% AC-limit bank
-// (HR 313/314, as GivTCP writes it), the half-scale sliders move in 2% steps,
-// and the Inverter Active Power Limit is not offered on the 1000-range-layout
-// families, where HEM reads the value back from HR 1002 but writes HR 50.
+// Also covered: the Gateway uses the direct 1-100% AC-limit bank (HR 313/314,
+// as GivTCP writes it), and the Inverter Active Power Limit is not offered on
+// the 1000-range-layout families, where HEM reads the value back from HR 1002
+// but writes HR 50.
 // ---------------------------------------------------------------------------
+
+/** GivTCP `write.py` for a DC hybrid: the register that requests `watts`. */
+function givTcpRegisterFor(watts: number, capacityWh: number): number {
+  return Math.min((watts / (capacityWh / 2)) * 50, 50);
+}
+
+/** GivTCP `read.py` for a DC hybrid: the watts a register actually allows. */
+function givTcpWattsFor(register: number, capacityWh: number, inverterMaxW: number): number {
+  return Math.min((register / 100) * capacityWh, inverterMaxW);
+}
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -242,40 +253,103 @@ describe('<ControlPage/> — power-limit kW readouts (issue #346)', () => {
     useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
-  it('shows the charge limit as a percentage of the inverter maximum, not the maximum itself', () => {
-    // The reported case: 8.2 kWh pack behind a 2600 W inverter, HR111 = 33.
-    // 66% of 2600 W is 1716 W, so the readout must say 1.7 kW. It read
-    // "2.6 kW" because the capacity-derived figure (2706 W) was clamped.
-    renderWith(makeSnapshot());
-    expect(readoutFor(powerSliders()[CHARGE])).toBe('66% (1.7 kW)');
+  it('shows the reporter\'s register as a share of the inverter maximum, derived through the pack size', () => {
+    // Gen1 Hybrid, 9.5 kWh, 2600 W. Register 17 = 17% of 9500 Wh = 1615 W
+    // (GivTCP read.py) = 62% of the inverter's 2600 W.
+    renderWith(makeSnapshot({ battery_capacity_kwh: 9.5, charge_rate: 17, discharge_rate: 17 }));
+    expect(givTcpWattsFor(17, 9500, 2600)).toBeCloseTo(1615, 6);
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('62% (1.6 kW)');
+    expect(readoutFor(powerSliders()[DISCHARGE])).toBe('62% (1.6 kW)');
   });
 
-  it('still reports 100% as the full inverter maximum', () => {
-    renderWith(makeSnapshot());
+  it('reads the register the old version wrote (31) as full power, which is what it did', () => {
+    // Register 31 is 2945 W on a 9.5 kWh pack: above the 2600 W inverter, so
+    // the inverter was never limited. The honest reading is 100%, not 62%.
+    expect(givTcpWattsFor(31, 9500, 2600)).toBe(2600);
+    renderWith(makeSnapshot({ battery_capacity_kwh: 9.5, charge_rate: 31, discharge_rate: 50 }));
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('100% (2.6 kW)');
     expect(readoutFor(powerSliders()[DISCHARGE])).toBe('100% (2.6 kW)');
   });
 
+  it('sends the register that delivers the chosen share of the inverter maximum', () => {
+    // 62% of 2600 W = 1612 W. GivTCP's formula gives 16.97, i.e. register 17 -
+    // not the 31 that "62% / 2" wrote.
+    vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
+    renderWith(makeSnapshot({ battery_capacity_kwh: 9.5, charge_rate: 50 }));
+    const slider = powerSliders()[CHARGE];
+    fireEvent.change(slider, { target: { value: '62' } });
+    fireEvent.click(slider.parentElement?.querySelector('button') as HTMLButtonElement);
+    expect(givTcpRegisterFor(0.62 * 2600, 9500)).toBeCloseTo(16.97, 2);
+    expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 17 });
+  });
+
   it('keeps the charge readout tracking the slider across its whole range', () => {
-    renderWith(makeSnapshot());
+    renderWith(makeSnapshot({ battery_capacity_kwh: 9.5, charge_rate: 17 }));
     const slider = powerSliders()[CHARGE];
 
+    // The register holds whole units of 1% of capacity (95 W), so each slider
+    // position shows the percentage the inverter will really hold.
     const readouts: string[] = [];
-    for (const position of [0, 10, 24, 40, 66, 86, 100]) {
+    for (const position of [0, 10, 24, 40, 62, 86, 100]) {
       fireEvent.change(slider, { target: { value: String(position) } });
       readouts.push(readoutFor(slider));
     }
 
     expect(readouts).toEqual([
       '0%',
-      '10% (0.3 kW)',
-      '24% (0.6 kW)',
+      '11% (0.3 kW)',
+      '26% (0.7 kW)',
       '40% (1.0 kW)',
-      '66% (1.7 kW)',
-      '86% (2.2 kW)',
+      '62% (1.6 kW)',
+      '88% (2.3 kW)',
       '100% (2.6 kW)',
     ]);
-    // Every step must be distinct — the bug was a frozen readout.
     expect(new Set(readouts).size).toBe(readouts.length);
+  });
+
+  it('shows what a save will really do when the slider sits between two registers', () => {
+    // 63% and 64% straddle registers 17 (62%) and 18 (66%).
+    renderWith(makeSnapshot({ battery_capacity_kwh: 9.5, charge_rate: 17 }));
+    const slider = powerSliders()[CHARGE];
+    fireEvent.change(slider, { target: { value: '63' } });
+    expect(readoutFor(slider)).toBe('62% (1.6 kW)');
+    fireEvent.change(slider, { target: { value: '64' } });
+    expect(readoutFor(slider)).toBe('66% (1.7 kW)');
+  });
+
+  it('never saves register 0 for a small non-zero percentage, which would stop charging', async () => {
+    // 1% of 2600 W on a 9.5 kWh pack is register 0.27. Writing 0 disables
+    // charging while the label claims a limit; the smallest real limit is 1.
+    vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
+    renderWith(makeSnapshot({ battery_capacity_kwh: 9.5, charge_rate: 17 }));
+    const slider = powerSliders()[CHARGE];
+    fireEvent.change(slider, { target: { value: '1' } });
+    // Register 1 = 1% of 9500 Wh = 95 W = 4% of the inverter maximum.
+    expect(readoutFor(slider)).toBe('4% (0.1 kW)');
+    fireEvent.click(slider.parentElement?.querySelector('button') as HTMLButtonElement);
+    expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 1 });
+    // The save stays pending until the inverter reads register 1 back.
+    act(() => useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_capacity_kwh: 9.5, charge_rate: 1 }),
+    }));
+    await act(async () => {});
+
+    // A deliberate 0% still stops charging.
+    fireEvent.change(slider, { target: { value: '0' } });
+    fireEvent.click(slider.parentElement?.querySelector('button') as HTMLButtonElement);
+    expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 0 });
+  });
+
+  it('keeps the plain half-scale mapping on a pack where capacity / 2 is the maximum', () => {
+    // 5.12 kWh: the decoder caps the maximum at capacity / 2 = 2560 W, so the
+    // register runs the full 0-50 and doubles to a percentage.
+    vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
+    renderWith(makeSnapshot({ battery_capacity_kwh: 5.12, max_battery_power_w: 2560, charge_rate: 31 }));
+    const slider = powerSliders()[CHARGE];
+    expect(readoutFor(slider)).toBe('62% (1.6 kW)');
+    fireEvent.change(slider, { target: { value: '100' } });
+    fireEvent.click(slider.parentElement?.querySelector('button') as HTMLButtonElement);
+    expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 50 });
   });
 
   it('applies the same percentage-of-maximum conversion on AC-coupled models', () => {
@@ -303,13 +377,12 @@ describe('<ControlPage/> — power-limit kW readouts (issue #346)', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 80 });
   });
 
-  it('moves the half-scale DC-hybrid sliders in 2% steps', () => {
-    // HR 111/112 hold 0-50, so an odd percentage can never be read back: a
-    // 33% draft would save 17, read back as 34%, and the slider would sit on
-    // the stale 33% draft forever.
+  it('moves the half-scale DC-hybrid sliders in 1% steps', () => {
+    // The register is derived through the pack size, so the slider is no
+    // longer restricted to even percentages.
     renderWith(makeSnapshot({ device_type_code: '2001' }));
-    expect(powerSliders()[CHARGE].getAttribute('step')).toBe('2');
-    expect(powerSliders()[DISCHARGE].getAttribute('step')).toBe('2');
+    expect(powerSliders()[CHARGE].getAttribute('step')).toBe('1');
+    expect(powerSliders()[DISCHARGE].getAttribute('step')).toBe('1');
   });
 
   it('keeps 1% steps on the direct-percentage registers', () => {
@@ -366,8 +439,8 @@ describe('<ControlPage/> — Gen1 Hybrid power-limit round trip (issue #346)', (
     device_type_code: '1001',
     max_battery_power_w: 2600,
     battery_capacity_kwh: 13.5,
-    charge_rate: 33,
-    discharge_rate: 25,
+    charge_rate: 10,
+    discharge_rate: 10,
     ...overrides,
   });
 
@@ -399,42 +472,50 @@ describe('<ControlPage/> — Gen1 Hybrid power-limit round trip (issue #346)', (
     useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
   });
 
-  it('renders the half-scale slider shape: 0-100 in 2% steps', () => {
+  it('renders the half-scale slider shape: 0-100 in 1% steps', () => {
     renderWith(gen1());
     for (const index of [CHARGE, DISCHARGE]) {
       const slider = powerSliders()[index];
       expect(slider.getAttribute('min')).toBe('0');
       expect(slider.getAttribute('max')).toBe('100');
-      expect(slider.getAttribute('step')).toBe('2');
+      expect(slider.getAttribute('step')).toBe('1');
     }
     expect(captionFor(powerSliders()[CHARGE])).toBe('Battery Charge Power Limit');
     expect(captionFor(powerSliders()[DISCHARGE])).toBe('Battery Discharge Power Limit');
   });
 
-  it('doubles HR 111/112 and shows a share of 2.6 kW, not the clamped maximum', () => {
-    // 13.5 kWh / 2 = 6.75 kW, so the old capacity formula clamped to 2.6 kW
-    // for every position from 39% up.
-    renderWith(gen1());
-    expect(readoutFor(powerSliders()[CHARGE])).toBe('66% (1.7 kW)');
-    expect(readoutFor(powerSliders()[DISCHARGE])).toBe('50% (1.3 kW)');
+  it('shows a share of 2.6 kW derived from the 13.5 kWh pack', () => {
+    // Register 10 = 10% of 13500 Wh = 1350 W = 52% of 2600 W; register 25 =
+    // 3375 W, above the inverter, so it reads as the full 2.6 kW.
+    renderWith(gen1({ charge_rate: 10, discharge_rate: 25 }));
+    expect(givTcpWattsFor(10, 13500, 2600)).toBe(1350);
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('52% (1.4 kW)');
+    expect(readoutFor(powerSliders()[DISCHARGE])).toBe('100% (2.6 kW)');
   });
 
-  it('gives every slider position its own readout and never saturates', () => {
-    renderWith(gen1());
-    const slider = powerSliders()[CHARGE];
-    const readouts: string[] = [];
-    for (let percent = 2; percent <= 100; percent += 2) {
-      fireEvent.change(slider, { target: { value: String(percent) } });
-      const kw = ((percent / 100) * 2600 / 1000).toFixed(1);
-      expect(readoutFor(slider)).toBe(`${percent}% (${kw} kW)`);
-      readouts.push(readoutFor(slider));
+  it('gives every register below the maximum its own readout', () => {
+    // 13.5 kWh behind 2.6 kW: registers 0-19 are below the inverter maximum
+    // (19% of 13500 = 2565 W); 20 and above all reach it.
+    const readouts = new Set<string>();
+    for (let register = 0; register <= 19; register += 1) {
+      cleanup();
+      renderWith(gen1({ charge_rate: register }));
+      const readout = readoutFor(powerSliders()[CHARGE]);
+      const watts = givTcpWattsFor(register, 13500, 2600);
+      const percent = Math.round((watts / 2600) * 100);
+      expect(readout.startsWith(`${percent}%`)).toBe(true);
+      readouts.add(readout);
     }
-    expect(new Set(readouts).size).toBe(readouts.length);
-    expect(readouts.filter((r) => r.includes('(2.6 kW)'))).toEqual(['100% (2.6 kW)']);
+    expect(readouts.size).toBe(20);
+    for (const register of [20, 31, 50]) {
+      cleanup();
+      renderWith(gen1({ charge_rate: register }));
+      expect(readoutFor(powerSliders()[CHARGE])).toBe('100% (2.6 kW)');
+    }
   });
 
-  it.each([0, 2, 34, 50, 66, 98, 100])(
-    'saves %i%% as half that on HR 111 and HR 112',
+  it.each([0, 2, 34, 50, 62, 98, 100])(
+    'saves %i%% as the register GivTCP would write for that power',
     async (percent) => {
       renderWith(gen1());
       for (const [index, path] of [
@@ -444,40 +525,247 @@ describe('<ControlPage/> — Gen1 Hybrid power-limit round trip (issue #346)', (
         const slider = powerSliders()[index];
         fireEvent.change(slider, { target: { value: String(percent) } });
         fireEvent.click(slider.parentElement?.querySelector('button') as HTMLButtonElement);
-        expect(apiPost).toHaveBeenCalledWith(path, { limit: percent / 2 });
-      }
-      // Never send a value HR 111/112 cannot hold.
-      for (const [, body] of vi.mocked(apiPost).mock.calls) {
-        expect((body as { limit: number }).limit).toBeLessThanOrEqual(50);
+        const call = vi.mocked(apiPost).mock.calls.find(([called]) => called === path);
+        expect(call).toBeDefined();
+        const limit = (call?.[1] as { limit: number }).limit;
+        const expected = givTcpRegisterFor((percent / 100) * 2600, 13500);
+        // Within one register step of GivTCP's formula (100% writes the
+        // register maximum instead, which is "no limit"), never beyond 0-50.
+        if (percent === 100) {
+          expect(limit).toBe(50);
+        } else {
+          expect(Math.abs(limit - expected)).toBeLessThanOrEqual(1);
+        }
+        expect(limit).toBeGreaterThanOrEqual(0);
+        expect(limit).toBeLessThanOrEqual(50);
+        // The delivered power is within one register step (135 W) of the wish.
+        expect(Math.abs(givTcpWattsFor(limit, 13500, 2600) - (percent / 100) * 2600))
+          .toBeLessThanOrEqual(135);
       }
     },
   );
 
   it('settles on the read-back value after a save and follows later external changes', async () => {
-    renderWith(gen1());
+    renderWith(gen1({ charge_rate: 10 }));
     const slider = powerSliders()[CHARGE];
 
+    // 80% of 2600 W = 2080 W = register 15.4 -> 15.
     fireEvent.change(slider, { target: { value: '80' } });
     fireEvent.click(slider.parentElement?.querySelector('button') as HTMLButtonElement);
-    expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 40 });
+    expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 15 });
 
-    // Until the read-back arrives the slider keeps the saved position.
-    act(() => useInverterStore.setState({ snapshot: gen1() }));
-    expect(readoutFor(powerSliders()[CHARGE])).toBe('80% (2.1 kW)');
-
-    // The inverter reads back 40 → 80%: the draft must be considered applied.
-    act(() => useInverterStore.setState({ snapshot: gen1({ charge_rate: 40 }) }));
-    expect(readoutFor(powerSliders()[CHARGE])).toBe('80% (2.1 kW)');
-
-    // A later change from the GivEnergy app must show through, which the
-    // stuck-draft bug on odd percentages prevented.
+    // Until the read-back arrives the slider keeps the saved position, shown as
+    // the percentage register 15 really gives (1.5 x 1350 W = 2025 W = 78%).
     act(() => useInverterStore.setState({ snapshot: gen1({ charge_rate: 10 }) }));
-    expect(readoutFor(powerSliders()[CHARGE])).toBe('20% (0.5 kW)');
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('78% (2.0 kW)');
+
+    // The inverter reads back 15: the draft must be considered applied.
+    act(() => useInverterStore.setState({ snapshot: gen1({ charge_rate: 15 }) }));
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('78% (2.0 kW)');
+
+    // A later change from the GivEnergy app must show through.
+    act(() => useInverterStore.setState({ snapshot: gen1({ charge_rate: 5 }) }));
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('26% (0.7 kW)');
   });
 
   it('offers the Inverter Active Power Limit on HR 50', () => {
     renderWith(gen1());
     expect(screen.queryByText('Inverter Active Power Limit')).not.toBeNull();
+  });
+});
+
+/**
+ * Issue #346: a limit change is queued by the API and applied register by
+ * register by the poll loop, but the page used to drop its "Applying changes to
+ * inverter" banner as soon as the POST returned - a few milliseconds - so the
+ * user could not read it and nothing said when the inverter had actually taken
+ * the value. The save now stays pending until a newer snapshot reads it back.
+ */
+describe('<ControlPage/> — power-limit saves wait for the inverter to confirm', () => {
+  const gen1 = (overrides: Partial<InverterSnapshot> = {}) => makeSnapshot({
+    device_type: 'gen1',
+    device_type_display: 'Gen1',
+    device_type_code: '1001',
+    max_battery_power_w: 2600,
+    battery_capacity_kwh: 9.5,
+    charge_rate: 50,
+    discharge_rate: 50,
+    ...overrides,
+  });
+  const BANNER = 'Applying changes to inverter…';
+
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    window.localStorage.clear();
+    vi.mocked(apiPost).mockReset();
+    vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    cleanup();
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
+  });
+
+  const saveButton = (slider: HTMLElement) =>
+    slider.parentElement?.querySelector('button') as HTMLButtonElement;
+
+  it.each([
+    ['charge', CHARGE, 'charge_rate'],
+    ['discharge', DISCHARGE, 'discharge_rate'],
+  ] as const)(
+    'keeps the Applying banner up until the inverter reads the %s limit back',
+    async (_name, index, field) => {
+      renderWith(gen1());
+      const slider = powerSliders()[index];
+      fireEvent.change(slider, { target: { value: '62' } });
+      fireEvent.click(saveButton(slider));
+      await act(async () => {});
+
+      // The POST has returned ("queued"), but the inverter has not applied it.
+      expect(apiPost).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(BANNER)).not.toBeNull();
+      expect(saveButton(slider).disabled).toBe(true);
+
+      // A snapshot that still shows the old value changes nothing.
+      act(() => useInverterStore.setState({ snapshot: gen1() }));
+      expect(screen.queryByText(BANNER)).not.toBeNull();
+
+      // 62% of 2600 W on 9.5 kWh is register 17.
+      act(() => useInverterStore.setState({ snapshot: gen1({ [field]: 17 }) }));
+      await act(async () => {});
+      expect(screen.queryByText(BANNER)).toBeNull();
+      expect(saveButton(slider).disabled).toBe(false);
+      expect(screen.queryByRole('alert')).toBeNull();
+    },
+  );
+
+  it('reports a limit the inverter never reads back, and resets the slider', async () => {
+    vi.useFakeTimers();
+    renderWith(gen1());
+    const slider = powerSliders()[CHARGE];
+    fireEvent.change(slider, { target: { value: '62' } });
+    fireEvent.click(saveButton(slider));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.queryByText(BANNER)).not.toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+
+    expect(screen.queryByText(BANNER)).toBeNull();
+    const alert = screen.getByRole('alert').textContent ?? '';
+    expect(alert).toMatch(/Charge power limit/);
+    expect(alert).toMatch(/not confirmed|did not confirm/i);
+    // A running Force Charge defers limit changes, so say so.
+    expect(alert).toMatch(/Force Charge/);
+    expect(alert).toMatch(/reset to the inverter's current setting/);
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('100% (2.6 kW)');
+    expect(saveButton(powerSliders()[CHARGE]).disabled).toBe(false);
+  });
+
+  it('hands the slider back to the inverter once a save is confirmed', async () => {
+    // Several percentages share one register on a capacity-relative scale. With
+    // register 27 read as 99%, dragging to 97% saves the same register, so the
+    // read-back never changes the base value and a kept draft would leave the
+    // thumb at 97 under a "99%" label, hiding every later external change.
+    renderWith(gen1({ charge_rate: 27 }));
+    const slider = powerSliders()[CHARGE];
+    expect(readoutFor(slider)).toBe('99% (2.6 kW)');
+    fireEvent.change(slider, { target: { value: '97' } });
+    fireEvent.click(saveButton(slider));
+    await act(async () => {});
+    act(() => useInverterStore.setState({ snapshot: gen1({ charge_rate: 27 }) }));
+    await act(async () => {});
+
+    expect(powerSliders()[CHARGE].value).toBe('99');
+    // A later change from the GivEnergy app shows through.
+    act(() => useInverterStore.setState({ snapshot: gen1({ charge_rate: 10 }) }));
+    expect(readoutFor(powerSliders()[CHARGE])).toBe('37% (1.0 kW)');
+    expect(powerSliders()[CHARGE].value).toBe('37');
+  });
+
+  it('cancels every pending confirmation when the page closes, even for overlapping saves', async () => {
+    vi.useFakeTimers();
+    // Baseline: timers left by an idle mount/unmount of the page itself.
+    renderWith(gen1()).unmount();
+    cleanup();
+    const idle = vi.getTimerCount();
+
+    const view = renderWith(gen1());
+    const charge = powerSliders()[CHARGE];
+    const discharge = powerSliders()[DISCHARGE];
+    fireEvent.change(charge, { target: { value: '62' } });
+    fireEvent.click(saveButton(charge));
+    fireEvent.change(discharge, { target: { value: '62' } });
+    fireEvent.click(saveButton(discharge));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    view.unmount();
+    // Both 20 s confirmation timers must be gone, not only the latest one.
+    expect(vi.getTimerCount()).toBe(idle);
+  });
+
+  it('cancels a save that is still posting when the page closes', async () => {
+    vi.useFakeTimers();
+    renderWith(gen1()).unmount();
+    cleanup();
+    const idle = vi.getTimerCount();
+
+    let release: () => void = () => {};
+    vi.mocked(apiPost).mockImplementation(() => new Promise((resolve) => {
+      release = () => resolve({ ok: true, data: {} });
+    }));
+    const view = renderWith(gen1());
+    const slider = powerSliders()[CHARGE];
+    fireEvent.change(slider, { target: { value: '62' } });
+    fireEvent.click(saveButton(slider));
+    view.unmount();
+
+    // The POST resolves after the page is gone: no confirmation wait may start.
+    release();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(vi.getTimerCount()).toBe(idle);
+  });
+
+  it('does not wait for confirmation when the save is rejected', async () => {
+    vi.mocked(apiPost).mockRejectedValue(new Error('register write rejected'));
+    renderWith(gen1());
+    const slider = powerSliders()[CHARGE];
+    fireEvent.change(slider, { target: { value: '62' } });
+    fireEvent.click(saveButton(slider));
+    await act(async () => {});
+
+    expect(screen.queryByText(BANNER)).toBeNull();
+    expect(screen.getByRole('alert').textContent).toMatch(/register write rejected/);
+  });
+
+  it('stops waiting when the page is closed mid-save', async () => {
+    vi.useFakeTimers();
+    const view = renderWith(gen1());
+    const slider = powerSliders()[CHARGE];
+    fireEvent.change(slider, { target: { value: '62' } });
+    fireEvent.click(saveButton(slider));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    view.unmount();
+    // Nothing left to fire a state update on an unmounted page.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(console.error).not.toHaveBeenCalled();
   });
 });
 
@@ -489,6 +777,10 @@ describe('<ControlPage/> — charge-limit readout across every device family', (
     return row?.querySelector('input[type="range"]') as HTMLInputElement;
   }
 
+  // Every case uses a 9.5 kWh pack. The maximum is what the backend decoder
+  // would report: the rated power capped at capacity / 2 = 4750 W. For the
+  // half-scale families register 25 is 0.25C = 2375 W (GivTCP read.py), shown
+  // as that share of the inverter's maximum.
   const CASES: Array<{
     code: string;
     family: string;
@@ -498,10 +790,10 @@ describe('<ControlPage/> — charge-limit readout across every device family', (
     expected: string;
     showsActivePower: boolean;
   }> = [
-    { code: '1001', family: 'Gen1 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 2600, chargeRegister: 25, expected: '50% (1.3 kW)', showsActivePower: true },
-    { code: '2001', family: 'Gen2/3 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 3600, chargeRegister: 25, expected: '50% (1.8 kW)', showsActivePower: true },
-    { code: '2101', family: 'Polar hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 2600, chargeRegister: 25, expected: '50% (1.3 kW)', showsActivePower: true },
-    { code: '2201', family: 'Gen3 Plus hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 5400, chargeRegister: 25, expected: '50% (2.7 kW)', showsActivePower: true },
+    { code: '1001', family: 'Gen1 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 2600, chargeRegister: 25, expected: '91% (2.4 kW)', showsActivePower: true },
+    { code: '2001', family: 'Gen2/3 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 3600, chargeRegister: 25, expected: '66% (2.4 kW)', showsActivePower: true },
+    { code: '2101', family: 'Polar hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 2600, chargeRegister: 25, expected: '91% (2.4 kW)', showsActivePower: true },
+    { code: '2201', family: 'Gen3 Plus hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
     { code: '2301', family: 'PV inverter', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 25, expected: '50%', showsActivePower: true },
     { code: '3001', family: 'AC-coupled', caption: 'AC Charge Power Limit', maxBatteryPowerW: 3000, chargeRegister: 66, expected: '66% (2.0 kW)', showsActivePower: true },
     { code: '3002', family: 'AC-coupled Mk2', caption: 'AC Charge Power Limit', maxBatteryPowerW: 3000, chargeRegister: 66, expected: '66% (2.0 kW)', showsActivePower: true },
@@ -509,12 +801,12 @@ describe('<ControlPage/> — charge-limit readout across every device family', (
     { code: '5001', family: 'EMS', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 25, expected: '50%', showsActivePower: true },
     { code: '6001', family: 'AC three-phase', caption: 'Three-phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
     { code: '7001', family: 'Gateway', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 66, expected: '66%', showsActivePower: true },
-    { code: '8001', family: 'AIO 6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 25, expected: '50% (3.0 kW)', showsActivePower: true },
-    { code: '8002', family: 'AIO 3.6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 3600, chargeRegister: 25, expected: '50% (1.8 kW)', showsActivePower: true },
-    { code: '8003', family: 'AIO 5kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 5000, chargeRegister: 25, expected: '50% (2.5 kW)', showsActivePower: true },
+    { code: '8001', family: 'AIO 6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
+    { code: '8002', family: 'AIO 3.6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 3600, chargeRegister: 25, expected: '66% (2.4 kW)', showsActivePower: true },
+    { code: '8003', family: 'AIO 5kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
     { code: '8101', family: 'Hybrid HV Gen3', caption: 'Three-phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
     { code: '8201', family: 'AIO Hybrid', caption: 'Three-phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
-    { code: '8301', family: 'Gen4 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 25, expected: '50% (3.0 kW)', showsActivePower: true },
+    { code: '8301', family: 'Gen4 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
   ];
 
   beforeEach(() => {
@@ -547,6 +839,7 @@ describe('<ControlPage/> — charge-limit readout across every device family', (
   it.each(CASES)('$code ($family)', ({ code, caption, maxBatteryPowerW, chargeRegister, expected, showsActivePower }) => {
     renderWith(makeSnapshot({
       device_type_code: code,
+      battery_capacity_kwh: 9.5,
       max_battery_power_w: maxBatteryPowerW,
       charge_rate: chargeRegister,
     }));

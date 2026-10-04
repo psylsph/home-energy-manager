@@ -144,6 +144,8 @@ History API uses MAX (not AVG) for cumulative counters — AVG understates monot
 | Battery SOC reserve | HR110 | HR110 | HR1109 |
 | Charge target SOC | HR116 | HR116 | HR1111 |
 
+**The DC-hybrid HR111/112 value is a percentage of battery *capacity* (50 = 0.5C), not of the inverter's maximum** (GivTCP `write.py`: `watts / (capacity / 2) * 50`; `read.py`: `min(reg / 100 * capacity_w, inverter_max)`). The Control page, Adaptive Charge, the forecast and the plan-apply path all convert through `src/lib/powerLimit.ts` / `src-tauri/src/inverter/power_limit.rs`; never hard-code a "halve the percentage" mapping (issue #346). 100% writes 50 (no limit). The direct banks (HR 313/314, HR 1110/1108) are plain percentages of the inverter maximum.
+
 API routes inspect `device_type` to choose the command; `ControlPage.tsx` picks the register max (50 vs 100) and display formula. Known limitation: register 32 (charge slot 2 end) returns exception 67 on some inverters, though `enable_charge` still updates correctly.
 
 ## Battery power sign convention

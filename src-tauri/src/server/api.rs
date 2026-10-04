@@ -4217,6 +4217,32 @@ pub async fn set_charge_slot(
         (Err(error), _) | (_, Err(error)) => return error_response(&error),
     };
 
+    // The requested rate is a share of the inverter's maximum; turning it into
+    // a register value needs the pack size and rating from the latest snapshot.
+    let requested_charge_rate = {
+        let guard = state.latest_snapshot.lock().await;
+        requested_charge_rate_pct.map(|percent| crate::inverter::power_limit::ChargeRateRequest {
+            percent,
+            scale: guard.as_ref().map_or_else(
+                || {
+                    crate::inverter::power_limit::PowerLimitScale::new(
+                        device_type.power_limit_bank(),
+                        0,
+                        0.0,
+                    )
+                },
+                crate::inverter::power_limit::PowerLimitScale::from_snapshot,
+            ),
+        })
+    };
+    // The rate is only applied to an enabled slot, so a disable never needs it.
+    if enabled && requested_charge_rate.is_some_and(|request| request.needs_pack_size()) {
+        return error_response(
+            "The battery size is not known yet, so a partial charge rate cannot be \
+             converted for this inverter. Try again once the inverter has been read, \
+             or request 100%.",
+        );
+    }
     match build_charge_slot_writes(
         device_type,
         slot,
@@ -4224,7 +4250,7 @@ pub async fn set_charge_slot(
         start,
         end,
         target_soc,
-        requested_charge_rate_pct,
+        requested_charge_rate,
     ) {
         Ok(writes) => {
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
@@ -4248,7 +4274,7 @@ pub(crate) fn build_charge_slot_writes(
     start: u16,
     end: u16,
     target_soc: u8,
-    requested_charge_rate_pct: Option<u16>,
+    requested_charge_rate: Option<crate::inverter::power_limit::ChargeRateRequest>,
 ) -> Result<Vec<RegisterWrite>, String> {
     let mut writes = charge_slot_command_for_device(device_type, slot, enabled, start, end)?
         .encode()
@@ -4314,9 +4340,10 @@ pub(crate) fn build_charge_slot_writes(
                 writes.extend(enable_writes);
             }
         }
-        if let Some(rate_pct) = requested_charge_rate_pct {
-            let bank = device_type.power_limit_bank();
-            let rate_command = charge_limit_command(bank, bank.percent_to_raw(rate_pct));
+        if let Some(request) = requested_charge_rate {
+            // Pick the register from the same bank the value was converted for,
+            // so the two cannot disagree.
+            let rate_command = charge_limit_command(request.scale.bank, request.to_raw());
             match rate_command.encode() {
                 Ok(rate_writes) => writes.extend(rate_writes),
                 Err(e) => return Err(format!("Validation error: {}", e)),
@@ -10155,6 +10182,152 @@ pub(crate) mod tests {
         .await;
     }
 
+    /// Issue #346: a forecast plan's `charge_rate_percent` is a share of the
+    /// inverter's maximum, but HR 111 stores a percentage of battery capacity,
+    /// so the register must be derived through the pack size.
+    #[tokio::test]
+    async fn charge_slot_rate_percent_is_derived_through_the_pack_size() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+                snapshot.battery_capacity_kwh = 9.5;
+                snapshot.max_battery_power_w = 2600;
+            }
+            for (percent, expected_raw) in [(62, 17), (40, 11), (100, 50), (0, 0)] {
+                let body = serde_json::json!({
+                    "slot": 1,
+                    "start_hour": 2, "start_minute": 0,
+                    "end_hour": 3, "end_minute": 36,
+                    "enabled": true,
+                    "target_soc": 100,
+                    "charge_rate_percent": percent,
+                });
+                let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                let rate = writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_CHARGE_LIMIT)
+                    .expect("slot must set the DC charge limit");
+                assert_eq!(rate.value, expected_raw, "{percent}% on 9.5 kWh / 2.6 kW");
+            }
+        })
+        .await;
+    }
+
+    /// Issue #346: without the pack size a partial charge rate cannot be turned
+    /// into a register value, and falling back to plain halving is exactly the
+    /// mapping that limits nothing on a large pack. Refuse it rather than write
+    /// a value that looks applied; 100% ("no limit", register 50) never needs
+    /// the pack size.
+    #[tokio::test]
+    async fn charge_slot_refuses_a_partial_rate_when_the_pack_size_is_unknown() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let slot_body = |percent: u32| {
+                serde_json::json!({
+                    "slot": 1,
+                    "start_hour": 2, "start_minute": 0,
+                    "end_hour": 3, "end_minute": 36,
+                    "enabled": true,
+                    "target_soc": 100,
+                    "charge_rate_percent": percent,
+                })
+            };
+
+            // A snapshot whose capacity has not been read yet, and no snapshot.
+            let known_device = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            let no_snapshot = Arc::new(AppState::new());
+            for state in [known_device, no_snapshot] {
+                let (status, body) =
+                    set_charge_slot(State(state.clone()), Json(slot_body(62))).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(
+                    body.0["error"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("battery size"),
+                    "error should explain why: {:?}",
+                    body.0
+                );
+                assert!(
+                    drain_pending_writes(&state).await.is_empty(),
+                    "nothing may be queued for a refused request"
+                );
+            }
+
+            // 100% still works without the pack size.
+            let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            let (status, _) = set_charge_slot(State(state.clone()), Json(slot_body(100))).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            let rate = writes
+                .iter()
+                .find(|w| w.address == HR_BATTERY_CHARGE_LIMIT)
+                .expect("100% must still set the charge limit");
+            assert_eq!(rate.value, 50);
+        })
+        .await;
+    }
+
+    /// The rate is only applied when a slot is enabled, so disabling one must not
+    /// be refused over a rate that would have been ignored anyway.
+    #[tokio::test]
+    async fn disabling_a_slot_is_not_refused_over_an_unconvertible_rate() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 0, "start_minute": 0,
+                "end_hour": 0, "end_minute": 0,
+                "enabled": false,
+                "target_soc": 100,
+                "charge_rate_percent": 62,
+            });
+            for state in [
+                make_state_with_device(DeviceType::Gen1Hybrid).await,
+                Arc::new(AppState::new()),
+            ] {
+                let (status, _) = set_charge_slot(State(state.clone()), Json(body.clone())).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                assert!(
+                    !writes.iter().any(|w| w.address == HR_BATTERY_CHARGE_LIMIT),
+                    "a disabled slot must not touch the charge limit"
+                );
+            }
+        })
+        .await;
+    }
+
+    /// A direct bank is a plain percentage of the maximum, so it never needs the
+    /// pack size and a partial rate is accepted without it.
+    #[tokio::test]
+    async fn charge_slot_partial_rate_on_a_direct_bank_does_not_need_the_pack_size() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_AC_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 2, "start_minute": 0,
+                "end_hour": 3, "end_minute": 36,
+                "enabled": true,
+                "target_soc": 100,
+                "charge_rate_percent": 62,
+            });
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            let rate = writes
+                .iter()
+                .find(|w| w.address == HR_AC_BATTERY_CHARGE_LIMIT)
+                .expect("AC-coupled must set the AC charge limit");
+            assert_eq!(rate.value, 62);
+        })
+        .await;
+    }
+
     /// CODE_REVIEW.md Minor 1: the `charge_rate_percent` branch must pick
     /// the right register per device family. AC-coupled uses HR 313 with a
     /// direct 1–100 scale (no half-scale division).
@@ -10234,7 +10407,14 @@ pub(crate) mod tests {
             200,
             336,
             SLOT_TARGET_SOC_NONE,
-            Some(PLAN_CHARGE_RATE_PERCENT),
+            Some(crate::inverter::power_limit::ChargeRateRequest {
+                percent: PLAN_CHARGE_RATE_PERCENT,
+                scale: crate::inverter::power_limit::PowerLimitScale::new(
+                    DeviceType::Gen2Hybrid.power_limit_bank(),
+                    2600,
+                    9.5,
+                ),
+            }),
         )
         .expect("refresh slot writes must encode");
         let rate = writes
