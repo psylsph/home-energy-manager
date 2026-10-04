@@ -44,6 +44,13 @@ assert_eq() {
   fi
 }
 
+make_mock() {
+  local dir="$1" name="$2"
+  shift 2
+  cat >"$dir/$name"
+  chmod +x "$dir/$name"
+}
+
 conf_value() {
   python3 - "$CONF" "$1" <<'PY'
 import json
@@ -103,13 +110,27 @@ assert_contains "replaces the updater via atomic rename" "mv -f" "$POSTINST_CONT
 echo
 echo "3. running the postinst refreshes a stale HEM updater"
 STAGE="$(mktemp -d)"
-mkdir -p "$STAGE/share/givenergy-local" "$STAGE/usr/local/bin" "$STAGE/usr/local/sbin"
+mkdir -p "$STAGE/bin" "$STAGE/share/givenergy-local" "$STAGE/usr/local/bin" "$STAGE/usr/local/sbin"
+
+# The postinst ends with `systemctl daemon-reload`. Stage a mock so the test
+# never pokes the host's systemd: a real reload raises a polkit password prompt
+# on a desktop, while on CI it fails silently, which is how this leaked.
+make_mock "$STAGE/bin" systemctl <<EOF
+#!/bin/bash
+printf 'systemctl %s\n' "\$*" >>"$STAGE/systemctl.log"
+exit 0
+EOF
+
+run_postinst() {
+  local script="$1"; shift
+  sh "$script" "$@"
+}
 cp "$INSTALLER" "$STAGE/share/givenergy-local/proxmox-install.sh"
 printf '#!/bin/bash\n# some older updater copy\nprintf "old updater\\n"\nREPO="psylsph/home-energy-manager"\n' >"$STAGE/usr/local/bin/update"
 chmod 0755 "$STAGE/usr/local/bin/update"
 sed "s|/usr/local/bin|$STAGE/usr/local/bin|g; s|/usr/local/sbin|$STAGE/usr/local/sbin|g; s|$PACKAGED_PATH|$STAGE/share/givenergy-local/proxmox-install.sh|g" \
   "$REPO_ROOT/src-tauri/$POSTINST" >"$STAGE/postinst"
-sh "$STAGE/postinst" configure 0.75.7 >"$STAGE/output.log" 2>&1
+run_postinst "$STAGE/postinst" configure 0.75.7 >"$STAGE/output.log" 2>&1
 assert_eq "postinst exits successfully" "0" "$?"
 assert_contains "reports the refresh" "refreshed the Proxmox update command" "$(cat "$STAGE/output.log")"
 cmp -s "$STAGE/usr/local/bin/update" "$INSTALLER"
@@ -120,20 +141,20 @@ assert_eq "updater stays executable" "0" "$?"
 echo
 echo "4. an unrelated update command is never touched"
 printf '#!/bin/sh\necho "something else entirely"\n' >"$STAGE/usr/local/bin/update"
-sh "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
+run_postinst "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
 cmp -s "$STAGE/usr/local/bin/update" <(printf '#!/bin/sh\necho "something else entirely"\n')
 assert_eq "unrelated update command left untouched" "0" "$?"
 
 echo
 echo "5. a container without an updater gets nothing"
 rm -f "$STAGE/usr/local/bin/update"
-sh "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
+run_postinst "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
 assert_eq "no updater appears on plain deb installs" "no" "$([ -e "$STAGE/usr/local/bin/update" ] && echo yes || echo no)"
 
 echo
 echo "6. the legacy pre-0.71.6 path is refreshed too"
 printf 'REPO="psylsph/home-energy-manager"\n# legacy copy\n' >"$STAGE/usr/local/sbin/home-energy-manager-update"
-sh "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
+run_postinst "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
 cmp -s "$STAGE/usr/local/sbin/home-energy-manager-update" "$INSTALLER"
 assert_eq "legacy updater path refreshed" "0" "$?"
 
@@ -141,7 +162,7 @@ echo
 echo "7. non-configure dpkg phases change nothing"
 cp "$STAGE/share/givenergy-local/proxmox-install.sh" "$STAGE/pristine"
 printf '#/old content with marker\nREPO="psylsph/home-energy-manager"\n' >"$STAGE/usr/local/bin/update"
-sh "$STAGE/postinst" abort-upgrade >/dev/null 2>&1
+run_postinst "$STAGE/postinst" abort-upgrade >/dev/null 2>&1
 cmp -s "$STAGE/usr/local/bin/update" <(printf '#/old content with marker\nREPO="psylsph/home-energy-manager"\n')
 assert_eq "abort-upgrade leaves the updater alone" "0" "$?"
 
@@ -151,7 +172,7 @@ echo "8. a binary file at the updater path is never touched"
 # the marker grep — grep treats binary files as matches by default, so the
 # postinst has to opt out with -I.
 printf 'REPO="psylsph/home-energy-manager"\x00\x80\x81\xffgarbage' >"$STAGE/usr/local/bin/update"
-sh "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
+run_postinst "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
 RC=0
 cmp -s "$STAGE/usr/local/bin/update" <(printf 'REPO="psylsph/home-energy-manager"\x00\x80\x81\xffgarbage') || RC=$?
 assert_eq "binary file at the updater path left untouched" "0" "$RC"
@@ -166,7 +187,7 @@ sed "s|/usr/local/bin|$STAGE/usr/local/bin|g; s|/usr/local/sbin|$STAGE/usr/local
 printf '#!/bin/sh\nREPO="psylsph/home-energy-manager"\n# stale copy\n' >"$STAGE/usr/local/bin/update"
 # A half-written temp file from a refresh that was killed mid-copy.
 printf 'partial garbage from an interrupted cp' >"$STAGE/usr/local/bin/update.tmp"
-sh "$STAGE/postinst-broken" configure 0.75.7 >/dev/null 2>&1
+run_postinst "$STAGE/postinst-broken" configure 0.75.7 >/dev/null 2>&1
 RC=0
 cmp -s "$STAGE/usr/local/bin/update" <(printf '#!/bin/sh\nREPO="psylsph/home-energy-manager"\n# stale copy\n') || RC=$?
 assert_eq "updater untouched when the packaged copy is unreadable" "0" "$RC"
@@ -176,7 +197,7 @@ echo
 echo "10. a running updater keeps reading its old copy across a refresh"
 printf '#!/bin/sh\nREPO="psylsph/home-energy-manager"\nOLD RUNNING COPY\n' >"$STAGE/usr/local/bin/update"
 exec 3<"$STAGE/usr/local/bin/update"
-sh "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
+run_postinst "$STAGE/postinst" configure 0.75.7 >/dev/null 2>&1
 READ_BACK="$(cat <&3)"
 exec 3<&-
 RC=0
@@ -185,6 +206,11 @@ assert_eq "an already-open reader still sees the old inode" "0" "$RC"
 RC=0
 cmp -s "$STAGE/usr/local/bin/update" "$INSTALLER" || RC=$?
 assert_eq "file on disk is the refreshed copy" "0" "$RC"
+
+echo
+echo "11. systemd reloads go through the staged mock, never the host"
+assert_contains "postinst reloaded systemd through the mock" "systemctl daemon-reload" "$(cat "$STAGE/systemctl.log" 2>/dev/null || true)"
+assert_eq "every configure run reloaded through the mock" "7" "$(grep -c '^systemctl daemon-reload$' "$STAGE/systemctl.log" 2>/dev/null || true)"
 
 rm -rf "$STAGE"
 
