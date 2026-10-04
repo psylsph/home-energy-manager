@@ -11773,6 +11773,339 @@ mod tests {
         .await;
     }
 
+    /// One decoded read request, as a scripted mock sees it.
+    struct ReadRequest {
+        function: u8,
+        base: u16,
+        count: usize,
+    }
+
+    type RegisterScript = Arc<dyn Fn(&ReadRequest) -> Vec<u16> + Send + Sync>;
+
+    /// Like `run_keyed_register_mock`, but the register contents come from a
+    /// script the test can change while the session is running, and it keeps
+    /// accepting connections so a forced reconnect does not hang the test.
+    async fn run_scripted_register_mock(listener: tokio::net::TcpListener, script: RegisterScript) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            loop {
+                let mut header = [0u8; 6];
+                if stream.read_exact(&mut header).await.is_err() {
+                    break;
+                }
+                let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+                let mut body = vec![0u8; length];
+                if stream.read_exact(&mut body).await.is_err() {
+                    break;
+                }
+                let mut frame = header.to_vec();
+                frame.extend_from_slice(&body);
+                let Ok(decoded) = crate::modbus::framer::decode_frame(&frame) else {
+                    break;
+                };
+                if decoded.payload.len() < 4 {
+                    break;
+                }
+                let base = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
+                let count = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]) as usize;
+                let mut data = script(&ReadRequest {
+                    function: decoded.function,
+                    base,
+                    count,
+                });
+                data.resize(count, 0);
+
+                let mut payload = Vec::with_capacity(14 + count * 2);
+                payload.extend_from_slice(b"TEST123456");
+                payload.extend_from_slice(&base.to_be_bytes());
+                payload.extend_from_slice(&(count as u16).to_be_bytes());
+                for value in data {
+                    payload.extend_from_slice(&value.to_be_bytes());
+                }
+                let response = crate::modbus::framer::encode_frame(
+                    "TEST123456",
+                    decoded.slave,
+                    decoded.function,
+                    &payload,
+                );
+                if stream.write_all(&response).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Plausible healthy registers for any block, with the device type code
+    /// (HR 0) and ARM firmware (HR 21) chosen by the caller.
+    fn healthy_registers(req: &ReadRequest, dtc: u16, arm_fw: u16) -> Vec<u16> {
+        let mut data = vec![0u16; req.count];
+        let mut set = |idx: usize, value: u16| {
+            if idx < data.len() {
+                data[idx] = value;
+            }
+        };
+        match (req.function, req.base) {
+            (4, 0) => {
+                set(5, 2300); // 230.0 V
+                set(13, 5000); // 50.00 Hz
+                set(41, 250); // 25.0 C inverter
+                set(50, 4800); // 48.0 V battery
+                set(56, 250); // 25.0 C battery
+                set(59, 50); // 50% SOC
+            }
+            (4, 60) => set(43, 250),
+            (3, 0) => {
+                set(0, dtc);
+                set(21, arm_fw);
+                set(27, 1); // eco
+            }
+            (3, 60) => {
+                set(50, 4); // reserve
+                set(51, 50); // charge rate
+                set(52, 50); // discharge rate
+                set(56, 100); // charge target
+            }
+            _ => {}
+        }
+        data
+    }
+
+    /// Settings pointing the poll loop at a mock on `port`.
+    async fn point_at_mock(state: &AppState, port: u16) {
+        let mut settings = state.settings.lock().await;
+        settings.host = "127.0.0.1".to_string();
+        settings.port = port;
+        settings.serial = "TEST123456".to_string();
+        settings.interval_secs = 1;
+    }
+
+    /// Collect the next `n` snapshot broadcasts, failing the test on timeout.
+    async fn next_snapshots(
+        rx: &mut tokio::sync::broadcast::Receiver<PollMessage>,
+        n: usize,
+    ) -> Vec<InverterSnapshot> {
+        let mut out = Vec::new();
+        tokio::time::timeout(Duration::from_secs(40), async {
+            while out.len() < n {
+                match rx.recv().await {
+                    Ok(PollMessage::Snapshot(snap)) => out.push(*snap),
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("only {} of {n} snapshots arrived", out.len()));
+        out
+    }
+
+    /// Install a log-capturing subscriber for the current thread (the test
+    /// runtime is single-threaded, so the spawned poll loop logs into it too).
+    fn capture_logs() -> (
+        Arc<crate::server::logs::LogRing>,
+        tracing::dispatcher::DefaultGuard,
+    ) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(crate::server::logs::LogRing::new(2000));
+        ring.min_level
+            .store(3, std::sync::atomic::Ordering::Relaxed); // DEBUG
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(crate::server::logs::LogCaptureLayer::new(ring.clone()));
+        let guard =
+            tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(subscriber));
+        (ring, guard)
+    }
+
+    fn count_logs(ring: &crate::server::logs::LogRing, needle: &str) -> usize {
+        ring.read_all()
+            .iter()
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+
+    /// A register that reads healthy, then (when the flag flips) returns
+    /// plausible-looking corrupt values for a few fields. They pass the
+    /// block-level fingerprint filter, so only the sanitizer can stop them.
+    #[tokio::test]
+    async fn poll_loop_never_broadcasts_corrupt_registers_that_pass_the_block_filter() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let corrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let script: RegisterScript = {
+                let corrupt = corrupt.clone();
+                Arc::new(move |req: &ReadRequest| {
+                    let mut data = healthy_registers(req, 0x2001, 352);
+                    if corrupt.load(std::sync::atomic::Ordering::Relaxed)
+                        && req.function == 4
+                        && req.base == 0
+                        && data.len() > 59
+                    {
+                        data[5] = 0xFFFF; // 6553.5 V
+                        data[13] = 0xFFFF; // 655.35 Hz
+                        data[41] = 2390; // 239.0 C inverter
+                        data[59] = 200; // SOC 200%
+                    }
+                    data
+                })
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+
+            // Establish a healthy baseline first: connect, warmup, grace.
+            let healthy = next_snapshots(&mut rx, 6).await;
+            let baseline = healthy.last().unwrap().clone();
+            assert_eq!(baseline.grid_voltage, 230.0);
+            assert_eq!(baseline.soc, 50);
+
+            corrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+            let after = next_snapshots(&mut rx, 4).await;
+            poll_task.abort();
+            server.abort();
+
+            for (i, snap) in after.iter().enumerate() {
+                assert_eq!(snap.grid_voltage, 230.0, "snapshot {i}: voltage leaked");
+                assert_eq!(snap.grid_frequency, 50.0, "snapshot {i}: frequency leaked");
+                assert_eq!(snap.soc, 50, "snapshot {i}: SOC leaked");
+                assert!(
+                    snap.inverter_temperature < 100.0,
+                    "snapshot {i}: temperature leaked ({})",
+                    snap.inverter_temperature
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn poll_loop_logs_how_a_known_model_was_identified_once() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            let script: RegisterScript =
+                Arc::new(|req: &ReadRequest| healthy_registers(req, 0x2001, 352));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let snaps = next_snapshots(&mut rx, 4).await;
+            poll_task.abort();
+            server.abort();
+
+            // 0x2001 + ARM FW 352 refines to Gen 3.
+            assert_eq!(snaps.last().unwrap().device_type, DeviceType::Gen3Hybrid);
+            assert_eq!(
+                count_logs(&ring, "Model detection: HR(0)/ARM firmware decoded"),
+                1,
+                "identification is logged once per session, not per poll"
+            );
+            let line = ring
+                .read_all()
+                .into_iter()
+                .find(|l| l.contains("Model detection: HR(0)/ARM firmware decoded"))
+                .unwrap();
+            for expected in ["0x2001", "arm_fw=352", "Exact", "Gen3Hybrid"] {
+                assert!(line.contains(expected), "missing {expected} in: {line}");
+            }
+            assert_eq!(
+                count_logs(&ring, "not a known code"),
+                0,
+                "an exact DTC must not raise the prefix-fallback warning"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn poll_loop_warns_once_about_an_unrecognised_device_code() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            // 0x4101 is a Commercial AIO code: it must stay unidentified.
+            let script: RegisterScript =
+                Arc::new(|req: &ReadRequest| healthy_registers(req, 0x4101, 352));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let snaps = next_snapshots(&mut rx, 4).await;
+            poll_task.abort();
+            server.abort();
+
+            assert!(matches!(
+                snaps.last().unwrap().device_type,
+                DeviceType::Unknown(0x4101)
+            ));
+            assert_eq!(
+                count_logs(&ring, "unrecognised HR(0) device type code"),
+                1,
+                "a persistently unknown code is warned about once, not every poll"
+            );
+            assert_eq!(count_logs(&ring, "HR(0)/ARM firmware decoded"), 0);
+            assert_eq!(count_logs(&ring, "Device model identified"), 0);
+            assert!(count_logs(&ring, "0x4101") >= 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn poll_loop_keeps_the_confirmed_model_when_arm_firmware_is_corrupted() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            let arm_fw = Arc::new(std::sync::atomic::AtomicU16::new(352));
+            let script: RegisterScript = {
+                let arm_fw = arm_fw.clone();
+                Arc::new(move |req: &ReadRequest| {
+                    healthy_registers(
+                        req,
+                        0x2001,
+                        arm_fw.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                })
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let before = next_snapshots(&mut rx, 4).await;
+            assert_eq!(before.last().unwrap().device_type, DeviceType::Gen3Hybrid);
+
+            // A corrupt ARM FW would decode this 0x2001 as Gen1.
+            arm_fw.store(7, std::sync::atomic::Ordering::Relaxed);
+            let after = next_snapshots(&mut rx, 3).await;
+            poll_task.abort();
+            server.abort();
+
+            for snap in &after {
+                assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+                assert_eq!(snap.device_type_display, "Gen 3 Hybrid");
+            }
+            assert!(
+                count_logs(&ring, "decoded type differs from confirmed model") >= 1,
+                "the drift must be visible in the logs"
+            );
+        })
+        .await;
+    }
+
     /// Serves every read with the dongle memory-leak fingerprint planted in
     /// the first standard input block (IR 0–59), and reports each accepted
     /// TCP connection over the channel — one message per session, so the
