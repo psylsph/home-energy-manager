@@ -57,7 +57,6 @@ use crate::server::logs::LogRing;
 use crate::server::ws::ConnectedClients;
 use tokio::sync::{broadcast, oneshot, Mutex, Notify};
 
-use crate::alerts::AlertType;
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot_with_solar_position;
 use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
@@ -6180,256 +6179,70 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                // ---- Email alerts ----
+                                // ---- Alerts ----
                                 //
-                                // Evaluate the sanitized snapshot against user-
-                                // configured thresholds and send email via Brevo
-                                // if any alerts are triggered (debounced).
-                                //
-                                // System-level battery voltage mismatch
-                                // (issue #272, breaker-trip case): the
-                                // transition is computed inside the alert
-                                // block below (where the debounce is locked)
-                                // and notified after it (where the config
-                                // lock is free for the senders).
-                                let mut mismatch_transition =
-                                    crate::alerts::BatteryConnTransition::default();
-                                let mut mismatch_suppressed = false;
-                                let mut mismatch_inverter_v: f32 = 0.0;
-                                let mut mismatch_module_v: Option<f32> = None;
-                                {
-                                    let settings_cfg = state.alert_config.lock().await;
-                                    let config = settings_cfg.clone();
-                                    if config.enabled {
-                                        tracing::debug!(
-                                            "Alerts: evaluating (grid_loss={}, batt_over_temp={}, soc={})",
-                                            snapshot.grid_loss,
-                                            snapshot.battery_over_temp,
-                                            snapshot.soc,
-                                        );
-                                        let triggered =
-                                            crate::alerts::evaluate_alerts(&snapshot, &config);
-                                        let mut debounce =
-                                            state.alert_debounce.lock().await;
-
-                                        // Register-corruption defence for the inverter's
-                                        // hardware battery warning flag (IR 57). The raw
-                                        // flag is fed into the debounce's consecutive-read
-                                        // counter every cycle; the BatteryOverTemp alert
-                                        // is only kept if the flag has now read `true` for
-                                        // BATTERY_WARNING_CONFIRM_CYCLES cycles in a row.
-                                        // This prevents a single transient garbage read on
-                                        // IR(57) from firing a spurious warning (e.g. the
-                                        // reported 21.5°C over-temp false positive), while
-                                        // still allowing a genuine sustained warning
-                                        // through regardless of the configured °C limit.
-                                        let confirmed =
-                                            debounce.confirm_battery_warning(
-                                                snapshot.battery_over_temp
-                                                    && config.battery_over_temp_enabled,
-                                            );
-                                        // Precision defence for the solar-clipping
-                                        // alert: feed this cycle's "solar above the
-                                        // configured ceiling" flag into a
-                                        // consecutive-read counter. The alert only
-                                        // survives if solar has been over the
-                                        // ceiling for SOLAR_CLIPPING_CONFIRM_CYCLES
-                                        // cycles, so a momentary cloud-edge spike
-                                        // does not fire it.
-                                        let clipping_confirmed =
-                                            debounce.confirm_solar_clipping(
-                                                config.solar_clipping_enabled
-                                                    && config.solar_clipping_ceiling_w > 0
-                                                    && snapshot.solar_power
-                                                        > config.solar_clipping_ceiling_w as i32,
-                                            );
-                                        // System-level battery voltage mismatch
-                                        // (issue #272, breaker-trip case): feed
-                                        // the inverter-vs-BMS mismatch flag
-                                        // through the debounce's consecutive-
-                                        // cycle counter. Only fed when the
-                                        // Battery Connection Lost alert is
-                                        // enabled, so a disabled alert cannot
-                                        // accumulate a streak. Suppressed when
-                                        // the per-battery detector already
-                                        // confirmed a loss (its notifications
-                                        // have fired for this episode).
-                                        let module_voltages: Vec<f32> = snapshot
-                                            .battery_modules
-                                            .iter()
-                                            .map(|m| m.voltage)
-                                            .collect();
-                                        let mismatch =
-                                            config.battery_connection_lost_enabled
-                                                && crate::alerts::battery_voltage_mismatch(
-                                                    snapshot.battery_voltage,
-                                                    &module_voltages,
-                                                );
-                                        let transition = debounce
-                                            .confirm_battery_voltage_mismatch(mismatch);
-                                        let any_conn_lost =
-                                            debounce.any_battery_connection_lost();
-                                        mismatch_transition = transition;
-                                        mismatch_suppressed = (transition.lost
-                                            || transition.restored)
-                                            && any_conn_lost;
-                                        if transition.lost || transition.restored {
-                                            mismatch_inverter_v = snapshot.battery_voltage;
-                                            mismatch_module_v = crate::alerts::healthiest_module_voltage(
-                                                &module_voltages,
-                                            );
-                                        }
-                                        let confirmed_triggered: Vec<AlertType> = triggered
-                                            .iter()
-                                            .copied()
-                                            .filter(|a| match *a {
-                                                AlertType::BatteryOverTemp => confirmed,
-                                                AlertType::SolarClipping => clipping_confirmed,
-                                                _ => true,
-                                            })
-                                            .collect();
-                                        let triggered = confirmed_triggered;
-                                        if !triggered.is_empty() {
-                                            tracing::warn!("Alerts: triggered={:?}", triggered);
-                                        }
-                                        let (to_send, suppressed): (Vec<_>, Vec<_>) = triggered
-                                            .iter()
-                                            .copied()
-                                            .partition(|a| debounce.should_fire(*a, config.cooldown_minutes));
-                                        if !suppressed.is_empty() {
-                                            tracing::warn!(
-                                                "Alerts: {:?} triggered but suppressed by cooldown",
-                                                suppressed
-                                            );
-                                        }
-                                        // Detect alerts that were previously active but have
-                                        // now returned to normal.
-                                        let cleared = debounce.extract_cleared(&triggered);
-                                        drop(debounce);
-
-                                        // Send "problem cleared" notifications
-                                        if !cleared.is_empty() {
-                                            let text = crate::alerts::build_cleared_message(
-                                                &snapshot, &cleared,
-                                            );
-                                            let token = config.telegram_bot_token.clone();
-                                            let chat_id = config.telegram_chat_id.clone();
-                                            let ntfy_text = text.clone();
-                                            let pushover_text = text.clone();
-                                            let cleared_names = cleared
-                                                .iter()
-                                                .map(|a| a.human_name())
-                                                .collect::<Vec<_>>()
-                                                .join(", ");
-
-                                            if !token.is_empty() && !chat_id.is_empty() {
-                                                tokio::task::spawn_blocking(move || {
-                                                    match crate::alerts::send_telegram_message(
-                                                        &token,
-                                                        &chat_id,
-                                                        &text,
-                                                    ) {
-                                                        Ok(()) => tracing::warn!(
-                                                            "Cleared alert sent: {cleared_names}"
-                                                        ),
-                                                        Err(e) => tracing::warn!(
-                                                            "Failed to send cleared alert: {e}"
-                                                        ),
-                                                    }
-                                                });
-                                            }
-
-                                            let ntfy_topic = config.ntfy_topic.clone();
-                                            let ntfy_server = config.ntfy_server.clone();
-                                            tokio::task::spawn_blocking(move || {
-                                                if ntfy_topic.is_empty() {
-                                                    return;
-                                                }
-                                                match crate::alerts::send_ntfy_message(
-                                                    &ntfy_topic,
-                                                    &ntfy_server,
-                                                    &ntfy_text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!("ntfy cleared alert sent"),
-                                                    Err(e) => tracing::warn!("ntfy cleared alert failed: {e}"),
-                                                }
-                                            });
-
-                                            let pushover_token = config.pushover_app_token.clone();
-                                            let pushover_user = config.pushover_user_key.clone();
-                                            tokio::task::spawn_blocking(move || {
-                                                if pushover_token.is_empty()
-                                                    || pushover_user.is_empty()
-                                                {
-                                                    return;
-                                                }
-                                                match crate::alerts::send_pushover_message(
-                                                    &pushover_token,
-                                                    &pushover_user,
-                                                    &pushover_text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!(
-                                                        "Pushover cleared alert sent"
-                                                    ),
-                                                    Err(e) => tracing::warn!(
-                                                        "Pushover cleared alert failed: {e}"
-                                                    ),
-                                                }
-                                            });
-                                        }
-
-                                        if !to_send.is_empty() {
-                                            let text = crate::alerts::build_alert_message(
-                                                &snapshot, &to_send,
-                                            );
-                                            let alert_types = to_send.clone();
-                                            let alert_config = config.clone();
-                                            let debounce = state.alert_debounce.clone();
-                                            tokio::spawn(async move {
-                                                let delivered = crate::alerts::dispatch_alert_text(
-                                                    &alert_config,
-                                                    &text,
-                                                    "alert",
-                                                )
-                                                .await;
-                                                let mut debounce = debounce.lock().await;
-                                                debounce.record_delivery(&alert_types, delivered);
-                                            });
-                                        }
-                                    }
-                                    drop(settings_cfg);
+                                // Evaluate the sanitized snapshot against the user's
+                                // thresholds (with the debounce's consecutive-read
+                                // confirmation and cooldown), then notify. Evaluation is
+                                // pure (`evaluate_alert_cycle`); only the senders do I/O.
+                                let alert_config = state.alert_config.lock().await.clone();
+                                let alert_cycle = {
+                                    let mut debounce = state.alert_debounce.lock().await;
+                                    crate::alerts::evaluate_alert_cycle(
+                                        &snapshot,
+                                        &alert_config,
+                                        &mut debounce,
+                                    )
+                                };
+                                crate::alerts::notify_cleared_alerts(
+                                    &alert_config,
+                                    &snapshot,
+                                    &alert_cycle.cleared,
+                                );
+                                if !alert_cycle.to_send.is_empty() {
+                                    let text = crate::alerts::build_alert_message(
+                                        &snapshot,
+                                        &alert_cycle.to_send,
+                                    );
+                                    tokio::spawn(crate::alerts::deliver_triggered_alerts(
+                                        state.alert_debounce.clone(),
+                                        alert_config,
+                                        text,
+                                        alert_cycle.to_send,
+                                    ));
                                 }
 
                                 // ---- Battery voltage mismatch notifications ----
-                                // (issue #272, breaker-trip case). Sent after the
-                                // alert block so the config lock is free for the
-                                // senders. Suppressed when the per-battery
-                                // detector already fired for this episode.
-                                if (mismatch_transition.lost || mismatch_transition.restored)
-                                    && !mismatch_suppressed
-                                {
-                                    if let Some(module_v) = mismatch_module_v {
-                                        if mismatch_transition.lost {
+                                // (issue #272, breaker-trip case). Sent after the alert
+                                // evaluation; already suppressed when the per-battery
+                                // detector fired for this episode.
+                                if let Some(notice) = alert_cycle.mismatch {
+                                    match notice.kind {
+                                        crate::alerts::MismatchKind::Lost => {
                                             tracing::warn!(
                                                 "Battery voltage mismatch: inverter \
-                                                 {mismatch_inverter_v:.1} V vs module \
-                                                 {module_v:.1} V — DC path fault \
-                                                 suspected (breaker?)"
+                                                 {:.1} V vs module \
+                                                 {:.1} V — DC path fault \
+                                                 suspected (breaker?)",
+                                                notice.inverter_voltage,
+                                                notice.module_voltage,
                                             );
                                             crate::alerts::send_battery_voltage_mismatch_notification(
                                                 &state,
-                                                mismatch_inverter_v,
-                                                module_v,
+                                                notice.inverter_voltage,
+                                                notice.module_voltage,
                                             )
                                             .await;
-                                        } else {
+                                        }
+                                        crate::alerts::MismatchKind::Restored => {
                                             tracing::info!(
                                                 "Battery voltage mismatch resolved: \
-                                                 inverter back to {mismatch_inverter_v:.1} V"
+                                                 inverter back to {:.1} V",
+                                                notice.inverter_voltage,
                                             );
                                             crate::alerts::send_battery_voltage_mismatch_restored_notification(
                                                 &state,
-                                                mismatch_inverter_v,
+                                                notice.inverter_voltage,
                                             )
                                             .await;
                                         }

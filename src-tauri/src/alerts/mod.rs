@@ -533,6 +533,205 @@ pub fn evaluate_alerts(snapshot: &InverterSnapshot, config: &AlertsConfig) -> Ve
     alerts
 }
 
+/// A system-level battery voltage mismatch worth telling the user about.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MismatchKind {
+    /// The sustained mismatch was just confirmed (breaker-trip suspected).
+    Lost,
+    /// The first healthy cycle after a confirmed loss.
+    Restored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MismatchNotice {
+    pub kind: MismatchKind,
+    pub inverter_voltage: f32,
+    pub module_voltage: f32,
+}
+
+/// What one poll cycle's alert evaluation decided.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct AlertCycle {
+    /// Confirmed breaches this cycle (after the consecutive-read defences).
+    pub triggered: Vec<AlertType>,
+    /// Breaches to deliver now. Each is marked pending in the debounce, so the
+    /// caller must report the outcome with [`AlertDebounce::record_delivery`].
+    pub to_send: Vec<AlertType>,
+    /// Confirmed breaches held back by the cooldown or a pending delivery.
+    pub suppressed: Vec<AlertType>,
+    /// Previously active alerts that have returned to normal.
+    pub cleared: Vec<AlertType>,
+    /// A system-level voltage mismatch to announce, if any.
+    pub mismatch: Option<MismatchNotice>,
+}
+
+/// Evaluate one sanitized snapshot against the user's alert thresholds and the
+/// debounce state, without doing any I/O.
+///
+/// Three register-corruption / noise defences feed the debounce every cycle
+/// (even when nothing is breached, so the streaks stay accurate):
+///
+/// - the inverter's hardware battery warning flag (IR 57) must read `true` for
+///   [`BATTERY_WARNING_CONFIRM_CYCLES`] cycles before `BatteryOverTemp` fires,
+///   so one garbage read cannot raise it (the reported 21.5°C false positive);
+/// - solar must sit above the configured ceiling for
+///   [`SOLAR_CLIPPING_CONFIRM_CYCLES`] cycles before `SolarClipping` fires, so
+///   a cloud-edge spike does not;
+/// - an inverter-vs-BMS battery voltage mismatch (issue #272, breaker trip) is
+///   confirmed over several cycles. It is only fed while the Battery
+///   Connection Lost alert is enabled, so a disabled alert cannot accumulate a
+///   streak, and it is suppressed when the per-battery detector already
+///   confirmed a loss for this episode (see [`mismatch_notification_due`]).
+///
+/// Does nothing (and leaves the debounce untouched) when alerts are disabled.
+pub(crate) fn evaluate_alert_cycle(
+    snapshot: &InverterSnapshot,
+    config: &AlertsConfig,
+    debounce: &mut AlertDebounce,
+) -> AlertCycle {
+    if !config.enabled {
+        return AlertCycle::default();
+    }
+    tracing::debug!(
+        "Alerts: evaluating (grid_loss={}, batt_over_temp={}, soc={})",
+        snapshot.grid_loss,
+        snapshot.battery_over_temp,
+        snapshot.soc,
+    );
+    let breaches = evaluate_alerts(snapshot, config);
+
+    let warning_confirmed = debounce
+        .confirm_battery_warning(snapshot.battery_over_temp && config.battery_over_temp_enabled);
+    let clipping_confirmed = debounce.confirm_solar_clipping(
+        config.solar_clipping_enabled
+            && config.solar_clipping_ceiling_w > 0
+            && snapshot.solar_power > config.solar_clipping_ceiling_w as i32,
+    );
+
+    let module_voltages: Vec<f32> = snapshot.battery_modules.iter().map(|m| m.voltage).collect();
+    let mismatch_now = config.battery_connection_lost_enabled
+        && battery_voltage_mismatch(snapshot.battery_voltage, &module_voltages);
+    let transition = debounce.confirm_battery_voltage_mismatch(mismatch_now);
+    let mismatch = if mismatch_notification_due(transition, debounce.any_battery_connection_lost())
+    {
+        healthiest_module_voltage(&module_voltages).map(|module_voltage| MismatchNotice {
+            kind: if transition.lost {
+                MismatchKind::Lost
+            } else {
+                MismatchKind::Restored
+            },
+            inverter_voltage: snapshot.battery_voltage,
+            module_voltage,
+        })
+    } else {
+        None
+    };
+
+    let triggered: Vec<AlertType> = breaches
+        .into_iter()
+        .filter(|a| match a {
+            AlertType::BatteryOverTemp => warning_confirmed,
+            AlertType::SolarClipping => clipping_confirmed,
+            _ => true,
+        })
+        .collect();
+    if !triggered.is_empty() {
+        tracing::warn!("Alerts: triggered={:?}", triggered);
+    }
+    let (to_send, suppressed): (Vec<_>, Vec<_>) = triggered
+        .iter()
+        .copied()
+        .partition(|a| debounce.should_fire(*a, config.cooldown_minutes));
+    if !suppressed.is_empty() {
+        tracing::warn!(
+            "Alerts: {:?} triggered but suppressed by cooldown",
+            suppressed
+        );
+    }
+    // Alerts that were active but have now returned to normal.
+    let cleared = debounce.extract_cleared(&triggered);
+
+    AlertCycle {
+        triggered,
+        to_send,
+        suppressed,
+        cleared,
+        mismatch,
+    }
+}
+
+/// Tell every configured channel that previously-active alerts have cleared.
+/// Fire-and-forget: each channel sends on a blocking thread and logs its own
+/// outcome.
+pub(crate) fn notify_cleared_alerts(
+    config: &AlertsConfig,
+    snapshot: &InverterSnapshot,
+    cleared: &[AlertType],
+) {
+    if cleared.is_empty() {
+        return;
+    }
+    let text = build_cleared_message(snapshot, cleared);
+    let token = config.telegram_bot_token.clone();
+    let chat_id = config.telegram_chat_id.clone();
+    let ntfy_text = text.clone();
+    let pushover_text = text.clone();
+    let cleared_names = cleared
+        .iter()
+        .map(|a| a.human_name())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if !token.is_empty() && !chat_id.is_empty() {
+        tokio::task::spawn_blocking(
+            move || match send_telegram_message(&token, &chat_id, &text) {
+                Ok(()) => tracing::warn!("Cleared alert sent: {cleared_names}"),
+                Err(e) => tracing::warn!("Failed to send cleared alert: {e}"),
+            },
+        );
+    }
+
+    let ntfy_topic = config.ntfy_topic.clone();
+    let ntfy_server = config.ntfy_server.clone();
+    tokio::task::spawn_blocking(move || {
+        if ntfy_topic.is_empty() {
+            return;
+        }
+        match send_ntfy_message(&ntfy_topic, &ntfy_server, &ntfy_text) {
+            Ok(()) => tracing::warn!("ntfy cleared alert sent"),
+            Err(e) => tracing::warn!("ntfy cleared alert failed: {e}"),
+        }
+    });
+
+    let pushover_token = config.pushover_app_token.clone();
+    let pushover_user = config.pushover_user_key.clone();
+    tokio::task::spawn_blocking(move || {
+        if pushover_token.is_empty() || pushover_user.is_empty() {
+            return;
+        }
+        match send_pushover_message(&pushover_token, &pushover_user, &pushover_text) {
+            Ok(()) => tracing::warn!("Pushover cleared alert sent"),
+            Err(e) => tracing::warn!("Pushover cleared alert failed: {e}"),
+        }
+    });
+}
+
+/// Deliver a triggered-alert message and report the outcome to the debounce:
+/// a successful delivery starts the cooldown and marks the alerts active; a
+/// failed one releases them so the next poll retries immediately.
+pub(crate) async fn deliver_triggered_alerts(
+    debounce: std::sync::Arc<tokio::sync::Mutex<AlertDebounce>>,
+    config: AlertsConfig,
+    text: String,
+    alert_types: Vec<AlertType>,
+) {
+    let delivered = dispatch_alert_text(&config, &text, "alert").await;
+    debounce
+        .lock()
+        .await
+        .record_delivery(&alert_types, delivered);
+}
+
 // ---------------------------------------------------------------------------
 // Notification body builder
 // ---------------------------------------------------------------------------
@@ -3726,5 +3925,450 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "send must be bounded by the agent timeout, took {elapsed:?}"
         );
+    }
+
+    // ================================================================
+    // evaluate_alert_cycle / notify_cleared_alerts / deliver_triggered_alerts
+    // ================================================================
+
+    fn cycle(
+        snapshot: &InverterSnapshot,
+        config: &AlertsConfig,
+        debounce: &mut AlertDebounce,
+    ) -> AlertCycle {
+        evaluate_alert_cycle(snapshot, config, debounce)
+    }
+
+    fn hot_battery() -> InverterSnapshot {
+        InverterSnapshot {
+            battery_temperature: 50.0, // above the 45 C limit
+            ..make_snapshot()
+        }
+    }
+
+    #[test]
+    fn a_healthy_snapshot_raises_nothing() {
+        let mut debounce = AlertDebounce::new();
+        let result = cycle(&make_snapshot(), &alerts_config(), &mut debounce);
+        assert_eq!(result, AlertCycle::default());
+    }
+
+    #[test]
+    fn disabled_alerts_do_nothing_and_leave_the_debounce_untouched() {
+        let mut config = alerts_config();
+        config.enabled = false;
+        config.battery_over_temp_enabled = true;
+        let mut debounce = AlertDebounce::new();
+        let flagged = InverterSnapshot {
+            battery_over_temp: true,
+            ..hot_battery()
+        };
+        for _ in 0..5 {
+            assert_eq!(
+                cycle(&flagged, &config, &mut debounce),
+                AlertCycle::default()
+            );
+        }
+        // Had the streak advanced while disabled, enabling would fire at once.
+        config.enabled = true;
+        let first = cycle(&flagged, &config, &mut debounce);
+        assert!(!first.triggered.contains(&AlertType::BatteryOverTemp));
+    }
+
+    #[test]
+    fn a_plain_threshold_breach_is_sent_immediately() {
+        let mut debounce = AlertDebounce::new();
+        let result = cycle(&hot_battery(), &alerts_config(), &mut debounce);
+        assert_eq!(result.triggered, vec![AlertType::BatteryTempHigh]);
+        assert_eq!(result.to_send, vec![AlertType::BatteryTempHigh]);
+        assert!(result.suppressed.is_empty());
+    }
+
+    #[test]
+    fn a_pending_delivery_suppresses_a_duplicate_on_the_next_cycle() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        let first = cycle(&hot_battery(), &config, &mut debounce);
+        assert_eq!(first.to_send, vec![AlertType::BatteryTempHigh]);
+        // Delivery has not been reported yet.
+        let second = cycle(&hot_battery(), &config, &mut debounce);
+        assert!(second.to_send.is_empty(), "no second attempt while pending");
+        assert_eq!(second.suppressed, vec![AlertType::BatteryTempHigh]);
+    }
+
+    #[test]
+    fn a_delivered_alert_is_held_by_the_cooldown() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        let first = cycle(&hot_battery(), &config, &mut debounce);
+        debounce.record_delivery(&first.to_send, true);
+        let second = cycle(&hot_battery(), &config, &mut debounce);
+        assert!(second.to_send.is_empty());
+        assert_eq!(second.suppressed, vec![AlertType::BatteryTempHigh]);
+        assert_eq!(
+            second.triggered,
+            vec![AlertType::BatteryTempHigh],
+            "still breached, merely not re-sent"
+        );
+    }
+
+    #[test]
+    fn a_failed_delivery_is_retried_on_the_next_cycle() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        let first = cycle(&hot_battery(), &config, &mut debounce);
+        debounce.record_delivery(&first.to_send, false);
+        let second = cycle(&hot_battery(), &config, &mut debounce);
+        assert_eq!(second.to_send, vec![AlertType::BatteryTempHigh]);
+    }
+
+    #[test]
+    fn a_zero_cooldown_allows_a_resend_after_delivery() {
+        let mut debounce = AlertDebounce::new();
+        let mut config = alerts_config();
+        config.cooldown_minutes = 0;
+        let first = cycle(&hot_battery(), &config, &mut debounce);
+        debounce.record_delivery(&first.to_send, true);
+        let second = cycle(&hot_battery(), &config, &mut debounce);
+        assert_eq!(second.to_send, vec![AlertType::BatteryTempHigh]);
+    }
+
+    #[test]
+    fn a_delivered_alert_is_reported_cleared_exactly_once_when_it_recovers() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        let breach = cycle(&hot_battery(), &config, &mut debounce);
+        debounce.record_delivery(&breach.to_send, true);
+
+        let recovered = cycle(&make_snapshot(), &config, &mut debounce);
+        assert_eq!(recovered.cleared, vec![AlertType::BatteryTempHigh]);
+        let after = cycle(&make_snapshot(), &config, &mut debounce);
+        assert!(after.cleared.is_empty(), "a clear is announced once");
+    }
+
+    #[test]
+    fn an_alert_that_never_reached_anyone_is_not_announced_as_cleared() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        let breach = cycle(&hot_battery(), &config, &mut debounce);
+        debounce.record_delivery(&breach.to_send, false);
+        let recovered = cycle(&make_snapshot(), &config, &mut debounce);
+        assert!(recovered.cleared.is_empty());
+    }
+
+    // ---- battery warning flag (IR 57) corruption defence ----------------
+
+    fn warning_config() -> AlertsConfig {
+        AlertsConfig {
+            battery_over_temp_enabled: true,
+            ..alerts_config()
+        }
+    }
+
+    fn warning_flag(on: bool) -> InverterSnapshot {
+        InverterSnapshot {
+            battery_over_temp: on,
+            ..make_snapshot()
+        }
+    }
+
+    #[test]
+    fn the_battery_warning_needs_consecutive_confirmation() {
+        let mut debounce = AlertDebounce::new();
+        let config = warning_config();
+        for n in 1..BATTERY_WARNING_CONFIRM_CYCLES {
+            let result = cycle(&warning_flag(true), &config, &mut debounce);
+            assert!(
+                !result.triggered.contains(&AlertType::BatteryOverTemp),
+                "must not fire on read {n}"
+            );
+        }
+        let result = cycle(&warning_flag(true), &config, &mut debounce);
+        assert!(result.triggered.contains(&AlertType::BatteryOverTemp));
+        assert!(result.to_send.contains(&AlertType::BatteryOverTemp));
+    }
+
+    #[test]
+    fn a_flickering_warning_flag_never_confirms() {
+        // Transient garbage on IR(57): on/off/on/off never builds a streak.
+        let mut debounce = AlertDebounce::new();
+        let config = warning_config();
+        for n in 0..12 {
+            let result = cycle(&warning_flag(n % 2 == 0), &config, &mut debounce);
+            assert!(
+                !result.triggered.contains(&AlertType::BatteryOverTemp),
+                "cycle {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_clean_read_restarts_the_battery_warning_streak() {
+        let mut debounce = AlertDebounce::new();
+        let config = warning_config();
+        for _ in 1..BATTERY_WARNING_CONFIRM_CYCLES {
+            cycle(&warning_flag(true), &config, &mut debounce);
+        }
+        cycle(&warning_flag(false), &config, &mut debounce);
+        let result = cycle(&warning_flag(true), &config, &mut debounce);
+        assert!(!result.triggered.contains(&AlertType::BatteryOverTemp));
+    }
+
+    #[test]
+    fn a_disabled_battery_warning_never_builds_a_streak() {
+        let mut debounce = AlertDebounce::new();
+        let mut config = warning_config();
+        config.battery_over_temp_enabled = false;
+        for _ in 0..10 {
+            cycle(&warning_flag(true), &config, &mut debounce);
+        }
+        config.battery_over_temp_enabled = true;
+        let result = cycle(&warning_flag(true), &config, &mut debounce);
+        assert!(
+            !result.triggered.contains(&AlertType::BatteryOverTemp),
+            "readings while disabled must not count toward confirmation"
+        );
+    }
+
+    // ---- solar clipping --------------------------------------------------
+
+    fn clipping_config() -> AlertsConfig {
+        AlertsConfig {
+            solar_clipping_enabled: true,
+            solar_clipping_ceiling_w: 5000,
+            ..alerts_config()
+        }
+    }
+
+    fn solar_at(watts: i32) -> InverterSnapshot {
+        InverterSnapshot {
+            solar_power: watts,
+            ..make_snapshot()
+        }
+    }
+
+    #[test]
+    fn solar_clipping_needs_a_sustained_over_ceiling_state() {
+        let mut debounce = AlertDebounce::new();
+        let config = clipping_config();
+        for n in 1..SOLAR_CLIPPING_CONFIRM_CYCLES {
+            let result = cycle(&solar_at(5200), &config, &mut debounce);
+            assert!(
+                !result.triggered.contains(&AlertType::SolarClipping),
+                "must not fire on read {n}"
+            );
+        }
+        let result = cycle(&solar_at(5200), &config, &mut debounce);
+        assert!(result.triggered.contains(&AlertType::SolarClipping));
+    }
+
+    #[test]
+    fn a_cloud_edge_spike_does_not_raise_solar_clipping() {
+        let mut debounce = AlertDebounce::new();
+        let config = clipping_config();
+        for watts in [5200, 5200, 3000, 5200, 5200, 3000, 5200] {
+            let result = cycle(&solar_at(watts), &config, &mut debounce);
+            assert!(!result.triggered.contains(&AlertType::SolarClipping));
+        }
+    }
+
+    #[test]
+    fn a_zero_ceiling_disables_solar_clipping() {
+        let mut debounce = AlertDebounce::new();
+        let mut config = clipping_config();
+        config.solar_clipping_ceiling_w = 0;
+        for _ in 0..10 {
+            let result = cycle(&solar_at(9000), &config, &mut debounce);
+            assert!(!result.triggered.contains(&AlertType::SolarClipping));
+        }
+    }
+
+    #[test]
+    fn solar_exactly_at_the_ceiling_is_not_clipping() {
+        let mut debounce = AlertDebounce::new();
+        let config = clipping_config();
+        for _ in 0..10 {
+            let result = cycle(&solar_at(5000), &config, &mut debounce);
+            assert!(!result.triggered.contains(&AlertType::SolarClipping));
+        }
+    }
+
+    // ---- system-level battery voltage mismatch (issue #272) -------------
+
+    fn tripped_breaker() -> InverterSnapshot {
+        InverterSnapshot {
+            battery_voltage: 7.0, // inverter side has collapsed
+            battery_modules: vec![crate::inverter::model::BatteryModule {
+                voltage: 53.2, // BMS still reads a healthy pack
+                ..Default::default()
+            }],
+            ..make_snapshot()
+        }
+    }
+
+    fn healthy_battery() -> InverterSnapshot {
+        InverterSnapshot {
+            battery_voltage: 53.4,
+            ..tripped_breaker()
+        }
+    }
+
+    #[test]
+    fn a_tripped_breaker_is_announced_once_when_confirmed() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        for n in 1..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            let result = cycle(&tripped_breaker(), &config, &mut debounce);
+            assert_eq!(result.mismatch, None, "not yet confirmed on cycle {n}");
+        }
+        let result = cycle(&tripped_breaker(), &config, &mut debounce);
+        assert_eq!(
+            result.mismatch,
+            Some(MismatchNotice {
+                kind: MismatchKind::Lost,
+                inverter_voltage: 7.0,
+                module_voltage: 53.2,
+            })
+        );
+        let again = cycle(&tripped_breaker(), &config, &mut debounce);
+        assert_eq!(again.mismatch, None, "announced once per episode");
+    }
+
+    #[test]
+    fn recovery_is_announced_once_after_a_confirmed_loss() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        for _ in 0..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            cycle(&tripped_breaker(), &config, &mut debounce);
+        }
+        let restored = cycle(&healthy_battery(), &config, &mut debounce);
+        assert_eq!(
+            restored.mismatch,
+            Some(MismatchNotice {
+                kind: MismatchKind::Restored,
+                inverter_voltage: 53.4,
+                module_voltage: 53.2,
+            })
+        );
+        assert_eq!(
+            cycle(&healthy_battery(), &config, &mut debounce).mismatch,
+            None
+        );
+    }
+
+    #[test]
+    fn a_brief_mismatch_that_never_confirms_announces_nothing() {
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        for _ in 1..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            cycle(&tripped_breaker(), &config, &mut debounce);
+        }
+        let result = cycle(&healthy_battery(), &config, &mut debounce);
+        assert_eq!(result.mismatch, None, "no 'restored' without a 'lost'");
+    }
+
+    #[test]
+    fn a_disabled_connection_lost_alert_never_builds_a_mismatch_streak() {
+        let mut debounce = AlertDebounce::new();
+        let mut config = alerts_config();
+        config.battery_connection_lost_enabled = false;
+        for _ in 0..10 {
+            assert_eq!(
+                cycle(&tripped_breaker(), &config, &mut debounce).mismatch,
+                None
+            );
+        }
+        config.battery_connection_lost_enabled = true;
+        let result = cycle(&tripped_breaker(), &config, &mut debounce);
+        assert_eq!(
+            result.mismatch, None,
+            "cycles while disabled must not count toward confirmation"
+        );
+    }
+
+    #[test]
+    fn the_system_mismatch_is_suppressed_when_a_battery_is_already_confirmed_lost() {
+        // The per-battery detector already told the user about this episode.
+        let mut debounce = AlertDebounce::new();
+        for _ in 0..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            debounce.confirm_battery_connection_lost(0x32, false);
+        }
+        assert!(debounce.any_battery_connection_lost());
+
+        let config = alerts_config();
+        for _ in 0..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES + 2 {
+            assert_eq!(
+                cycle(&tripped_breaker(), &config, &mut debounce).mismatch,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn the_mismatch_needs_a_trustworthy_module_reference() {
+        // Garbage module voltages leave nothing to compare against.
+        let mut debounce = AlertDebounce::new();
+        let config = alerts_config();
+        let no_reference = InverterSnapshot {
+            battery_voltage: 7.0,
+            battery_modules: vec![crate::inverter::model::BatteryModule {
+                voltage: f32::NAN,
+                ..Default::default()
+            }],
+            ..make_snapshot()
+        };
+        for _ in 0..6 {
+            assert_eq!(cycle(&no_reference, &config, &mut debounce).mismatch, None);
+        }
+    }
+
+    #[test]
+    fn the_mismatch_is_tracked_even_when_no_notification_channel_is_configured() {
+        // Existing behaviour, pinned: threshold alerts need a channel, but the
+        // mismatch streak runs regardless so it is accurate once one is added.
+        let mut debounce = AlertDebounce::new();
+        let mut config = alerts_config();
+        config.telegram_bot_token.clear();
+        for _ in 1..BATTERY_CONNECTION_LOST_CONFIRM_CYCLES {
+            cycle(&tripped_breaker(), &config, &mut debounce);
+        }
+        let result = cycle(&tripped_breaker(), &config, &mut debounce);
+        assert_eq!(result.triggered, Vec::<AlertType>::new());
+        assert!(result.mismatch.is_some());
+    }
+
+    // ---- delivery ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_failed_delivery_releases_the_alert_for_a_retry() {
+        // No channel is configured, so nothing can be delivered.
+        let mut config = alerts_config();
+        config.telegram_bot_token.clear();
+        let debounce = std::sync::Arc::new(tokio::sync::Mutex::new(AlertDebounce::new()));
+        assert!(debounce
+            .lock()
+            .await
+            .should_fire(AlertType::BatteryTempHigh, 30));
+
+        deliver_triggered_alerts(
+            debounce.clone(),
+            config,
+            "text".to_string(),
+            vec![AlertType::BatteryTempHigh],
+        )
+        .await;
+
+        let mut guard = debounce.lock().await;
+        assert!(
+            guard.should_fire(AlertType::BatteryTempHigh, 30),
+            "a failed attempt must not start the cooldown or stay pending"
+        );
+        assert!(guard.extract_cleared(&[]).is_empty(), "and is not active");
+    }
+
+    #[test]
+    fn notifying_an_empty_cleared_list_does_nothing() {
+        // No runtime needed: it returns before spawning anything.
+        notify_cleared_alerts(&alerts_config(), &make_snapshot(), &[]);
     }
 }
