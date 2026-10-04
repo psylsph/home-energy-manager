@@ -173,9 +173,11 @@ describe('<SettingsPage/> — toggles are real switches', () => {
   it('does not flip on an unrelated key', async () => {
     await open();
     const graphs = screen.getByRole('switch', { name: 'Show Graphs' });
-    fireEvent.keyDown(graphs, { key: 'a' });
-    fireEvent.keyDown(graphs, { key: 'Tab' });
-    expect(useInverterStore.getState().panelGraphsEnabled).toBe(false);
+    // One key at a time: two flips would cancel out and hide the bug.
+    for (const key of ['a', 'Tab', 'Escape', 'ArrowRight']) {
+      fireEvent.keyDown(graphs, { key });
+      expect(useInverterStore.getState().panelGraphsEnabled, key).toBe(false);
+    }
   });
 
   it('still flips on a click', async () => {
