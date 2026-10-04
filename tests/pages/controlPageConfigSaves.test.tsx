@@ -153,6 +153,7 @@ describe('<ControlPage/> — Auto Winter save', () => {
   it('posts the loaded configuration and confirms it', async () => {
     connect();
     render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
 
     fireEvent.click(save());
 
@@ -170,6 +171,7 @@ describe('<ControlPage/> — Auto Winter save', () => {
     connect();
     render(<ControlPage />);
     const winter = section('Auto Winter Mode');
+    await waitFor(() => expect(save()).toBeEnabled());
 
     // The first button in the section is the master Enable toggle.
     fireEvent.click(within(winter).getAllByRole('button')[0]);
@@ -184,6 +186,7 @@ describe('<ControlPage/> — Auto Winter save', () => {
     connect();
     failOn('/api/auto-winter');
     render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
     fireEvent.click(save());
     await waitFor(() => expect(save().textContent).toBe('✗ Error'));
   });
@@ -224,6 +227,7 @@ describe('<ControlPage/> — Load Discharge Limiter save', () => {
     connect();
     failOn('/api/load-limiter');
     render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
     fireEvent.click(save());
     await waitFor(() => expect(save().textContent).toBe('✗ Error'));
   });

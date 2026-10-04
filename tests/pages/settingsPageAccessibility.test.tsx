@@ -159,7 +159,7 @@ describe('<SettingsPage/> — toggles are real switches', () => {
 
     fireEvent.keyDown(dev(), { key: ' ' });
     expect(useInverterStore.getState().developerMode).toBe(false);
-    await waitFor(() => expect(screen.queryByRole('switch', { name: 'Allow battery control through the authenticated API' })).toBeNull());
+    expect(dev()).toHaveAttribute('aria-checked', 'false');
   });
 
   it('turns a switch on with Enter', async () => {
@@ -213,6 +213,20 @@ describe('<SettingsPage/> — enable switches survive a rejection that is not an
       });
 
       fireEvent.click(screen.getByRole('switch', { name: 'Enable Weather' }));
+
+      await screen.findByText('Failed to save');
+    });
+  }
+
+  for (const [label, reason] of [['null', null], ['undefined', undefined]] as const) {
+    it(`Enable Auto-Discovery: a ${label} rejection shows a generic message`, async () => {
+      await open();
+      apiPostMock.mockImplementation(async (p: string) => {
+        if (p === '/api/settings') return Promise.reject(reason);
+        return { ok: true, message: 'Saved' };
+      });
+
+      fireEvent.click(screen.getByRole('switch', { name: 'Enable Auto-Discovery' }));
 
       await screen.findByText('Failed to save');
     });

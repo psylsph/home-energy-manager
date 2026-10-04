@@ -105,12 +105,11 @@ function failPost(path: string, error: unknown = new Error('rejected')) {
 
 const tauriWindow = window as unknown as { __TAURI_INTERNALS__?: unknown };
 
-/** The toggle sitting beside a row's label (these toggles carry no role). */
+/** A labelled switch, found the way assistive technology finds it. */
 function rowToggle(label: string): HTMLElement {
-  const row = screen.getByText(label).closest('div.flex.items-center.justify-between') as HTMLElement;
-  return row.querySelector('.cursor-pointer') as HTMLElement;
+  return screen.getByRole('switch', { name: label });
 }
-const isOn = (toggle: HTMLElement) => /bg-accent/.test(toggle.querySelector('div')!.className);
+const isOn = (toggle: HTMLElement) => toggle.getAttribute('aria-checked') === 'true';
 
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});

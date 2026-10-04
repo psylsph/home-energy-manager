@@ -885,6 +885,9 @@ describe('<ControlPage/> — Agile scope UI', () => {
     // thresholds AND the Save button, which disambiguates it from the
     // per-slot "Save" buttons in the schedule editors below).
     const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    // Save stays disabled until the saved thresholds have loaded; interact only
+    // after that, or the late load would overwrite the dragged values.
+    await waitFor(() => expect(within(agileRoot).getByRole('button', { name: 'Save' })).toBeEnabled());
     const chargeSlider = within(
       screen.getByText('Charge when below').parentElement!.parentElement!,
     ).getByRole('slider');
@@ -918,6 +921,9 @@ describe('<ControlPage/> — Agile scope UI', () => {
     render(<ControlPage />);
 
     const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    // Save stays disabled until the saved thresholds have loaded; interact only
+    // after that, or the late load would overwrite the dragged values.
+    await waitFor(() => expect(within(agileRoot).getByRole('button', { name: 'Save' })).toBeEnabled());
     const chargeSlider = within(
       screen.getByText('Charge when below').parentElement!.parentElement!,
     ).getByRole('slider');
@@ -954,6 +960,9 @@ describe('<ControlPage/> — Agile scope UI', () => {
     render(<ControlPage />);
 
     const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    // Save stays disabled until the saved thresholds have loaded; interact only
+    // after that, or the late load would overwrite the dragged values.
+    await waitFor(() => expect(within(agileRoot).getByRole('button', { name: 'Save' })).toBeEnabled());
     const chargeSlider = within(
       screen.getByText('Charge when below').parentElement!.parentElement!,
     ).getByRole('slider');

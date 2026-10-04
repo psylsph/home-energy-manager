@@ -544,13 +544,9 @@ describe('<SettingsPage/> — local weather', () => {
   });
 });
 
-/**
- * The Enable Weather / Enable Alerts toggles have no role or accessible name
- * (only the update-check switch is labelled), so find them by their row label.
- */
+/** A labelled switch, found the way assistive technology finds it. */
 function rowToggle(label: string): HTMLElement {
-  const row = screen.getByText(label).parentElement as HTMLElement;
-  return row.querySelector('.cursor-pointer') as HTMLElement;
+  return screen.getByRole('switch', { name: label });
 }
 
 describe('<SettingsPage/> — optimistic toggles revert when the save fails', () => {

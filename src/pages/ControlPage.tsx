@@ -583,6 +583,9 @@ function AutoWinterSection() {
 
   const [debounce, setDebounce] = useState(10);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded (or the load has failed): saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -596,7 +599,9 @@ function AutoWinterSection() {
           setTargetSoc(Math.max(4, res.data.config.target_soc));
           setDebounce(res.data.config.debounce_readings);
         }
-      } catch { /* use defaults */ }
+      } catch { /* use defaults */ } finally {
+        setLoaded(true);
+      }
     })();
   }, []);
 
@@ -749,7 +754,7 @@ function AutoWinterSection() {
 
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -766,6 +771,9 @@ function AdaptiveChargeSection() {
     confirmation_readings: 2,
   });
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded (or the load has failed): saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
 
@@ -777,7 +785,9 @@ function AdaptiveChargeSection() {
           data: { config: AdaptiveChargeConfig };
         }>('/api/adaptive-charge');
         if (response.ok) setConfig(response.data.config);
-      } catch { /* retain safe defaults */ }
+      } catch { /* retain safe defaults */ } finally {
+        setLoaded(true);
+      }
     })();
   }, []);
 
@@ -974,7 +984,7 @@ function AdaptiveChargeSection() {
       <button
         type="button"
         onClick={save}
-        disabled={saving}
+        disabled={saving || !loaded}
         className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 disabled:opacity-50"
       >
         {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? 'Check settings' : 'Save Adaptive Charge'}
@@ -1562,6 +1572,9 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
   }, [computeRollingWindow]);
 
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded (or the load has failed): saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   // Load config from backend on mount
@@ -1574,7 +1587,9 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
           setChargeThreshold(res.charge_threshold);
           setDischargeThreshold(res.discharge_threshold);
         }
-      } catch { /* use defaults */ }
+      } catch { /* use defaults */ } finally {
+        setLoaded(true);
+      }
     })();
   }, []);
 
@@ -1824,7 +1839,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
 
       <button
         onClick={saveConfig}
-        disabled={saving}
+        disabled={saving || !loaded}
         className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
       >
         {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -1972,6 +1987,9 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
   const [enabled, setEnabled] = useState(false);
   const [floorSoc, setFloorSoc] = useState(50);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded (or the load has failed): saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -1982,7 +2000,9 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
           setEnabled(res.data.config.enabled);
           setFloorSoc(res.data.config.floor_soc);
         }
-      } catch { /* use defaults */ }
+      } catch { /* use defaults */ } finally {
+        setLoaded(true);
+      }
     })();
   }, [refreshKey]);
 
@@ -2039,7 +2059,7 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
         </div>
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="w-full px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? '...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -2068,6 +2088,9 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
   const [endHour, setEndHour] = useState(0);
   const [endMinute, setEndMinute] = useState(0);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded (or the load has failed): saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -2084,7 +2107,9 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
           setEndHour(cfg.end_hour);
           setEndMinute(cfg.end_minute);
         }
-      } catch { /* use defaults */ }
+      } catch { /* use defaults */ } finally {
+        setLoaded(true);
+      }
     })();
   }, [refreshKey]);
 
@@ -2270,7 +2295,7 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
 
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -2295,6 +2320,9 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
   const [recoveryThreshold, setRecoveryThreshold] = useState(55);
   const [confirmations, setConfirmations] = useState(3);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded (or the load has failed): saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -2311,7 +2339,9 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
           setRecoveryThreshold(config.recovery_threshold);
           setConfirmations(config.confirmation_readings);
         }
-      } catch { /* retain safe defaults */ }
+      } catch { /* retain safe defaults */ } finally {
+        setLoaded(true);
+      }
     })();
   }, [refreshKey]);
 
@@ -2442,7 +2472,7 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
         <button
           type="button"
           onClick={handleSave}
-          disabled={saving || recoveryThreshold >= highThreshold}
+          disabled={saving || !loaded || recoveryThreshold >= highThreshold}
           className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
