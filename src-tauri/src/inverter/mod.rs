@@ -5,6 +5,7 @@
 
 pub(crate) mod agile;
 pub(crate) mod auto_discovery;
+pub(crate) mod cosy;
 pub mod daily_report;
 pub mod decoder;
 pub mod discovery;

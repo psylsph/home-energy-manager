@@ -1191,7 +1191,7 @@ pub(crate) fn clear_cosy_slot_registers(device_type: DeviceType) -> Vec<Register
 }
 
 #[allow(async_fn_in_trait)]
-trait RegisterWriteExecutor {
+pub(crate) trait RegisterWriteExecutor {
     async fn write_register(&mut self, write: &RegisterWrite) -> Result<(), String>;
 }
 
@@ -1204,7 +1204,7 @@ impl RegisterWriteExecutor for ModbusClient {
 }
 
 /// Execute a list of register writes with delays between adjacent writes.
-async fn execute_register_writes<W: RegisterWriteExecutor>(
+pub(crate) async fn execute_register_writes<W: RegisterWriteExecutor>(
     writer: &mut W,
     writes: &[RegisterWrite],
     label: &str,
