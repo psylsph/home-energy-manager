@@ -161,6 +161,31 @@ impl PowerLimitBank {
     }
 }
 
+/// How an HR(0) device type code was matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtcMatch {
+    /// A code in a known DTC range.
+    Exact,
+    /// Not a known code, but its family prefix (high byte) is.
+    PrefixFallback,
+    /// Neither the code nor its prefix is known.
+    Unknown,
+}
+
+/// Result of [`DeviceType::detection_trace`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectionTrace {
+    pub raw_dtc: u16,
+    pub arm_fw: u16,
+    pub matched: DtcMatch,
+    /// Device type from the DTC alone.
+    pub base: DeviceType,
+    /// Device type after ARM-firmware refinement (same as `base` for non-0x20xx).
+    pub refined: DeviceType,
+    /// Whether ARM firmware is consulted for this DTC family (0x20xx only).
+    pub arm_refinement_applicable: bool,
+}
+
 /// Inverter hardware variant, read from holding register HR(0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceType {
@@ -194,7 +219,14 @@ impl Default for DeviceType {
 impl DeviceType {
     /// Map a raw HR(0) hex value to DeviceType.
     pub fn from_register(val: u16) -> Self {
-        match val {
+        Self::classify_register(val).0
+    }
+
+    /// Like [`from_register`](Self::from_register), but also reports how the
+    /// code was matched, so detection logs can say whether a model came from a
+    /// known DTC or from the family-prefix fallback.
+    pub fn classify_register(val: u16) -> (Self, DtcMatch) {
+        let exact = match val {
             0x1001 => Self::Gen1Hybrid,
             // 0x20xx hybrids can only be generation-refined with ARM firmware.
             0x2001..=0x20ff => Self::Gen1Hybrid,
@@ -215,7 +247,7 @@ impl DeviceType {
             0x8301..=0x83ff => Self::Gen4Hybrid,
             _ => {
                 let prefix = val >> 8;
-                match prefix {
+                let fallback = match prefix {
                     0x10 => Self::Gen1Hybrid,
                     0x20 => Self::Gen1Hybrid,
                     0x21 => Self::PolarHybrid,
@@ -230,10 +262,12 @@ impl DeviceType {
                     0x81 => Self::HybridHvGen3,
                     0x82 => Self::AllInOneHybrid,
                     0x83 => Self::Gen4Hybrid,
-                    _ => Self::Unknown(val),
-                }
+                    _ => return (Self::Unknown(val), DtcMatch::Unknown),
+                };
+                return (fallback, DtcMatch::PrefixFallback);
             }
-        }
+        };
+        (exact, DtcMatch::Exact)
     }
 
     /// Refine the device type using the ARM firmware version.
@@ -247,6 +281,21 @@ impl DeviceType {
             3 => Self::Gen3Hybrid,
             8 | 9 => Self::Gen2Hybrid,
             _ => Self::Gen1Hybrid,
+        }
+    }
+
+    /// Step-by-step account of how a raw HR(0) code and ARM firmware map to a
+    /// device type. Pure, so the poll loop can log it and tests can pin it.
+    pub fn detection_trace(raw_dtc: u16, arm_fw: u16) -> DetectionTrace {
+        let (base, matched) = Self::classify_register(raw_dtc);
+        let refined = base.refine_with_arm_fw(raw_dtc, arm_fw);
+        DetectionTrace {
+            raw_dtc,
+            arm_fw,
+            matched,
+            base,
+            refined,
+            arm_refinement_applicable: raw_dtc >> 8 == 0x20,
         }
     }
 
@@ -1676,6 +1725,74 @@ mod tests {
     }
 
     // -- DeviceType -----------------------------------------------------------
+    #[test]
+    fn classify_register_reports_exact_prefix_and_unknown() {
+        assert_eq!(
+            DeviceType::classify_register(0x2201),
+            (DeviceType::Gen3PlusHybrid, DtcMatch::Exact)
+        );
+        // 0x3003 is not a listed AC code; the 0x30 family prefix catches it.
+        assert_eq!(
+            DeviceType::classify_register(0x3003),
+            (DeviceType::ACCoupled, DtcMatch::PrefixFallback)
+        );
+        assert_eq!(
+            DeviceType::classify_register(0x9999),
+            (DeviceType::Unknown(0x9999), DtcMatch::Unknown)
+        );
+    }
+
+    #[test]
+    fn classify_register_agrees_with_from_register_for_every_code() {
+        for code in 0..=u16::MAX {
+            assert_eq!(
+                DeviceType::classify_register(code).0,
+                DeviceType::from_register(code),
+                "mismatch for {code:#06X}"
+            );
+        }
+    }
+
+    #[test]
+    fn commercial_codes_stay_unknown_in_the_trace() {
+        for code in [0x4101u16, 0x41FF, 0x5101, 0x51FF] {
+            let trace = DeviceType::detection_trace(code, 352);
+            assert_eq!(trace.matched, DtcMatch::Unknown, "{code:#06X}");
+            assert_eq!(trace.refined, DeviceType::Unknown(code), "{code:#06X}");
+        }
+    }
+
+    #[test]
+    fn detection_trace_records_arm_refinement_for_20xx_only() {
+        let t = DeviceType::detection_trace(0x2001, 352);
+        assert!(t.arm_refinement_applicable);
+        assert_eq!(t.base, DeviceType::Gen1Hybrid);
+        assert_eq!(t.refined, DeviceType::Gen3Hybrid);
+        assert_eq!(t.matched, DtcMatch::Exact);
+
+        let t = DeviceType::detection_trace(0x2001, 852);
+        assert_eq!(t.refined, DeviceType::Gen2Hybrid);
+
+        // Non-0x20xx families ignore ARM firmware entirely.
+        let t = DeviceType::detection_trace(0x8101, 352);
+        assert!(!t.arm_refinement_applicable);
+        assert_eq!(t.base, t.refined);
+        assert_eq!(t.refined, DeviceType::HybridHvGen3);
+    }
+
+    #[test]
+    fn detection_trace_survives_corrupt_inputs() {
+        // Saturated / zero registers must classify without panicking.
+        let t = DeviceType::detection_trace(0xFFFF, 0xFFFF);
+        assert_eq!(t.matched, DtcMatch::Unknown);
+        let t = DeviceType::detection_trace(0, 0);
+        assert_eq!(t.refined, DeviceType::Unknown(0));
+        // A corrupt ARM FW on a 0x20xx hybrid falls back to Gen1 (documented
+        // refinement behaviour), and the trace shows that.
+        let t = DeviceType::detection_trace(0x2001, 0xFFFF);
+        assert_eq!(t.refined, DeviceType::Gen1Hybrid);
+    }
+
     #[test]
     fn device_type_20xx_defaults_to_gen1_until_refined() {
         assert_eq!(DeviceType::from_register(0x2001), DeviceType::Gen1Hybrid);

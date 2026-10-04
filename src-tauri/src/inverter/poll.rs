@@ -1110,6 +1110,44 @@ fn lock_snapshot_device_identity(
         };
     }
 }
+/// What one poll's decoded HR(0)/ARM firmware says about the model, compared
+/// with what this session has already confirmed. Drives detection logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectionObservation {
+    /// First poll that mapped to a real model.
+    Identified,
+    /// Nothing confirmed yet and the decoded code is unknown (or HR(0) read 0).
+    Unidentified { raw_dtc: u16 },
+    /// Matches the confirmed model and code.
+    Stable,
+    /// Decoded type differs from the confirmed one (typically corrupt ARM FW
+    /// flipping a 0x20xx hybrid generation). The confirmed type is kept.
+    TypeDrift,
+    /// Same type, different raw HR(0) code (e.g. the 0x81xx rating digit).
+    /// The confirmed code is kept.
+    CodeDrift,
+}
+
+fn observe_model_detection(
+    confirmed: Option<(DeviceType, &str)>,
+    decoded_type: DeviceType,
+    decoded_code: &str,
+) -> DetectionObservation {
+    match confirmed {
+        None => match decoded_type {
+            DeviceType::Unknown(_) => DetectionObservation::Unidentified {
+                raw_dtc: u16::from_str_radix(decoded_code, 16).unwrap_or(0),
+            },
+            _ => DetectionObservation::Identified,
+        },
+        Some((known_type, _)) if known_type != decoded_type => DetectionObservation::TypeDrift,
+        Some((_, known_code)) if !known_code.eq_ignore_ascii_case(decoded_code) => {
+            DetectionObservation::CodeDrift
+        }
+        Some(_) => DetectionObservation::Stable,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main poll loop
 // ---------------------------------------------------------------------------
@@ -2619,6 +2657,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 let mut rate_release_counts = RateReleaseCounts::default();
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
                 let mut known_device_type_code: Option<String> = None;
+                // Last unidentified HR(0) value warned about, so a persistently
+                // unknown model logs once rather than on every poll.
+                let mut last_unidentified_dtc: Option<u16> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
                 // Battery slave addresses already announced this session, so
                 // "Battery #N detected" is logged once (INFO) per address
@@ -2950,6 +2991,81 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // 'Unknown(0)' means we haven't identified the model yet.
                                 let is_new_model = known_device_type.is_none()
                                     && !matches!(snapshot.device_type, crate::inverter::model::DeviceType::Unknown(_));
+                                let observation = observe_model_detection(
+                                    known_device_type
+                                        .zip(known_device_type_code.as_deref()),
+                                    snapshot.device_type,
+                                    &snapshot.device_type_code,
+                                );
+                                let observed_dtc =
+                                    u16::from_str_radix(&snapshot.device_type_code, 16)
+                                        .unwrap_or(0);
+                                let observed_arm_fw: u16 =
+                                    snapshot.firmware_version.parse().unwrap_or(0);
+                                match observation {
+                                    DetectionObservation::Identified => {
+                                        let trace = DeviceType::detection_trace(
+                                            observed_dtc,
+                                            observed_arm_fw,
+                                        );
+                                        tracing::info!(
+                                            raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
+                                            arm_fw = trace.arm_fw,
+                                            dsp_fw = %snapshot.dsp_firmware_version,
+                                            serial = %snapshot.inverter_serial,
+                                            matched = ?trace.matched,
+                                            base_type = ?trace.base,
+                                            arm_refinement_applicable = trace.arm_refinement_applicable,
+                                            refined_type = ?trace.refined,
+                                            slave = client.slave_address(),
+                                            "Model detection: HR(0)/ARM firmware decoded"
+                                        );
+                                        if trace.matched == crate::inverter::model::DtcMatch::PrefixFallback {
+                                            tracing::warn!(
+                                                raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
+                                                device_type = ?trace.refined,
+                                                "Model detection: HR(0) is not a known code - classified by family prefix only"
+                                            );
+                                        }
+                                    }
+                                    DetectionObservation::Unidentified { raw_dtc } => {
+                                        if last_unidentified_dtc != Some(raw_dtc) {
+                                            last_unidentified_dtc = Some(raw_dtc);
+                                            if raw_dtc == 0 {
+                                                tracing::debug!(
+                                                    slave = client.slave_address(),
+                                                    "Model detection: HR(0) read as 0x0000 (empty or failed read) - model not identified yet"
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    raw_dtc = %format_args!("{:#06X}", raw_dtc),
+                                                    arm_fw = observed_arm_fw,
+                                                    serial = %snapshot.inverter_serial,
+                                                    slave = client.slave_address(),
+                                                    "Model detection: unrecognised HR(0) device type code - model-aware polling stays off (corrupt read, or an unsupported product)"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    DetectionObservation::TypeDrift => {
+                                        tracing::debug!(
+                                            confirmed = ?known_device_type,
+                                            confirmed_code = ?known_device_type_code,
+                                            decoded = ?snapshot.device_type,
+                                            raw_dtc = %format_args!("{:#06X}", observed_dtc),
+                                            arm_fw = observed_arm_fw,
+                                            "Model detection: decoded type differs from confirmed model - keeping confirmed value"
+                                        );
+                                    }
+                                    DetectionObservation::CodeDrift => {
+                                        tracing::debug!(
+                                            confirmed_code = ?known_device_type_code,
+                                            raw_dtc = %format_args!("{:#06X}", observed_dtc),
+                                            "Model detection: HR(0) code differs from confirmed code - keeping confirmed value"
+                                        );
+                                    }
+                                    DetectionObservation::Stable => {}
+                                }
                                 if is_new_model {
                                     // Name the actual blocks the model-aware poll
                                     // will read on the next cycle. For a Gateway
@@ -3042,11 +3158,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // runs for the raw DTC and firmware string, but the refinement
                                     // result is ignored in favour of the known-good detection.
                                     if snapshot.device_type != cached_type {
-                                        tracing::debug!(
-                                            decoded = ?snapshot.device_type,
-                                            cached = ?cached_type,
-                                            "Device type mismatch - locking to cached value"
-                                        );
                                         snapshot.device_type = cached_type;
                                         snapshot.device_type_display = cached_type.display_name().to_string();
                                     }
@@ -8638,6 +8749,99 @@ mod tests {
                 "AppState::new should seed cosy_active from cosy_active_persisted"
             );
         });
+    }
+
+    #[test]
+    fn detection_observation_first_known_code_is_identified() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Gen3Hybrid, "2001"),
+            DetectionObservation::Identified
+        );
+    }
+
+    #[test]
+    fn detection_observation_unknown_code_is_unidentified_with_raw_value() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Unknown(0x4101), "4101"),
+            DetectionObservation::Unidentified { raw_dtc: 0x4101 }
+        );
+        // Commercial 0x51xx must stay unidentified rather than being guessed.
+        assert_eq!(
+            observe_model_detection(None, DeviceType::from_register(0x5101), "5101"),
+            DetectionObservation::Unidentified { raw_dtc: 0x5101 }
+        );
+    }
+
+    #[test]
+    fn detection_observation_empty_hr0_is_unidentified_zero() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Unknown(0), "0000"),
+            DetectionObservation::Unidentified { raw_dtc: 0 }
+        );
+    }
+
+    #[test]
+    fn detection_observation_garbage_code_text_does_not_panic() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Unknown(0), "ZZZZ"),
+            DetectionObservation::Unidentified { raw_dtc: 0 }
+        );
+    }
+
+    #[test]
+    fn detection_observation_same_model_and_code_is_stable() {
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::HybridHvGen3, "8102")),
+                DeviceType::HybridHvGen3,
+                "8102"
+            ),
+            DetectionObservation::Stable
+        );
+        // Hex case is not a difference.
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::HybridHvGen3, "810a")),
+                DeviceType::HybridHvGen3,
+                "810A"
+            ),
+            DetectionObservation::Stable
+        );
+    }
+
+    #[test]
+    fn detection_observation_corrupt_arm_fw_flip_is_type_drift() {
+        // 0x2001 + ARM FW 352 -> Gen3; a corrupt FW later decodes as Gen1.
+        let confirmed = DeviceType::from_register(0x2001).refine_with_arm_fw(0x2001, 352);
+        let flipped = DeviceType::from_register(0x2001).refine_with_arm_fw(0x2001, 7);
+        assert_eq!(
+            observe_model_detection(Some((confirmed, "2001")), flipped, "2001"),
+            DetectionObservation::TypeDrift
+        );
+    }
+
+    #[test]
+    fn detection_observation_corrupt_dtc_to_other_family_is_type_drift() {
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::Gen3Hybrid, "2001")),
+                DeviceType::Unknown(0xFFFF),
+                "FFFF"
+            ),
+            DetectionObservation::TypeDrift
+        );
+    }
+
+    #[test]
+    fn detection_observation_rating_digit_change_is_code_drift() {
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::HybridHvGen3, "8102")),
+                DeviceType::HybridHvGen3,
+                "8101"
+            ),
+            DetectionObservation::CodeDrift
+        );
     }
 
     #[test]
