@@ -8742,4 +8742,238 @@ mod tests {
         assert_eq!(empty.grid_voltage, prev.grid_voltage);
         assert_eq!(empty.grid_frequency, prev.grid_frequency);
     }
+
+    // -------------------------------------------------------------------
+    // Every cumulative counter, every corruption mode.
+    //
+    // The daily (`today_*`) and lifetime (`total_*`) counters are checked by
+    // per-field macro invocations, so a field that is dropped from, or
+    // mistyped in, one of them gets no protection and nothing fails. These
+    // tests run the same scenarios over the whole list.
+    // -------------------------------------------------------------------
+
+    type CounterAccessor = fn(&mut InverterSnapshot) -> &mut f32;
+
+    const DAILY_COUNTERS: &[(&str, CounterAccessor)] = &[
+        ("today_solar_kwh", |s| &mut s.today_solar_kwh),
+        ("today_pv1_kwh", |s| &mut s.today_pv1_kwh),
+        ("today_pv2_kwh", |s| &mut s.today_pv2_kwh),
+        ("today_import_kwh", |s| &mut s.today_import_kwh),
+        ("today_export_kwh", |s| &mut s.today_export_kwh),
+        ("today_charge_kwh", |s| &mut s.today_charge_kwh),
+        ("today_discharge_kwh", |s| &mut s.today_discharge_kwh),
+        ("today_consumption_kwh", |s| &mut s.today_consumption_kwh),
+        ("today_ac_charge_kwh", |s| &mut s.today_ac_charge_kwh),
+    ];
+
+    const LIFETIME_COUNTERS: &[(&str, CounterAccessor)] = &[
+        ("total_import_kwh", |s| &mut s.total_import_kwh),
+        ("total_export_kwh", |s| &mut s.total_export_kwh),
+        ("total_solar_kwh", |s| &mut s.total_solar_kwh),
+        ("total_charge_kwh", |s| &mut s.total_charge_kwh),
+        ("total_discharge_kwh", |s| &mut s.total_discharge_kwh),
+        ("total_throughput_kwh", |s| &mut s.total_throughput_kwh),
+    ];
+
+    /// `prev` (t=100) and `snap` (t=103) differing only in one counter.
+    fn counter_pair(
+        field: CounterAccessor,
+        prev_value: f32,
+        raw_value: f32,
+    ) -> (InverterSnapshot, InverterSnapshot) {
+        let mut prev = good_prev();
+        *field(&mut prev) = prev_value;
+        let mut snap = corrupt_snap();
+        *field(&mut snap) = raw_value;
+        (prev, snap)
+    }
+
+    #[test]
+    fn every_counter_is_present_in_the_tables() {
+        // Guard the tables themselves: a counter added to the snapshot must
+        // be added here (and to the sanitizer) or this count drifts.
+        assert_eq!(DAILY_COUNTERS.len(), 9);
+        assert_eq!(LIFETIME_COUNTERS.len(), 6);
+        let mut names: Vec<_> = DAILY_COUNTERS
+            .iter()
+            .chain(LIFETIME_COUNTERS)
+            .map(|(n, _)| *n)
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 15, "duplicate name in the counter tables");
+    }
+
+    #[test]
+    fn every_daily_counter_rejects_an_impossible_value() {
+        for &(name, field) in DAILY_COUNTERS {
+            for raw in [200.1_f32, 1010.0, -1.0] {
+                // With a previous reading: held at it.
+                let (prev, mut snap) = counter_pair(field, 12.0, raw);
+                assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 12.0, "{name} {raw} with prev");
+
+                // Without one: zero, never the corrupt value.
+                let (_, mut snap) = counter_pair(field, 12.0, raw);
+                assert!(sanitize_for_test(&mut snap, None), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 0.0, "{name} {raw} without prev");
+            }
+        }
+    }
+
+    #[test]
+    fn every_lifetime_counter_rejects_an_impossible_value() {
+        for &(name, field) in LIFETIME_COUNTERS {
+            // 4_294_967.0 is what a corrupt uint32 pair decodes to.
+            for raw in [100_000.1_f32, 4_294_967.0, -1.0] {
+                let (prev, mut snap) = counter_pair(field, 12_000.0, raw);
+                assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 12_000.0, "{name} {raw} with prev");
+
+                let (_, mut snap) = counter_pair(field, 12_000.0, raw);
+                assert!(sanitize_for_test(&mut snap, None), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 0.0, "{name} {raw} without prev");
+            }
+        }
+    }
+
+    #[test]
+    fn every_counter_accepts_its_range_boundary() {
+        for &(name, field) in DAILY_COUNTERS {
+            let (_, mut snap) = counter_pair(field, 0.0, 200.0);
+            sanitize_for_test(&mut snap, None);
+            assert_eq!(*field(&mut snap), 200.0, "{name}");
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (_, mut snap) = counter_pair(field, 0.0, 100_000.0);
+            sanitize_for_test(&mut snap, None);
+            assert_eq!(*field(&mut snap), 100_000.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_daily_counter_holds_a_physically_impossible_rate_spike() {
+        // +80 kWh in three seconds is inside the 200 kWh daily ceiling but far
+        // beyond the 10 kW rate budget.
+        for &(name, field) in DAILY_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 5.0, 85.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 5.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_lifetime_counter_holds_a_physically_impossible_rate_spike() {
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 10_000.0, 10_500.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 10_000.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_counter_accepts_realistic_growth() {
+        // 0.3 kWh and 0.5 kWh in three seconds is within the rate budget.
+        for &(name, field) in DAILY_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 5.0, 5.3);
+            assert!(!sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 5.3, "{name}");
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 10_000.0, 10_000.5);
+            assert!(!sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 10_000.5, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_counter_holds_a_material_decrease_mid_day() {
+        // 50 -> 30 kWh at a time that is nowhere near a midnight reset.
+        for &(name, field) in DAILY_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 50.0, 30.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 50.0, "{name}");
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 10_000.0, 9_000.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 10_000.0, "{name}");
+        }
+    }
+
+    /// Feed the same lower reading until the sanitizer gives up and accepts it,
+    /// returning how many polls it was held for.
+    fn polls_held_before_release(field: CounterAccessor, prev_value: f32, raw_value: f32) -> u8 {
+        let mut sanitizer = SeqSanitizer::new();
+        for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
+            let (mut prev, mut snap) = counter_pair(field, prev_value, raw_value);
+            prev.timestamp = 100 + i as i64 * 3;
+            snap.timestamp = prev.timestamp + 3;
+            sanitizer.run(&mut snap, Some(&prev));
+            if *field(&mut snap) == raw_value {
+                return i;
+            }
+            assert_eq!(
+                *field(&mut snap),
+                prev_value,
+                "held while counting, poll {i}"
+            );
+        }
+        DELTA_CORRECTION_RELEASE_THRESHOLD
+    }
+
+    #[test]
+    fn every_counter_releases_a_persistent_lower_baseline_after_the_threshold() {
+        // A wrong baseline must not freeze the counter forever: after
+        // DELTA_CORRECTION_RELEASE_THRESHOLD identical lower reads it is taken.
+        for &(name, field) in DAILY_COUNTERS {
+            assert_eq!(
+                polls_held_before_release(field, 50.0, 30.0),
+                DELTA_CORRECTION_RELEASE_THRESHOLD - 1,
+                "{name}"
+            );
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            assert_eq!(
+                polls_held_before_release(field, 10_000.0, 9_000.0),
+                DELTA_CORRECTION_RELEASE_THRESHOLD - 1,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn counters_are_independent_one_corrupt_field_does_not_touch_the_others() {
+        // Corrupt exactly one counter; every other must keep its raw value.
+        let base_for = |name: &str| {
+            if name.starts_with("total_") {
+                10_000.0
+            } else {
+                5.0
+            }
+        };
+        let all: Vec<_> = DAILY_COUNTERS.iter().chain(LIFETIME_COUNTERS).collect();
+        for &&(victim, victim_field) in &all {
+            let mut prev = good_prev();
+            let mut snap = corrupt_snap();
+            for &&(name, field) in &all {
+                *field(&mut prev) = base_for(name);
+                *field(&mut snap) = base_for(name) + 0.1;
+            }
+            *victim_field(&mut snap) = 4_000_000.0;
+            sanitize_for_test(&mut snap, Some(&prev));
+            for &&(name, field) in &all {
+                let expected = if name == victim {
+                    base_for(name)
+                } else {
+                    base_for(name) + 0.1
+                };
+                let got = *field(&mut snap);
+                assert!(
+                    (got - expected).abs() < 1e-2,
+                    "corrupting {victim}: {name} is {got}, expected {expected}"
+                );
+            }
+        }
+    }
 }
