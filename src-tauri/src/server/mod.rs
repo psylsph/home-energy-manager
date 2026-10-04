@@ -97,7 +97,8 @@ fn create_router_at(
     // Permissive CORS policy: bind to 0.0.0.0 and allow all origins,
     // methods, and headers for maximum LAN compatibility (reverse proxies,
     // containers, Tailscale, etc.). This is a deliberate design decision
-    // per AGENTS.md line 10 — do not restrict without explicit instruction.
+    // per AGENTS.md (General rules) — do not restrict without explicit
+    // instruction.
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)

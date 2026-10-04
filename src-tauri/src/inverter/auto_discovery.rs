@@ -96,16 +96,11 @@ pub(crate) async fn apply_discovery(
             );
             // Persist the new host so it survives a restart.
             let (new_host, new_port) = (ip.clone(), port);
-            let persisted = tokio::task::spawn_blocking(move || {
-                crate::settings::Settings::update(move |s| {
-                    s.host = new_host;
-                    s.port = new_port;
-                })
-                .map(|_| ())
+            let persisted = crate::settings::Settings::update_async(move |s| {
+                s.host = new_host;
+                s.port = new_port;
             })
-            .await
-            .map_err(|error| format!("settings worker failed: {error}"))
-            .and_then(|result| result);
+            .await;
             if let Err(e) = persisted {
                 tracing::warn!("Auto-discovery: failed to persist new host: {e}");
             }
