@@ -820,7 +820,7 @@ impl AppState {
 // Poll-cycle decision helpers
 // ---------------------------------------------------------------------------
 
-fn valid_lv_battery_response(data: &[u16]) -> bool {
+pub(crate) fn valid_lv_battery_response(data: &[u16]) -> bool {
     let soc = data.get(100 - 60).copied().unwrap_or(0);
     // SOC 0 is a valid BMS reading at the battery cutoff; the BMS identity
     // and voltage/capacity checks below distinguish an absent module.
@@ -837,7 +837,7 @@ fn valid_lv_battery_response(data: &[u16]) -> bool {
 /// consecutive failures before the lost-notification fires, and the
 /// restored-notification fires on the first successful read after a
 /// confirmed loss.
-async fn track_battery_conn(
+pub(crate) async fn track_battery_conn(
     state: &Arc<AppState>,
     battery_number: usize,
     slave_addr: u8,
@@ -1000,7 +1000,7 @@ fn merge_external_meters(
     merged
 }
 
-fn record_external_meter_failure(
+pub(crate) fn record_external_meter_failure(
     failures: &mut std::collections::BTreeMap<u8, u8>,
     cached: &mut std::collections::BTreeMap<u8, crate::inverter::model::MeterData>,
     address: u8,
@@ -1029,24 +1029,24 @@ const HV_PROBE_RETRY_INTERVAL_CYCLES: u8 = 5;
 
 /// BCU device addresses are defined as 0x70–0x8F by the reference protocol.
 /// Never let a corrupt BMS count make us probe outside that supported range.
-const HV_MAX_BCU_COUNT: u16 = 0x8F - 0x70 + 1;
+pub(crate) const HV_MAX_BCU_COUNT: u16 = 0x8F - 0x70 + 1;
 
 /// Physical BCU addresses are contiguous from 0x70. A short run of absent
 /// stacks therefore ends discovery early when a corrupt count overstates the
 /// number of stacks, while still allowing normal multi-stack systems through.
 const HV_MAX_CONSECUTIVE_MISSING_BCU_PROBES: u8 = 3;
 
-fn hv_bcu_probe_offsets(raw_count: u16) -> Vec<u8> {
+pub(crate) fn hv_bcu_probe_offsets(raw_count: u16) -> Vec<u8> {
     (0..raw_count.min(HV_MAX_BCU_COUNT))
         .map(|offset| offset as u8)
         .collect()
 }
 
-fn hv_bcu_probe_should_stop(consecutive_missing: u8) -> bool {
+pub(crate) fn hv_bcu_probe_should_stop(consecutive_missing: u8) -> bool {
     consecutive_missing >= HV_MAX_CONSECUTIVE_MISSING_BCU_PROBES
 }
 
-fn should_probe_hv_stacks(
+pub(crate) fn should_probe_hv_stacks(
     known_device_type: Option<DeviceType>,
     hv_probe_done: bool,
     hv_probe_attempted: bool,
@@ -1064,7 +1064,7 @@ fn should_probe_hv_stacks(
 
 /// Convert one HV discovery result into the existing one-shot completion flag.
 /// Kept separate so retry semantics can be pinned by a focused unit test.
-fn hv_probe_completed(detected_stacks: &[(u8, u8)]) -> bool {
+pub(crate) fn hv_probe_completed(detected_stacks: &[(u8, u8)]) -> bool {
     !detected_stacks.is_empty()
 }
 
@@ -3375,10 +3375,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // probe. Each entry is (bcu_offset, num_modules). Empty discovery
                 // remains retryable so a transient startup timeout cannot hide the
                 // battery for the rest of the TCP session.
-                let mut detected_hv_stacks: Vec<(u8, u8)> = Vec::new();
-                let mut hv_probe_done = false;
-                let mut hv_probe_attempted = false;
-                let mut hv_probe_cycles_since_last: u8 = 0;
+                let mut hv_stacks = crate::inverter::battery_reads::HvStacks::default();
 
                 // Tracks which Cosy slot index was last preloaded into the
                 // inverter's charge slot registers. Only re-writes when the
@@ -3789,476 +3786,54 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // --- Battery BMS module reads ---
                                 //
                                 // Two distinct battery protocols exist in the GivEnergy
-                                // ecosystem (per givenergy-modbus model/hv_bcu.py and GivTCP):
-                                //
-                                //   LV packs:     BMS at 0x32 (battery #1) + 0x33-0x37, IR 60-119
-                                //   HV stacks:    BCU at 0x70+i (cluster) + BMU at 0x50+m, IR 60-119
-                                //
-                                // HV stackable batteries (e.g. GIV-BAT-3.4-HV modules) do NOT
-                                // answer at 0x32. Device type decides which path runs.
-                                // Batteryless devices (Gateway, EMS, PvInverter) skip entirely
-                                // - they have no directly-attached battery to probe.
-                                if identity.device_type.is_some_and(|dt| dt.is_batteryless()) {
-                                    // Batteryless device (Gateway / EMS / PvInverter):
-                                    // no directly-attached battery to probe. The Gateway
-                                    // aggregation bank decoder populates battery fields;
-                                    // EMS/PvInverter have none.
-                                } else {
-                                let is_hv = identity.device_type
-                                    .map(|dt| dt.uses_hv_battery())
-                                    .unwrap_or(false);
-                                if is_hv {
-                                    // --- HV battery: BCU cluster read ---
-                                    //
-                                    // Discover the BCU layout via the BMS at 0xA0. Once a
-                                    // usable layout is found, read each stack's cluster block
-                                    // every cycle. Empty attempts remain retryable on a slow
-                                    // cadence so startup timeouts recover without adding a BMS
-                                    // timeout to every poll.
-                                    if hv_probe_attempted && !hv_probe_done {
-                                        hv_probe_cycles_since_last =
-                                            hv_probe_cycles_since_last.saturating_add(1);
-                                    }
-                                    if should_probe_hv_stacks(
-                                        identity.device_type,
-                                        hv_probe_done,
-                                        hv_probe_attempted,
-                                        hv_probe_cycles_since_last,
-                                    ) {
-                                        hv_probe_attempted = true;
-                                        hv_probe_cycles_since_last = 0;
-                                        tracing::info!("Probing for HV battery BCU stacks...");
-                                        let mut found: Vec<(u8, u8)> = Vec::new();
-                                        // BMS at 0xA0 reports the number of BCUs at IR(61).
-                                        match client
-                                            .read_registers_at_slave(
-                                                crate::modbus::registers::HV_BMS_ADDRESS,
-                                                crate::modbus::framer::RegisterType::Input,
-                                                60,
-                                                5,
-                                            )
-                                            .await
-                                        {
-                                            Ok(bms) => {
-                                                let raw_num_bcus = *bms.get(1).unwrap_or(&0);
-                                                let bcu_offsets = hv_bcu_probe_offsets(raw_num_bcus);
-                                                if raw_num_bcus > HV_MAX_BCU_COUNT {
-                                                    tracing::warn!(
-                                                        raw_num_bcus,
-                                                        max_supported = HV_MAX_BCU_COUNT,
-                                                        "BMS reported an invalid HV BCU count; capping probe"
-                                                    );
-                                                }
-                                                tracing::info!(
-                                                    num_bcus = bcu_offsets.len(),
-                                                    "BMS reports {} HV BCU stack(s) after validation",
-                                                    bcu_offsets.len()
-                                                );
-                                                let mut consecutive_missing = 0;
-                                                for offset in bcu_offsets {
-                                                    // Each BCU's IR(64) holds its module count.
-                                                    let bcu_addr = crate::modbus::registers::
-                                                        HV_BCU_BASE_ADDRESS.wrapping_add(offset);
-                                                    let present = match client
-                                                        .read_registers_at_slave(
-                                                            bcu_addr,
-                                                            crate::modbus::framer::RegisterType::Input,
-                                                            60,
-                                                            60,
-                                                        )
-                                                        .await
-                                                    {
-                                                        Ok(data)
-                                                            if crate::inverter::decoder::
-                                                                validate_hv_bcu(&data) =>
-                                                        {
-                                                            let cluster =
-                                                                crate::inverter::decoder::
-                                                                    decode_hv_bcu_cluster(&data);
-                                                            tracing::info!(
-                                                                bcu_offset = offset,
-                                                                modules = cluster.number_of_modules,
-                                                                version = %cluster.pack_software_version,
-                                                                "HV BCU at 0x{bcu_addr:02X} - {} modules",
-                                                                cluster.number_of_modules
-                                                            );
-                                                            found.push((
-                                                                offset,
-                                                                cluster.number_of_modules as u8,
-                                                            ));
-                                                            true
-                                                        }
-                                                        Ok(_) => {
-                                                            tracing::debug!(
-                                                                bcu_offset = offset,
-                                                                "BCU 0x{bcu_addr:02X} probe: invalid version - no stack"
-                                                            );
-                                                            false
-                                                        }
-                                                        Err(e) => {
-                                                            tracing::debug!(
-                                                                bcu_offset = offset,
-                                                                "BCU 0x{bcu_addr:02X} probe: no response: {e}"
-                                                            );
-                                                            false
-                                                        }
-                                                    };
-                                                    if present {
-                                                        consecutive_missing = 0;
-                                                    } else {
-                                                        consecutive_missing += 1;
-                                                        if hv_bcu_probe_should_stop(consecutive_missing) {
-                                                            tracing::debug!(
-                                                                bcu_offset = offset,
-                                                                consecutive_missing,
-                                                                "Stopping HV BCU probe after consecutive missing stacks"
-                                                            );
-                                                            break;
-                                                        }
-                                                    }
-                                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    "BMS 0xA0 probe failed: {e} - falling back to direct BCU 0x70 probe"
-                                                );
-                                                // Fallback: probe BCU 0x70 directly (single-stack
-                                                // installs where the BMS aggregation isn't exposed).
-                                                if let Ok(data) = client
-                                                    .read_registers_at_slave(
-                                                        crate::modbus::registers::HV_BCU_BASE_ADDRESS,
-                                                        crate::modbus::framer::RegisterType::Input,
-                                                        60,
-                                                        60,
-                                                    )
-                                                    .await
-                                                {
-                                                    if crate::inverter::decoder::validate_hv_bcu(&data)
-                                                    {
-                                                        let cluster =
-                                                            crate::inverter::decoder::
-                                                                decode_hv_bcu_cluster(&data);
-                                                        found.push((0, cluster.number_of_modules as u8));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        detected_hv_stacks = found;
-                                        hv_probe_done = hv_probe_completed(&detected_hv_stacks);
-                                        if detected_hv_stacks.is_empty() {
-                                            tracing::info!("No HV battery BCU stacks detected");
-                                        } else {
-                                            tracing::info!(
-                                                "Detected {} HV BCU stack(s): {:?}",
-                                                detected_hv_stacks.len(),
-                                                detected_hv_stacks
-                                            );
-                                        }
-                                    }
-
-                                    // Read each detected stack's cluster block this cycle.
-                                    for &(offset, _modules) in &detected_hv_stacks {
-                                        let bcu_addr = crate::modbus::registers::HV_BCU_BASE_ADDRESS
-                                            .wrapping_add(offset);
-                                        match client
-                                            .read_registers_at_slave(
-                                                bcu_addr,
-                                                crate::modbus::framer::RegisterType::Input,
-                                                60,
-                                                60,
-                                            )
-                                            .await
-                                        {
-                                            Ok(data)
-                                                if crate::inverter::decoder::validate_hv_bcu(&data) =>
-                                            {
-                                                let cluster =
-                                                    crate::inverter::decoder::decode_hv_bcu_cluster(
-                                                        &data,
-                                                    );
-                                                tracing::debug!(
-                                                    bcu_offset = offset,
-                                                    voltage = cluster.battery_voltage,
-                                                    current = cluster.battery_current,
-                                                    modules = cluster.number_of_modules,
-                                                    "HV BCU cluster read OK"
-                                                );
-                                                if hv_cluster.is_none() {
-                                                    hv_cluster = Some(cluster);
-                                                }
-                                            }
-                                            Ok(_) => {
-                                                tracing::debug!(
-                                                    bcu_offset = offset,
-                                                    "HV BCU 0x{bcu_addr:02X} read: invalid version"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    bcu_offset = offset,
-                                                    "HV BCU 0x{bcu_addr:02X} read failed: {e}"
-                                                );
-                                            }
-                                        }
-                                    }
-
-                                    // --- HV battery: BMU per-module cell reads ---
-                                    //
-                                    // Each BMU (device 0x50+m) exposes one module's
-                                    // cell-level data for the Battery page. The read base
-                                    // shifts by 120*bcu_offset so the returned slice
-                                    // always starts at v_cell_01 (per GivTCP's read
-                                    // convention; givenergy-modbus resolves the same
-                                    // layout via the BMU stride within a BCU).
-                                    let mut module_index: usize = 0;
-                                    for &(offset, num_modules) in &detected_hv_stacks {
-                                        let base = 60u16 + 120u16 * offset as u16;
-                                        for bmu_num in 0..num_modules {
-                                            let bmu_addr = crate::modbus::registers::
-                                                HV_BMU_BASE_ADDRESS.wrapping_add(bmu_num);
-                                            match client
-                                                .read_registers_at_slave(
-                                                    bmu_addr,
-                                                    crate::modbus::framer::RegisterType::Input,
-                                                    base,
-                                                    60,
-                                                )
-                                                .await
-                                            {
-                                                Ok(data)
-                                                    if crate::inverter::decoder::
-                                                        validate_hv_bmu(&data) =>
-                                                {
-                                                    let module = crate::inverter::decoder::
-                                                        decode_hv_bmu_block(&data, module_index);
-                                                    tracing::debug!(
-                                                        bcu_offset = offset,
-                                                        bmu = bmu_num,
-                                                        module = module_index,
-                                                        cells = module.cell_voltages.len(),
-                                                        voltage = module.voltage,
-                                                        "HV BMU read OK"
-                                                    );
-                                                    snapshot.battery_modules.push(module);
-                                                }
-                                                Ok(_) => {
-                                                    tracing::debug!(
-                                                        bcu_offset = offset,
-                                                        bmu = bmu_num,
-                                                        "HV BMU 0x{bmu_addr:02X}: invalid serial - not present"
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::debug!(
-                                                        bcu_offset = offset,
-                                                        bmu = bmu_num,
-                                                        "HV BMU 0x{bmu_addr:02X}: no response: {e}"
-                                                    );
-                                                }
-                                            }
-                                            module_index += 1;
-                                            tokio::time::sleep(Duration::from_millis(100)).await;
-                                        }
-                                    }
-
-                                    // HV BMU modules do not expose a per-module SOC register
-                                    // (confirmed against GivTCP's hvbmu.py - the BMU bank is
-                                    // cell voltages, cell temps and serial only). The BCU
-                                    // cluster reports the stack-wide SOC spread and per-module
-                                    // Ah capacity, which we backfill onto each module so the
-                                    // Battery page shows a sensible non-zero per-module SOC
-                                    // and capacity instead of 0%.
-                                    if let Some(cluster) = &hv_cluster {
-                                        crate::inverter::decoder::backfill_hv_module_fields(
-                                            &mut snapshot.battery_modules,
-                                            cluster,
-                                        );
-                                    }
-                                } else {
-                                    // --- LV battery: BMS pack reads ---
-                                    //
-                                    // Per givenergy-modbus reference, LV batteries expose BMS
-                                    // data on the inverter's IR 60-119 at device address 0x32
-                                    // (battery #1) and additional batteries at 0x33, 0x34, ... 0x37.
-                                    // Battery #1 IR 60-119 is NOT part of the standard poll
-                                    // blocks (those only read IR 0-59), so we issue a separate
-                                    // read here. Additional batteries also need separate reads
-                                    // at their own device addresses.
-
-                                    // Read battery #1 BMS (device 0x32, IR 60-119).
-                                    // Do not use the model-specific operational read address
-                                    // here: AC/Gen1 switch to 0x31 and newer models use 0x11,
-                                    // while the first LV battery BMS cache remains exposed at
-                                    // 0x32.
-                                    match client
-                                        .read_registers_at_slave(
-                                            0x32,
-                                            crate::modbus::framer::RegisterType::Input,
-                                            60,
-                                            60,
+                                // ecosystem (see `battery_reads`): LV packs answer at 0x32+,
+                                // HV stacks via BCU 0x70+ / BMU 0x50+. Device type decides
+                                // which path runs; batteryless devices (Gateway, EMS,
+                                // PvInverter) skip entirely - the Gateway aggregation bank
+                                // decoder populates their battery fields, EMS/PvInverter
+                                // have none.
+                                if !identity.device_type.is_some_and(|dt| dt.is_batteryless()) {
+                                    if identity.device_type.is_some_and(|dt| dt.uses_hv_battery()) {
+                                        hv_cluster = crate::inverter::battery_reads::read_hv_battery(
+                                            &mut client,
+                                            &mut hv_stacks,
+                                            identity.device_type,
+                                            &mut snapshot,
+                                            crate::inverter::battery_reads::DEVICE_READ_PACE,
                                         )
-                                        .await
-                                    {
-                                        Ok(data) => {
-                                            let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
-                                            if valid_lv_battery_response(&data) {
-                                                crate::inverter::decoder::decode_battery_block_into(
-                                                    &data, 0, &mut snapshot, "",
-                                                );
-                                                tracing::debug!("Battery #1 BMS read OK");
-                                                track_battery_conn(
-                                                    &state, 1, 0x32, true,
-                                                ).await;
-
-                                                // Override SOC with BMS module SOC (IR 100) only when
-                                                // When inverter IR(59) returns 0 (corrupted), calculate
-                                                // aggregate SOC from capacity-weighted average of all
-                                                // battery modules.
-                                                // Note: full aggregate is computed below after all
-                                                // additional batteries are read.
-                                                if snapshot.soc == 0 && !snapshot.battery_modules.is_empty() {
-                                                    if let Some(bms) = snapshot.battery_modules.first() {
-                                                        if bms.soc > 0 && bms.soc <= 99 {
-                                                            snapshot.soc = bms.soc;
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                tracing::debug!(
-                                                    "Battery #1 BMS data invalid: SOC={soc}"
-                                                );
-                                                track_battery_conn(
-                                                    &state, 1, 0x32, false,
-                                                ).await;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!("Battery #1 BMS read skipped: {e}");
-                                            track_battery_conn(
-                                                &state, 1, 0x32, false,
-                                            ).await;
-                                        }
+                                        .await;
+                                    } else {
+                                        crate::inverter::battery_reads::read_lv_batteries(
+                                            &mut client,
+                                            &state,
+                                            &mut snapshot,
+                                            &mut known_battery_addrs,
+                                        )
+                                        .await;
                                     }
-
-                                    // Probe additional LV batteries (device addresses 0x33-0x37)
-                                    for (i, &addr) in crate::modbus::registers::LV_BATTERY_ADDRESSES
-                                        .iter()
-                                        .enumerate()
-                                    {
-                                        match client.read_registers_at_slave(
-                                            addr,
-                                            crate::modbus::framer::RegisterType::Input,
-                                            60,
-                                            60,
-                                        ).await {
-                                            Ok(data) => {
-                                                let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
-                                                if valid_lv_battery_response(&data) {
-                                                    crate::inverter::decoder::decode_battery_block_into(
-                                                        &data, i + 1, &mut snapshot, "",
-                                                    );
-                                                    track_battery_conn(
-                                                        &state, i + 2, addr, true,
-                                                    ).await;
-                                                    if !known_battery_addrs.contains(&addr) {
-                                                        tracing::info!(
-                                                            "Battery #{} detected at addr 0x{:02X} (SOC={}%)",
-                                                            i + 2, addr, soc
-                                                        );
-                                                        known_battery_addrs.push(addr);
-                                                    } else {
-                                                        tracing::debug!(
-                                                            "Battery #{} at addr 0x{:02X} (SOC={}%)",
-                                                            i + 2, addr, soc
-                                                        );
-                                                    }
-                                                } else {
-                                                    tracing::debug!(
-                                                        "Battery addr 0x{:02X}: SOC={} - not present",
-                                                        addr, soc
-                                                    );
-                                                    // Known battery answering with invalid data —
-                                                    // count it as a failed read only for addresses
-                                                    // we have seen answer before.
-                                                    if known_battery_addrs.contains(&addr) {
-                                                        track_battery_conn(
-                                                            &state, i + 2, addr, false,
-                                                        ).await;
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    "Battery addr 0x{:02X}: no response: {e}",
-                                                    addr
-                                                );
-                                                if known_battery_addrs.contains(&addr) {
-                                                    track_battery_conn(
-                                                        &state, i + 2, addr, false,
-                                                    ).await;
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
                                 }
 
                                 // --- External CT meter reads ---
                                 // Read all previously detected meters on every poll cycle.
                                 // If a meter stops responding, we skip it silently.
-                                for &addr in &detected_meters {
-                                    match client.read_registers_at_slave(
-                                        addr,
-                                        crate::modbus::framer::RegisterType::Input,
-                                        60,
-                                        30,
-                                    ).await {
-                                        Ok(data) => {
-                                            let meter =
-                                                crate::inverter::decoder::decode_meter_data(&data, addr);
-                                            cached_external_meters.insert(addr, meter);
-                                            external_meter_failures.remove(&addr);
-                                        }
-                                        Err(e) => {
-                                            record_external_meter_failure(
-                                                &mut external_meter_failures,
-                                                &mut cached_external_meters,
-                                                addr,
-                                            );
-                                            tracing::debug!(
-                                                "Meter addr 0x{addr:02X}: read failed: {e}",
-                                            );
-                                        }
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                }
+                                crate::inverter::battery_reads::read_external_meters(
+                                    &mut client,
+                                    &detected_meters,
+                                    &mut cached_external_meters,
+                                    &mut external_meter_failures,
+                                    crate::inverter::battery_reads::DEVICE_READ_PACE,
+                                )
+                                .await;
                                 snapshot.meters = merge_external_meters(
                                     std::mem::take(&mut snapshot.meters),
                                     &detected_meters,
                                     &cached_external_meters,
                                 );
 
-                                // If inverter IR(59) was 0, recalculate SOC from
-                                // capacity-weighted average of ALL battery modules
-                                // (now that additional batteries have been read).
-                                if snapshot.soc == 0 && snapshot.battery_modules.len() > 1 {
-                                    let total_cap: f32 = snapshot
-                                        .battery_modules.iter().map(|m| m.capacity_ah).sum();
-                                    let total_rem: f32 = snapshot
-                                        .battery_modules.iter().map(|m| m.remaining_capacity_ah).sum();
-                                    if total_cap > 0.0 {
-                                        let agg = (total_rem / total_cap * 100.0).round() as u8;
-                                        snapshot.soc = agg.min(100);
-                                        tracing::debug!(
-                                            "Inverter SOC was 0 - aggregate from {} modules: {}%",
-                                            snapshot.battery_modules.len(),
-                                            snapshot.soc
-                                        );
-                                    }
-                                }
+                                // If inverter IR(59) was 0, recalculate SOC from the
+                                // capacity-weighted average of ALL battery modules (now
+                                // that additional batteries have been read).
+                                crate::inverter::battery_reads::apply_aggregate_soc(&mut snapshot);
 
                                 // Override battery temperature from BMS data for all
                                 // device types (IR(56) is frequently garbage - #48).
