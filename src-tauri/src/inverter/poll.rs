@@ -5719,108 +5719,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // ---- Daily consumption report ----
-                                {
-                                    let settings_cfg = state.alert_config.lock().await;
-                                    let config = settings_cfg.clone();
-                                    drop(settings_cfg);
-
-                                    if config.daily_report_enabled && config.enabled {
-                                        let today = chrono::Local::now().date_naive();
-                                        let mut last_sent = state.last_report_date.lock().await;
-                                        // Only send if we have sent a report before.
-                                        // Don't send on startup - last_sent starts as None.
-                                        if let Some(sent_date) = *last_sent {
-                                            if sent_date < today {
-                                                let now = chrono::Local::now();
-                                                let minutes_since_midnight =
-                                                    now.hour() * 60 + now.minute();
-                                                let send_minutes = config.daily_report_hour as u32 * 60
-                                                    + config.daily_report_minute as u32;
-
-                                                if minutes_since_midnight >= send_minutes {
-                                                    let yesterday = today
-                                                        .checked_sub_signed(
-                                                            chrono::Duration::days(1),
-                                                        )
-                                                        .unwrap_or(today);
-                                                    let db_guard = state.history.lock().await;
-                                                    let db = db_guard.clone();
-                                                    drop(db_guard);
-
-                                                    if let Some(db) = db {
-                                                        let report = tokio::task::spawn_blocking(move || {
-                                                            let rows = db.get_readings_for_date(yesterday)?;
-                                                            let date_str = yesterday
-                                                                .format("%A %d %B %Y")
-                                                                .to_string();
-                                                            let Some(body) = crate::alerts::report::
-                                                                generate_daily_report_html(&rows, &date_str)
-                                                            else {
-                                                                return Ok(None);
-                                                            };
-                                                            let settings = crate::settings::Settings::load();
-                                                            let caption = crate::alerts::report::
-                                                                generate_daily_summary_text(
-                                                                    &rows,
-                                                                    &date_str,
-                                                                    &settings,
-                                                                )
-                                                                .unwrap_or_default();
-                                                            Ok(Some((
-                                                                caption,
-                                                                format!("hem-report-{yesterday}.html"),
-                                                                body,
-                                                            )))
-                                                        })
-                                                        .await
-                                                        .map_err(|error| {
-                                                            format!("daily report worker failed: {error}")
-                                                        })
-                                                        .and_then(|result| result);
-
-                                                        match report {
-                                                            Ok(Some((caption, filename, body))) => {
-                                                                let token = config.telegram_bot_token.clone();
-                                                                let chat_id = config.telegram_chat_id.clone();
-                                                                tokio::task::spawn_blocking(move || {
-                                                                    // Caption uses intentional <b>/<i> tags from
-                                                                    // generate_daily_summary_text, so we keep HTML
-                                                                    // parse_mode here (unlike the support-bundle
-                                                                    // caption, which is plain text).
-                                                                    match crate::alerts::send_telegram_document(
-                                                                        &token,
-                                                                        &chat_id,
-                                                                        &caption,
-                                                                        &filename,
-                                                                        body.as_bytes(),
-                                                                        Some("HTML"),
-                                                                    ) {
-                                                                        Ok(()) => tracing::warn!("Daily report sent"),
-                                                                        Err(e) => tracing::warn!(
-                                                                            "Failed to send daily report: {e}"
-                                                                        ),
-                                                                    }
-                                                                });
-                                                                *last_sent = Some(today);
-                                                            }
-                                                            Ok(None) => {
-                                                                tracing::debug!(
-                                                                    "Daily report: insufficient data for {yesterday}",
-                                                                );
-                                                                *last_sent = Some(today);
-                                                            }
-                                                            Err(e) => {
-                                                                tracing::warn!(
-                                                                    "Failed to query history for daily report: {e}"
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                crate::inverter::daily_report::run_daily_report(
+                                    &state,
+                                    chrono::Local::now(),
+                                    crate::inverter::daily_report::send_daily_report_telegram,
+                                )
+                                .await;
 
                                 // Reflect the (possibly updated) cosy_active flag
                                 // AFTER the cosy state machine has run. Without this,
