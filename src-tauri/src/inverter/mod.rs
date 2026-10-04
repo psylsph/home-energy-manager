@@ -7,6 +7,7 @@ pub(crate) mod agile;
 pub mod decoder;
 pub mod discovery;
 pub mod encoder;
+pub(crate) mod forecast_plan;
 pub mod model;
 pub mod poll;
 pub mod power_limit;
