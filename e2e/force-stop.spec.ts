@@ -229,7 +229,14 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
-    test.setTimeout(60_000);
+    // Two settle-and-wait stages (start, then stop) share this test, so its
+    // floor on a perfectly quiet run is ~50 s: a 7 s initial quiet window, ~20 s
+    // for the 5 start writes (1.5 s apart, behind a poll cycle) plus their 7 s
+    // settle window, ~16 s for the 7 stop writes plus theirs, and fixture
+    // overhead. Every deferred batch left by an earlier test costs one more 7 s
+    // window, and each stage may legitimately run to its own 30 s bound, so a
+    // 60 s cap made a correct run time out. Budget for the stage bounds instead.
+    test.setTimeout(120_000);
     await clearWrites(drainModbusWrites);
 
     // No Content-Type, no body.
