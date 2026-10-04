@@ -4,6 +4,7 @@
 //! periodic polling, and network discovery of GivEnergy inverters.
 
 pub(crate) mod agile;
+pub(crate) mod auto_discovery;
 pub mod daily_report;
 pub mod decoder;
 pub mod discovery;

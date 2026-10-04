@@ -3123,10 +3123,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
             .load(std::sync::atomic::Ordering::Relaxed),
     );
     let mut last_discovery_time: Option<Instant> = None;
-    // After this many consecutive failures, trigger auto-discovery.
-    const DISCOVERY_AFTER_FAILURES: u32 = 5;
-    // Minimum interval between auto-discovery scans.
-    const DISCOVERY_COOLDOWN: Duration = Duration::from_secs(300);
 
     loop {
         // ---- Manual reconnect request? ----
@@ -5925,11 +5921,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // in case its IP changed (DHCP renewal, etc.). If exactly one
                 // alternative inverter is found, auto-switch to it.
                 consecutive_connect_failures = consecutive_connect_failures.wrapping_add(1);
-                let should_discover = !settings.disable_auto_discovery
-                    && consecutive_connect_failures >= DISCOVERY_AFTER_FAILURES
-                    && last_discovery_time.is_none_or(|t| t.elapsed() >= DISCOVERY_COOLDOWN);
-
-                if should_discover {
+                if crate::inverter::auto_discovery::discovery_due(
+                    settings.disable_auto_discovery,
+                    consecutive_connect_failures,
+                    last_discovery_time,
+                    Instant::now(),
+                ) {
                     last_discovery_time = Some(Instant::now());
                     tracing::warn!(
                         "Auto-discovery: {} consecutive failures to reach {}:{}. Scanning LAN...",
@@ -5942,63 +5939,18 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     let inverters =
                         crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
 
-                    // Filter out the configured host (it's clearly not responding).
-                    let candidates: Vec<_> = inverters
-                        .iter()
-                        .filter(|inv| inv.ip != settings.host)
-                        .collect();
-
-                    match candidates.len() {
-                        0 => {
-                            tracing::warn!(
-                                "Auto-discovery: no alternative inverters found on LAN ({}:{} unreachable). Dongle may be powered off or network changed.",
-                                settings.host,
-                                settings.port
-                            );
-                        }
-                        1 => {
-                            let new = &candidates[0];
-                            tracing::warn!(
-                                "Auto-discovery: found alternative inverter at {}:{}. Auto-switching from {}:{}.",
-                                new.ip, new.port, settings.host, settings.port
-                            );
-
-                            // Persist the new host to disk so it survives restart.
-                            let new_host = new.ip.clone();
-                            let new_port = new.port;
-                            if let Err(e) = settings_update_blocking(move |s| {
-                                s.host = new_host;
-                                s.port = new_port;
-                            })
-                            .await
-                            {
-                                tracing::warn!("Auto-discovery: failed to persist new host: {e}");
-                            }
-
-                            // Update in-memory settings + bump version so the
-                            // next loop iteration picks up the new host.
-                            let mut poll_settings = state.settings.lock().await;
-                            poll_settings.host = new.ip.clone();
-                            poll_settings.port = new.port;
-                            poll_settings.version = poll_settings.version.wrapping_add(1);
-                            drop(poll_settings);
-
-                            // Reset counters so we try the new host immediately
-                            // with a fresh TCP connect, not a stale backoff.
-                            consecutive_connect_failures = 0;
-                            reconnect.reset_connect_backoff();
-                        }
-                        n => {
-                            let alts: Vec<_> = candidates
-                                .iter()
-                                .map(|i| format!("{}:{}", i.ip, i.port))
-                                .collect();
-                            tracing::warn!(
-                                "Auto-discovery: found {} alternative inverters — ambiguous, not auto-switching: {}",
-                                n,
-                                alts.join(", ")
-                            );
-                        }
+                    if crate::inverter::auto_discovery::apply_discovery(
+                        &state,
+                        &settings.host,
+                        settings.port,
+                        &inverters,
+                    )
+                    .await
+                    {
+                        // Reset counters so we try the new host immediately with
+                        // a fresh TCP connect, not a stale backoff.
+                        consecutive_connect_failures = 0;
+                        reconnect.reset_connect_backoff();
                     }
                 }
             }
