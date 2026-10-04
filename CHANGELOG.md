@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.85.5] - 2026-10-04
+
+### Fixed
+
+- **The daily consumption report now actually sends.** Since June the scheduled Telegram report never fired. It now goes out at the time you choose, and if you turn it on (or restart the app) shortly before that time you still get this morning's report rather than waiting a day.
+- **Every switch on the Settings page now works with a keyboard and a screen reader.** Only four of nineteen switches were announced by name; all of them are now labelled, can be tabbed to, and flip with Space or Enter.
+- **Saving settings can no longer overwrite what you configured with defaults.** On a slow or failing connection the Save buttons for Notifications, Auto Winter, the Load and Temperature limiters, the Discharge Schedule Minimum SOC, Adaptive Charge and the Agile thresholds could be pressed before your saved settings had loaded. They now stay off until the settings have loaded, and if they can't be loaded they stay off and say why. The Notifications form is also locked until it has loaded, so nothing you type is lost.
+- **A failed attempt to switch Alerts or Auto-Discovery on or off now shows a clear message** instead of failing silently.
+
+### Improved
+
+- **The log now records how your inverter model was identified.** At startup it notes the device code and firmware, whether the code was recognised exactly, and warns once if it isn't recognised, which makes support requests easier to diagnose.
+
 ## [0.85.4] - 2026-10-04
 
 ### Fixed
