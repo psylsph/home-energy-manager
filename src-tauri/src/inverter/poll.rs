@@ -1148,6 +1148,270 @@ fn observe_model_detection(
     }
 }
 
+/// The captured baseline of a bounded force action: when its slot closes and
+/// which inverter it describes.
+struct ForceBaselineIdentity<'a> {
+    slot_end_ms: Option<i64>,
+    device_type: DeviceType,
+    inverter_serial: &'a str,
+}
+
+/// What the poll loop does about a bounded force action whose slot may have
+/// closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForceAutoRevertDecision {
+    /// No baseline, no slot end, the slot is still open, or a restoration is
+    /// already awaiting confirmation (failed attempts are re-queued by
+    /// `retry_stalled_force_restorations` after a quiet interval, not here).
+    NotDue,
+    /// The slot closed but a higher-priority owner holds the discharge-control
+    /// domain this cycle.
+    DeferredByOwner,
+    /// The baseline provably belongs to a different inverter: release it
+    /// rather than write it onto hardware it never described.
+    ReleaseForeignBaseline,
+    /// The baseline's identity cannot be verified this cycle: keep it and try
+    /// again on a later one.
+    WithholdUnidentifiable,
+    /// Write the captured baseline back.
+    Restore,
+}
+
+/// Decide whether a bounded Force Charge / Force Discharge should now be
+/// reverted. The arbiter request is made only once a revert is actually due
+/// (it records the request for the rest of the cycle), and its outcome comes
+/// before the identity check, exactly as the two auto-revert blocks always did.
+fn decide_force_auto_revert(
+    baseline: Option<ForceBaselineIdentity<'_>>,
+    now_ms: i64,
+    restoration_pending: bool,
+    arbiter: &mut DischargeControlArbiter,
+    snapshot: &InverterSnapshot,
+) -> ForceAutoRevertDecision {
+    let Some(baseline) = baseline else {
+        return ForceAutoRevertDecision::NotDue;
+    };
+    let expired = baseline.slot_end_ms.is_some_and(|end| now_ms >= end);
+    if !expired || restoration_pending {
+        return ForceAutoRevertDecision::NotDue;
+    }
+    if !arbiter.request(DischargeControlOwner::ManualForce) {
+        return ForceAutoRevertDecision::DeferredByOwner;
+    }
+    if force_baseline_matches_inverter(
+        Some(snapshot),
+        baseline.device_type,
+        baseline.inverter_serial,
+    ) {
+        ForceAutoRevertDecision::Restore
+    } else if force_baseline_belongs_to_other_inverter(
+        Some(snapshot),
+        baseline.device_type,
+        baseline.inverter_serial,
+    ) {
+        ForceAutoRevertDecision::ReleaseForeignBaseline
+    } else {
+        ForceAutoRevertDecision::WithholdUnidentifiable
+    }
+}
+
+/// Force Charge auto-revert.
+///
+/// A bounded external Force Charge also owns a temporary schedule window. Once
+/// it closes, restore the captured charge flags, target, mode, and schedule
+/// using the same durable ownership/readback path as an explicit Stop.
+async fn run_force_charge_auto_revert(
+    state: &Arc<AppState>,
+    client: &mut ModbusClient,
+    snapshot: &InverterSnapshot,
+    arbiter: &mut DischargeControlArbiter,
+    write_gap: Duration,
+) {
+    let _force_action_guard = state.force_action_lock.lock().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let revert = state.force_charge_revert.lock().await.clone();
+    let restoration_pending = state.force_charge_restoration.lock().await.is_some();
+    let decision = decide_force_auto_revert(
+        revert.as_ref().map(|r| ForceBaselineIdentity {
+            slot_end_ms: r.force_charge_slot_end_ms,
+            device_type: r.device_type,
+            inverter_serial: &r.inverter_serial,
+        }),
+        now_ms,
+        restoration_pending,
+        arbiter,
+        snapshot,
+    );
+    let Some(revert) = revert else {
+        return;
+    };
+    match decision {
+        ForceAutoRevertDecision::NotDue => {}
+        ForceAutoRevertDecision::DeferredByOwner => {
+            tracing::debug!(
+                owner = ?arbiter.selected_owner(),
+                "Force Charge auto-revert deferred by a higher-priority owner"
+            );
+        }
+        ForceAutoRevertDecision::ReleaseForeignBaseline => {
+            tracing::warn!(
+                captured = %revert.inverter_serial,
+                "Force Charge auto-revert withheld: the captured inverter is not connected"
+            );
+            state.force_charge_revert.lock().await.take();
+            if let Err(error) = state.command_ledger.complete_restoration("force_charge") {
+                tracing::warn!("Failed to release Force Charge ownership: {error}");
+            }
+        }
+        ForceAutoRevertDecision::WithholdUnidentifiable => {
+            tracing::debug!(
+                "Force Charge auto-revert withheld: the captured inverter is not identifiable"
+            );
+        }
+        ForceAutoRevertDecision::Restore => {
+            *state.force_charge_restoration.lock().await = Some(ForceRestorationRequest {
+                requested_at_ms: now_ms,
+                device_type: snapshot.device_type,
+                inverter_serial: snapshot.inverter_serial.clone(),
+                firmware_version: snapshot.firmware_version.clone(),
+            });
+            if let Err(error) = state
+                .command_ledger
+                .hold_restoration_ownership("force_charge")
+            {
+                tracing::warn!("Could not hold Force Charge restoration ownership: {error}");
+            }
+            let writes =
+                crate::server::api::build_force_charge_stop_writes(snapshot.device_type, &revert);
+            for write in writes {
+                match client.write_register(write.address, write.value).await {
+                    Ok(()) => tracing::info!(
+                        "Force Charge auto-revert: wrote reg {} = {}",
+                        write.address,
+                        write.value
+                    ),
+                    Err(error) => tracing::error!(
+                        "Force Charge auto-revert: write reg {} failed: {error}",
+                        write.address
+                    ),
+                }
+                tokio::time::sleep(write_gap).await;
+            }
+        }
+    }
+}
+
+/// Force Discharge auto-revert (issue #129).
+///
+/// When Force Discharge is started with a bounded duration
+/// (`POST /api/control/force-discharge {"minutes": N}`), the API handler
+/// records the slot's end time in
+/// `force_discharge_revert.force_discharge_slot_end_ms`. When that time passes
+/// the inverter stops discharging (the slot window has closed) but the
+/// force-discharge flags remain set: HR 27 = 0 (export), HR 59 = 1
+/// (enable_discharge), HR 96 = 0 (charge off), HR 20 = 0 (charge target off).
+/// The battery is effectively paused - it won't charge from solar and won't
+/// discharge. Without this auto-revert, the user must manually click Eco.
+///
+/// Each poll cycle checks whether the slot has expired. If so the revert is
+/// kept (retaining ownership so a subsequent explicit Stop still retries) and
+/// the restoration writes go out over the live Modbus client, as for the
+/// explicit Stop button. Only the FIRST attempt is initiated here; failed
+/// attempts are re-queued by `retry_stalled_force_restorations` after a quiet
+/// interval. Re-initiating every cycle would advance the freshness barrier
+/// past every snapshot and confirmation could never succeed.
+///
+/// Returns the new value for the caller's `discharge_control_may_override_pause`
+/// when this step decides it (`Some(false)` when the baseline was withheld or
+/// released, `Some(true)` when restoration writes were sent), else `None`.
+async fn run_force_discharge_auto_revert(
+    state: &Arc<AppState>,
+    client: &mut ModbusClient,
+    snapshot: &InverterSnapshot,
+    arbiter: &mut DischargeControlArbiter,
+    write_gap: Duration,
+) -> Option<bool> {
+    let _force_action_guard = state.force_action_lock.lock().await;
+    let now_ms = chrono::Local::now().timestamp_millis();
+    let revert = state.force_discharge_revert.lock().await.clone();
+    let restoration_pending = state.force_discharge_restoration.lock().await.is_some();
+    // Ownership is retained until a causally newer snapshot confirms every
+    // restoration write, so failed writes retry on a later poll instead of
+    // losing the baseline permanently. The identity rule is the explicit
+    // Stop's: a provably-foreign baseline is released instead of being written
+    // onto hardware it never described; an unverifiable one is withheld.
+    let decision = decide_force_auto_revert(
+        revert.as_ref().map(|r| ForceBaselineIdentity {
+            slot_end_ms: r.force_discharge_slot_end_ms,
+            device_type: r.device_type,
+            inverter_serial: &r.inverter_serial,
+        }),
+        now_ms,
+        restoration_pending,
+        arbiter,
+        snapshot,
+    );
+    let revert = revert?;
+    match decision {
+        ForceAutoRevertDecision::NotDue => None,
+        ForceAutoRevertDecision::DeferredByOwner => {
+            tracing::debug!(
+                owner = ?arbiter.selected_owner(),
+                "Force discharge auto-revert deferred by a higher-priority owner"
+            );
+            None
+        }
+        ForceAutoRevertDecision::ReleaseForeignBaseline => {
+            tracing::warn!(
+                captured = %revert.inverter_serial,
+                "Force discharge auto-revert withheld: the captured inverter is not connected"
+            );
+            state.force_discharge_revert.lock().await.take();
+            if let Err(error) = state.command_ledger.complete_restoration("force_discharge") {
+                tracing::warn!("Failed to release Force Discharge ownership: {error}");
+            }
+            Some(false)
+        }
+        ForceAutoRevertDecision::WithholdUnidentifiable => {
+            tracing::debug!(
+                "Force discharge auto-revert withheld: the captured inverter is not identifiable"
+            );
+            Some(false)
+        }
+        ForceAutoRevertDecision::Restore => {
+            *state.force_discharge_restoration.lock().await = Some(ForceRestorationRequest {
+                requested_at_ms: now_ms,
+                device_type: snapshot.device_type,
+                inverter_serial: snapshot.inverter_serial.clone(),
+                firmware_version: snapshot.firmware_version.clone(),
+            });
+            let writes = crate::server::api::build_force_discharge_stop_writes(
+                snapshot.device_type,
+                &snapshot.firmware_version,
+                &revert,
+            );
+            if writes.is_empty() {
+                return None;
+            }
+            for w in &writes {
+                match client.write_register(w.address, w.value).await {
+                    Ok(()) => tracing::info!(
+                        "Force discharge auto-revert: wrote reg {} = {}",
+                        w.address,
+                        w.value
+                    ),
+                    Err(e) => tracing::error!(
+                        "Force discharge auto-revert: write reg {} failed: {e}",
+                        w.address
+                    ),
+                }
+                tokio::time::sleep(write_gap).await;
+            }
+            Some(true)
+        }
+    }
+}
+
 /// Which optional register blocks this cycle actually read. Optional blocks
 /// are polled by device type and can individually time out, so the values they
 /// feed must be carried forward from the previous snapshot when absent.
@@ -4886,234 +5150,27 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // the current snapshot cannot yet reflect one of these writes.
                                 let mut discharge_control_may_override_pause = false;
 
-                                // ---- Force Charge auto-revert ----
-                                //
-                                // A bounded external Force Charge also owns a
-                                // temporary schedule window. Once it closes,
-                                // restore the captured charge flags, target,
-                                // mode, and schedule using the same durable
-                                // ownership/readback path as an explicit Stop.
+                                // ---- Force Charge / Force Discharge auto-revert ----
+                                // Bounded force actions restore their captured baseline
+                                // once the slot closes (see the functions' docs).
+                                run_force_charge_auto_revert(
+                                    &state,
+                                    &mut client,
+                                    &snapshot,
+                                    &mut discharge_arbiter,
+                                    write_gap,
+                                )
+                                .await;
+                                if let Some(may_override) = run_force_discharge_auto_revert(
+                                    &state,
+                                    &mut client,
+                                    &snapshot,
+                                    &mut discharge_arbiter,
+                                    write_gap,
+                                )
+                                .await
                                 {
-                                    let _force_action_guard = state.force_action_lock.lock().await;
-                                    let now_ms = chrono::Utc::now().timestamp_millis();
-                                    let revert_guard = state.force_charge_revert.lock().await;
-                                    let expired = revert_guard
-                                        .as_ref()
-                                        .and_then(|revert| revert.force_charge_slot_end_ms)
-                                        .is_some_and(|end| now_ms >= end);
-                                    let restoration_pending = state
-                                        .force_charge_restoration
-                                        .lock()
-                                        .await
-                                        .is_some();
-                                    if expired
-                                        && !restoration_pending
-                                        && discharge_arbiter
-                                            .request(DischargeControlOwner::ManualForce)
-                                    {
-                                        let revert = revert_guard.clone();
-                                        drop(revert_guard);
-                                        if let Some(revert) = revert {
-                                            if !force_baseline_matches_inverter(
-                                                Some(&snapshot),
-                                                revert.device_type,
-                                                &revert.inverter_serial,
-                                            ) {
-                                                if force_baseline_belongs_to_other_inverter(
-                                                    Some(&snapshot),
-                                                    revert.device_type,
-                                                    &revert.inverter_serial,
-                                                ) {
-                                                    tracing::warn!(
-                                                        captured = %revert.inverter_serial,
-                                                        "Force Charge auto-revert withheld: the captured inverter is not connected"
-                                                    );
-                                                    state.force_charge_revert.lock().await.take();
-                                                    if let Err(error) = state
-                                                        .command_ledger
-                                                        .complete_restoration("force_charge")
-                                                    {
-                                                        tracing::warn!(
-                                                            "Failed to release Force Charge ownership: {error}"
-                                                        );
-                                                    }
-                                                } else {
-                                                    tracing::debug!(
-                                                        "Force Charge auto-revert withheld: the captured inverter is not identifiable"
-                                                    );
-                                                }
-                                            } else {
-                                                *state.force_charge_restoration.lock().await =
-                                                    Some(ForceRestorationRequest {
-                                                        requested_at_ms: now_ms,
-                                                        device_type: snapshot.device_type,
-                                                        inverter_serial: snapshot.inverter_serial.clone(),
-                                                        firmware_version: snapshot.firmware_version.clone(),
-                                                    });
-                                                if let Err(error) = state
-                                                    .command_ledger
-                                                    .hold_restoration_ownership("force_charge")
-                                                {
-                                                    tracing::warn!(
-                                                        "Could not hold Force Charge restoration ownership: {error}"
-                                                    );
-                                                }
-                                                let writes = crate::server::api::build_force_charge_stop_writes(
-                                                    snapshot.device_type,
-                                                    &revert,
-                                                );
-                                                for write in writes {
-                                                    match client
-                                                        .write_register(write.address, write.value)
-                                                        .await
-                                                    {
-                                                        Ok(()) => tracing::info!(
-                                                            "Force Charge auto-revert: wrote reg {} = {}",
-                                                            write.address,
-                                                            write.value
-                                                        ),
-                                                        Err(error) => tracing::error!(
-                                                            "Force Charge auto-revert: write reg {} failed: {error}",
-                                                            write.address
-                                                        ),
-                                                    }
-                                                    tokio::time::sleep(write_gap).await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // ---- Force Discharge auto-revert (issue #129) ----
-                                //
-                                // When Force Discharge is started with a bounded duration
-                                // (`POST /api/control/force-discharge {"minutes": N}`), the API
-                                // handler records the slot's end time in
-                                // `force_discharge_revert.force_discharge_slot_end_ms`. When
-                                // that time passes, the inverter stops discharging (the slot
-                                // window has closed) but the force-discharge flags remain
-                                // set: HR 27 = 0 (export), HR 59 = 1 (enable_discharge),
-                                // HR 96 = 0 (charge off), HR 20 = 0 (charge target off).
-                                // The battery is effectively paused — it won't charge from
-                                // solar and won't discharge. Without this auto-revert, the
-                                // user must manually click Eco to recover.
-                                //
-                                // Each poll cycle checks if the slot has expired. If so, we
-                                // keep the revert (retaining ownership so a subsequent explicit
-                                // Stop still retries) and queue the restoration writes via the
-                                // live Modbus client (same path as the explicit Stop button).
-                                // Only the FIRST attempt is initiated here; failed attempts are
-                                // re-queued by `retry_stalled_force_restorations` after a quiet
-                                // interval. Re-initiating every cycle would advance the
-                                // freshness barrier past every snapshot and confirmation
-                                // could never succeed.
-                                {
-                                    let _force_action_guard = state.force_action_lock.lock().await;
-                                    let now_ms = chrono::Local::now().timestamp_millis();
-                                    let revert_guard = state.force_discharge_revert.lock().await;
-                                    let expired = revert_guard
-                                        .as_ref()
-                                        .and_then(|r| r.force_discharge_slot_end_ms)
-                                        .is_some_and(|end| now_ms >= end);
-                                    let restoration_pending = state
-                                        .force_discharge_restoration
-                                        .lock()
-                                        .await
-                                        .is_some();
-
-                                    if expired
-                                        && !restoration_pending
-                                        && discharge_arbiter
-                                            .request(DischargeControlOwner::ManualForce)
-                                    {
-                                        // Retain ownership until a causally newer
-                                        // snapshot confirms every restoration
-                                        // write. Failed writes therefore retry on
-                                        // a later poll instead of losing the
-                                        // baseline permanently.
-                                        let revert = revert_guard.clone();
-                                        drop(revert_guard);
-                                        if let Some(r) = revert {
-                                            // Second automatic writer of a captured
-                                            // baseline: same identity rule as the
-                                            // explicit Stop. A provably-foreign
-                                            // baseline is released instead of being
-                                            // written onto hardware it never
-                                            // described; an unverifiable one is
-                                            // withheld for a later cycle.
-                                            if !force_baseline_matches_inverter(
-                                                Some(&snapshot),
-                                                r.device_type,
-                                                &r.inverter_serial,
-                                            ) {
-                                                if force_baseline_belongs_to_other_inverter(
-                                                    Some(&snapshot),
-                                                    r.device_type,
-                                                    &r.inverter_serial,
-                                                ) {
-                                                    tracing::warn!(
-                                                        captured = %r.inverter_serial,
-                                                        "Force discharge auto-revert withheld: the captured inverter is not connected"
-                                                    );
-                                                    state.force_discharge_revert.lock().await.take();
-                                                    if let Err(error) = state
-                                                        .command_ledger
-                                                        .complete_restoration("force_discharge")
-                                                    {
-                                                        tracing::warn!(
-                                                            "Failed to release Force Discharge ownership: {error}"
-                                                        );
-                                                    }
-                                                } else {
-                                                    tracing::debug!(
-                                                        "Force discharge auto-revert withheld: the captured inverter is not identifiable"
-                                                    );
-                                                }
-                                                // Skip the write; ownership is either
-                                                // released (foreign) or retained
-                                                // (unverifiable) for the next cycle.
-                                                discharge_control_may_override_pause = false;
-                                            } else {
-                                            *state.force_discharge_restoration.lock().await =
-                                                Some(ForceRestorationRequest {
-                                                    requested_at_ms: now_ms,
-                                                    device_type: snapshot.device_type,
-                                                    inverter_serial: snapshot.inverter_serial.clone(),
-                                                    firmware_version: snapshot.firmware_version.clone(),
-                                                });
-                                            let writes = crate::server::api::build_force_discharge_stop_writes(
-                                                snapshot.device_type,
-                                                &snapshot.firmware_version,
-                                                &r,
-                                            );
-                                            if !writes.is_empty() {
-                                                discharge_control_may_override_pause = true;
-                                                for w in &writes {
-                                                    match client.write_register(w.address, w.value).await {
-                                                        Ok(()) => tracing::info!(
-                                                            "Force discharge auto-revert: wrote reg {} = {}",
-                                                            w.address, w.value
-                                                        ),
-                                                        Err(e) => tracing::error!(
-                                                            "Force discharge auto-revert: write reg {} failed: {e}",
-                                                            w.address
-                                                        ),
-                                                    }
-                                                    tokio::time::sleep(write_gap).await;
-                                                }
-                                            }
-                                            }
-                                        }
-                                    } else if expired && !restoration_pending {
-                                        tracing::debug!(
-                                            owner = ?discharge_arbiter.selected_owner(),
-                                            "Force discharge auto-revert deferred by a higher-priority owner"
-                                        );
-                                    }
-                                    // (expired && restoration_pending): the first
-                                    // attempt is awaiting confirmation; failed attempts
-                                    // are re-queued by `retry_stalled_force_restorations`
-                                    // in publish_snapshot after the quiet interval.
+                                    discharge_control_may_override_pause = may_override;
                                 }
 
                                 // ---- Timed Export state machine ----
@@ -8903,6 +8960,671 @@ mod tests {
                 "AppState::new should seed cosy_active from cosy_active_persisted"
             );
         });
+    }
+
+    // -------------------------------------------------------------------
+    // decide_force_auto_revert
+    // -------------------------------------------------------------------
+
+    fn gen2_snapshot(serial: &str) -> InverterSnapshot {
+        InverterSnapshot {
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial.to_string(),
+            firmware_version: "400".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn baseline(slot_end_ms: Option<i64>, serial: &str) -> Option<ForceBaselineIdentity<'_>> {
+        Some(ForceBaselineIdentity {
+            slot_end_ms,
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial,
+        })
+    }
+
+    const REVERT_NOW_MS: i64 = 1_000_000;
+
+    /// Run the decision against a fresh arbiter, returning both results.
+    fn decide(
+        baseline: Option<ForceBaselineIdentity<'_>>,
+        restoration_pending: bool,
+        snapshot: &InverterSnapshot,
+    ) -> (ForceAutoRevertDecision, DischargeControlArbiter) {
+        let mut arbiter = DischargeControlArbiter::default();
+        let decision = decide_force_auto_revert(
+            baseline,
+            REVERT_NOW_MS,
+            restoration_pending,
+            &mut arbiter,
+            snapshot,
+        );
+        (decision, arbiter)
+    }
+
+    #[test]
+    fn force_revert_is_not_due_without_a_baseline() {
+        let (decision, arbiter) = decide(None, false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(arbiter.selected_owner(), None, "must not claim the domain");
+    }
+
+    #[test]
+    fn force_revert_is_not_due_for_an_unbounded_action() {
+        let (decision, arbiter) = decide(baseline(None, "SN1"), false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(arbiter.selected_owner(), None);
+    }
+
+    #[test]
+    fn force_revert_waits_while_the_slot_is_open() {
+        let (decision, arbiter) = decide(
+            baseline(Some(REVERT_NOW_MS + 1), "SN1"),
+            false,
+            &gen2_snapshot("SN1"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(
+            arbiter.selected_owner(),
+            None,
+            "an open slot must not claim the domain"
+        );
+    }
+
+    #[test]
+    fn force_revert_is_due_exactly_at_the_slot_end() {
+        let (decision, _) = decide(
+            baseline(Some(REVERT_NOW_MS), "SN1"),
+            false,
+            &gen2_snapshot("SN1"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::Restore);
+    }
+
+    #[test]
+    fn force_revert_is_not_repeated_while_a_restoration_is_pending() {
+        // Re-initiating every cycle would advance the freshness barrier past
+        // every snapshot, so confirmation could never succeed.
+        let (decision, arbiter) = decide(baseline(Some(0), "SN1"), true, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(arbiter.selected_owner(), None);
+    }
+
+    #[test]
+    fn force_revert_restores_when_the_baseline_matches_and_claims_the_domain() {
+        let (decision, arbiter) = decide(baseline(Some(0), "SN1"), false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::Restore);
+        assert_eq!(
+            arbiter.selected_owner(),
+            Some(DischargeControlOwner::ManualForce)
+        );
+    }
+
+    #[test]
+    fn force_revert_defers_to_a_safety_owner() {
+        let mut arbiter = DischargeControlArbiter::default();
+        assert!(arbiter.request(DischargeControlOwner::Safety));
+        let decision = decide_force_auto_revert(
+            baseline(Some(0), "SN1"),
+            REVERT_NOW_MS,
+            false,
+            &mut arbiter,
+            &gen2_snapshot("SN1"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::DeferredByOwner);
+        assert_eq!(
+            arbiter.selected_owner(),
+            Some(DischargeControlOwner::Safety)
+        );
+    }
+
+    #[test]
+    fn force_revert_outranks_lower_priority_owners() {
+        for lower in [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+        ] {
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(lower);
+            let decision = decide_force_auto_revert(
+                baseline(Some(0), "SN1"),
+                REVERT_NOW_MS,
+                false,
+                &mut arbiter,
+                &gen2_snapshot("SN1"),
+            );
+            assert_eq!(decision, ForceAutoRevertDecision::Restore, "{lower:?}");
+            assert_eq!(
+                arbiter.selected_owner(),
+                Some(DischargeControlOwner::ManualForce)
+            );
+        }
+    }
+
+    #[test]
+    fn force_revert_releases_a_baseline_from_a_different_inverter() {
+        let (decision, _) = decide(baseline(Some(0), "SN-OLD"), false, &gen2_snapshot("SN-NEW"));
+        assert_eq!(decision, ForceAutoRevertDecision::ReleaseForeignBaseline);
+    }
+
+    #[test]
+    fn force_revert_releases_a_baseline_from_a_different_register_family() {
+        // Same serial, but single-phase baseline vs a three-phase unit: the
+        // captured writes cannot be applied safely.
+        let three_phase = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            inverter_serial: "SN1".to_string(),
+            ..Default::default()
+        };
+        let (decision, _) = decide(baseline(Some(0), "SN1"), false, &three_phase);
+        assert_eq!(decision, ForceAutoRevertDecision::ReleaseForeignBaseline);
+    }
+
+    #[test]
+    fn force_revert_accepts_a_same_serial_model_refinement() {
+        // An OTA update can refine the device class (Gen2 -> Gen3) without
+        // changing the register family; that must not strand the baseline.
+        let refined = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            inverter_serial: "SN1".to_string(),
+            ..Default::default()
+        };
+        let (decision, _) = decide(baseline(Some(0), "SN1"), false, &refined);
+        assert_eq!(decision, ForceAutoRevertDecision::Restore);
+    }
+
+    #[test]
+    fn force_revert_withholds_when_identity_cannot_be_verified() {
+        // Unreadable serial on either side: cannot tell, so keep ownership.
+        let (decision, _) = decide(baseline(Some(0), ""), false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::WithholdUnidentifiable);
+        let (decision, _) = decide(baseline(Some(0), "SN1"), false, &gen2_snapshot(""));
+        assert_eq!(decision, ForceAutoRevertDecision::WithholdUnidentifiable);
+    }
+
+    #[test]
+    fn force_revert_asks_the_arbiter_before_judging_identity() {
+        // A foreign baseline must not be released while a higher-priority owner
+        // holds the domain: the arbiter outcome comes first.
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::Safety);
+        let decision = decide_force_auto_revert(
+            baseline(Some(0), "SN-OLD"),
+            REVERT_NOW_MS,
+            false,
+            &mut arbiter,
+            &gen2_snapshot("SN-NEW"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::DeferredByOwner);
+    }
+
+    // -------------------------------------------------------------------
+    // run_force_charge_auto_revert / run_force_discharge_auto_revert
+    // -------------------------------------------------------------------
+
+    type RecordedWrites = Arc<std::sync::Mutex<Vec<(u16, u16)>>>;
+
+    /// A dongle that acknowledges every register write and records it.
+    async fn spawn_write_recorder() -> (ModbusClient, RecordedWrites, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let recorded: RecordedWrites = Arc::default();
+        let log = recorded.clone();
+        let handle = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            loop {
+                let mut header = [0u8; 6];
+                if stream.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+                let mut body = vec![0u8; length];
+                if stream.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                let mut frame = header.to_vec();
+                frame.extend_from_slice(&body);
+                let Ok(decoded) = crate::modbus::framer::decode_frame(&frame) else {
+                    return;
+                };
+                if decoded.function != 6 || decoded.payload.len() < 4 {
+                    return;
+                }
+                let register = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
+                let value = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]);
+                log.lock().unwrap().push((register, value));
+                let mut payload = b"TEST123456".to_vec();
+                payload.extend_from_slice(&register.to_be_bytes());
+                payload.extend_from_slice(&value.to_be_bytes());
+                let reply =
+                    crate::modbus::framer::encode_frame("TEST123456", decoded.slave, 6, &payload);
+                if stream.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(500));
+        client.connect().await.unwrap();
+        (client, recorded, handle)
+    }
+
+    fn charge_baseline(serial: &str, slot_end_ms: Option<i64>) -> ForceChargeRevert {
+        ForceChargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            force_charge_slot_end_ms: slot_end_ms,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial.into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            target_soc: 100,
+            charge_slot_1_target_soc: None,
+            battery_power_mode: 1,
+            charge_rate: None,
+            charge_slot_1_start: None,
+            charge_slot_1_end: None,
+            three_phase_force_charge_enable: None,
+            three_phase_ac_charge_enable: None,
+            battery_pause_mode: Some(0),
+        }
+    }
+
+    fn discharge_baseline(serial: &str, slot_end_ms: Option<i64>) -> ForceDischargeRevert {
+        ForceDischargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial.into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            discharge_rate: None,
+            discharge_slot_1_start: None,
+            discharge_slot_1_end: None,
+            discharge_slot_2_start: None,
+            discharge_slot_2_end: None,
+            three_phase_force_discharge_enable: None,
+            three_phase_force_charge_enable: None,
+            force_discharge_slot_end_ms: slot_end_ms,
+            pause_registers_supported: false,
+            battery_pause_mode_raw: None,
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
+            battery_pause_mode: 0,
+            battery_pause_slot: Default::default(),
+        }
+    }
+
+    const GAP: Duration = Duration::from_millis(1);
+    /// A slot that closed long ago / one that never closes: the wall clock the
+    /// appliers read cannot affect either.
+    const LONG_EXPIRED: Option<i64> = Some(0);
+    const NEVER_EXPIRES: Option<i64> = Some(i64::MAX);
+
+    #[tokio::test]
+    async fn charge_auto_revert_writes_the_baseline_once_the_slot_has_closed() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let revert = charge_baseline("SN1", LONG_EXPIRED);
+            let expected =
+                crate::server::api::build_force_charge_stop_writes(DeviceType::Gen2Hybrid, &revert);
+            assert!(
+                !expected.is_empty(),
+                "fixture must produce restoration writes"
+            );
+            *state.force_charge_revert.lock().await = Some(revert);
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            let sent: Vec<_> = recorded.lock().unwrap().clone();
+            let want: Vec<_> = expected.iter().map(|w| (w.address, w.value)).collect();
+            assert_eq!(sent, want);
+            let request = state.force_charge_restoration.lock().await.clone();
+            assert_eq!(request.map(|r| r.inverter_serial), Some("SN1".to_string()));
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "the baseline is kept until a newer snapshot confirms the writes"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_does_nothing_while_the_slot_is_open() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", NEVER_EXPIRES));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+            assert!(state.force_charge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_does_nothing_without_a_baseline() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_is_not_repeated_while_one_awaits_confirmation() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            let snap = gen2_snapshot("SN1");
+
+            run_force_charge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP).await;
+            let first = recorded.lock().unwrap().len();
+            assert!(first > 0);
+            let first_request = state.force_charge_restoration.lock().await.clone().unwrap();
+
+            // Next cycle: a fresh arbiter, restoration still unconfirmed.
+            let mut next_cycle = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(&state, &mut client, &snap, &mut next_cycle, GAP).await;
+            server.abort();
+
+            assert_eq!(
+                recorded.lock().unwrap().len(),
+                first,
+                "no second batch of writes"
+            );
+            let after = state.force_charge_restoration.lock().await.clone().unwrap();
+            assert_eq!(
+                after.requested_at_ms, first_request.requested_at_ms,
+                "the freshness barrier must not advance again"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_releases_a_baseline_from_another_inverter() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN-OLD", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN-NEW"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(
+                recorded.lock().unwrap().is_empty(),
+                "never write a foreign baseline"
+            );
+            assert!(
+                state.force_charge_revert.lock().await.is_none(),
+                "ownership released"
+            );
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_keeps_an_unverifiable_baseline_for_a_later_cycle() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            // The connected inverter's serial is unreadable this cycle.
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot(""),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "baseline kept"
+            );
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_defers_to_a_higher_priority_owner() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(DischargeControlOwner::Safety);
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+            assert!(state.force_charge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_writes_the_baseline_and_allows_overriding_a_pause() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let revert = discharge_baseline("SN1", LONG_EXPIRED);
+            let expected = crate::server::api::build_force_discharge_stop_writes(
+                DeviceType::Gen2Hybrid,
+                "400",
+                &revert,
+            );
+            assert!(
+                !expected.is_empty(),
+                "fixture must produce restoration writes"
+            );
+            *state.force_discharge_revert.lock().await = Some(revert);
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+
+            let mut arbiter = DischargeControlArbiter::default();
+            let may_override = run_force_discharge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            let want: Vec<_> = expected.iter().map(|w| (w.address, w.value)).collect();
+            assert_eq!(recorded.lock().unwrap().clone(), want);
+            assert_eq!(may_override, Some(true));
+            assert!(state.force_discharge_restoration.lock().await.is_some());
+            assert!(state.force_discharge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_leaves_the_pause_flag_alone_when_not_due() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let snap = gen2_snapshot("SN1");
+
+            // No baseline.
+            let mut arbiter = DischargeControlArbiter::default();
+            assert_eq!(
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                    .await,
+                None
+            );
+            // Slot still open.
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", NEVER_EXPIRES));
+            let mut arbiter = DischargeControlArbiter::default();
+            assert_eq!(
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                    .await,
+                None
+            );
+            // Deferred to a higher-priority owner.
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", LONG_EXPIRED));
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(DischargeControlOwner::Safety);
+            assert_eq!(
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                    .await,
+                None
+            );
+            server.abort();
+            assert!(recorded.lock().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_is_not_repeated_while_one_awaits_confirmation() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let snap = gen2_snapshot("SN1");
+
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP).await;
+            let first = recorded.lock().unwrap().len();
+            assert!(first > 0);
+
+            let mut next_cycle = DischargeControlArbiter::default();
+            let again =
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut next_cycle, GAP)
+                    .await;
+            server.abort();
+            assert_eq!(again, None);
+            assert_eq!(recorded.lock().unwrap().len(), first);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_releases_a_foreign_baseline_and_clears_the_override() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN-OLD", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            let may_override = run_force_discharge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN-NEW"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert_eq!(may_override, Some(false));
+            assert!(state.force_discharge_revert.lock().await.is_none());
+            assert!(state.force_discharge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_withholds_an_unverifiable_baseline() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            let may_override = run_force_discharge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot(""),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert_eq!(may_override, Some(false));
+            assert!(
+                state.force_discharge_revert.lock().await.is_some(),
+                "baseline kept"
+            );
+        })
+        .await;
     }
 
     // -------------------------------------------------------------------
