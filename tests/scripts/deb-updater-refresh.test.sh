@@ -123,7 +123,7 @@ EOF
 
 run_postinst() {
   local script="$1"; shift
-  sh "$script" "$@"
+  PATH="$STAGE/bin:/usr/bin:/bin" sh "$script" "$@"
 }
 cp "$INSTALLER" "$STAGE/share/givenergy-local/proxmox-install.sh"
 printf '#!/bin/bash\n# some older updater copy\nprintf "old updater\\n"\nREPO="psylsph/home-energy-manager"\n' >"$STAGE/usr/local/bin/update"
