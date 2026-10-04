@@ -416,4 +416,74 @@ mod tests {
             .await;
         }
     }
+
+    // ---- the report must actually start ----------------------------------
+
+    #[tokio::test]
+    async fn a_fresh_start_does_not_send_but_arms_tomorrows_report() {
+        // Starting the app must not fire a report on every restart, but it must
+        // record today as the baseline so tomorrow's report can go out.
+        with_isolated_config_dir_async(|| async {
+            let state = state_with(enabled_config(), None).await;
+            let db = open_history();
+            insert_a_day(&db, date(2026, 8, 30));
+            *state.history.lock().await = Some(db);
+
+            let sent = run(&state, local_dt(2026, 8, 31, 9, 0)).await;
+            assert!(sent.lock().unwrap().is_empty(), "no report on startup");
+            assert_eq!(
+                *state.last_report_date.lock().await,
+                Some(date(2026, 8, 31)),
+                "today must be recorded as the baseline"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_first_report_goes_out_the_morning_after_a_fresh_start() {
+        // Regression: last_report_date starts as None and was only ever set
+        // inside the branch that required it to already be set, so the
+        // scheduled report never sent at all.
+        with_isolated_config_dir_async(|| async {
+            let state = state_with(enabled_config(), None).await;
+            let db = open_history();
+            insert_a_day(&db, date(2026, 8, 31));
+            *state.history.lock().await = Some(db);
+
+            // Day 1: the app starts after the send time. Nothing goes out.
+            let day1 = run(&state, local_dt(2026, 8, 31, 9, 0)).await;
+            assert!(day1.lock().unwrap().is_empty());
+
+            // Day 2, before the send time: still nothing.
+            let early = run(&state, local_dt(2026, 9, 1, 7, 0)).await;
+            assert!(early.lock().unwrap().is_empty());
+
+            // Day 2, after the send time: yesterday's report is sent.
+            let day2 = run(&state, local_dt(2026, 9, 1, 9, 0)).await;
+            let filenames: Vec<String> = day2
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.filename.clone())
+                .collect();
+            assert_eq!(filenames, vec!["hem-report-2026-08-31.html".to_string()]);
+            assert_eq!(*state.last_report_date.lock().await, Some(date(2026, 9, 1)));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_disabled_report_does_not_arm_the_baseline() {
+        // Only an enabled report records a baseline, so enabling it later starts
+        // from that moment rather than inheriting a stale date.
+        with_isolated_config_dir_async(|| async {
+            let mut config = enabled_config();
+            config.daily_report_enabled = false;
+            let state = state_with(config, None).await;
+            run(&state, local_dt(2026, 8, 31, 9, 0)).await;
+            assert_eq!(*state.last_report_date.lock().await, None);
+        })
+        .await;
+    }
 }
