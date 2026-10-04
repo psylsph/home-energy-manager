@@ -37,8 +37,9 @@ pub(crate) fn daily_report_due(
     minute: u8,
 ) -> Option<NaiveDate> {
     let today = now.date_naive();
-    // Only send if we have sent a report before. Don't send on startup -
-    // last_sent starts as None.
+    // No baseline yet (the app just started): never due. The caller records
+    // today as the baseline (see `run_daily_report`), so a restart does not
+    // fire a report but tomorrow's still goes out.
     let sent_date = last_sent?;
     if sent_date >= today {
         return None;
@@ -97,6 +98,9 @@ pub(crate) fn send_daily_report_telegram(config: &AlertsConfig, report: DailyRep
 /// Run one poll cycle's worth of the daily report: if enabled and due, build
 /// the previous day's report and pass it to `send`.
 ///
+/// The first enabled cycle after start only records today as the baseline (no
+/// report on startup); the first report is sent the following day.
+///
 /// `last_report_date` is advanced when a report was sent or when there was too
 /// little data to make one. It is left alone when there is no history database
 /// or the query failed, so those retry on a later cycle.
@@ -111,6 +115,13 @@ pub(crate) async fn run_daily_report(
     }
     let today = now.date_naive();
     let mut last_sent = state.last_report_date.lock().await;
+    if last_sent.is_none() {
+        // First enabled cycle since start: don't send on startup, but record
+        // today as the baseline. Without this `last_report_date` would stay
+        // None forever and the report would never be sent.
+        *last_sent = Some(today);
+        return;
+    }
     let Some(report_date) = daily_report_due(
         now,
         *last_sent,
@@ -210,6 +221,15 @@ mod tests {
         // Clock stepped backwards: do not send a second report today.
         let now = local_dt(2026, 8, 31, 20, 0);
         assert_eq!(daily_report_due(now, Some(date(2026, 9, 2)), 8, 0), None);
+    }
+
+    #[test]
+    fn without_a_baseline_nothing_is_due() {
+        // Seeding the baseline is run_daily_report's job, not the due-check's.
+        assert_eq!(
+            daily_report_due(local_dt(2026, 8, 31, 9, 0), None, 8, 0),
+            None
+        );
     }
 
     #[test]
