@@ -52,6 +52,11 @@ pub(crate) fn daily_report_due(
     Some(today.checked_sub_signed(Duration::days(1)).unwrap_or(today))
 }
 
+/// The `last_report_date` to record the first time the report is seen enabled.
+pub(crate) fn first_cycle_baseline(now: DateTime<Local>, _hour: u8, _minute: u8) -> NaiveDate {
+    now.date_naive()
+}
+
 /// Build the report for `report_date` from stored readings. `Ok(None)` means
 /// there was too little data for a report. Blocking (SQLite).
 pub(crate) fn build_daily_report(
@@ -430,7 +435,8 @@ mod tests {
                 );
                 assert_eq!(
                     *state.last_report_date.lock().await,
-                    Some(date(2026, 8, 30))
+                    None,
+                    "a disabled report forgets its baseline (daily={daily} master={master})"
                 );
             })
             .await;
@@ -503,6 +509,94 @@ mod tests {
             let state = state_with(config, None).await;
             run(&state, local_dt(2026, 8, 31, 9, 0)).await;
             assert_eq!(*state.last_report_date.lock().await, None);
+        })
+        .await;
+    }
+
+    // ---- baseline when the report is first enabled ------------------------
+
+    #[test]
+    fn the_baseline_is_yesterday_before_the_send_time_and_today_after() {
+        // Before the send time today's report is still to come, so yesterday is
+        // the baseline; at or after it, today's has gone (or is being skipped).
+        let day = date(2026, 8, 31);
+        assert_eq!(
+            first_cycle_baseline(local_dt(2026, 8, 31, 6, 0), 8, 0),
+            date(2026, 8, 30)
+        );
+        assert_eq!(
+            first_cycle_baseline(local_dt(2026, 8, 31, 7, 59), 8, 0),
+            date(2026, 8, 30)
+        );
+        assert_eq!(first_cycle_baseline(local_dt(2026, 8, 31, 8, 0), 8, 0), day);
+        assert_eq!(
+            first_cycle_baseline(local_dt(2026, 8, 31, 20, 0), 8, 0),
+            day
+        );
+    }
+
+    #[test]
+    fn the_baseline_crosses_a_month_boundary() {
+        assert_eq!(
+            first_cycle_baseline(local_dt(2026, 9, 1, 6, 0), 8, 0),
+            date(2026, 8, 31)
+        );
+    }
+
+    #[tokio::test]
+    async fn enabling_the_report_before_the_send_time_still_sends_this_morning() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with(enabled_config(), None).await;
+            let db = open_history();
+            insert_a_day(&db, date(2026, 8, 30));
+            *state.history.lock().await = Some(db);
+
+            // 06:00: enabled, nothing sent yet.
+            let early = run(&state, local_dt(2026, 8, 31, 6, 0)).await;
+            assert!(early.lock().unwrap().is_empty());
+            assert_eq!(
+                *state.last_report_date.lock().await,
+                Some(date(2026, 8, 30))
+            );
+
+            // 09:00: yesterday's report goes out, as it would have anyway.
+            let later = run(&state, local_dt(2026, 8, 31, 9, 0)).await;
+            let names: Vec<String> = later
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.filename.clone())
+                .collect();
+            assert_eq!(names, vec!["hem-report-2026-08-30.html".to_string()]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn disabling_the_report_forgets_the_baseline_so_re_enabling_does_not_fire_at_once() {
+        with_isolated_config_dir_async(|| async {
+            // Sent on the 25th, then disabled for days.
+            let mut config = enabled_config();
+            config.daily_report_enabled = false;
+            let state = state_with(config, Some(date(2026, 8, 25))).await;
+            let db = open_history();
+            insert_a_day(&db, date(2026, 8, 30));
+            *state.history.lock().await = Some(db);
+            run(&state, local_dt(2026, 8, 31, 9, 0)).await;
+            assert_eq!(
+                *state.last_report_date.lock().await,
+                None,
+                "disabled: baseline forgotten"
+            );
+
+            // Re-enabled after the send time: baseline today, nothing sent at once.
+            *state.alert_config.lock().await = enabled_config();
+            let sent = run(&state, local_dt(2026, 8, 31, 15, 0)).await;
+            assert!(sent.lock().unwrap().is_empty());
+            assert_eq!(
+                *state.last_report_date.lock().await,
+                Some(date(2026, 8, 31))
+            );
         })
         .await;
     }

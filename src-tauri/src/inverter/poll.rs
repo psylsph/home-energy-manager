@@ -2940,9 +2940,7 @@ async fn settings_update_blocking<F>(update: F) -> Result<(), String>
 where
     F: FnOnce(&mut crate::settings::Settings) + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || crate::settings::Settings::update(update).map(|_| ()))
-        .await
-        .map_err(|error| format!("settings worker failed: {error}"))?
+    crate::settings::Settings::update_async(update).await
 }
 
 /// Store the decoded snapshot as the latest, broadcast it to WebSocket
@@ -8344,6 +8342,42 @@ mod tests {
             2,
             "a different unknown code is a new report"
         );
+    }
+
+    #[test]
+    fn identify_does_not_repeat_a_warning_when_the_code_flaps() {
+        // A dongle alternating between a failed read and an unsupported model
+        // must not warn on every transition.
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut empty = InverterSnapshot::default();
+        let mut unsupported = snapshot_decoded_as(0x4101, 0);
+        for _ in 0..4 {
+            identity.identify(&mut empty, &mut client);
+            identity.identify(&mut unsupported, &mut client);
+        }
+        assert_eq!(count_logs(&ring, "unrecognised HR(0) device type code"), 1);
+        assert_eq!(count_logs(&ring, "read as 0x0000"), 1);
+    }
+
+    #[test]
+    fn identify_logs_the_raw_firmware_not_a_parsed_number() {
+        // Three-phase firmware strings are not numeric; the log must show the
+        // real string rather than a misleading arm_fw=0.
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x4001, 0);
+        snap.firmware_version = "1.2-rc3".to_string();
+        identity.identify(&mut snap, &mut client);
+        let line = ring
+            .read_all()
+            .into_iter()
+            .find(|l| l.contains("Model detection: HR(0)/ARM firmware decoded"))
+            .expect("identification line");
+        assert!(line.contains("firmware=1.2-rc3"), "{line}");
+        assert!(!line.contains("arm_fw=0"), "{line}");
     }
 
     #[test]
