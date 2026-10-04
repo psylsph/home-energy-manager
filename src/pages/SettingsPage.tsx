@@ -366,6 +366,9 @@ export default function SettingsPage() {
   // The alert config loads separately from the main settings and its form always
   // renders, so its Save must wait: saving defaults would blank the saved tokens.
   const [alertsLoaded, setAlertsLoaded] = useState(false);
+  // A failed load leaves the form on defaults, so it stays locked: saving would
+  // overwrite the stored tokens.
+  const [alertsLoadFailed, setAlertsLoadFailed] = useState(false);
   const [lanIp, setLanIp] = useState<string | null>(null);
   const [clients, setClients] = useState<string[]>([]);
   const [hiddenPanels, setHiddenPanels] = useState<string[]>([]);
@@ -522,12 +525,13 @@ export default function SettingsPage() {
           // the response into the initialized defaults so those fields remain
           // controlled inputs and are not sent back as `undefined` on save.
           setAlertsConfig((current) => ({ ...current, ...res.data.config }));
+          setAlertsLoaded(true);
+        } else {
+          setAlertsLoadFailed(true);
         }
       } catch (e: unknown) {
         console.warn('Failed to load alerts config:', e);
-      } finally {
-        // Settled either way: a failed load must not lock the form for good.
-        setAlertsLoaded(true);
+        setAlertsLoadFailed(true);
       }
     })();
 
@@ -2128,7 +2132,9 @@ export default function SettingsPage() {
       </section>
 
       {/* ─── Section 6: Notifications ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
+      {/* Inert until the saved config has loaded: anything typed earlier would be
+          replaced by the load, and a Save would post the defaults. */}
+      <section inert={!alertsLoaded} className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
           <button
@@ -2447,6 +2453,11 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {alertsLoadFailed && (
+          <p className="text-amber-300 text-xs font-sans">
+            The saved notification settings could not be loaded, so this section is turned off to avoid overwriting them. Reload the page to try again.
+          </p>
+        )}
         <div className="flex flex-col sm:flex-row gap-2">
           <button
             onClick={handleAlertsSave}

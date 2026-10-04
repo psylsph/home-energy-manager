@@ -574,6 +574,10 @@ function ScheduleSlotEditor({
   );
 }
 
+/** Shown beside a Save that is switched off because the saved settings could not be loaded. */
+const LOAD_FAILED_NOTE =
+  'The saved settings could not be loaded, so saving is turned off to avoid overwriting them. Reload the page to try again.';
+
 function AutoWinterSection() {
   const { snapshot } = useInverterStore();
   const [enabled, setEnabled] = useState(false);
@@ -583,9 +587,10 @@ function AutoWinterSection() {
 
   const [debounce, setDebounce] = useState(10);
   const [saving, setSaving] = useState(false);
-  // True once the saved configuration has loaded (or the load has failed): saving
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
   // earlier would post the defaults over what the user configured.
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -598,9 +603,12 @@ function AutoWinterSection() {
           setRecoveryThreshold(Math.round(res.data.config.recovery_threshold));
           setTargetSoc(Math.max(4, res.data.config.target_soc));
           setDebounce(res.data.config.debounce_readings);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ } finally {
-        setLoaded(true);
+      } catch {
+        setLoadFailed(true);
       }
     })();
   }, []);
@@ -752,6 +760,9 @@ function AutoWinterSection() {
           </div>
         )}
 
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           onClick={handleSave}
           disabled={saving || !loaded}
@@ -771,9 +782,10 @@ function AdaptiveChargeSection() {
     confirmation_readings: 2,
   });
   const [saving, setSaving] = useState(false);
-  // True once the saved configuration has loaded (or the load has failed): saving
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
   // earlier would post the defaults over what the user configured.
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
 
@@ -784,9 +796,14 @@ function AdaptiveChargeSection() {
           ok: boolean;
           data: { config: AdaptiveChargeConfig };
         }>('/api/adaptive-charge');
-        if (response.ok) setConfig(response.data.config);
-      } catch { /* retain safe defaults */ } finally {
-        setLoaded(true);
+        if (response.ok) {
+          setConfig(response.data.config);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
+        }
+      } catch {
+        setLoadFailed(true);
       }
     })();
   }, []);
@@ -981,6 +998,9 @@ function AdaptiveChargeSection() {
       )}
 
       {serverError && <p className="text-red-400 text-xs">{serverError}</p>}
+      {loadFailed && (
+        <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+      )}
       <button
         type="button"
         onClick={save}
@@ -1572,9 +1592,10 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
   }, [computeRollingWindow]);
 
   const [saving, setSaving] = useState(false);
-  // True once the saved configuration has loaded (or the load has failed): saving
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
   // earlier would post the defaults over what the user configured.
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   // Load config from backend on mount
@@ -1582,13 +1603,23 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
     (async () => {
       try {
         const res = await apiGet<{ ok: boolean; enabled: boolean; region: string; charge_threshold: number; discharge_threshold: number }>('/api/agile');
-        if (res.ok) {
+        // Only a response that really carries the saved values counts: a partial
+        // one would leave the form undefined and Save would post that.
+        if (
+          res.ok
+          && typeof res.region === 'string'
+          && typeof res.charge_threshold === 'number'
+          && typeof res.discharge_threshold === 'number'
+        ) {
           setRegion(res.region);
           setChargeThreshold(res.charge_threshold);
           setDischargeThreshold(res.discharge_threshold);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ } finally {
-        setLoaded(true);
+      } catch {
+        setLoadFailed(true);
       }
     })();
   }, []);
@@ -1837,6 +1868,9 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
         </div>
       </div>
 
+      {loadFailed && (
+        <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+      )}
       <button
         onClick={saveConfig}
         disabled={saving || !loaded}
@@ -1987,9 +2021,10 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
   const [enabled, setEnabled] = useState(false);
   const [floorSoc, setFloorSoc] = useState(50);
   const [saving, setSaving] = useState(false);
-  // True once the saved configuration has loaded (or the load has failed): saving
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
   // earlier would post the defaults over what the user configured.
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -1999,9 +2034,12 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
         if (res.ok) {
           setEnabled(res.data.config.enabled);
           setFloorSoc(res.data.config.floor_soc);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ } finally {
-        setLoaded(true);
+      } catch {
+        setLoadFailed(true);
       }
     })();
   }, [refreshKey]);
@@ -2057,6 +2095,9 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
             className="flex-1"
           />
         </div>
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           onClick={handleSave}
           disabled={saving || !loaded}
@@ -2088,9 +2129,10 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
   const [endHour, setEndHour] = useState(0);
   const [endMinute, setEndMinute] = useState(0);
   const [saving, setSaving] = useState(false);
-  // True once the saved configuration has loaded (or the load has failed): saving
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
   // earlier would post the defaults over what the user configured.
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -2106,9 +2148,12 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
           setStartMinute(cfg.start_minute);
           setEndHour(cfg.end_hour);
           setEndMinute(cfg.end_minute);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ } finally {
-        setLoaded(true);
+      } catch {
+        setLoadFailed(true);
       }
     })();
   }, [refreshKey]);
@@ -2293,6 +2338,9 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
           </>
         )}
 
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           onClick={handleSave}
           disabled={saving || !loaded}
@@ -2320,9 +2368,10 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
   const [recoveryThreshold, setRecoveryThreshold] = useState(55);
   const [confirmations, setConfirmations] = useState(3);
   const [saving, setSaving] = useState(false);
-  // True once the saved configuration has loaded (or the load has failed): saving
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
   // earlier would post the defaults over what the user configured.
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -2338,9 +2387,12 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
           setHighThreshold(config.high_threshold);
           setRecoveryThreshold(config.recovery_threshold);
           setConfirmations(config.confirmation_readings);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* retain safe defaults */ } finally {
-        setLoaded(true);
+      } catch {
+        setLoadFailed(true);
       }
     })();
   }, [refreshKey]);
@@ -2469,6 +2521,9 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
           </>
         )}
 
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           type="button"
           onClick={handleSave}

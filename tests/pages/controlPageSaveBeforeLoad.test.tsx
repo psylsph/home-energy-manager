@@ -5,11 +5,19 @@ import { render, screen, cleanup, fireEvent, waitFor, within, act } from '@testi
 // Each Control-page section that loads its saved configuration on mount holds
 // defaults until that load finishes. Saving in that window posts the defaults
 // over what the user configured. Each Save must stay disabled until its own
-// load has settled, and a load that FAILS must not lock the section for good.
+// load has succeeded. A load that FAILS keeps Save off and says why: the form
+// then shows defaults, and saving would overwrite the saved configuration.
 // ---------------------------------------------------------------------------
 
 type Deferred = { resolve: () => void; reject: (e: unknown) => void };
-const held = vi.hoisted(() => ({ paths: [] as string[], pending: {} as Record<string, Deferred | undefined> }));
+const held = vi.hoisted(() => ({
+  paths: [] as string[],
+  pending: {} as Record<string, Deferred | undefined>,
+  /** Paths answered immediately with a response that is not a success. */
+  unsuccessful: [] as string[],
+  /** Paths answered immediately with this body instead of the normal one. */
+  override: {} as Record<string, unknown>,
+}));
 
 const bodies: Record<string, () => unknown> = {
   '/api/auto-winter': () => ({
@@ -45,6 +53,8 @@ const bodies: Record<string, () => unknown> = {
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn((path: string) => {
     const body = bodies[path];
+    if (path in held.override) return Promise.resolve(held.override[path]);
+    if (held.unsuccessful.includes(path)) return Promise.resolve({ ok: false });
     if (held.paths.includes(path)) {
       return new Promise((resolve, reject) => {
         held.pending[path] = { resolve: () => resolve(body()), reject };
@@ -81,6 +91,8 @@ beforeEach(() => {
   window.localStorage.clear();
   held.paths = [];
   held.pending = {};
+  held.unsuccessful = [];
+  held.override = {};
   vi.mocked(apiPost).mockReset();
   vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
   useInverterStore.setState({
@@ -101,6 +113,7 @@ afterEach(() => {
 });
 
 const SAVE = /^(Save|Saving\.\.\.|\.\.\.|✓ Saved|✗ Error)$/;
+const LOAD_FAILED = /saved settings could not be loaded/;
 
 interface SectionCase {
   name: string;
@@ -189,15 +202,31 @@ describe('<ControlPage/> — saves wait for the section to load', () => {
         await waitFor(() => expect(apiPost).toHaveBeenCalledWith(c.posts, expect.objectContaining(c.loaded)));
       });
 
-      it('is not locked out when the load fails', async () => {
+      it('stays locked, and says why, when the load fails', async () => {
         held.paths = [c.path];
         render(<ControlPage />);
         await waitFor(() => expect(c.save()).toBeInTheDocument());
-        expect(c.save()).toBeDisabled();
+        expect(screen.queryByText(LOAD_FAILED)).toBeNull();
 
         await fail(c.path);
 
+        await screen.findByText(LOAD_FAILED);
+        expect(c.save()).toBeDisabled();
+        fireEvent.click(c.save());
+        expect(vi.mocked(apiPost).mock.calls.filter((x) => x[0] === c.posts)).toHaveLength(0);
+      });
+
+      it('treats a response that is not a success as a failed load', async () => {
+        held.unsuccessful = [c.path];
+        render(<ControlPage />);
+        await screen.findByText(LOAD_FAILED);
+        expect(c.save()).toBeDisabled();
+      });
+
+      it('shows no warning when the load succeeds', async () => {
+        render(<ControlPage />);
         await waitFor(() => expect(c.save()).toBeEnabled());
+        expect(screen.queryByText(LOAD_FAILED)).toBeNull();
       });
     });
   }
@@ -230,13 +259,23 @@ describe('<ControlPage/> — saves wait for the section to load', () => {
       );
     });
 
-    it('is not locked out when the load fails', async () => {
+    it('stays locked, and says why, when the load fails', async () => {
       held.paths = ['/api/agile'];
       useInverterStore.setState({ snapshot: makeSnapshot({ adaptive_charge_enabled: false }) });
       await openAgile();
       expect(save()).toBeDisabled();
       await fail('/api/agile');
-      await waitFor(() => expect(save()).toBeEnabled());
+      await screen.findByText(LOAD_FAILED);
+      expect(save()).toBeDisabled();
+    });
+
+    it('treats a response missing the saved values as a failed load', async () => {
+      // A partial response would leave the form undefined, and Save would post that.
+      held.override = { '/api/agile': { ok: true, enabled: false } };
+      useInverterStore.setState({ snapshot: makeSnapshot({ adaptive_charge_enabled: false }) });
+      await openAgile();
+      await screen.findByText(LOAD_FAILED);
+      expect(save()).toBeDisabled();
     });
   });
 });

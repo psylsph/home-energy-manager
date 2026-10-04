@@ -7,7 +7,8 @@ import { render, screen, cleanup, fireEvent, waitFor, within, act } from '@testi
 // Settings would blank the Telegram token and Save Location the postcode. The
 // page already waits for /api/settings before showing anything, but alerts and
 // weather load separately, so their Save buttons must stay disabled until their
-// own load has finished; a load that FAILS must not lock them out for good.
+// own load has succeeded. A load that FAILS keeps Save off and says why: the
+// form then shows defaults and saving would overwrite the stored tokens.
 // ---------------------------------------------------------------------------
 
 const apiGetMock = vi.fn();
@@ -152,12 +153,60 @@ describe('<SettingsPage/> — notifications wait for the alert config', () => {
     );
   });
 
-  it('is not locked out when the alert config fails to load', async () => {
+  it('stays locked, and says why, when the alert config fails to load', async () => {
+    mount(['/api/alerts']);
+    render(<SettingsPage />);
+    const s = await section('Notifications');
+
+    await fail('/api/alerts');
+
+    await within(s).findByText(/saved notification settings could not be loaded/);
+    expect(button(s, 'Save Notification Settings')).toBeDisabled();
+    // The defaults on screen must never reach the server.
+    fireEvent.click(button(s, 'Save Notification Settings'));
+    expect(apiPostMock).not.toHaveBeenCalledWith('/api/alerts', expect.anything());
+  });
+
+  it('treats a response that is not a success as a failed load', async () => {
+    mount([]);
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/alerts') return { ok: false };
+      if (path === '/api/settings') return { ok: true, data: settingsBody() };
+      if (path === '/api/weather') return { ok: true, data: weatherBody() };
+      return { ok: true, lan_ip: null, clients: [], client_count: 0 };
+    });
+    render(<SettingsPage />);
+    const s = await section('Notifications');
+    await within(s).findByText(/saved notification settings could not be loaded/);
+    expect(button(s, 'Save Notification Settings')).toBeDisabled();
+  });
+
+  it('shows no warning when the alert config loads', async () => {
+    mount([]);
+    render(<SettingsPage />);
+    const s = await section('Notifications');
+    await waitFor(() => expect(button(s, 'Save Notification Settings')).toBeEnabled());
+    expect(within(s).queryByText(/could not be loaded/)).toBeNull();
+  });
+
+  it('is inert until the config has loaded, so nothing typed can be lost', async () => {
+    mount(['/api/alerts']);
+    render(<SettingsPage />);
+    const s = await section('Notifications');
+    expect(s).toHaveAttribute('inert');
+
+    await release('/api/alerts');
+
+    await waitFor(() => expect(s).not.toHaveAttribute('inert'));
+  });
+
+  it('stays inert after a failed load', async () => {
     mount(['/api/alerts']);
     render(<SettingsPage />);
     const s = await section('Notifications');
     await fail('/api/alerts');
-    await waitFor(() => expect(button(s, 'Save Notification Settings')).toBeEnabled());
+    await within(s).findByText(/could not be loaded/);
+    expect(s).toHaveAttribute('inert');
   });
 });
 
