@@ -79,9 +79,20 @@ test.describe.serial('Adaptive Charge', () => {
   test('drives preferred/recovery hysteresis, blocks manual writes, and restores baseline', async ({
     baseUrl,
     setInputReg,
+    setHoldingReg,
     drainModbusWrites,
   }) => {
-    test.setTimeout(100_000);
+    // The scenario legitimately takes about 90 s (confirmation readings and a
+    // hysteresis hold), so the cap must leave real headroom.
+    test.setTimeout(180_000);
+
+    // DC-hybrid charge limits are converted through the battery pack size
+    // (#346); without HR55 the controller cannot convert a percentage and
+    // deliberately writes nothing. 141 Ah x 51.2 V is a 7.2 kWh pack, whose
+    // half (3.6 kW) equals the inverter limit, so 40% maps to raw 20 and 100%
+    // to 50 (no limit).
+    await setHoldingReg(55, 141);
+    await waitForSnapshot(baseUrl, (value) => Number(value.battery_capacity_kwh) > 7);
 
     // Establish a non-default manual baseline so restoration is observable.
     const baseline = await postJson(baseUrl, '/api/control/charge-rate', { limit: 35 });
