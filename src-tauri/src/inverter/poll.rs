@@ -1148,6 +1148,451 @@ fn observe_model_detection(
     }
 }
 
+/// Which optional register blocks this cycle actually read. Optional blocks
+/// are polled by device type and can individually time out, so the values they
+/// feed must be carried forward from the previous snapshot when absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OptionalBlocksPresent {
+    ac_config: bool,
+    extended_slots: bool,
+    three_phase_high_config: bool,
+    three_phase_config: bool,
+    three_phase_fault: bool,
+    ems_plant: bool,
+    gateway_discharge_detail: bool,
+    gateway_serial: bool,
+}
+
+impl OptionalBlocksPresent {
+    fn from_blocks(blocks: &[crate::modbus::client::BlockRead]) -> Self {
+        use crate::modbus::registers as reg;
+        let has = |expected: &reg::RegisterBlock| {
+            blocks.iter().any(|b| {
+                b.block.register_type == expected.register_type
+                    && b.block.start == expected.start
+                    && b.block.count == expected.count
+            })
+        };
+        Self {
+            ac_config: has(&reg::AC_CONFIG_BLOCK),
+            extended_slots: has(&reg::EXTENDED_SLOTS_BLOCK),
+            three_phase_high_config: has(&reg::THREE_PHASE_HIGH_CONFIG_BLOCK),
+            three_phase_config: has(&reg::THREE_PHASE_CONFIG_BLOCK),
+            three_phase_fault: has(&reg::THREE_PHASE_INPUT_BLOCK_6),
+            ems_plant: has(&reg::EMS_PLANT_HOLDING_BLOCK),
+            gateway_discharge_detail: has(&reg::GATEWAY_INPUT_BLOCK_3),
+            gateway_serial: has(&reg::GATEWAY_INPUT_BLOCK_5),
+        }
+    }
+}
+
+/// The 60-register blocks that match the dongle memory-leak fingerprint (the
+/// dongle served its own TCP memory instead of register values).
+fn suspicious_blocks(
+    blocks: &[crate::modbus::client::BlockRead],
+) -> impl Iterator<Item = &crate::modbus::client::BlockRead> {
+    blocks
+        .iter()
+        .filter(|b| b.block.start % 60 == 0 && b.block.count == 60 && is_block_suspicious(&b.data))
+}
+
+/// Keep the previous values for everything an absent optional block would have
+/// supplied, so a single skipped read does not flash zeros in the UI.
+fn carry_forward_absent_blocks(
+    snapshot: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
+    present: &OptionalBlocksPresent,
+) {
+    let _ = carry_forward_optional_block_values(
+        snapshot,
+        prev,
+        present.ac_config,
+        present.extended_slots,
+        present.three_phase_config,
+        present.ems_plant,
+    );
+    let _ = carry_forward_three_phase_high_config_values(
+        snapshot,
+        prev,
+        present.three_phase_high_config,
+    );
+    let _ = carry_forward_three_phase_fault_block_values(snapshot, prev, present.three_phase_fault);
+    if snapshot.device_type == DeviceType::Gateway {
+        if let Some(p) = prev {
+            if !present.gateway_discharge_detail {
+                snapshot.per_aio_discharge_today_kwh = p.per_aio_discharge_today_kwh;
+            }
+            if !present.gateway_serial {
+                snapshot.per_aio_serial = p.per_aio_serial.clone();
+            }
+        }
+    }
+}
+
+/// What the poll loop should do about the model once it has been identified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelDetectionPlan {
+    /// Read slave address the detected model operates on.
+    preferred_slave: u8,
+    /// That differs from the address currently in use.
+    slave_changed: bool,
+    /// Re-poll straight away with the model-specific blocks.
+    should_repoll: bool,
+    /// Three-phase models read 15+ blocks per cycle and need a longer
+    /// inter-request delay so the dongle's slow processor keeps up.
+    longer_inter_request_delay: bool,
+    /// The model polls at least one optional block on a fast cycle.
+    has_model_specific_blocks: bool,
+}
+
+fn plan_model_detection(device_type: DeviceType, current_slave: u8) -> ModelDetectionPlan {
+    let preferred_slave = device_type.preferred_read_slave_address();
+    ModelDetectionPlan {
+        preferred_slave,
+        slave_changed: preferred_slave != current_slave,
+        should_repoll: should_repoll_after_model_detection(device_type, current_slave),
+        longer_inter_request_delay: device_type.needs_three_phase_input_blocks(),
+        has_model_specific_blocks: !crate::modbus::client::preview_model_specific_blocks(
+            &device_type,
+            GatewayPollScope::Fast,
+        )
+        .is_empty(),
+    }
+}
+
+/// Whether [`ModelIdentity::identify`] wants the cycle repeated at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentifyOutcome {
+    /// The model was just identified and needs a different slave address or
+    /// extra blocks: re-read immediately rather than a full interval later.
+    RepollNow,
+    Continue,
+}
+
+/// The model this session has confirmed, and what has already been reported
+/// about it. Per connection: a reconnect starts from scratch.
+#[derive(Debug, Default)]
+struct ModelIdentity {
+    device_type: Option<DeviceType>,
+    /// Raw HR(0) code (hex) the model was confirmed from. The exact 0x81xx
+    /// code carries the 6/8/10 kW rating, so it is locked along with the type.
+    code: Option<String>,
+    /// Last unidentified HR(0) value warned about, so a persistently unknown
+    /// model logs once rather than on every poll.
+    last_unidentified_dtc: Option<u16>,
+}
+
+impl ModelIdentity {
+    /// Confirmed type and code, once both are known.
+    fn confirmed(&self) -> Option<(DeviceType, &str)> {
+        self.device_type.zip(self.code.as_deref())
+    }
+
+    /// Run once per decoded cycle: log what detection saw, confirm a newly
+    /// identified model (switching slave address / delay on `client` as the
+    /// model needs), and lock the snapshot to the confirmed type so a corrupt
+    /// register can't flip the displayed model on a later poll.
+    fn identify(
+        &mut self,
+        snapshot: &mut InverterSnapshot,
+        client: &mut ModbusClient,
+    ) -> IdentifyOutcome {
+        let observation = observe_model_detection(
+            self.confirmed(),
+            snapshot.device_type,
+            &snapshot.device_type_code,
+        );
+        let observed_dtc = u16::from_str_radix(&snapshot.device_type_code, 16).unwrap_or(0);
+        let observed_arm_fw: u16 = snapshot.firmware_version.parse().unwrap_or(0);
+        match observation {
+            DetectionObservation::Identified => {
+                let trace = DeviceType::detection_trace(observed_dtc, observed_arm_fw);
+                tracing::info!(
+                    raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
+                    arm_fw = trace.arm_fw,
+                    dsp_fw = %snapshot.dsp_firmware_version,
+                    serial = %snapshot.inverter_serial,
+                    matched = ?trace.matched,
+                    base_type = ?trace.base,
+                    arm_refinement_applicable = trace.arm_refinement_applicable,
+                    refined_type = ?trace.refined,
+                    slave = client.slave_address(),
+                    "Model detection: HR(0)/ARM firmware decoded"
+                );
+                if trace.matched == crate::inverter::model::DtcMatch::PrefixFallback {
+                    tracing::warn!(
+                        raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
+                        device_type = ?trace.refined,
+                        "Model detection: HR(0) is not a known code - classified by family prefix only"
+                    );
+                }
+                return self.confirm(snapshot, client);
+            }
+            DetectionObservation::Unidentified { raw_dtc } => {
+                if self.last_unidentified_dtc != Some(raw_dtc) {
+                    self.last_unidentified_dtc = Some(raw_dtc);
+                    if raw_dtc == 0 {
+                        tracing::debug!(
+                            slave = client.slave_address(),
+                            "Model detection: HR(0) read as 0x0000 (empty or failed read) - model not identified yet"
+                        );
+                    } else {
+                        tracing::warn!(
+                            raw_dtc = %format_args!("{:#06X}", raw_dtc),
+                            arm_fw = observed_arm_fw,
+                            serial = %snapshot.inverter_serial,
+                            slave = client.slave_address(),
+                            "Model detection: unrecognised HR(0) device type code - model-aware polling stays off (corrupt read, or an unsupported product)"
+                        );
+                    }
+                }
+            }
+            DetectionObservation::TypeDrift => {
+                tracing::debug!(
+                    confirmed = ?self.device_type,
+                    confirmed_code = ?self.code,
+                    decoded = ?snapshot.device_type,
+                    raw_dtc = %format_args!("{:#06X}", observed_dtc),
+                    arm_fw = observed_arm_fw,
+                    "Model detection: decoded type differs from confirmed model - keeping confirmed value"
+                );
+            }
+            DetectionObservation::CodeDrift => {
+                tracing::debug!(
+                    confirmed_code = ?self.code,
+                    raw_dtc = %format_args!("{:#06X}", observed_dtc),
+                    "Model detection: HR(0) code differs from confirmed code - keeping confirmed value"
+                );
+            }
+            DetectionObservation::Stable => {}
+        }
+
+        // Lock the device type to prevent dongle register corruption
+        // (especially HR(21) arm_firmware_version) from flipping the displayed
+        // model on a subsequent poll. Once identified, the snapshot always
+        // carries the cached type - the decoder still runs for the raw DTC and
+        // firmware string, but the refinement result is ignored in favour of
+        // the known-good detection.
+        if let Some(cached_type) = self.device_type {
+            if snapshot.device_type != cached_type {
+                snapshot.device_type = cached_type;
+                snapshot.device_type_display = cached_type.display_name().to_string();
+            }
+        }
+        IdentifyOutcome::Continue
+    }
+
+    /// First poll that mapped to a real model: announce the poll plan, apply
+    /// the slave address / delay the model needs, and remember it.
+    fn confirm(
+        &mut self,
+        snapshot: &InverterSnapshot,
+        client: &mut ModbusClient,
+    ) -> IdentifyOutcome {
+        // Name the actual blocks the model-aware poll will read on the next
+        // cycle. For a Gateway this is the lean HR-only standard set + the full
+        // IR 1600-1859 bank + EMS plant holding; `extra_poll_blocks()` is empty
+        // for Gateway (its blocks are added in
+        // `model_specific_blocks_in_poll_order`), so the old `extra_blocks=[]`
+        // log line misled users into thinking detection hadn't changed the
+        // poll plan.
+        let standard_blocks_next: Vec<&'static str> =
+            crate::modbus::client::preview_standard_blocks(Some(&snapshot.device_type), None)
+                .iter()
+                .map(|b| b.name)
+                .collect();
+        let model_specific_blocks_next: Vec<&'static str> =
+            crate::modbus::client::preview_model_specific_blocks(
+                &snapshot.device_type,
+                GatewayPollScope::Detail,
+            )
+            .iter()
+            .map(|b| b.name)
+            .collect();
+        tracing::info!(
+            device_type = ?snapshot.device_type,
+            standard_blocks = ?standard_blocks_next,
+            model_specific_blocks = ?model_specific_blocks_next,
+            "Device model identified - enabling model-aware polling"
+        );
+
+        let plan = plan_model_detection(snapshot.device_type, client.slave_address());
+        if plan.slave_changed {
+            tracing::info!(
+                from = client.slave_address(),
+                to = plan.preferred_slave,
+                "Switching operational read slave address for detected model"
+            );
+            client.set_slave(plan.preferred_slave);
+        }
+        if plan.longer_inter_request_delay {
+            tracing::info!(
+                "Three-phase model detected - increasing inter-request delay to {}ms",
+                ModbusClient::INTER_REQUEST_DELAY_3PH.as_millis()
+            );
+            client.set_inter_request_delay(ModbusClient::INTER_REQUEST_DELAY_3PH);
+        }
+
+        self.device_type = Some(snapshot.device_type);
+        self.code = Some(snapshot.device_type_code.clone());
+
+        // The first detection poll is intentionally minimal: it discovers the
+        // model, then immediately re-polls with the model-specific slave
+        // address and optional blocks (AC HR300-359, Gen3 HR240-299, Gateway
+        // IR 1600-1859). Without this, model-specific registers can lag a full
+        // poll interval behind detection.
+        if plan.should_repoll {
+            tracing::info!(
+                slave_changed = plan.slave_changed,
+                has_model_specific_blocks = plan.has_model_specific_blocks,
+                "Model-specific poll enabled - re-reading immediately"
+            );
+            IdentifyOutcome::RepollNow
+        } else {
+            IdentifyOutcome::Continue
+        }
+    }
+}
+
+/// After this many consecutive cycles whose blocks match the dongle
+/// memory-leak fingerprint, the dongle's app processor is assumed stuck and a
+/// fresh TCP session is forced.
+const MAX_SUSPICIOUS_CYCLES: u8 = 6;
+
+/// What one poll cycle produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CycleOutcome {
+    /// The read completed (a snapshot was published, or the cycle was
+    /// deliberately skipped as fingerprint-suspicious).
+    poll_ok: bool,
+    /// Sanitization changed the data, so the cycle should be repeated at once.
+    sanitized: bool,
+    /// The TCP session is dead.
+    connection_lost: bool,
+    /// A block matched the dongle memory-leak fingerprint; nothing was
+    /// decoded or broadcast.
+    block_suspicious: bool,
+}
+
+impl CycleOutcome {
+    const FINGERPRINT: Self = Self {
+        poll_ok: true,
+        sanitized: true,
+        connection_lost: false,
+        block_suspicious: true,
+    };
+    const CONNECTION_LOST: Self = Self {
+        poll_ok: false,
+        sanitized: false,
+        connection_lost: true,
+        block_suspicious: false,
+    };
+    const TRANSIENT_FAILURE: Self = Self {
+        poll_ok: false,
+        sanitized: false,
+        connection_lost: false,
+        block_suspicious: false,
+    };
+
+    const fn published(sanitized: bool) -> Self {
+        Self {
+            poll_ok: true,
+            sanitized,
+            connection_lost: false,
+            block_suspicious: false,
+        }
+    }
+}
+
+/// What the poll loop does after a cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CycleStep {
+    /// Leave the inner loop and reconnect.
+    Reconnect,
+    /// A fingerprint cycle: re-read immediately, nothing was published.
+    RepollSuspicious,
+    /// A transient failure: back off briefly, then try again.
+    RetryAfterBackoff,
+    /// Sanitization corrected the data: re-read immediately.
+    RepollSanitized,
+    /// A clean cycle: sleep for the configured interval.
+    WaitForInterval,
+}
+
+/// Decide what follows a poll cycle, updating the fingerprint streak and the
+/// reconnect controller. A fingerprint cycle never decoded real register data,
+/// so it must not reset the streak (Review H2: it used to, which made the
+/// forced reconnect unreachable).
+fn decide_after_cycle(
+    outcome: CycleOutcome,
+    consecutive_suspicious: &mut u8,
+    reconnect: &mut ReconnectController,
+    now: Instant,
+) -> CycleStep {
+    if !outcome.poll_ok {
+        // A failed poll breaks the flap recovery streak.
+        reconnect.note_poll_failed();
+        if outcome.connection_lost {
+            return CycleStep::Reconnect;
+        }
+        // Transient timeout: once the sustained-timeout threshold is reached
+        // (counted by the controller) disconnect instead of hammering a wedged
+        // dongle until the OS sends an RST.
+        if reconnect.note_transient_timeout() {
+            return CycleStep::Reconnect;
+        }
+        return CycleStep::RetryAfterBackoff;
+    }
+
+    if outcome.block_suspicious {
+        *consecutive_suspicious += 1;
+        if *consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
+            tracing::warn!(
+                suspicious = *consecutive_suspicious,
+                max = MAX_SUSPICIOUS_CYCLES,
+                "Persistent fingerprint corruption - forcing reconnect"
+            );
+            return CycleStep::Reconnect;
+        }
+        tracing::warn!(
+            suspicious = *consecutive_suspicious,
+            max = MAX_SUSPICIOUS_CYCLES,
+            "Dongle memory-leak corruption detected - skipping broadcast, re-polling immediately"
+        );
+        return CycleStep::RepollSuspicious;
+    }
+    *consecutive_suspicious = 0;
+
+    // Fresh, sanitized data reached the UI/history. Resets the sustained-timeout
+    // streak, marks the session productive, restarts the flap data-starvation
+    // clock, and - if a flap is engaged - advances the stand-down count.
+    reconnect.note_good_poll(now);
+
+    if outcome.sanitized {
+        CycleStep::RepollSanitized
+    } else {
+        CycleStep::WaitForInterval
+    }
+}
+
+/// Advance the external-meter retry cadence after a productive cycle: the
+/// counter ticks while retries remain, and also while the first scan found
+/// nothing, so a configured-but-slow meter is retried every
+/// `METER_RETRY_INTERVAL` cycles.
+fn tick_meter_retry_cadence(
+    meter_cycle_since_last: &mut u8,
+    meter_probe_done: bool,
+    meter_retry_count: u8,
+    no_meters_detected: bool,
+) {
+    if meter_probe_done && meter_retry_count > 0 && meter_retry_count < METER_MAX_RETRIES {
+        *meter_cycle_since_last += 1;
+    }
+    if meter_probe_done && meter_retry_count == 0 && no_meters_detected {
+        *meter_cycle_since_last += 1;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main poll loop
 // ---------------------------------------------------------------------------
@@ -2635,7 +3080,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 //
                 // Resets to 0 on any successful poll.
                 let mut consecutive_suspicious: u8 = 0;
-                const MAX_SUSPICIOUS_CYCLES: u8 = 6;
 
                 // Grace period: for the first few reads after connect, skip
                 // delta sanitization. The dongle can return plausible-but-wrong
@@ -2655,11 +3099,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 let mut delta_corrections = DeltaCorrectionCounts::default();
                 let mut suspect_counts = ConsecutiveSuspectCounts::default();
                 let mut rate_release_counts = RateReleaseCounts::default();
-                let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
-                let mut known_device_type_code: Option<String> = None;
-                // Last unidentified HR(0) value warned about, so a persistently
-                // unknown model logs once rather than on every poll.
-                let mut last_unidentified_dtc: Option<u16> = None;
+                let mut identity = ModelIdentity::default();
                 let mut detected_meters: Vec<u8> = Vec::new();
                 // Battery slave addresses already announced this session, so
                 // "Battery #N detected" is logged once (INFO) per address
@@ -2814,9 +3254,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     // responses (including duplicate write ACKs) are silently
                     // dropped during the read cycle. No explicit flush needed.
 
-                    let (poll_ok, sanitized, connection_lost, block_suspicious) = async {
+                    let outcome = async {
                         let gateway_scope = gateway_poll_scope(
-                            known_device_type,
+                            identity.device_type,
                             gateway_detail_poll_countdown,
                         );
                         // Prefill the device type from the persisted serial on
@@ -2824,18 +3264,18 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                         // confirmed a model) so a known-Gateway startup can
                         // skip the wide IR 0-59 / IR 180-183 standard blocks.
                         // Model-specific blocks are still gated on the
-                        // confirmed `known_device_type` (set on the cycle
+                        // confirmed `identity.device_type` (set on the cycle
                         // after detection), so the decoder always gets a
                         // clean chance to confirm or override the prefill.
                         let prefilled_device_type: Option<DeviceType> =
-                            if known_device_type.is_none() {
+                            if identity.device_type.is_none() {
                                 device_type_from_serial(&settings.serial)
                             } else {
                                 None
                             };
                         match client
                             .read_all_with_extras(
-                                known_device_type.as_ref(),
+                                identity.device_type.as_ref(),
                                 prefilled_device_type.as_ref(),
                                 gateway_scope,
                             )
@@ -2922,18 +3362,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // memory-leak corruption fingerprint. If the dongle serves
                                 // its own TCP/IP memory instead of register values, the
                                 // entire poll cycle is suspect - trigger a re-poll.
-                                let block_suspicious = blocks
-                                    .iter()
-                                    .any(|b| b.block.start % 60 == 0 && b.block.count == 60 && is_block_suspicious(&b.data));
-                                if block_suspicious {
-                                    for br in &blocks {
-                                        if br.block.start % 60 == 0 && br.block.count == 60 && is_block_suspicious(&br.data) {
-                                            tracing::warn!(
-                                                block = br.block.name,
-                                                start = br.block.start,
-                                                "Block matched dongle memory-leak fingerprint - re-polling",
-                                            );
-                                        }
+                                let mut fingerprint_hits = suspicious_blocks(&blocks).peekable();
+                                if fingerprint_hits.peek().is_some() {
+                                    for br in fingerprint_hits {
+                                        tracing::warn!(
+                                            block = br.block.name,
+                                            start = br.block.start,
+                                            "Block matched dongle memory-leak fingerprint - re-polling",
+                                        );
                                     }
                                     // Skip decode and broadcast entirely — the
                                     // registers are the dongle's own TCP memory.
@@ -2942,229 +3378,21 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // counter on the very cycle it should have
                                     // accumulated, and the force-reconnect path
                                     // was unreachable. The counter now lives in
-                                    // the caller (see the poll_ok match below).
-                                    return (true, true, false, true);
+                                    // the caller (see `decide_after_cycle`).
+                                    return CycleOutcome::FINGERPRINT;
                                 }
-                                let has_ac_config_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 300
-                                        && b.block.count == 60
-                                });
-                                let has_extended_slots_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 240
-                                        && b.block.count == 60
-                                });
-                                let has_three_phase_high_config_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 1000
-                                        && b.block.count == 80
-                                });
-                                let has_three_phase_config_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 1080
-                                        && b.block.count == 45
-                                });
-                                let has_three_phase_fault_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
-                                        && b.block.start == 1300
-                                        && b.block.count == 60
-                                });
-                                let has_ems_plant_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 2040
-                                        && b.block.count == 36
-                                });
-                                let has_gateway_discharge_detail_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
-                                        && b.block.start == 1720
-                                        && b.block.count == 60
-                                });
-                                let has_gateway_serial_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
-                                        && b.block.start == 1831
-                                        && b.block.count == 29
-                                });
+                                let present = OptionalBlocksPresent::from_blocks(&blocks);
 
-                                // Cache the device type for subsequent polls.
-                                // This enables model-aware polling (extra blocks).
-                                // 'Unknown(0)' means we haven't identified the model yet.
-                                let is_new_model = known_device_type.is_none()
-                                    && !matches!(snapshot.device_type, crate::inverter::model::DeviceType::Unknown(_));
-                                let observation = observe_model_detection(
-                                    known_device_type
-                                        .zip(known_device_type_code.as_deref()),
-                                    snapshot.device_type,
-                                    &snapshot.device_type_code,
-                                );
-                                let observed_dtc =
-                                    u16::from_str_radix(&snapshot.device_type_code, 16)
-                                        .unwrap_or(0);
-                                let observed_arm_fw: u16 =
-                                    snapshot.firmware_version.parse().unwrap_or(0);
-                                match observation {
-                                    DetectionObservation::Identified => {
-                                        let trace = DeviceType::detection_trace(
-                                            observed_dtc,
-                                            observed_arm_fw,
-                                        );
-                                        tracing::info!(
-                                            raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
-                                            arm_fw = trace.arm_fw,
-                                            dsp_fw = %snapshot.dsp_firmware_version,
-                                            serial = %snapshot.inverter_serial,
-                                            matched = ?trace.matched,
-                                            base_type = ?trace.base,
-                                            arm_refinement_applicable = trace.arm_refinement_applicable,
-                                            refined_type = ?trace.refined,
-                                            slave = client.slave_address(),
-                                            "Model detection: HR(0)/ARM firmware decoded"
-                                        );
-                                        if trace.matched == crate::inverter::model::DtcMatch::PrefixFallback {
-                                            tracing::warn!(
-                                                raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
-                                                device_type = ?trace.refined,
-                                                "Model detection: HR(0) is not a known code - classified by family prefix only"
-                                            );
-                                        }
-                                    }
-                                    DetectionObservation::Unidentified { raw_dtc } => {
-                                        if last_unidentified_dtc != Some(raw_dtc) {
-                                            last_unidentified_dtc = Some(raw_dtc);
-                                            if raw_dtc == 0 {
-                                                tracing::debug!(
-                                                    slave = client.slave_address(),
-                                                    "Model detection: HR(0) read as 0x0000 (empty or failed read) - model not identified yet"
-                                                );
-                                            } else {
-                                                tracing::warn!(
-                                                    raw_dtc = %format_args!("{:#06X}", raw_dtc),
-                                                    arm_fw = observed_arm_fw,
-                                                    serial = %snapshot.inverter_serial,
-                                                    slave = client.slave_address(),
-                                                    "Model detection: unrecognised HR(0) device type code - model-aware polling stays off (corrupt read, or an unsupported product)"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    DetectionObservation::TypeDrift => {
-                                        tracing::debug!(
-                                            confirmed = ?known_device_type,
-                                            confirmed_code = ?known_device_type_code,
-                                            decoded = ?snapshot.device_type,
-                                            raw_dtc = %format_args!("{:#06X}", observed_dtc),
-                                            arm_fw = observed_arm_fw,
-                                            "Model detection: decoded type differs from confirmed model - keeping confirmed value"
-                                        );
-                                    }
-                                    DetectionObservation::CodeDrift => {
-                                        tracing::debug!(
-                                            confirmed_code = ?known_device_type_code,
-                                            raw_dtc = %format_args!("{:#06X}", observed_dtc),
-                                            "Model detection: HR(0) code differs from confirmed code - keeping confirmed value"
-                                        );
-                                    }
-                                    DetectionObservation::Stable => {}
-                                }
-                                if is_new_model {
-                                    // Name the actual blocks the model-aware poll
-                                    // will read on the next cycle. For a Gateway
-                                    // this is the lean HR-only standard set + the
-                                    // full IR 1600-1859 bank + EMS plant holding;
-                                    // `extra_poll_blocks()` is empty for Gateway
-                                    // (its blocks are added in
-                                    // `model_specific_blocks_in_poll_order`), so
-                                    // the old `extra_blocks=[]` log line misled
-                                    // users into thinking detection hadn't changed
-                                    // the poll plan.
-                                    let standard_blocks_next: Vec<&'static str> =
-                                        crate::modbus::client::preview_standard_blocks(
-                                            Some(&snapshot.device_type),
-                                            None,
-                                        )
-                                        .iter()
-                                        .map(|b| b.name)
-                                        .collect();
-                                    let model_specific_blocks_next: Vec<&'static str> =
-                                        crate::modbus::client::preview_model_specific_blocks(
-                                            &snapshot.device_type,
-                                            GatewayPollScope::Detail,
-                                        )
-                                        .iter()
-                                        .map(|b| b.name)
-                                        .collect();
-                                    tracing::info!(
-                                        device_type = ?snapshot.device_type,
-                                        standard_blocks = ?standard_blocks_next,
-                                        model_specific_blocks = ?model_specific_blocks_next,
-                                        "Device model identified - enabling model-aware polling"
-                                    );
-                                    let preferred_slave = snapshot.device_type.preferred_read_slave_address();
-                                    let slave_changed = preferred_slave != client.slave_address();
-                                    let should_repoll = should_repoll_after_model_detection(
-                                        snapshot.device_type,
-                                        client.slave_address(),
-                                    );
-                                    if slave_changed {
-                                        tracing::info!(
-                                            from = client.slave_address(),
-                                            to = preferred_slave,
-                                            "Switching operational read slave address for detected model"
-                                        );
-                                        client.set_slave(preferred_slave);
-                                    }
-
-                                    // Three-phase models read 15+ blocks per cycle and
-                                    // need a longer inter-request delay to avoid
-                                    // overwhelming the dongle's slow processor.
-                                    if snapshot.device_type.needs_three_phase_input_blocks() {
-                                        tracing::info!(
-                                            "Three-phase model detected - increasing inter-request delay to {}ms",
-                                            ModbusClient::INTER_REQUEST_DELAY_3PH.as_millis()
-                                        );
-                                        client.set_inter_request_delay(
-                                            ModbusClient::INTER_REQUEST_DELAY_3PH,
-                                        );
-                                    }
-
-                                    let has_model_specific_blocks = !crate::modbus::client::preview_model_specific_blocks(
-                                        &snapshot.device_type,
-                                        GatewayPollScope::Fast,
-                                    )
-                                    .is_empty();
-                                    known_device_type = Some(snapshot.device_type);
-                                    known_device_type_code =
-                                        Some(snapshot.device_type_code.clone());
-
-                                    // The first detection poll is intentionally minimal: it discovers
-                                    // the model, then immediately re-polls with the model-specific
-                                    // slave address and optional blocks (AC HR300-359, Gen3 HR240-299,
-                                    // Gateway IR 1600-1859). Without this, model-specific registers
-                                    // can lag a full poll interval behind detection.
-                                    if should_repoll {
-                                        tracing::info!(
-                                            slave_changed,
-                                            has_model_specific_blocks,
-                                            "Model-specific poll enabled - re-reading immediately"
-                                        );
-                                        return (true, true, false, false);
-                                    }
-
-                                } else if let Some(cached_type) = known_device_type {
-                                    // Lock the device type to prevent dongle register corruption
-                                    // (especially HR(21) arm_firmware_version) from flipping the
-                                    // displayed model on a subsequent poll. Once identified, the
-                                    // snapshot always carries the cached type - the decoder still
-                                    // runs for the raw DTC and firmware string, but the refinement
-                                    // result is ignored in favour of the known-good detection.
-                                    if snapshot.device_type != cached_type {
-                                        snapshot.device_type = cached_type;
-                                        snapshot.device_type_display = cached_type.display_name().to_string();
-                                    }
+                                // Confirm the model on first sight (enabling model-aware
+                                // polling) and lock the snapshot to it afterwards.
+                                if identity.identify(&mut snapshot, &mut client)
+                                    == IdentifyOutcome::RepollNow
+                                {
+                                    return CycleOutcome::published(true);
                                 }
 
                                 if should_probe_external_meters(
-                                    known_device_type,
+                                    identity.device_type,
                                     meter_probe_done,
                                     snapshot.enable_ammeter,
                                     snapshot.meter_type,
@@ -3293,8 +3521,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // DTC. The exact 0x81xx code carries its 6/8/10 kW rating, so
                                 // allowing a later corrupt HR(0) through would lower valid power
                                 // ceilings even though the displayed DeviceType remained locked.
-                                if let (Some(kdt), Some(code)) =
-                                    (known_device_type, known_device_type_code.as_deref())
+                                if let Some((kdt, code)) = identity.confirmed()
                                 {
                                     lock_snapshot_device_identity(&mut snapshot, kdt, code);
                                 }
@@ -3318,13 +3545,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // answer at 0x32. Device type decides which path runs.
                                 // Batteryless devices (Gateway, EMS, PvInverter) skip entirely
                                 // - they have no directly-attached battery to probe.
-                                if known_device_type.is_some_and(|dt| dt.is_batteryless()) {
+                                if identity.device_type.is_some_and(|dt| dt.is_batteryless()) {
                                     // Batteryless device (Gateway / EMS / PvInverter):
                                     // no directly-attached battery to probe. The Gateway
                                     // aggregation bank decoder populates battery fields;
                                     // EMS/PvInverter have none.
                                 } else {
-                                let is_hv = known_device_type
+                                let is_hv = identity.device_type
                                     .map(|dt| dt.uses_hv_battery())
                                     .unwrap_or(false);
                                 if is_hv {
@@ -3340,7 +3567,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             hv_probe_cycles_since_last.saturating_add(1);
                                     }
                                     if should_probe_hv_stacks(
-                                        known_device_type,
+                                        identity.device_type,
                                         hv_probe_done,
                                         hv_probe_attempted,
                                         hv_probe_cycles_since_last,
@@ -3827,35 +4054,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         prev.as_ref(),
                                     );
                                     let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts, &mut rate_release_counts);
-                                    let _ = carry_forward_optional_block_values(
-                                        &mut snapshot,
-                                        prev.as_ref(),
-                                        has_ac_config_block,
-                                        has_extended_slots_block,
-                                        has_three_phase_config_block,
-                                        has_ems_plant_block,
-                                    );
-                                    let _ = carry_forward_three_phase_high_config_values(
-                                        &mut snapshot,
-                                        prev.as_ref(),
-                                        has_three_phase_high_config_block,
-                                    );
-                                    let _ = carry_forward_three_phase_fault_block_values(
-                                        &mut snapshot,
-                                        prev.as_ref(),
-                                        has_three_phase_fault_block,
-                                    );
-                                    if snapshot.device_type == DeviceType::Gateway {
-                                        if let Some(p) = prev.as_ref() {
-                                            if !has_gateway_discharge_detail_block {
-                                                snapshot.per_aio_discharge_today_kwh =
-                                                    p.per_aio_discharge_today_kwh;
-                                            }
-                                            if !has_gateway_serial_block {
-                                                snapshot.per_aio_serial = p.per_aio_serial.clone();
-                                            }
-                                        }
-                                    }
+                                    carry_forward_absent_blocks(&mut snapshot, prev.as_ref(), &present);
                                     let mods = prev.as_ref().map(|p| p.battery_modules.clone());
                                     (s, mods)
                                 };
@@ -5009,7 +5208,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             &te_config,
                                             &mut te_state,
                                             minute_of_day,
-                                            known_device_type.unwrap_or_default(),
+                                            identity.device_type.unwrap_or_default(),
                                             last_timed_export_write_outcome,
                                             te_rearm.is_observing(),
                                         );
@@ -5099,7 +5298,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                     &te_config,
                                                     &mut te_state_fallback,
                                                     minute_of_day,
-                                                    known_device_type.unwrap_or_default(),
+                                                    identity.device_type.unwrap_or_default(),
                                                     crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued,
                                                     false,
                                                 );
@@ -6300,7 +6499,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
                                 publish_snapshot(&state, snapshot).await;
 
-                                (true, sanitized, false, false)
+                                CycleOutcome::published(sanitized)
                             }
                             Err(e) => {
                                 if e.is_hard_failure() {
@@ -6310,7 +6509,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         error = %e,
                                         "TCP connection lost — reconnecting"
                                     );
-                                    (false, false, true, false)
+                                    CycleOutcome::CONNECTION_LOST
                                 } else {
                                     // Timeout — the dongle is slow but the
                                     // TCP socket is fine.
@@ -6321,91 +6520,46 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         error = %e,
                                         "Poll read failed (transient) — continuing"
                                     );
-                                    (false, false, false, false)
+                                    CycleOutcome::TRANSIENT_FAILURE
                                 }
                             }
                         }
                     }.await;
 
-                    match poll_ok {
-                        true => {
-                            // Review H2: a fingerprint cycle never decoded
-                            // real register data, so it must NOT reset the
-                            // streak — it accumulates here and forces a
-                            // reconnect once the threshold is crossed. (The
-                            // old code reset the counter at the top of this
-                            // arm on the suspicious cycle itself, making the
-                            // reconnect path dead code.)
-                            if block_suspicious {
-                                consecutive_suspicious += 1;
-                                if consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
-                                    tracing::warn!(
-                                        suspicious = consecutive_suspicious,
-                                        max = MAX_SUSPICIOUS_CYCLES,
-                                        "Persistent fingerprint corruption - forcing reconnect"
-                                    );
-                                    break;
-                                }
-                                tracing::warn!(
-                                    suspicious = consecutive_suspicious,
-                                    max = MAX_SUSPICIOUS_CYCLES,
-                                    "Dongle memory-leak corruption detected - skipping broadcast, re-polling immediately"
-                                );
-                                continue;
-                            }
-                            consecutive_suspicious = 0;
-                            // Fresh, sanitized data reached the UI/history.
-                            // Resets the sustained-timeout streak, marks the
-                            // session productive, restarts the flap
-                            // data-starvation clock, and — if a flap is
-                            // engaged — advances the stand-down count.
-                            reconnect.note_good_poll(Instant::now());
-                            // Tick the meter retry cadence counter.
-                            if meter_probe_done
-                                && meter_retry_count > 0
-                                && meter_retry_count < METER_MAX_RETRIES
-                            {
-                                meter_cycle_since_last += 1;
-                            }
-                            // If the first scan found nothing and ammeter is
-                            // expected, start the retry cadence.
-                            if meter_probe_done
-                                && meter_retry_count == 0
-                                && detected_meters.is_empty()
-                            {
-                                meter_cycle_since_last += 1;
-                            }
-
-                            // Sanitization was applied - corrupted register data
-                            // detected. Re-poll immediately instead of waiting
-                            // for the next interval, so the frontend gets a
-                            // fresh reading as soon as possible.
-                            if sanitized {
-                                tracing::debug!("Corrupted data detected - re-reading immediately");
-                                continue;
-                            }
-                        }
-                        false => {
-                            // A failed poll breaks the flap recovery streak.
-                            reconnect.note_poll_failed();
-                            if connection_lost {
-                                break;
-                            }
-                            // Transient timeout — read_blocks_resilient already
-                            // retried the failed block. Count it and, once the
-                            // sustained-timeout threshold is reached (handled by
-                            // the controller), disconnect to force a reconnect
-                            // instead of hammering a wedged dongle until the OS
-                            // sends an RST.
-                            if reconnect.note_transient_timeout() {
-                                break;
-                            }
-                            // Sleep briefly then continue to the next poll cycle.
+                    let step = decide_after_cycle(
+                        outcome,
+                        &mut consecutive_suspicious,
+                        &mut reconnect,
+                        Instant::now(),
+                    );
+                    match step {
+                        CycleStep::Reconnect => break,
+                        CycleStep::RepollSuspicious => continue,
+                        CycleStep::RetryAfterBackoff => {
+                            // Transient timeout - read_blocks_resilient already
+                            // retried the failed block. Sleep briefly, then
+                            // continue to the next poll cycle.
                             tracing::debug!(
                                 "Poll read failed (transient) — sleeping before next cycle"
                             );
                             tokio::time::sleep(Duration::from_secs(2)).await;
                             continue;
+                        }
+                        CycleStep::RepollSanitized | CycleStep::WaitForInterval => {
+                            tick_meter_retry_cadence(
+                                &mut meter_cycle_since_last,
+                                meter_probe_done,
+                                meter_retry_count,
+                                detected_meters.is_empty(),
+                            );
+                            // Sanitization was applied - corrupted register data
+                            // detected. Re-poll immediately instead of waiting
+                            // for the next interval, so the frontend gets a
+                            // fresh reading as soon as possible.
+                            if step == CycleStep::RepollSanitized {
+                                tracing::debug!("Corrupted data detected - re-reading immediately");
+                                continue;
+                            }
                         }
                     }
 
@@ -8749,6 +8903,752 @@ mod tests {
                 "AppState::new should seed cosy_active from cosy_active_persisted"
             );
         });
+    }
+
+    // -------------------------------------------------------------------
+    // plan_model_detection / ModelIdentity
+    // -------------------------------------------------------------------
+
+    fn snapshot_decoded_as(dtc: u16, arm_fw: u16) -> InverterSnapshot {
+        let trace = DeviceType::detection_trace(dtc, arm_fw);
+        InverterSnapshot {
+            device_type: trace.refined,
+            device_type_display: trace.refined.display_name().to_string(),
+            device_type_code: format!("{dtc:04X}"),
+            firmware_version: arm_fw.to_string(),
+            inverter_serial: "SA1234G567".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn unconnected_client() -> ModbusClient {
+        ModbusClient::new("127.0.0.1", 8899, "TEST123456")
+    }
+
+    #[test]
+    fn plan_for_a_plain_hybrid_on_the_default_slave_changes_nothing() {
+        let plan = plan_model_detection(DeviceType::Gen2Hybrid, 0x11);
+        assert!(!plan.slave_changed);
+        assert!(!plan.should_repoll);
+        assert!(!plan.longer_inter_request_delay);
+        assert_eq!(plan.preferred_slave, 0x11);
+    }
+
+    #[test]
+    fn plan_for_an_ac_coupled_model_switches_slave_and_repolls() {
+        let plan = plan_model_detection(DeviceType::ACCoupled, 0x11);
+        assert!(plan.slave_changed);
+        assert_eq!(
+            plan.preferred_slave,
+            DeviceType::ACCoupled.preferred_read_slave_address()
+        );
+        assert_ne!(plan.preferred_slave, 0x11);
+        assert!(plan.should_repoll);
+    }
+
+    #[test]
+    fn plan_is_quiet_once_already_on_the_preferred_slave() {
+        let preferred = DeviceType::ACCoupled.preferred_read_slave_address();
+        let plan = plan_model_detection(DeviceType::ACCoupled, preferred);
+        assert!(!plan.slave_changed);
+        // Still repolls: AC coupled has an extra config block to read.
+        assert!(plan.should_repoll);
+    }
+
+    #[test]
+    fn plan_for_three_phase_slows_the_request_cadence() {
+        for dt in [DeviceType::ThreePhase, DeviceType::ACThreePhase] {
+            assert!(
+                plan_model_detection(dt, 0x11).longer_inter_request_delay,
+                "{dt:?}"
+            );
+        }
+        assert!(!plan_model_detection(DeviceType::Gen3Hybrid, 0x11).longer_inter_request_delay);
+    }
+
+    #[test]
+    fn plan_reports_model_specific_blocks_for_gateway_but_not_plain_gen1() {
+        assert!(plan_model_detection(DeviceType::Gateway, 0x11).has_model_specific_blocks);
+        assert!(!plan_model_detection(DeviceType::Gen1Hybrid, 0x11).has_model_specific_blocks);
+    }
+
+    #[test]
+    fn a_new_identity_has_confirmed_nothing() {
+        let identity = ModelIdentity::default();
+        assert!(identity.confirmed().is_none());
+        assert!(identity.last_unidentified_dtc.is_none());
+    }
+
+    #[test]
+    fn identify_confirms_a_plain_hybrid_without_a_repoll() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x2001, 852); // Gen2
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::Continue
+        );
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen2Hybrid, "2001")));
+        assert_eq!(client.slave_address(), 0x11, "slave must not change");
+    }
+
+    #[test]
+    fn identify_switches_the_client_slave_and_asks_for_a_repoll() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        assert_eq!(client.slave_address(), 0x11);
+        let mut snap = snapshot_decoded_as(0x3001, 0); // AC coupled
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::RepollNow
+        );
+        assert_eq!(
+            client.slave_address(),
+            DeviceType::ACCoupled.preferred_read_slave_address()
+        );
+        assert_eq!(identity.confirmed(), Some((DeviceType::ACCoupled, "3001")));
+    }
+
+    #[test]
+    fn identify_asks_for_a_repoll_for_models_with_extra_blocks_on_the_default_slave() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x2001, 352); // Gen3: HR 240-299
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::RepollNow
+        );
+        assert_eq!(client.slave_address(), 0x11);
+    }
+
+    #[test]
+    fn identify_only_repolls_on_the_cycle_that_confirmed_the_model() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x3001, 0);
+        identity.identify(&mut snap, &mut client);
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::Continue,
+            "a stable model must not repoll every cycle"
+        );
+    }
+
+    #[test]
+    fn identify_leaves_an_unrecognised_code_unconfirmed() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x5101, 352); // Commercial EMS
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::Continue
+        );
+        assert!(identity.confirmed().is_none());
+        assert_eq!(identity.last_unidentified_dtc, Some(0x5101));
+        assert_eq!(
+            client.slave_address(),
+            0x11,
+            "an unknown model must not move the slave"
+        );
+    }
+
+    #[test]
+    fn identify_keeps_trying_after_an_empty_read_and_then_confirms() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut empty = InverterSnapshot::default(); // HR(0) read 0x0000
+        identity.identify(&mut empty, &mut client);
+        assert!(identity.confirmed().is_none());
+
+        let mut good = snapshot_decoded_as(0x2001, 852);
+        identity.identify(&mut good, &mut client);
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen2Hybrid, "2001")));
+    }
+
+    #[test]
+    fn identify_locks_the_snapshot_to_the_confirmed_type() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x2001, 352), &mut client); // Gen3
+
+        // Corrupt ARM firmware now decodes the same code as Gen1.
+        let mut drifted = snapshot_decoded_as(0x2001, 7);
+        assert_eq!(drifted.device_type, DeviceType::Gen1Hybrid);
+        assert_eq!(
+            identity.identify(&mut drifted, &mut client),
+            IdentifyOutcome::Continue
+        );
+        assert_eq!(drifted.device_type, DeviceType::Gen3Hybrid);
+        assert_eq!(drifted.device_type_display, "Gen 3 Hybrid");
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen3Hybrid, "2001")));
+    }
+
+    #[test]
+    fn identify_never_re_confirms_to_a_different_model() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x2001, 352), &mut client);
+        // A wholesale corrupt HR(0) must not displace the confirmed model.
+        let mut garbage = snapshot_decoded_as(0xFFFF, 0);
+        identity.identify(&mut garbage, &mut client);
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen3Hybrid, "2001")));
+        assert_eq!(garbage.device_type, DeviceType::Gen3Hybrid);
+    }
+
+    #[test]
+    fn identify_leaves_the_confirmed_code_alone_when_the_code_drifts() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x8102, 0), &mut client);
+        // Same family, different rating digit: keep the confirmed code.
+        identity.identify(&mut snapshot_decoded_as(0x8101, 0), &mut client);
+        assert_eq!(
+            identity.confirmed(),
+            Some((DeviceType::HybridHvGen3, "8102"))
+        );
+    }
+
+    #[test]
+    fn identify_logs_the_decoded_identity_once() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x2001, 352);
+        for _ in 0..3 {
+            identity.identify(&mut snap, &mut client);
+        }
+        assert_eq!(
+            count_logs(&ring, "Model detection: HR(0)/ARM firmware decoded"),
+            1
+        );
+        assert_eq!(count_logs(&ring, "Device model identified"), 1);
+    }
+
+    #[test]
+    fn identify_warns_once_per_distinct_unrecognised_code() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut a = snapshot_decoded_as(0x4101, 0);
+        let mut b = snapshot_decoded_as(0x5101, 0);
+        for _ in 0..3 {
+            identity.identify(&mut a, &mut client);
+        }
+        assert_eq!(count_logs(&ring, "unrecognised HR(0) device type code"), 1);
+        identity.identify(&mut b, &mut client);
+        assert_eq!(
+            count_logs(&ring, "unrecognised HR(0) device type code"),
+            2,
+            "a different unknown code is a new report"
+        );
+    }
+
+    #[test]
+    fn identify_does_not_warn_about_an_empty_hr0_read() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut InverterSnapshot::default(), &mut client);
+        assert_eq!(count_logs(&ring, "unrecognised HR(0) device type code"), 0);
+        assert_eq!(count_logs(&ring, "read as 0x0000"), 1);
+    }
+
+    #[test]
+    fn identify_flags_a_prefix_only_classification() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        // 0x3003 is not a listed AC code; the 0x30 family prefix catches it.
+        identity.identify(&mut snapshot_decoded_as(0x3003, 0), &mut client);
+        assert_eq!(count_logs(&ring, "classified by family prefix only"), 1);
+        assert_eq!(
+            identity.confirmed().map(|(t, _)| t),
+            Some(DeviceType::ACCoupled)
+        );
+    }
+
+    #[test]
+    fn identify_does_not_flag_an_exact_code_as_prefix_only() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x2201, 0), &mut client);
+        assert_eq!(count_logs(&ring, "classified by family prefix only"), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // OptionalBlocksPresent / suspicious_blocks / carry_forward_absent_blocks
+    // -------------------------------------------------------------------
+
+    use crate::modbus::client::BlockRead;
+    use crate::modbus::registers as reg;
+
+    fn read_of(block: &'static reg::RegisterBlock, fill: u16) -> BlockRead {
+        BlockRead {
+            block,
+            data: vec![fill; block.count as usize],
+        }
+    }
+
+    /// Every optional block with the flag it should raise.
+    type OptionalBlockCase = (
+        &'static str,
+        &'static reg::RegisterBlock,
+        fn(&OptionalBlocksPresent) -> bool,
+    );
+
+    fn optional_block_cases() -> Vec<OptionalBlockCase> {
+        vec![
+            ("ac_config", &reg::AC_CONFIG_BLOCK, |p| p.ac_config),
+            ("extended_slots", &reg::EXTENDED_SLOTS_BLOCK, |p| {
+                p.extended_slots
+            }),
+            (
+                "three_phase_high_config",
+                &reg::THREE_PHASE_HIGH_CONFIG_BLOCK,
+                |p| p.three_phase_high_config,
+            ),
+            ("three_phase_config", &reg::THREE_PHASE_CONFIG_BLOCK, |p| {
+                p.three_phase_config
+            }),
+            ("three_phase_fault", &reg::THREE_PHASE_INPUT_BLOCK_6, |p| {
+                p.three_phase_fault
+            }),
+            ("ems_plant", &reg::EMS_PLANT_HOLDING_BLOCK, |p| p.ems_plant),
+            (
+                "gateway_discharge_detail",
+                &reg::GATEWAY_INPUT_BLOCK_3,
+                |p| p.gateway_discharge_detail,
+            ),
+            ("gateway_serial", &reg::GATEWAY_INPUT_BLOCK_5, |p| {
+                p.gateway_serial
+            }),
+        ]
+    }
+
+    #[test]
+    fn no_blocks_means_no_optional_block_is_present() {
+        assert_eq!(
+            OptionalBlocksPresent::from_blocks(&[]),
+            OptionalBlocksPresent::default()
+        );
+    }
+
+    #[test]
+    fn each_optional_block_raises_only_its_own_flag() {
+        let cases = optional_block_cases();
+        for (name, block, own_flag) in &cases {
+            let present = OptionalBlocksPresent::from_blocks(&[read_of(block, 0)]);
+            for (other_name, _, other_flag) in &cases {
+                assert_eq!(
+                    other_flag(&present),
+                    other_name == name,
+                    "reading {name} must raise only {name}, but {other_name} was {}",
+                    other_flag(&present)
+                );
+            }
+            assert!(own_flag(&present), "{name}");
+        }
+    }
+
+    #[test]
+    fn all_optional_blocks_together_raise_every_flag() {
+        let blocks: Vec<_> = optional_block_cases()
+            .into_iter()
+            .map(|(_, b, _)| read_of(b, 0))
+            .collect();
+        let present = OptionalBlocksPresent::from_blocks(&blocks);
+        for (name, _, flag) in optional_block_cases() {
+            assert!(flag(&present), "{name}");
+        }
+    }
+
+    #[test]
+    fn standard_blocks_do_not_count_as_optional_blocks() {
+        let blocks: Vec<_> = reg::STANDARD_POLL_BLOCKS
+            .iter()
+            .map(|b| read_of(b, 0))
+            .collect();
+        assert_eq!(
+            OptionalBlocksPresent::from_blocks(&blocks),
+            OptionalBlocksPresent::default()
+        );
+    }
+
+    #[test]
+    fn a_block_with_the_right_start_but_the_wrong_type_is_not_a_match() {
+        // Input 300/60 is not the Holding AC config block, and Holding
+        // 1300/60 is not the three-phase fault input block.
+        static INPUT_300: reg::RegisterBlock = reg::RegisterBlock {
+            start: 300,
+            count: 60,
+            register_type: reg::RegisterType::Input,
+            name: "input_300_359",
+        };
+        static HOLDING_1300: reg::RegisterBlock = reg::RegisterBlock {
+            start: 1300,
+            count: 60,
+            register_type: reg::RegisterType::Holding,
+            name: "holding_1300_1359",
+        };
+        let present = OptionalBlocksPresent::from_blocks(&[
+            read_of(&INPUT_300, 0),
+            read_of(&HOLDING_1300, 0),
+        ]);
+        assert_eq!(present, OptionalBlocksPresent::default());
+    }
+
+    #[test]
+    fn a_block_with_the_right_start_but_the_wrong_length_is_not_a_match() {
+        static SHORT_AC: reg::RegisterBlock = reg::RegisterBlock {
+            start: 300,
+            count: 30,
+            register_type: reg::RegisterType::Holding,
+            name: "holding_300_329",
+        };
+        assert!(!OptionalBlocksPresent::from_blocks(&[read_of(&SHORT_AC, 0)]).ac_config);
+    }
+
+    /// 60 registers full of the 0xE000+ leaked-memory pattern.
+    fn leaked_block(block: &'static reg::RegisterBlock) -> BlockRead {
+        read_of(block, 0xE500)
+    }
+
+    #[test]
+    fn clean_blocks_are_not_suspicious() {
+        let blocks = vec![read_of(&reg::STANDARD_POLL_BLOCKS[0], 0x0010)];
+        assert_eq!(suspicious_blocks(&blocks).count(), 0);
+    }
+
+    #[test]
+    fn a_leaked_sixty_register_block_is_suspicious() {
+        let blocks = vec![
+            read_of(&reg::STANDARD_POLL_BLOCKS[0], 0x0010),
+            leaked_block(&reg::AC_CONFIG_BLOCK),
+        ];
+        let hits: Vec<_> = suspicious_blocks(&blocks).map(|b| b.block.name).collect();
+        assert_eq!(hits, vec![reg::AC_CONFIG_BLOCK.name]);
+    }
+
+    #[test]
+    fn every_leaked_sixty_register_block_is_reported() {
+        let blocks = vec![
+            leaked_block(&reg::AC_CONFIG_BLOCK),
+            read_of(&reg::THREE_PHASE_CONFIG_BLOCK, 0),
+            leaked_block(&reg::EXTENDED_SLOTS_BLOCK),
+        ];
+        let hits: Vec<_> = suspicious_blocks(&blocks).map(|b| b.block.name).collect();
+        assert_eq!(
+            hits,
+            vec![reg::AC_CONFIG_BLOCK.name, reg::EXTENDED_SLOTS_BLOCK.name]
+        );
+    }
+
+    #[test]
+    fn leaked_data_in_a_non_standard_sized_block_is_not_fingerprinted() {
+        // The fingerprint is defined over 60-register blocks aligned to 60;
+        // the 45-register config block and the unaligned 29-register gateway
+        // serial block are out of scope even when full of 0xE000+ values.
+        let blocks = vec![
+            leaked_block(&reg::THREE_PHASE_CONFIG_BLOCK),
+            leaked_block(&reg::GATEWAY_INPUT_BLOCK_5),
+        ];
+        assert_eq!(suspicious_blocks(&blocks).count(), 0);
+    }
+
+    fn gateway_snapshot_with_aio(kwh: f32, serial: &str) -> InverterSnapshot {
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gateway,
+            ..Default::default()
+        };
+        snap.per_aio_discharge_today_kwh = [kwh; 3];
+        snap.per_aio_serial = std::array::from_fn(|_| serial.to_string());
+        snap
+    }
+
+    #[test]
+    fn absent_gateway_blocks_carry_the_previous_aio_values_forward() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = gateway_snapshot_with_aio(0.0, "");
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &OptionalBlocksPresent::default());
+        assert_eq!(snap.per_aio_discharge_today_kwh, [7.5; 3]);
+        assert_eq!(snap.per_aio_serial[0], "AB1234C567");
+    }
+
+    #[test]
+    fn present_gateway_blocks_keep_their_own_aio_values() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = gateway_snapshot_with_aio(1.25, "ZZ9999Z999");
+        let present = OptionalBlocksPresent {
+            gateway_discharge_detail: true,
+            gateway_serial: true,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &present);
+        assert_eq!(snap.per_aio_discharge_today_kwh, [1.25; 3]);
+        assert_eq!(snap.per_aio_serial[0], "ZZ9999Z999");
+    }
+
+    #[test]
+    fn gateway_detail_and_serial_blocks_are_carried_independently() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = gateway_snapshot_with_aio(1.25, "");
+        let present = OptionalBlocksPresent {
+            gateway_discharge_detail: true,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &present);
+        assert_eq!(
+            snap.per_aio_discharge_today_kwh, [1.25; 3],
+            "detail present"
+        );
+        assert_eq!(snap.per_aio_serial[0], "AB1234C567", "serial carried");
+    }
+
+    #[test]
+    fn nothing_is_carried_forward_without_a_previous_snapshot() {
+        let mut snap = gateway_snapshot_with_aio(0.0, "");
+        carry_forward_absent_blocks(&mut snap, None, &OptionalBlocksPresent::default());
+        assert_eq!(snap.per_aio_discharge_today_kwh, [0.0; 3]);
+        assert_eq!(snap.per_aio_serial[0], "");
+    }
+
+    #[test]
+    fn non_gateway_models_never_borrow_gateway_aio_values() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &OptionalBlocksPresent::default());
+        assert_eq!(snap.per_aio_discharge_today_kwh, [0.0; 3]);
+    }
+
+    #[test]
+    fn an_absent_ac_config_block_keeps_the_previous_limits_and_a_present_one_does_not() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            charge_rate: 80,
+            discharge_rate: 60,
+            ..Default::default()
+        };
+        let fresh = || InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            charge_rate: 0,
+            discharge_rate: 0,
+            ..Default::default()
+        };
+
+        let mut absent = fresh();
+        carry_forward_absent_blocks(&mut absent, Some(&prev), &OptionalBlocksPresent::default());
+        assert_eq!((absent.charge_rate, absent.discharge_rate), (80, 60));
+
+        let mut present = fresh();
+        let flags = OptionalBlocksPresent {
+            ac_config: true,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut present, Some(&prev), &flags);
+        assert_eq!((present.charge_rate, present.discharge_rate), (0, 0));
+    }
+
+    // -------------------------------------------------------------------
+    // decide_after_cycle / tick_meter_retry_cadence
+    // -------------------------------------------------------------------
+
+    fn fresh_reconnect() -> ReconnectController {
+        ReconnectController::new(Instant::now(), 0)
+    }
+
+    /// How many consecutive transient timeouts a fresh controller tolerates
+    /// before demanding a reconnect (so the tests don't hard-code the constant).
+    fn timeouts_until_reconnect() -> u8 {
+        let mut reconnect = fresh_reconnect();
+        let mut streak = 0u8;
+        for n in 1..=20u8 {
+            let step = decide_after_cycle(
+                CycleOutcome::TRANSIENT_FAILURE,
+                &mut streak,
+                &mut reconnect,
+                Instant::now(),
+            );
+            if step == CycleStep::Reconnect {
+                return n;
+            }
+            assert_eq!(step, CycleStep::RetryAfterBackoff);
+        }
+        panic!("transient timeouts never forced a reconnect");
+    }
+
+    fn step(
+        outcome: CycleOutcome,
+        streak: &mut u8,
+        reconnect: &mut ReconnectController,
+    ) -> CycleStep {
+        decide_after_cycle(outcome, streak, reconnect, Instant::now())
+    }
+
+    #[test]
+    fn clean_cycle_waits_for_the_interval() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        assert_eq!(
+            step(CycleOutcome::published(false), &mut streak, &mut reconnect),
+            CycleStep::WaitForInterval
+        );
+    }
+
+    #[test]
+    fn sanitized_cycle_repolls_immediately() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        assert_eq!(
+            step(CycleOutcome::published(true), &mut streak, &mut reconnect),
+            CycleStep::RepollSanitized
+        );
+    }
+
+    #[test]
+    fn fingerprint_cycles_repoll_until_the_streak_forces_a_reconnect() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        for n in 1..MAX_SUSPICIOUS_CYCLES {
+            assert_eq!(
+                step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect),
+                CycleStep::RepollSuspicious,
+                "fingerprint cycle {n}"
+            );
+            assert_eq!(streak, n);
+        }
+        assert_eq!(
+            step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect),
+            CycleStep::Reconnect,
+            "the streak limit must force a reconnect"
+        );
+    }
+
+    #[test]
+    fn a_clean_cycle_resets_the_fingerprint_streak() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        for _ in 1..MAX_SUSPICIOUS_CYCLES {
+            step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        }
+        assert_eq!(
+            step(CycleOutcome::published(false), &mut streak, &mut reconnect),
+            CycleStep::WaitForInterval
+        );
+        assert_eq!(streak, 0);
+        // A fresh run of fingerprint cycles must start counting from zero again.
+        for n in 1..MAX_SUSPICIOUS_CYCLES {
+            assert_eq!(
+                step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect),
+                CycleStep::RepollSuspicious,
+                "fingerprint cycle {n} after reset"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sanitized_cycle_also_resets_the_fingerprint_streak() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        step(CycleOutcome::published(true), &mut streak, &mut reconnect);
+        assert_eq!(streak, 0);
+    }
+
+    #[test]
+    fn a_fingerprint_cycle_does_not_count_as_a_good_poll() {
+        // Review H2: the fingerprint cycle decoded nothing real, so it must not
+        // clear the sustained-timeout streak.
+        let limit = timeouts_until_reconnect();
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        for _ in 1..limit {
+            assert_eq!(
+                step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect),
+                CycleStep::RetryAfterBackoff
+            );
+        }
+        step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        assert_eq!(
+            step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect),
+            CycleStep::Reconnect,
+            "the timeout streak must survive a fingerprint cycle"
+        );
+    }
+
+    #[test]
+    fn a_published_cycle_clears_the_sustained_timeout_streak() {
+        let limit = timeouts_until_reconnect();
+        for sanitized in [false, true] {
+            let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+            for _ in 1..limit {
+                step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect);
+            }
+            step(
+                CycleOutcome::published(sanitized),
+                &mut streak,
+                &mut reconnect,
+            );
+            assert_eq!(
+                step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect),
+                CycleStep::RetryAfterBackoff,
+                "sanitized={sanitized}: good poll must reset the timeout count"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_timeouts_back_off_then_reconnect_at_the_limit() {
+        let limit = timeouts_until_reconnect();
+        assert!(limit >= 2, "a single timeout must not drop the session");
+    }
+
+    #[test]
+    fn a_dead_socket_reconnects_immediately() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        assert_eq!(
+            step(CycleOutcome::CONNECTION_LOST, &mut streak, &mut reconnect),
+            CycleStep::Reconnect
+        );
+    }
+
+    #[test]
+    fn a_failed_poll_leaves_the_fingerprint_streak_alone() {
+        // Existing behaviour, pinned: only a decoded cycle resets the streak.
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect);
+        assert_eq!(streak, 1);
+    }
+
+    #[test]
+    fn meter_cadence_ticks_while_retries_remain() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, true, 1, false);
+        assert_eq!(ticks, 1);
+        tick_meter_retry_cadence(&mut ticks, true, METER_MAX_RETRIES - 1, false);
+        assert_eq!(ticks, 2);
+    }
+
+    #[test]
+    fn meter_cadence_stops_ticking_once_retries_are_exhausted() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, true, METER_MAX_RETRIES, false);
+        assert_eq!(ticks, 0);
+    }
+
+    #[test]
+    fn meter_cadence_starts_after_an_empty_first_scan_only() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, true, 0, true);
+        assert_eq!(ticks, 1, "first scan found nothing: start the cadence");
+        tick_meter_retry_cadence(&mut ticks, true, 0, false);
+        assert_eq!(ticks, 1, "meters were found: nothing to retry");
+    }
+
+    #[test]
+    fn meter_cadence_does_not_tick_before_the_first_scan() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, false, 0, true);
+        tick_meter_retry_cadence(&mut ticks, false, 3, false);
+        assert_eq!(ticks, 0);
     }
 
     #[test]
