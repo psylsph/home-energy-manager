@@ -53,8 +53,19 @@ pub(crate) fn daily_report_due(
 }
 
 /// The `last_report_date` to record the first time the report is seen enabled.
-pub(crate) fn first_cycle_baseline(now: DateTime<Local>, _hour: u8, _minute: u8) -> NaiveDate {
-    now.date_naive()
+///
+/// Before today's send time today's report is still to come, so the baseline is
+/// yesterday: enabling the report (or restarting) at 06:00 still gets the 08:00
+/// report rather than losing it. At or after the send time today's has gone, or
+/// is being deliberately skipped, so the baseline is today.
+pub(crate) fn first_cycle_baseline(now: DateTime<Local>, hour: u8, minute: u8) -> NaiveDate {
+    let today = now.date_naive();
+    let minutes_since_midnight = now.hour() * 60 + now.minute();
+    if minutes_since_midnight >= hour as u32 * 60 + minute as u32 {
+        today
+    } else {
+        today.checked_sub_signed(Duration::days(1)).unwrap_or(today)
+    }
 }
 
 /// Build the report for `report_date` from stored readings. `Ok(None)` means
@@ -103,8 +114,8 @@ pub(crate) fn send_daily_report_telegram(config: &AlertsConfig, report: DailyRep
 /// Run one poll cycle's worth of the daily report: if enabled and due, build
 /// the previous day's report and pass it to `send`.
 ///
-/// The first enabled cycle after start only records today as the baseline (no
-/// report on startup); the first report is sent the following day.
+/// The first enabled cycle after start only records a baseline (no report on
+/// startup); the first report follows at the next send time.
 ///
 /// `last_report_date` is advanced when a report was sent or when there was too
 /// little data to make one. It is left alone when there is no history database
@@ -116,15 +127,22 @@ pub(crate) async fn run_daily_report(
 ) {
     let config = state.alert_config.lock().await.clone();
     if !(config.daily_report_enabled && config.enabled) {
+        // Forget the baseline, so re-enabling later starts afresh instead of
+        // firing at once for a date left over from before it was disabled.
+        *state.last_report_date.lock().await = None;
         return;
     }
     let today = now.date_naive();
     let mut last_sent = state.last_report_date.lock().await;
     if last_sent.is_none() {
-        // First enabled cycle since start: don't send on startup, but record
-        // today as the baseline. Without this `last_report_date` would stay
-        // None forever and the report would never be sent.
-        *last_sent = Some(today);
+        // First enabled cycle since start: don't send on startup, but record a
+        // baseline (see `first_cycle_baseline`). Without this `last_report_date`
+        // would stay None forever and the report would never be sent.
+        *last_sent = Some(first_cycle_baseline(
+            now,
+            config.daily_report_hour,
+            config.daily_report_minute,
+        ));
         return;
     }
     let Some(report_date) = daily_report_due(

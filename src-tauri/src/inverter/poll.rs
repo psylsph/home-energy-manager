@@ -1534,9 +1534,10 @@ struct ModelIdentity {
     /// Raw HR(0) code (hex) the model was confirmed from. The exact 0x81xx
     /// code carries the 6/8/10 kW rating, so it is locked along with the type.
     code: Option<String>,
-    /// Last unidentified HR(0) value warned about, so a persistently unknown
-    /// model logs once rather than on every poll.
-    last_unidentified_dtc: Option<u16>,
+    /// Unidentified HR(0) values already reported, so a persistently unknown
+    /// model - or one that flaps between codes - logs once per value rather
+    /// than on every poll or transition.
+    reported_unidentified: std::collections::BTreeSet<u16>,
 }
 
 impl ModelIdentity {
@@ -1566,7 +1567,7 @@ impl ModelIdentity {
                 let trace = DeviceType::detection_trace(observed_dtc, observed_arm_fw);
                 tracing::info!(
                     raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
-                    arm_fw = trace.arm_fw,
+                    firmware = %snapshot.firmware_version,
                     dsp_fw = %snapshot.dsp_firmware_version,
                     serial = %snapshot.inverter_serial,
                     matched = ?trace.matched,
@@ -1586,8 +1587,7 @@ impl ModelIdentity {
                 return self.confirm(snapshot, client);
             }
             DetectionObservation::Unidentified { raw_dtc } => {
-                if self.last_unidentified_dtc != Some(raw_dtc) {
-                    self.last_unidentified_dtc = Some(raw_dtc);
+                if self.reported_unidentified.insert(raw_dtc) {
                     if raw_dtc == 0 {
                         tracing::debug!(
                             slave = client.slave_address(),
@@ -1596,7 +1596,7 @@ impl ModelIdentity {
                     } else {
                         tracing::warn!(
                             raw_dtc = %format_args!("{:#06X}", raw_dtc),
-                            arm_fw = observed_arm_fw,
+                            firmware = %snapshot.firmware_version,
                             serial = %snapshot.inverter_serial,
                             slave = client.slave_address(),
                             "Model detection: unrecognised HR(0) device type code - model-aware polling stays off (corrupt read, or an unsupported product)"
@@ -8177,7 +8177,7 @@ mod tests {
     fn a_new_identity_has_confirmed_nothing() {
         let identity = ModelIdentity::default();
         assert!(identity.confirmed().is_none());
-        assert!(identity.last_unidentified_dtc.is_none());
+        assert!(identity.reported_unidentified.is_empty());
     }
 
     #[test]
@@ -8245,7 +8245,7 @@ mod tests {
             IdentifyOutcome::Continue
         );
         assert!(identity.confirmed().is_none());
-        assert_eq!(identity.last_unidentified_dtc, Some(0x5101));
+        assert!(identity.reported_unidentified.contains(&0x5101));
         assert_eq!(
             client.slave_address(),
             0x11,
@@ -12152,7 +12152,7 @@ mod tests {
                 .into_iter()
                 .find(|l| l.contains("Model detection: HR(0)/ARM firmware decoded"))
                 .unwrap();
-            for expected in ["0x2001", "arm_fw=352", "Exact", "Gen3Hybrid"] {
+            for expected in ["0x2001", "firmware=352", "Exact", "Gen3Hybrid"] {
                 assert!(line.contains(expected), "missing {expected} in: {line}");
             }
             assert_eq!(
