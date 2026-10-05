@@ -87,8 +87,17 @@ const calls = (path: string) => vi.mocked(apiPost).mock.calls.filter((c) => c[0]
 let postcodeResponse: () => Promise<Partial<Response>>;
 let fetchSpy: ReturnType<typeof vi.spyOn>;
 
+/** True when the request goes to the postcodes.io host (parsed, not substring-matched). */
+function isPostcodeRequest(input: unknown): boolean {
+  try {
+    return new URL(String(input)).hostname === 'api.postcodes.io';
+  } catch {
+    return false;
+  }
+}
+
 function postcodeCalls() {
-  return fetchSpy.mock.calls.filter((c: unknown[]) => String(c[0]).includes('postcodes.io'));
+  return fetchSpy.mock.calls.filter((c: unknown[]) => isPostcodeRequest(c[0]));
 }
 
 beforeEach(() => {
@@ -113,7 +122,7 @@ beforeEach(() => {
   state.tempLimiter = { enabled: true, high_threshold: 70, recovery_threshold: 60, confirmation_readings: 3 };
   postcodeResponse = async () => ({ ok: true, json: async () => ({ status: 200 }) });
   fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: unknown) => {
-    if (String(input).includes('postcodes.io')) return postcodeResponse();
+    if (isPostcodeRequest(input)) return postcodeResponse();
     // Octopus price feed: no upcoming slots is enough for these tests.
     return { ok: true, json: async () => ({ results: [] }) };
   }) as typeof fetch);
