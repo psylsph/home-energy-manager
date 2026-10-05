@@ -1325,14 +1325,7 @@ mod tests {
     /// older ones, while leaving unrelated files untouched.
     #[test]
     fn prune_old_logs_drops_expired_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "hem-prune-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("prune-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         let today = chrono::Local::now().date_naive();
@@ -1361,15 +1354,7 @@ mod tests {
     /// Build a tempdir containing a fake `dist/index.html`. Returns the
     /// directory path. Caller is responsible for removing it.
     fn make_fake_dist(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "hem-dist-test-{}-{}-{}",
-            label,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::test_util::make_unique_test_dir(&format!("dist-test-{label}"));
         std::fs::create_dir_all(dir.join("dist")).unwrap();
         std::fs::write(dir.join("dist").join("index.html"), "<html></html>").unwrap();
         dir
@@ -1418,14 +1403,7 @@ mod tests {
     /// every request. The resolver should fall through.
     #[test]
     fn resolve_dist_dir_rejects_dist_without_index_html() {
-        let dir = std::env::temp_dir().join(format!(
-            "hem-dist-noindex-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("dist-noindex");
         std::fs::create_dir_all(&dir).unwrap();
         let args = vec![
             "--headless".to_string(),

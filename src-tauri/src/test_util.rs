@@ -13,14 +13,7 @@ fn config_dir_mutex() -> &'static parking_lot::Mutex<()> {
 }
 
 fn make_temp_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "givenergy-local-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    make_unique_test_dir("config")
 }
 
 struct ThreadFallbackDir(std::path::PathBuf);

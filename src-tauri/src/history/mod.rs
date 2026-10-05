@@ -4139,8 +4139,7 @@ mod tests {
 
     #[test]
     fn migrates_development_tariff_schema_to_day_night_rate_types() {
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let dir = unique_test_dir("givenergy-history-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("legacy-octopus.db");
         let _ = std::fs::remove_file(&path);
@@ -5988,8 +5987,7 @@ mod tests {
     /// normally — only stuck values are recalculated.
     #[test]
     fn reconstruct_solar_kwh_on_open() {
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let dir = unique_test_dir("givenergy-history-test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test_history.db");
         let _ = std::fs::remove_file(&path);
@@ -6129,8 +6127,7 @@ mod tests {
         // added) by creating a DB with the OLD schema and inserting a row,
         // then reopening with the new schema and verifying the column
         // appears and accepts values.
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let dir = unique_test_dir("givenergy-history-test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("legacy_history.db");
         let _ = std::fs::remove_file(&path);
@@ -6189,8 +6186,7 @@ mod tests {
         // ALTER adds the column (NULL for every legacy row) and the one-time
         // backfill must copy today_consumption_kwh across so the History
         // "Load Energy Today" chart shows historic data instead of blanks.
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let dir = unique_test_dir("givenergy-history-test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("legacy_backfill_history.db");
         let _ = std::fs::remove_file(&path);
@@ -6297,8 +6293,7 @@ mod tests {
         // but must NOT touch rows where 0 is a legitimate value:
         //   * midnight reset rows (both consumption and home_energy are 0)
         //   * rows already populated (home_energy already non-zero)
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-{id}"));
+        let dir = unique_test_dir("givenergy-history-test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("legacy_zero_backfill_history.db");
         let _ = std::fs::remove_file(&path);
@@ -7208,8 +7203,7 @@ mod tests {
         // Insert three snapshots, query today_pv1_kwh / today_pv2_kwh /
         // today_solar_kwh over a wide bucket — must return the MAX of each,
         // not the average, since the fields are cumulative.
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-pv-{id}"));
+        let dir = unique_test_dir("givenergy-history-test-pv");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("pv_history.db");
         let _ = std::fs::remove_file(&path);
@@ -7291,8 +7285,7 @@ mod tests {
         // Simulate an existing DB created before the per-string columns
         // existed. After reopening with the current code, the ALTER
         // migrations must add the columns and inserts must succeed.
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-pv-mig-{id}"));
+        let dir = unique_test_dir("givenergy-history-test-pv-mig");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("legacy_pv.db");
         let _ = std::fs::remove_file(&path);
@@ -7338,8 +7331,7 @@ mod tests {
     fn existing_db_migrates_pv_pct_columns() {
         // issue #110: an existing DB opened with the new schema must ALTER
         // in the pv1_pct / pv2_pct columns and inserts must succeed.
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("givenergy-history-test-pct-mig-{id}"));
+        let dir = unique_test_dir("givenergy-history-test-pct-mig");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("legacy_pct.db");
         let _ = std::fs::remove_file(&path);

@@ -20825,13 +20825,7 @@ pub(crate) mod tests {
         s.import_standing_charge_p_per_day = standing_charge_p_per_day;
         s.save().expect("save settings");
 
-        let tmp_path = std::env::temp_dir().join(format!(
-            "givenergy-test-history-{}.db",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let tmp_path = crate::test_util::make_unique_test_dir("api-history").join("history.db");
         let db = crate::history::HistoryDb::open(&tmp_path).expect("open history db");
         let db_arc = std::sync::Arc::new(db);
 

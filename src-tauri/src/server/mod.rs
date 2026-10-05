@@ -962,14 +962,7 @@ mod tests {
 
     impl TempDist {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "hem-cache-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let path = crate::test_util::make_unique_test_dir("cache-test");
             fs::create_dir_all(path.join("assets")).unwrap();
             fs::write(path.join("index.html"), "<!doctype html>").unwrap();
             fs::write(
