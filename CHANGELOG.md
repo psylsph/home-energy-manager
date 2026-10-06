@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Improved
+
+- **The Refresh Interval setting now explains its effect on your GivEnergy cloud history.** Your WiFi dongle passes each reading the app asks for on to the cloud, which stores it as a data point, so a short interval makes the cloud history much larger (#347).
+
 ## [0.85.5] - 2026-10-04
 
 ### Fixed

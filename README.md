@@ -112,7 +112,7 @@ Click **Scan Network** on the Settings page. The app will search your local netw
 
 ## Features
 
-Home Energy Manager connects directly to your inverter over your home network. It never sends data to the internet and doesn't need a GivEnergy Cloud account.
+Home Energy Manager connects directly to your inverter over your home network. It never sends data to the internet and doesn't need a GivEnergy Cloud account. (Your WiFi dongle keeps reporting to the GivEnergy cloud as it always has, and it also passes on each reading the app asks for, so a short refresh interval makes your cloud history finer-grained.)
 
 ### Monitoring
 

@@ -1586,6 +1586,10 @@ export default function SettingsPage() {
           <p className="text-text-secondary text-xs font-sans">
             How often the app polls the inverter for fresh data.
           </p>
+          <p className="text-text-secondary text-xs font-sans">
+            Each poll also reaches the GivEnergy cloud through the WiFi dongle, which stores it as a
+            data point, so a short interval makes your cloud history much larger.
+          </p>
           <div className="flex gap-2">
             {VALID_INTERVALS.map((s) => (
               <button

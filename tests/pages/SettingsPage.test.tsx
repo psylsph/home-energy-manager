@@ -207,6 +207,15 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       expect(thirtyBtn.className).toContain('text-on-accent');
     });
 
+    it('warns that each poll also reaches the GivEnergy cloud via the dongle', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+      await screen.findByText('Refresh Interval');
+      expect(
+        screen.getByText(/Each poll also reaches the GivEnergy cloud through the WiFi dongle/),
+      ).toBeTruthy();
+    });
+
     it('hydrates the standing charge when set', async () => {
       mountApiMocks({ import_standing_charge_p_per_day: 54.86 });
       render(<SettingsPage />);
