@@ -215,6 +215,43 @@ The Forecast tab predicts the next 48 hours from live weather data (Open-Meteo �
 
 For charge recommendations to appear, make sure your import tariff windows are configured under **Settings → Energy Tariffs**.
 
+### How do I stop the battery discharging into the car, or another large load?
+
+The **Load Discharge Limiter** on the Control page watches your home load and
+pauses battery discharge when it stays above a threshold, then restores normal
+Eco when the load falls back. This is the setting to use if something like a car
+charger pulls the battery down whenever it starts.
+
+Put the **Load Threshold** above your ordinary house load but below what the
+large load draws, and set the **Activation Window** to the hours you care about.
+For a 7.4 kW charger during peak-rate hours, for example:
+
+- **Load Threshold**: `7.0 kW` — a 7.4 kW charge plus house load is comfortably
+  above this, while ordinary evening use is well below it.
+- **Activation Window**: `08:00` to `23:00` — your peak hours. Outside them the
+  limiter does nothing, so the battery supports the house as usual overnight and
+  during cheap-rate hours.
+- **Pause / Recovery Delay**: how long the load must stay above the threshold
+  before discharge pauses, and below it before discharge resumes. The default
+  **5 minutes** suits most homes.
+
+Switch **Enable** on, set those values, then **Save**. While the limiter is
+holding the battery down the house runs on grid — what you want when the large
+load is on a cheap rate, but worth knowing if it isn't.
+
+Two things it needs:
+
+- **Load the inverter can see.** `home_power` comes from the inverter's own load
+  register, so a charger wired upstream of your CT clamp is invisible to it.
+  Check the **Home Power** figure on the Control page while the car is charging
+  — it should jump by roughly the charge rate. If it doesn't move, the limiter
+  has nothing to trigger on.
+- **Eco mode, and the app running.** The limiter is implemented inside HEM and
+  only operates while the battery is in Eco mode; the card warns you if you're
+  in Timed or Export.
+
+---
+
 ### Something else?
 
 Open an issue on [GitHub](https://github.com/psylsph/home-energy-manager/issues) and we'll help you out.
