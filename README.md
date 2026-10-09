@@ -33,21 +33,21 @@ Home Energy Manager connects directly to your inverter over your home network an
     <td align="center"><b>History — Solar</b><br><img src=".github/screenshots/history-solar.png" width="400"></td>
   </tr>
   <tr>
-    <td align="center"><b>History — Home</b><br><img src=".github/screenshots/history-home.png" width="400"></td>
-    <td align="center"><b>Planner</b><br><img src=".github/screenshots/forecast.png" width="290"></td>
-</tr>
+    <td align="center"><b>Planner</b><br><img src=".github/screenshots/planner.png" width="400"></td>
+    <td align="center"><b>Planner — Solar Forecast</b><br><img src=".github/screenshots/planner-solar.png" width="400"></td>
+  </tr>
 
   <tr>
+    <td align="center"><b>History — Home</b><br><img src=".github/screenshots/history-home.png" width="400"></td>
     <td align="center"><b>Control Panel</b><br><img src=".github/screenshots/control.png" width="400"></td>
+  </tr>
+  <tr>
     <td align="center"><b>Settings</b><br><img src=".github/screenshots/settings.png" width="400"></td>
-  </tr>
-  <tr>
     <td align="center"><b>Developer Console</b><br><img src=".github/screenshots/developer-mode.png" width="400"></td>
-    <td align="center"><b>Consumption Reports</b><br><img src=".github/screenshots/power-reports-1.png" width="400"></td>
   </tr>
   <tr>
+    <td align="center"><b>Consumption Reports</b><br><img src=".github/screenshots/power-reports-1.png" width="400"></td>
     <td align="center"><b>Consumption Report (PDF)</b><br><img src=".github/screenshots/power-reports-2.png" width="400"></td>
-    <td></td>
   </tr>
 </table>
 
@@ -135,11 +135,17 @@ Home Energy Manager connects directly to your inverter over your home network. I
 - **PDF consumption reports** — generate formatted reports with charts and summary tables for solar, home, grid, and battery energy, including cost breakdowns. Open **Consumption Report** from the Power page, then choose **Print / save as PDF**. The History page exports CSV only.
 - **Consumption Reports** — summary statistics for any time range including total energy, peak power, solar coverage percentage, and grid dependency, with time-bucketed breakdowns exportable as CSV
 
-### Forecasting & Planning
+### Planner
 
-- **Solar forecast** — a 48-hour generation forecast built from live weather data (Open-Meteo — free, no account or API key needed) and automatically calibrated against your own generation history, so it learns your panels' real-world performance over the first couple of weeks
+The Planner tab looks three days ahead and tells you whether tonight's cheap-rate window needs a grid charge, and how much.
+
+- **Today's recommendation** — the plan card leads the page with the overnight charge to make, its time window, the lowest the battery will fall and what the charge will cost. It's the smallest charge that keeps your battery above the minimum level you choose, placed in your cheapest import window, and one click applies it to the inverter
+- **Automatic planning** — switch it on and the app re-sizes and writes the charge slot a few minutes before each cheap window from your live battery level, then sends you a notification saying what it did (or why no charge was needed)
+- **Export opportunities** — when your export tariff pays more at certain times, the Planner shows how much you can sell from the battery, when, and what it should earn, without dropping below your minimum
+- **Solar forecast** — a 72-hour generation forecast built from live weather data (Open-Meteo — free, no account or API key needed) and automatically calibrated against your own generation history, so it learns your panels' real-world performance over the first couple of weeks
 - **Consumption profile** — your household's typical hourly electricity usage, learned from your own history and shown with typical low/high ranges
-- **Battery projection & overnight charge plan** — see where your battery charge is heading hour by hour, and get a recommended overnight grid charge when it would otherwise dip below your minimum level. The plan is sized to the smallest charge that holds your floor and placed in your cheapest import tariff window; one click applies it to the inverter
+- **Battery projection** — see where your battery is heading hour by hour if you rely on solar alone, if you follow the plan, or if you leave your current inverter schedule as it is
+- **Tomorrow at a glance** — expected solar, house consumption, export and import for tomorrow, with the plan's charge included
 
 ### Control
 
