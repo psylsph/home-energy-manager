@@ -156,6 +156,15 @@ pub(super) fn simulate_hold(
     })
 }
 
+/// The part of a hold window spent charging.
+pub fn hold_charging_window(
+    _window: &ChargeWindow,
+    _kwh: f64,
+    _max_charge_kw: f64,
+) -> Option<ChargeWindow> {
+    None
+}
+
 /// Compute the hold-through-window recommendation. `NoPlan` and
 /// `NoChargeNeeded` from the default planner pass through unchanged, as
 /// does its plan when there are no hourly inputs to simulate a hold with.

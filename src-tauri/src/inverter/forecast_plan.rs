@@ -865,6 +865,79 @@ mod tests {
         assert!(plan_notification(&plan, PlanTrigger::Refresh).is_none());
     }
 
+    // ---- stale hold targets (issue #359 review) ----------------------------
+
+    fn armed(device_type: DeviceType, target_soc: u8) -> InverterSnapshot {
+        InverterSnapshot {
+            device_type,
+            battery_capacity_kwh: 19.0,
+            max_battery_power_w: 3600,
+            target_soc,
+            ..Default::default()
+        }
+    }
+
+    fn writes_to(regs: &[(u16, u16)], address: u16) -> Vec<u16> {
+        regs.iter()
+            .filter(|(a, _)| *a == address)
+            .map(|(_, v)| *v)
+            .collect()
+    }
+
+    #[test]
+    fn a_full_charge_plan_resets_a_stale_target_on_extended_models() {
+        // A hold plan left HR 116 at 62; models that follow the global
+        // target would otherwise stop the next full charge at 62%.
+        for device in [DeviceType::Gen3Hybrid, DeviceType::AllInOne6kW] {
+            let regs = written(&plan_slot_plan(
+                &charge(120, 300, false, 3.2),
+                &armed(device, 62),
+            ));
+            assert_eq!(writes_to(&regs, 116), vec![100], "{device:?}: {regs:?}");
+        }
+    }
+
+    #[test]
+    fn clearing_the_plan_resets_a_stale_target_on_extended_models() {
+        let regs = written(&plan_slot_plan(
+            &no_charge(),
+            &armed(DeviceType::AllInOne6kW, 62),
+        ));
+        assert_eq!(writes_to(&regs, 116), vec![100], "{regs:?}");
+    }
+
+    #[test]
+    fn no_target_reset_when_none_is_armed() {
+        // 100 is "no limit" and 4 is the decoder's unset value.
+        for target in [100, 4] {
+            let snapshot = armed(DeviceType::AllInOne6kW, target);
+            for rec in [charge(120, 300, false, 3.2), no_charge()] {
+                let regs = written(&plan_slot_plan(&rec, &snapshot));
+                assert!(writes_to(&regs, 116).is_empty(), "{target}: {regs:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn flag_gated_models_need_no_target_reset() {
+        // Gen1/2 and AC-coupled disarm a target by clearing HR 20, which a
+        // full charge already does.
+        let regs = written(&plan_slot_plan(
+            &charge(120, 300, false, 3.2),
+            &armed(DeviceType::Gen2Hybrid, 62),
+        ));
+        assert!(writes_to(&regs, 116).is_empty(), "{regs:?}");
+    }
+
+    #[test]
+    fn a_new_hold_target_replaces_a_stale_one_without_a_reset() {
+        let regs = written(&plan_slot_plan(
+            &hold(false),
+            &armed(DeviceType::Gen3Hybrid, 70),
+        ));
+        assert_eq!(writes_to(&regs, 116), vec![62], "{regs:?}");
+    }
+
     // ---- plan_notification --------------------------------------------------
 
     fn all_plans() -> Vec<SlotPlan> {

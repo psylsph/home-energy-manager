@@ -1328,6 +1328,64 @@ mod tests {
         );
     }
 
+    /// Issue #359 review: the export advice must see a hold plan's charge,
+    /// or it can sell into the very hours the battery is being charged.
+    #[test]
+    fn export_advice_respects_a_hold_plan_charge() {
+        use crate::forecast::planner::ExportAdvice;
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        seed_full_forecast_state(&db, now);
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 0.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![slot("00:00", "05:00", 0.07), slot("05:00", "23:59", 0.27)],
+        });
+        // The best export window, 23:00–01:00, runs into the cheap charging
+        // hours that start at midnight.
+        settings.export_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![
+                slot("00:00", "01:00", 0.40),
+                slot("01:00", "23:00", 0.05),
+                slot("23:00", "23:59", 0.40),
+            ],
+        });
+        let snap = battery_snapshot();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        for strategy in [
+            crate::settings::PlanStrategy::MinSoc,
+            crate::settings::PlanStrategy::HoldWindow,
+        ] {
+            settings.forecast_plan_strategy = strategy;
+            let (_, export) =
+                crate::server::api::compute_full_plan(&payload, &settings, Some(&snap), now_ts);
+            match export {
+                Some(ExportAdvice::NoExport { reason }) => assert!(
+                    reason.contains("overlaps the planned charge"),
+                    "{strategy:?}: {reason}"
+                ),
+                other => panic!("{strategy:?}: expected an overlap refusal, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn payload_builds_full_forecast() {
         let db = test_db();

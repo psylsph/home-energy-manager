@@ -1170,7 +1170,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
 }
 
 mod hold;
-pub use hold::plan_hold_through_window;
+pub use hold::{hold_charging_window, plan_hold_through_window};
 
 /// Compute the recommendation for the user's chosen strategy (issue
 /// #359). [`PlanStrategy::MinSoc`] is exactly [`plan_overnight_charge`].
@@ -4560,5 +4560,89 @@ mod tests {
                 plan_hold_through_window(&inputs)
             );
         }
+    }
+
+    /// A midday cheap window: hour 0 (11:00) is idle, hour 1 (12:00) is the
+    /// window, with `solar` against a 1 kWh load.
+    fn midday_window_case(solar: f64) -> (Vec<SimHourInput>, SimulationParams, ChargeWindow, i64) {
+        let hours = vec![
+            SimHourInput {
+                timestamp: hour_ts(11, 0),
+                solar_kwh: 0.5,
+                consumption_kwh: 0.5,
+            },
+            SimHourInput {
+                timestamp: hour_ts(12, 0),
+                solar_kwh: solar,
+                consumption_kwh: 1.0,
+            },
+        ];
+        let p = SimulationParams {
+            capacity_kwh: 10.0,
+            start_soc_pct: 55.0,
+            reserve_soc_pct: 4.0,
+            max_charge_kw: 3.0,
+            max_discharge_kw: 3.0,
+            charge_efficiency: 0.9,
+            discharge_efficiency: 0.95,
+        };
+        let window = ChargeWindow {
+            start_min: 12 * 60,
+            end_min: 13 * 60,
+            tomorrow: false,
+            rate: 0.1,
+        };
+        let now = hour_ts(11, 0) - 60;
+        (hours, p, window, now)
+    }
+
+    #[test]
+    fn hold_grid_charge_leaves_room_for_solar_in_the_window() {
+        // 0.3 kWh of surplus covers part of the 55%→60% top-up, so the grid
+        // supplies only the rest and the battery stops at the target.
+        let (hours, p, window, now) = midday_window_case(1.3);
+        let outcome = hold::simulate_hold(&hours, &p, &window, now, 60).expect("simulates");
+        let room_ac = 5.0 / 100.0 * 10.0 / 0.9;
+        assert!(
+            (outcome.series[1].soc_pct - 60.0).abs() < 0.01,
+            "ends at {}",
+            outcome.series[1].soc_pct
+        );
+        assert!(
+            (outcome.charge_kwh - (room_ac - 0.3)).abs() < 1e-6,
+            "grid charge {}",
+            outcome.charge_kwh
+        );
+        assert!((outcome.grid_kwh - outcome.charge_kwh).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hold_draws_nothing_from_the_grid_when_solar_fills_the_room() {
+        let (hours, p, window, now) = midday_window_case(2.0);
+        let outcome = hold::simulate_hold(&hours, &p, &window, now, 60).expect("simulates");
+        assert_eq!(outcome.charge_kwh, 0.0);
+        assert_eq!(outcome.grid_kwh, 0.0);
+    }
+
+    #[test]
+    fn hold_charging_window_covers_only_the_charging_time() {
+        let window = ChargeWindow {
+            start_min: 23 * 60,
+            end_min: 6 * 60,
+            tomorrow: false,
+            rate: 0.07,
+        };
+        let charging = hold_charging_window(&window, 14.99, 3.6).expect("charges");
+        // 14.99 kWh at 3.6 kW is 249.8 minutes, rounded up.
+        assert_eq!(
+            (charging.start_min, charging.end_min),
+            (23 * 60, 3 * 60 + 10)
+        );
+        assert_eq!(charging.rate, 0.07);
+        // Never longer than the window itself.
+        let capped = hold_charging_window(&window, 100.0, 3.6).expect("charges");
+        assert_eq!((capped.start_min, capped.end_min), (23 * 60, 6 * 60));
+        // A pure hold charges nothing.
+        assert!(hold_charging_window(&window, 0.0, 3.6).is_none());
     }
 }

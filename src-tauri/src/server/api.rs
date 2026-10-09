@@ -10770,6 +10770,40 @@ pub(crate) mod tests {
         .await;
     }
 
+    /// Issue #359: the Planner's Apply (the only caller sending
+    /// `charge_rate_percent`) resets a target a hold plan left armed on an
+    /// extended-slot model, so a full charge isn't capped by it. Other saves
+    /// keep the "100 never writes HR 116" rule pinned below.
+    #[tokio::test]
+    async fn planner_apply_resets_a_stale_target_on_extended_models() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+                snapshot.target_soc = 62;
+            }
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 2, "start_minute": 0,
+                "end_hour": 3, "end_minute": 36,
+                "enabled": true,
+                "target_soc": 100,
+                "charge_rate_percent": 100,
+            });
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            let targets: Vec<u16> = writes
+                .iter()
+                .filter(|w| w.address == HR_CHARGE_TARGET_SOC)
+                .map(|w| w.value)
+                .collect();
+            assert_eq!(targets, vec![100], "{writes:?}");
+        })
+        .await;
+    }
+
     /// Enabling a charge slot with target_soc=100 when HR 116 was previously
     /// set to 80 must NOT overwrite HR 116 (100 = no limit).
     #[tokio::test]

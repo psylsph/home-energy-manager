@@ -1308,6 +1308,29 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     });
   });
 
+  it('notes the hold is unconfirmed on a model other than Gen3', async () => {
+    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
+    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-plan-strategy-note')).toHaveTextContent(
+      /confirmed on Gen 3/i,
+    );
+  });
+
+  it('shows no hold note on a Gen3 or for the minimum strategy', async () => {
+    useInverterStore.setState({ snapshot: { device_type: 'Gen3Hybrid' } } as never);
+    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-target');
+    expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
+    cleanup();
+    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-apply');
+    expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
+  });
+
   it('shows no target for a minimum-SOC plan', async () => {
     mockPage(planPayload('charge'));
     render(<ForecastPage />);

@@ -7,6 +7,9 @@ import {
   truncateSeriesAtNextChargeStart,
   formatForecastXAxisTick,
   forecastPlanTitle,
+  chargeTargetReadBack,
+  holdStrategyNote,
+  holdTargetPct,
   minimumSocNote,
   planAutoApplyTriggerLabel,
   parseLeadMinutes,
@@ -662,5 +665,48 @@ describe('minimumSocNote (issue #360)', () => {
     expect(minimumSocNote(4, undefined)).toBeNull();
     expect(minimumSocNote(4, Number.NaN)).toBeNull();
     expect(minimumSocNote(20, 100)).toBeNull();
+  });
+});
+
+describe('hold plans (issue #359 review)', () => {
+  const charge: Extract<PlanRecommendation, { kind: 'charge' }> = {
+    kind: 'charge',
+    window: { start: '23:00', end: '06:00', rate: 0.07, tomorrow: false },
+    kwh: 15,
+    min_soc_pct: 20,
+    observed_min_soc_pct: 4,
+    after_min_soc_pct: 20,
+    current_soc_pct: 30,
+    rationale: 'why',
+    with_charge_series: [],
+    import_tomorrow_with_charge_kwh: 0,
+    export_tomorrow_with_charge_kwh: 0,
+  };
+
+  it('reads the hold target from a hold plan only', () => {
+    expect(holdTargetPct({ ...charge, strategy: 'hold_window', slot_target_soc_pct: 75 })).toBe(75);
+    expect(holdTargetPct(charge)).toBeNull();
+    // A target without the hold strategy is not presented as a hold.
+    expect(holdTargetPct({ ...charge, slot_target_soc_pct: 75 })).toBeNull();
+    expect(holdTargetPct({ ...charge, strategy: 'hold_window' })).toBeNull();
+    expect(
+      forecastPlanTitle({ ...charge, slot_target_soc_pct: 75 }),
+    ).toBe('Overnight charge — Tonight 23:00\u201306:00, 15.0 kWh');
+  });
+
+  it('only needs a target read back when one below 100 was requested', () => {
+    expect(chargeTargetReadBack(100, 62)).toBe(true);
+    expect(chargeTargetReadBack(75, 75)).toBe(true);
+    expect(chargeTargetReadBack(75, 62)).toBe(false);
+    expect(chargeTargetReadBack(75, undefined)).toBe(false);
+  });
+
+  it('flags the hold as unconfirmed off Gen3', () => {
+    expect(holdStrategyNote('Gen3Hybrid')).toBeNull();
+    expect(holdStrategyNote('Gen3PlusHybrid')).toBeNull();
+    expect(holdStrategyNote(undefined)).toBeNull();
+    for (const device of ['Gen2Hybrid', 'ACCoupled', 'AllInOne6kW', 'ThreePhase']) {
+      expect(holdStrategyNote(device)).toMatch(/confirmed on Gen 3/i);
+    }
   });
 });

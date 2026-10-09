@@ -547,6 +547,24 @@ export function minimumSocNote(
   );
 }
 
+/** The hold target of a hold-through-window plan, %. */
+export function holdTargetPct(_rec: PlanRecommendation): number | null {
+  return null;
+}
+
+/** Whether a read-back slot target satisfies the requested one. */
+export function chargeTargetReadBack(
+  _desiredTargetSoc: number,
+  _actualTargetSoc: number | undefined,
+): boolean {
+  return true;
+}
+
+/** Caveat for models where holding at a target is unconfirmed. */
+export function holdStrategyNote(_deviceType: string | undefined): string | null {
+  return null;
+}
+
 /** Short headline for the Plan card. Degrades gracefully per kind. */
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {
