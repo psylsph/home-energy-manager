@@ -4259,12 +4259,46 @@ pub async fn set_charge_slot(
         target_soc,
         requested_charge_rate,
     ) {
-        Ok(writes) => {
+        Ok(mut writes) => {
+            // Only the Planner's Apply sends a charge rate: a full charge from
+            // it also disarms a target an earlier hold plan left behind.
+            if enabled && target_soc >= 100 && requested_charge_rate_pct.is_some() {
+                let armed = state
+                    .latest_snapshot
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map_or(100, |snapshot| snapshot.target_soc);
+                writes.extend(stale_charge_target_reset(device_type, armed));
+            }
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
             ok_response(&format!("Charge slot {} configured", slot))
         }
         Err(e) => error_response(&e),
+    }
+}
+
+/// The write that disarms a charge target a hold plan left behind (issue
+/// #359): HR 116 back to 100 on single-phase extended-slot models, which
+/// follow the global target without the HR 20 flag, when the inverter still
+/// reports an armed 5–99% target. Flag-gated models (Gen1/2, AC-coupled)
+/// are already disarmed by the HR 20 clear a full charge writes; three-phase
+/// keeps its target elsewhere. Used only for planner-owned writes, so the
+/// Control page's "an explicit 100 never writes HR 116" rule still holds.
+pub(crate) fn stale_charge_target_reset(
+    device_type: DeviceType,
+    armed_target_soc: u8,
+) -> Vec<RegisterWrite> {
+    if device_type.uses_extended_schedule_slots()
+        && !device_type.uses_three_phase_schedule_slots()
+        && (5..=99).contains(&armed_target_soc)
+    {
+        ControlCommand::SetChargeTargetSocOnly { soc: 100 }
+            .encode()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     }
 }
 
@@ -8425,9 +8459,22 @@ pub(crate) fn compute_full_plan(
             }),
         );
     };
+    // A hold plan charges at full rate from the window's start until it
+    // reaches its target. The export planner simulates a full-rate charge
+    // across whatever window it is given, so it gets that charging stretch,
+    // not the whole hold window (issue #359).
+    let hold_charging = match &charge {
+        PlanRecommendation::ChargeAndHold { window, kwh, .. } => {
+            crate::forecast::planner::hold_charging_window(window, *kwh, params.max_charge_kw)
+        }
+        PlanRecommendation::Charge { .. }
+        | PlanRecommendation::NoChargeNeeded { .. }
+        | PlanRecommendation::NoPlan { .. } => None,
+    };
     let charge_window = match &charge {
         crate::forecast::planner::PlanRecommendation::Charge { window, .. } => Some(window),
-        _ => None,
+        PlanRecommendation::ChargeAndHold { .. } => hold_charging.as_ref(),
+        PlanRecommendation::NoChargeNeeded { .. } | PlanRecommendation::NoPlan { .. } => None,
     };
     let export = crate::forecast::planner::plan_export_window(&ExportPlanInputs {
         sim_hours: &sim_hours,
@@ -19960,9 +20007,6 @@ pub(crate) mod tests {
         .await;
     }
 
-    /// Issue #283 planner v2: the settings endpoint accepts and validates
-    /// `forecast_min_soc_pct` (0..=100, the SOC floor for the forecast
-    /// window). Out-of-range values are rejected and leave disk untouched.
     /// Issue #359: the planner strategy saves, validates, and reads back.
     /// Unknown values are rejected and leave disk untouched.
     #[tokio::test]
@@ -20015,6 +20059,9 @@ pub(crate) mod tests {
         .await;
     }
 
+    /// Issue #283 planner v2: the settings endpoint accepts and validates
+    /// `forecast_min_soc_pct` (0..=100, the SOC floor for the forecast
+    /// window). Out-of-range values are rejected and leave disk untouched.
     #[tokio::test]
     async fn update_settings_validates_forecast_min_soc_pct() {
         with_isolated_config_dir_async(|| async {

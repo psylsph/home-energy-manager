@@ -94,7 +94,7 @@ pub(crate) fn rec_kwh(rec: &PlanRecommendation) -> f64 {
     match rec {
         PlanRecommendation::Charge { kwh, .. } => *kwh,
         PlanRecommendation::ChargeAndHold { kwh, .. } => *kwh,
-        _ => 0.0,
+        PlanRecommendation::NoChargeNeeded { .. } | PlanRecommendation::NoPlan { .. } => 0.0,
     }
 }
 
@@ -126,7 +126,8 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
                         snapshot,
                     ),
                 ),
-            ),
+            )
+            .map(|writes| with_stale_target_reset(writes, snapshot)),
         },
         PlanRefreshAction::ClearSlot => SlotPlan::Clear {
             writes: crate::server::api::build_charge_slot_writes(
@@ -137,7 +138,8 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
                 0,
                 SLOT_TARGET_SOC_NONE,
                 None,
-            ),
+            )
+            .map(|writes| with_stale_target_reset(writes, snapshot)),
         },
         PlanRefreshAction::WriteSlotWithTarget {
             start_hhmm,
@@ -176,6 +178,19 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
             },
         },
     }
+}
+
+/// Append the reset for a charge target an earlier hold plan left armed
+/// (issue #359), so a full charge or a cleared slot isn't capped by it.
+fn with_stale_target_reset(
+    mut writes: Vec<RegisterWrite>,
+    snapshot: &InverterSnapshot,
+) -> Vec<RegisterWrite> {
+    writes.extend(crate::server::api::stale_charge_target_reset(
+        snapshot.device_type,
+        snapshot.target_soc,
+    ));
+    writes
 }
 
 /// The message to send the user for this outcome. Only the auto-apply

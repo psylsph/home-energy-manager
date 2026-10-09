@@ -547,30 +547,45 @@ export function minimumSocNote(
   );
 }
 
-/** The hold target of a hold-through-window plan, %. */
-export function holdTargetPct(_rec: PlanRecommendation): number | null {
-  return null;
+/** The slot target of a hold-through-window plan, % (issue #359), or null
+ *  for any other plan. Keyed on the strategy: a target alone doesn't make
+ *  a plan a hold. */
+export function holdTargetPct(rec: PlanRecommendation): number | null {
+  if (rec.kind !== 'charge' || rec.strategy !== 'hold_window') return null;
+  return rec.slot_target_soc_pct ?? null;
 }
 
-/** Whether a read-back slot target satisfies the requested one. */
+/** Whether a read-back slot target satisfies the requested one. A request
+ *  of 100 means "no limit", which inverters report in different ways, so
+ *  only an explicit target below 100 has to be read back (issue #359). */
 export function chargeTargetReadBack(
-  _desiredTargetSoc: number,
-  _actualTargetSoc: number | undefined,
+  desiredTargetSoc: number,
+  actualTargetSoc: number | undefined,
 ): boolean {
-  return true;
+  return desiredTargetSoc >= 100 || actualTargetSoc === desiredTargetSoc;
 }
 
-/** Caveat for models where holding at a target is unconfirmed. */
-export function holdStrategyNote(_deviceType: string | undefined): string | null {
-  return null;
+/** Device types where charging to a target and then holding it through
+ *  the slot has been confirmed on real hardware (issue #359). */
+const HOLD_CONFIRMED_DEVICES = new Set(['Gen3Hybrid', 'Gen3PlusHybrid']);
+
+/** Caveat under the strategy picker on models where the hold behaviour is
+ *  unconfirmed, or null when it's confirmed or the model isn't known yet. */
+export function holdStrategyNote(deviceType: string | undefined): string | null {
+  if (deviceType == null || HOLD_CONFIRMED_DEVICES.has(deviceType)) return null;
+  return (
+    'Holding the battery at its target has only been confirmed on Gen 3 hybrids so far. ' +
+    'On the first night, check the battery stays flat once it reaches the target.'
+  );
 }
 
 /** Short headline for the Plan card. Degrades gracefully per kind. */
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {
     const when = rec.window.tomorrow ? 'Tomorrow' : 'Tonight';
-    if (rec.slot_target_soc_pct != null) {
-      return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, to ${Math.round(rec.slot_target_soc_pct)}% then hold`;
+    const holdTarget = holdTargetPct(rec);
+    if (holdTarget != null) {
+      return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, to ${Math.round(holdTarget)}% then hold`;
     }
     return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, ${rec.kwh.toFixed(1)} kWh`;
   }

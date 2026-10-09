@@ -15,9 +15,9 @@
 //! outcome is reshaped here.
 
 use super::{
-    cheapest_import_window, energy_on_local_day, first_reachable_occurrence, floor_held, hhmm,
-    plan_overnight_charge, post_range, window_overlap_segments, ChargeWindow, PlanInputs,
-    PlanRecommendation,
+    charge_duration_minutes, charge_window_for_duration, cheapest_import_window,
+    energy_on_local_day, first_reachable_occurrence, floor_held, hhmm, plan_overnight_charge,
+    post_range, window_overlap_segments, ChargeWindow, PlanInputs, PlanRecommendation,
 };
 use crate::forecast::simulate::{
     simulate_battery_segment, SimHourInput, SimHourResult, SimulationParams,
@@ -126,8 +126,13 @@ pub(super) fn simulate_hold(
             };
             let mut drawn = 0.0;
             if inside {
+                // Solar surplus charges first, as in Eco; the grid tops up only
+                // what is left of the room to the target and of the rate.
+                let surplus = (hour.solar_kwh - hour.consumption_kwh).max(0.0) * fraction;
                 let room_ac = (target - soc).max(0.0) / 100.0 * params.capacity_kwh / eta_c;
-                let charge_ac = (params.max_charge_kw * fraction).min(room_ac);
+                let charge_ac = (params.max_charge_kw * fraction - surplus)
+                    .min(room_ac - surplus)
+                    .max(0.0);
                 let unmet_load = (hour.consumption_kwh - hour.solar_kwh).max(0.0) * fraction;
                 segment_hour.solar_kwh += charge_ac + unmet_load;
                 charge_kwh += charge_ac;
@@ -156,13 +161,16 @@ pub(super) fn simulate_hold(
     })
 }
 
-/// The part of a hold window spent charging.
+/// The stretch of a hold window spent charging: `kwh` at the inverter's
+/// maximum from the window's start, in whole minutes and never longer
+/// than the window. `None` for a pure hold that charges nothing.
 pub fn hold_charging_window(
-    _window: &ChargeWindow,
-    _kwh: f64,
-    _max_charge_kw: f64,
+    window: &ChargeWindow,
+    kwh: f64,
+    max_charge_kw: f64,
 ) -> Option<ChargeWindow> {
-    None
+    let minutes = charge_duration_minutes(kwh, max_charge_kw);
+    (minutes > 0).then(|| charge_window_for_duration(window, minutes))
 }
 
 /// Compute the hold-through-window recommendation. `NoPlan` and
@@ -219,26 +227,27 @@ pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
     let lowest = soc_at_start.ceil().clamp(f64::from(MIN_TARGET_PCT), 100.0) as u8;
 
     let floor = inputs.target_soc_pct;
-    let holds = |target: u8| simulate(target).is_some_and(|o| o.holds(sim_hours, params, floor));
-    let (target, reaches_minimum) = if !full.holds(sim_hours, params, floor) {
-        (100, false)
-    } else if holds(lowest) {
-        (lowest, true)
+    // Search for the lowest holding target, keeping the winning simulation
+    // so it isn't run again.
+    let holding = |target: u8| simulate(target).filter(|o| o.holds(sim_hours, params, floor));
+    let (target, reaches_minimum, outcome) = if !full.holds(sim_hours, params, floor) {
+        (100, false, full)
+    } else if let Some(at_lowest) = holding(lowest) {
+        (lowest, true, at_lowest)
     } else {
         // `lowest` fails and 100 holds; holding is monotonic in the target.
-        let (mut lo, mut hi) = (lowest, 100u8);
+        let (mut lo, mut hi, mut best) = (lowest, 100u8, full);
         while hi - lo > 1 {
             let mid = lo + (hi - lo) / 2;
-            if holds(mid) {
-                hi = mid;
-            } else {
-                lo = mid;
+            match holding(mid) {
+                Some(at_mid) => {
+                    hi = mid;
+                    best = at_mid;
+                }
+                None => lo = mid,
             }
         }
-        (hi, true)
-    };
-    let Some(outcome) = simulate(target) else {
-        return base;
+        (hi, true, best)
     };
     let after_min_soc_pct = outcome.trough_pct();
 

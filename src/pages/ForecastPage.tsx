@@ -28,6 +28,9 @@ import {
   formatForecastXAxisTick,
   forecastExportTitle,
   forecastPlanTitle,
+  chargeTargetReadBack,
+  holdStrategyNote,
+  holdTargetPct,
   forecastStatusMessages,
   forecastXAxisTicks,
   forecastYAxisScale,
@@ -207,6 +210,7 @@ function forecastChargeSlotMatchesReadback(
     && actual.start_minute === desired.start_minute
     && actual.end_hour === desired.end_hour
     && actual.end_minute === desired.end_minute
+    && chargeTargetReadBack(desired.target_soc, actual.target_soc)
     && snapshot?.enable_charge === true;
 }
 
@@ -672,6 +676,8 @@ export default function ForecastPage() {
   // Issue #360: explain what a 0% minimum, or one at or below the inverter
   // reserve, means to the planner beside the input.
   const reserveNote = minimumSocNote(minSocPct, data.battery?.reserve_soc_pct);
+  const holdNote = planStrategy === 'hold_window' ? holdStrategyNote(snapshot?.device_type) : null;
+  const holdTarget = plan?.recommendation ? holdTargetPct(plan.recommendation) : null;
   const anchoredProjection = data.battery
     ? anchorSeriesAtNow(
         relabelToStateInstants(data.battery.hours),
@@ -919,9 +925,9 @@ export default function ForecastPage() {
               <div className="rounded-lg bg-bg-elevated p-3">
                 <div className="text-[11px] text-text-secondary">Charge</div>
                 <div data-testid="forecast-plan-kwh" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.recommendation.kwh.toFixed(1)} kWh</div>
-                {plan.recommendation.slot_target_soc_pct != null && (
+                {holdTarget != null && (
                   <div data-testid="forecast-plan-target" className="text-[11px] text-text-secondary">
-                    to {Math.round(plan.recommendation.slot_target_soc_pct)}%, then hold
+                    to {Math.round(holdTarget)}%, then hold
                   </div>
                 )}
               </div>
@@ -1034,6 +1040,11 @@ export default function ForecastPage() {
                 ? 'Charges to the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house for the rest of the cheap window.'
                 : 'Charges at full rate for just long enough to stay above your minimum, then lets the battery run the house again.'}
             </p>
+            {holdNote && (
+              <p data-testid="forecast-plan-strategy-note" className="text-[11px] text-amber-300 font-sans">
+                {holdNote}
+              </p>
+            )}
           </div>
           {/* Planner floor — the planner sizes the overnight charge so the
               battery never dips below this percentage across the forward
