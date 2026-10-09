@@ -247,6 +247,11 @@ describe('ForecastPage', () => {
     expect(screen.queryByTestId('forecast-status-banner')).toBeNull();
   });
 
+  it('titles the page Planner', async () => {
+    render(<ForecastPage />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Planner' })).toBeTruthy();
+  });
+
   it('attributes forecast data to Open-Meteo under CC BY 4.0', async () => {
     // Open-Meteo's CC-BY 4.0 licence requires attribution where the data is
     // presented — the page's entire content is Open-Meteo-derived.

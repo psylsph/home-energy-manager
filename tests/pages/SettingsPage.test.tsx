@@ -393,13 +393,14 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       });
     });
 
-    it('offers the Forecast panel and persists hiding it', async () => {
-      // The Forecast tab was missing from the Panel Visibility list even
-      // though the router already treats it as hideable — a user could not
-      // hide it from the bottom navigation bar.
+    it('offers the Planner panel and persists hiding it', async () => {
+      // The Planner (formerly Forecast) tab was missing from the Panel
+      // Visibility list even though the router already treats it as
+      // hideable — a user could not hide it from the bottom navigation bar.
+      // Its saved key stays `forecast` so existing settings keep working.
       mountApiMocks();
       render(<SettingsPage />);
-      const forecastCheckbox = await screen.findByRole('checkbox', { name: 'Forecast' });
+      const forecastCheckbox = await screen.findByRole('checkbox', { name: 'Planner' });
       expect((forecastCheckbox as HTMLInputElement).checked).toBe(true);
 
       fireEvent.click(forecastCheckbox);

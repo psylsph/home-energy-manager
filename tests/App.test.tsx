@@ -33,6 +33,9 @@ vi.mock('../src/pages/MetersPage', () => ({
 vi.mock('../src/pages/HistoryPage', () => ({
   default: () => <div data-testid="mock-History">History</div>,
 }));
+vi.mock('../src/pages/ForecastPage', () => ({
+  default: () => <div data-testid="mock-Forecast">Forecast</div>,
+}));
 vi.mock('../src/pages/OctopusPage', () => ({
   default: () => <div data-testid="mock-Octopus">Octopus</div>,
 }));
@@ -166,6 +169,19 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
     expect(window.location.hash).toBe('#/battery');
     expect(batteryLink.getAttribute('aria-current')).toBe('page');
     expect(screen.getByRole('link', { name: 'Status' }).getAttribute('aria-current')).toBeNull();
+  });
+
+  it('labels the forecast tab Planner while keeping its /forecast URL', async () => {
+    // Users call the page the planner; the URL and the panel-visibility key
+    // stay `forecast` so bookmarks and saved hidden-panel settings still work.
+    render(<App />);
+    const plannerLink = screen.getByRole('link', { name: 'Planner' });
+    expect(screen.queryByRole('link', { name: 'Forecast' })).toBeNull();
+    await act(async () => {
+      fireEvent.click(plannerLink);
+    });
+    expect(screen.getByTestId('mock-Forecast')).toBeDefined();
+    expect(window.location.hash).toBe('#/forecast');
   });
 
   // Each core route renders its (mocked) page. This also guards the structural
