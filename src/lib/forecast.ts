@@ -527,9 +527,15 @@ export function reserveFloorNote(
   minSocPct: number,
   reserveSocPct: number | null | undefined,
 ): string | null {
-  void minSocPct;
-  void reserveSocPct;
-  return null;
+  if (reserveSocPct == null || !Number.isFinite(reserveSocPct) || reserveSocPct >= 100) {
+    return null;
+  }
+  const floor = Math.max(reserveSocPct, 0) + RESERVE_FLOOR_MARGIN_PCT;
+  if (minSocPct >= floor) return null;
+  return (
+    `Your inverter keeps a ${Math.round(reserveSocPct)}% battery reserve, so the planner holds at least ${Math.round(floor)}%. ` +
+    'At or below the reserve the battery would sit empty on grid power.'
+  );
 }
 
 /** Short headline for the Plan card. Degrades gracefully per kind. */

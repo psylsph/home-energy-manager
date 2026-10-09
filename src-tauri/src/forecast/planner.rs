@@ -722,8 +722,17 @@ pub const RESERVE_FLOOR_MARGIN_PCT: f64 = 1.0;
 
 /// The SOC floor the planners actually hold (issue #360): the user's minimum,
 /// but never at or below the inverter's battery reserve.
-pub fn effective_floor_pct(min_soc_pct: f64, _reserve_soc_pct: f64) -> f64 {
-    min_soc_pct
+///
+/// The simulation stops discharging at the reserve, so a floor at or under it
+/// is always "held" — the plan would never charge and the export could sell
+/// down to the reserve, leaving the house on grid power until solar arrives.
+/// A battery sitting at its reserve is empty, not on target. A 100% reserve
+/// (battery paused) never discharges, so the user's minimum stands there.
+pub fn effective_floor_pct(min_soc_pct: f64, reserve_soc_pct: f64) -> f64 {
+    if !reserve_soc_pct.is_finite() || reserve_soc_pct >= 100.0 {
+        return min_soc_pct;
+    }
+    min_soc_pct.max(reserve_soc_pct.max(0.0) + RESERVE_FLOOR_MARGIN_PCT)
 }
 
 /// Compute the recommendation. See [`PlanRecommendation`] for the cases.
@@ -752,6 +761,8 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
                 .to_string(),
         };
     };
+    // Never at or below the inverter's reserve (issue #360).
+    let floor = effective_floor_pct(inputs.target_soc_pct, inputs.params.reserve_soc_pct);
 
     // The planning moment drives both the window pick (minute-of-day)
     // and the one-cycle occurrence anchoring below.
@@ -793,10 +804,10 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         .take(observed_end)
         .map(|h| h.soc_pct)
         .fold(f64::INFINITY, f64::min);
-    if observed_min_soc_pct >= inputs.target_soc_pct {
+    if observed_min_soc_pct >= floor {
         return PlanRecommendation::NoChargeNeeded {
             current_soc_pct: inputs.current_soc_pct,
-            min_soc_pct: inputs.target_soc_pct,
+            min_soc_pct: floor,
             observed_min_soc_pct,
         };
     }
@@ -825,7 +836,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     // evening trough is the classic under-charge this v2 objective
     // exists to catch.
     let stored_needed_kwh =
-        (inputs.target_soc_pct - fixable_trough.min(soc_at_window_end)).max(0.0) / 100.0 * capacity;
+        (floor - fixable_trough.min(soc_at_window_end)).max(0.0) / 100.0 * capacity;
     let ac_needed = stored_needed_kwh / eta;
     let initial_kwh = ac_needed.min(deliverable_ac);
 
@@ -844,7 +855,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         let max_duration_min = window_duration_minutes(&base_window);
         let full_outcome =
             simulate_with_max_rate(sim_hours, inputs.params, &base_window, inputs.now_ts);
-        let duration_min = if full_outcome.trough_pct >= inputs.target_soc_pct {
+        let duration_min = if full_outcome.trough_pct >= floor {
             let mut lo = 0u16; // known-failing because the observed trough is below target
             let mut hi = max_duration_min; // known-good
             while hi - lo > 1 {
@@ -852,7 +863,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
                 let probe_window = charge_window_for_duration(&base_window, mid);
                 let probe =
                     simulate_with_max_rate(sim_hours, inputs.params, &probe_window, inputs.now_ts);
-                if probe.trough_pct >= inputs.target_soc_pct {
+                if probe.trough_pct >= floor {
                     hi = mid;
                 } else {
                     lo = mid;
@@ -953,7 +964,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
 
     // The honest caveat: when even the full deliverable charge can't
     // hold the minimum, say so instead of pretending the plan succeeds.
-    let reaches_minimum = after_min_soc_pct >= inputs.target_soc_pct - 0.05;
+    let reaches_minimum = after_min_soc_pct >= floor - 0.05;
     let duration_min = window_duration_minutes(&window);
     let rationale = if reaches_minimum {
         format!(
@@ -969,7 +980,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             hhmm(window.start_min),
             hhmm(window.end_min),
             after_min_soc_pct,
-            inputs.target_soc_pct,
+            floor,
             kwh * window.rate,
         )
     } else {
@@ -987,7 +998,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             hhmm(window.start_min),
             hhmm(window.end_min),
             after_min_soc_pct,
-            inputs.target_soc_pct,
+            floor,
             kwh * window.rate,
         )
     };
@@ -995,7 +1006,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     PlanRecommendation::Charge {
         window,
         kwh,
-        min_soc_pct: inputs.target_soc_pct,
+        min_soc_pct: floor,
         observed_min_soc_pct,
         current_soc_pct: inputs.current_soc_pct,
         after_min_soc_pct,
@@ -1078,6 +1089,8 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
                 .to_string(),
         };
     }
+    // Never at or below the inverter's reserve (issue #360).
+    let floor = effective_floor_pct(inputs.floor_pct, inputs.params.reserve_soc_pct);
     let now_min = chrono::DateTime::from_timestamp(inputs.now_ts, 0)
         .map(|dt| {
             let local = dt.with_timezone(&chrono::Local);
@@ -1237,7 +1250,7 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
                 hi = mid;
                 continue;
             };
-            if trough_after(&probe.series, &probe_run) >= inputs.floor_pct {
+            if trough_after(&probe.series, &probe_run) >= floor {
                 lo = mid;
             } else {
                 hi = mid;
@@ -1275,14 +1288,14 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
     let final_run = window_runs_for_window(&window, inputs.sim_hours, &selected);
     let kwh = final_sim.export_kwh;
     let after_min_soc_pct = trough_after(&final_sim.series, &final_run);
-    if kwh < EXPORT_MIN_KWH || after_min_soc_pct < inputs.floor_pct {
+    if kwh < EXPORT_MIN_KWH || after_min_soc_pct < floor {
         return ExportAdvice::NoExport {
             reason: format!(
                 "only about {:.1} kWh spare above your {:.0}% floor during \
                  the {} window — under the {:.1} kWh threshold worth \
                  scheduling",
                 kwh.max(0.0),
-                inputs.floor_pct,
+                floor,
                 hhmm(base_window.start_min),
                 EXPORT_MIN_KWH,
             ),
@@ -1301,14 +1314,14 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
         hhmm(window.end_min),
         earning,
         after_min_soc_pct,
-        inputs.floor_pct,
+        floor,
         replacement_rate * 100.0,
         replace_cost,
     );
     ExportAdvice::Export {
         window,
         kwh,
-        min_soc_pct: inputs.floor_pct,
+        min_soc_pct: floor,
         after_min_soc_pct,
         earning,
         rationale,

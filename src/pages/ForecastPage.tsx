@@ -36,6 +36,7 @@ import {
   planAutoApplyTriggerLabel,
   insertChargeStartVertices,
   relabelToStateInstants,
+  reserveFloorNote,
   shouldRefetchForecast,
   toBatteryChartData,
   toConsumptionChartData,
@@ -643,6 +644,9 @@ export default function ForecastPage() {
   // 23:30–23:59 window landed entirely in the 23:00 bucket's point, so the
   // dashed "if charge enacted" line visibly climbed before the
   // charge-start marker.
+  // Issue #360: a minimum at or below the inverter reserve is lifted by the
+  // planner — say so beside the input rather than leaving the user guessing.
+  const reserveNote = reserveFloorNote(minSocPct, data.battery?.reserve_soc_pct);
   const anchoredProjection = data.battery
     ? anchorSeriesAtNow(
         relabelToStateInstants(data.battery.hours),
@@ -1005,6 +1009,11 @@ export default function ForecastPage() {
               level until the following cheap period. Lower means less grid import; higher
               keeps more backup in reserve.
             </p>
+            {reserveNote && (
+              <p data-testid="forecast-min-soc-reserve-note" className="text-[11px] text-amber-300 font-sans">
+                {reserveNote}
+              </p>
+            )}
           </div>
           {/* Automatic plan handling — one control for keeping charge slot 1
               in step with the plan: the backend applies the calculated plan
