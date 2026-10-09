@@ -2497,7 +2497,7 @@ export default function SettingsPage() {
               ['solar', 'Solar'],
               ['meters', 'Meters'],
               ['history', 'History'],
-              ['forecast', 'Forecast'],
+              ['forecast', 'Planner'],
               ...(octopusKeyConfigured ? [['octopus', 'Octopus'] as const] : []),
               ['control', 'Control'],
             ] as const).map(([key, label]) => (

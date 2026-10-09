@@ -205,9 +205,9 @@ instructions on all three channels.
 
 ---
 
-### How does the Forecast tab work?
+### How does the Planner tab work?
 
-The Forecast tab predicts the next 48 hours from live weather data (Open-Meteo — free, no account or API key needed) combined with your own history:
+The Planner tab (called Forecast in older versions) predicts the next 48 hours from live weather data (Open-Meteo — free, no account or API key needed) combined with your own history:
 
 - **Solar** is calibrated against your actual generation over the last two weeks, so the prediction learns how your panels really perform. Until roughly five usable days of history exist, the prediction is marked *preliminary*.
 - **Consumption** is learned from your household's typical hourly usage.

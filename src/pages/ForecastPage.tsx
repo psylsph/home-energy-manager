@@ -783,7 +783,7 @@ export default function ForecastPage() {
   return (
     <div className="flex flex-col gap-3 sm:gap-4 max-w-5xl">
       <div>
-        <h1 className="text-lg font-bold text-text-primary">Forecast</h1>
+        <h1 className="text-lg font-bold text-text-primary">Planner</h1>
         <p
           className="text-xs text-text-secondary"
           data-testid="forecast-attribution"

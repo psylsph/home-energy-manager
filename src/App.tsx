@@ -180,7 +180,7 @@ const NAV_ITEMS = [
   { to: '/inverter', label: 'Inverter', icon: InverterIcon, accent: FLOW_COLORS.inverter },
   { to: '/meters', label: 'Meters', icon: MeterIcon, accent: FLOW_COLORS.grid },
   { to: '/history', label: 'History', icon: HistoryIcon, accent: undefined },
-  { to: '/forecast', label: 'Forecast', icon: ForecastIcon, accent: FLOW_COLORS.solar },
+  { to: '/forecast', label: 'Planner', icon: ForecastIcon, accent: FLOW_COLORS.solar },
   { to: '/octopus', label: 'Octopus', icon: OctopusIcon, accent: '#ec4899' },
   { to: '/control', label: 'Control', icon: ControlIcon, accent: undefined },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, accent: undefined },
