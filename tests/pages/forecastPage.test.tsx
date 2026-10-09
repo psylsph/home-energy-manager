@@ -1192,6 +1192,43 @@ describe('ForecastPage min SOC input', () => {
   });
 });
 
+describe('ForecastPage minimum vs battery reserve (issue #360)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  const mockWithMinSoc = (minSoc: number) => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      // fullPayload() carries a 15% inverter reserve.
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_charge_needed');
+      if (path === '/api/settings') return { ok: true, data: { forecast_min_soc_pct: minSoc } };
+      return { ok: true, data: {} };
+    });
+  };
+
+  it('explains the lifted floor when the minimum sits at or below the reserve', async () => {
+    mockWithMinSoc(10);
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-min-soc-reserve-note')).toHaveTextContent(
+      /15% battery reserve, so the planner holds at least 16%/,
+    );
+  });
+
+  it('shows no note when the minimum is above the reserve', async () => {
+    mockWithMinSoc(20);
+    render(<ForecastPage />);
+    const input = (await screen.findByTestId('forecast-min-soc-input')) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('20'));
+    expect(screen.queryByTestId('forecast-min-soc-reserve-note')).toBeNull();
+  });
+});
+
 describe('ForecastPage plan settings edits survive background refetches', () => {
   beforeEach(() => {
     vi.clearAllMocks();

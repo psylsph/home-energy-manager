@@ -517,6 +517,21 @@ export type PlanResponse = {
   export?: ExportAdvice | null;
 };
 
+/** How far above the inverter's battery reserve the planner's floor sits
+ *  (mirrors `RESERVE_FLOOR_MARGIN_PCT` in `forecast/planner.rs`). */
+export const RESERVE_FLOOR_MARGIN_PCT = 1;
+
+/** Note shown under the Minimum battery level input when the saved minimum
+ *  is at or below the inverter's battery reserve (issue #360). */
+export function reserveFloorNote(
+  minSocPct: number,
+  reserveSocPct: number | null | undefined,
+): string | null {
+  void minSocPct;
+  void reserveSocPct;
+  return null;
+}
+
 /** Short headline for the Plan card. Degrades gracefully per kind. */
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {

@@ -7,6 +7,7 @@ import {
   truncateSeriesAtNextChargeStart,
   formatForecastXAxisTick,
   forecastPlanTitle,
+  reserveFloorNote,
   planAutoApplyTriggerLabel,
   parseLeadMinutes,
   forecastStatusMessages,
@@ -615,5 +616,27 @@ describe('parseLeadMinutes', () => {
     expect(parseLeadMinutes('12.5')).toBeNull();
     expect(parseLeadMinutes('1e2')).toBeNull();
     expect(parseLeadMinutes('abc')).toBeNull();
+  });
+});
+
+describe('reserveFloorNote (issue #360)', () => {
+  it('explains the lifted floor when the minimum is at or below the reserve', () => {
+    expect(reserveFloorNote(4, 4)).toBe(
+      'Your inverter keeps a 4% battery reserve, so the planner holds at least 5%. ' +
+        'At or below the reserve the battery would sit empty on grid power.',
+    );
+    expect(reserveFloorNote(0, 10)).toMatch(/holds at least 11%/);
+  });
+
+  it('stays quiet when the minimum is above the reserve', () => {
+    expect(reserveFloorNote(20, 4)).toBeNull();
+    expect(reserveFloorNote(5, 4)).toBeNull();
+  });
+
+  it('stays quiet without a usable reserve or with the battery paused at 100%', () => {
+    expect(reserveFloorNote(4, null)).toBeNull();
+    expect(reserveFloorNote(4, undefined)).toBeNull();
+    expect(reserveFloorNote(4, Number.NaN)).toBeNull();
+    expect(reserveFloorNote(20, 100)).toBeNull();
   });
 });

@@ -717,6 +717,15 @@ fn simulate_with_max_rate(
     }
 }
 
+/// How far above the inverter's battery reserve the planner's floor must sit.
+pub const RESERVE_FLOOR_MARGIN_PCT: f64 = 1.0;
+
+/// The SOC floor the planners actually hold (issue #360): the user's minimum,
+/// but never at or below the inverter's battery reserve.
+pub fn effective_floor_pct(min_soc_pct: f64, _reserve_soc_pct: f64) -> f64 {
+    min_soc_pct
+}
+
 /// Compute the recommendation. See [`PlanRecommendation`] for the cases.
 pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     // Gate: no projection to reason about.
@@ -3641,6 +3650,128 @@ mod tests {
         assert!(
             after_charge_start > before_charge,
             "planned charge must lift the composed series: {before_charge} → {after_charge_start}"
+        );
+    }
+    // ----------------------------------------------------------------
+    // Reserve-aware floor (issue #360)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn effective_floor_sits_just_above_the_reserve() {
+        // Above the reserve the user's minimum stands.
+        assert_eq!(effective_floor_pct(20.0, 4.0), 20.0);
+        // At or below it, the floor lifts to just above the reserve.
+        assert_eq!(effective_floor_pct(4.0, 4.0), 5.0);
+        assert_eq!(effective_floor_pct(0.0, 10.0), 11.0);
+        assert_eq!(effective_floor_pct(0.0, 0.0), 1.0);
+        // A 100% reserve (battery paused) never discharges, so lifting the
+        // floor past it would ask for an impossible charge.
+        assert_eq!(effective_floor_pct(20.0, 100.0), 20.0);
+    }
+
+    #[test]
+    fn min_soc_at_or_below_the_reserve_still_charges_an_empty_battery() {
+        // The simulation never discharges below the 10% reserve, so with the
+        // minimum at (or under) the reserve the projected low always "held"
+        // the floor and the plan never charged — even though the battery
+        // sat empty on grid power through the morning peak.
+        let p = params();
+        let solar = {
+            let mut s = [0.0; 24];
+            for h in 10..=15 {
+                s[h as usize] = 1.0;
+            }
+            s
+        };
+        let cons: [f64; 24] =
+            std::array::from_fn(|h| if (3..=5).contains(&h) { 1.0 } else { 0.25 });
+        let (sim, sim_hours) = fixed_48h(30.0, solar, cons, &p);
+        assert!(
+            sim.hours.iter().map(|h| h.import_kwh).sum::<f64>() > 1.0,
+            "fixture must import while the battery sits at the reserve"
+        );
+        let flux = flux_tariff();
+        for min in [10.0, 4.0, 0.0] {
+            match plan_overnight_charge(&plan_inputs_with_min(
+                &sim,
+                &sim_hours,
+                &p,
+                Some(&flux),
+                min,
+            )) {
+                PlanRecommendation::Charge {
+                    kwh,
+                    min_soc_pct,
+                    after_min_soc_pct,
+                    ..
+                } => {
+                    assert!(kwh > 0.0, "min {min}: expected a charge");
+                    assert_eq!(min_soc_pct, 11.0, "min {min}: reports the floor it held");
+                    assert!(
+                        after_min_soc_pct >= 11.0 - 0.05,
+                        "min {min}: charge must keep the battery off the reserve, got {after_min_soc_pct}"
+                    );
+                }
+                other => panic!("min {min}: expected Charge, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn min_soc_at_the_reserve_with_a_battery_that_never_empties_needs_no_charge() {
+        // The lifted floor must not invent charges: a sunny day that never
+        // drains the battery to the reserve still needs nothing.
+        let p = params();
+        let solar = {
+            let mut s = [0.0; 24];
+            for h in 6..=19 {
+                s[h as usize] = 1.5;
+            }
+            s
+        };
+        let (sim, sim_hours) = fixed_48h(50.0, solar, [0.3; 24], &p);
+        let flux = flux_tariff();
+        match plan_overnight_charge(&plan_inputs_with_min(
+            &sim,
+            &sim_hours,
+            &p,
+            Some(&flux),
+            10.0,
+        )) {
+            PlanRecommendation::NoChargeNeeded { min_soc_pct, .. } => {
+                assert_eq!(min_soc_pct, 11.0);
+            }
+            other => panic!("expected NoChargeNeeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn export_advice_never_sells_the_battery_down_to_the_reserve() {
+        // Floor configured at the 10% reserve: selling to exactly 10% would
+        // leave the house on grid power until the next cheap window, so the
+        // export holds just above the reserve instead.
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        let hours = idle_day_hours(0);
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&ExportPlanInputs {
+            floor_pct: 10.0,
+            ..export_inputs(&hours, &p, &flux_tariff(), &flux_tariff(), None, now)
+        });
+        let ExportAdvice::Export {
+            min_soc_pct,
+            after_min_soc_pct,
+            ..
+        } = advice
+        else {
+            panic!("expected an export recommendation, got {advice:?}");
+        };
+        assert_eq!(min_soc_pct, 11.0);
+        assert!(
+            after_min_soc_pct >= 11.0,
+            "export must stop above the reserve, got {after_min_soc_pct}"
         );
     }
 }
