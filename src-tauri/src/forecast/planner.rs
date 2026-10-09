@@ -1320,7 +1320,12 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
     }
     // Selling while the planned charge is filling the battery would
     // have the grid pay for energy the plan is simultaneously buying.
-    if let Some(charge_window) = inputs.charge_window {
+    // A hold plan's whole slot counts too (issue #359): slot 1 stays
+    // active, holding the battery, after it stops charging.
+    for charge_window in [inputs.charge_window, inputs.hold_window]
+        .into_iter()
+        .flatten()
+    {
         let overlaps = selected.run.iter().any(|&i| {
             inputs
                 .sim_hours

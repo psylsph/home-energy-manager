@@ -98,14 +98,79 @@ pub(crate) fn rec_kwh(rec: &PlanRecommendation) -> f64 {
     }
 }
 
-/// [`plan_slot_plan`] for a planner that armed `planner_armed_target` with
-/// an earlier hold plan.
+/// [`plan_slot_plan`] for a planner that may have armed `planner_armed`
+/// with an earlier hold plan (issue #359): a full charge, a full hold or a
+/// cleared slot also disarms that target, if the inverter still reports it.
 pub(crate) fn plan_slot_plan_for(
     rec: &PlanRecommendation,
     snapshot: &InverterSnapshot,
-    _planner_armed_target: Option<u8>,
+    planner_armed: Option<u8>,
 ) -> SlotPlan {
-    plan_slot_plan(rec, snapshot)
+    let reset = |writes: Result<Vec<RegisterWrite>, String>| {
+        writes.map(|mut writes| {
+            crate::server::api::extend_unwritten(
+                &mut writes,
+                crate::server::api::planner_target_reset(
+                    snapshot.device_type,
+                    snapshot.target_soc,
+                    planner_armed,
+                ),
+            );
+            writes
+        })
+    };
+    match plan_slot_plan(rec, snapshot) {
+        SlotPlan::Write {
+            start_hhmm,
+            end_hhmm,
+            kwh,
+            tomorrow,
+            writes,
+        } => SlotPlan::Write {
+            start_hhmm,
+            end_hhmm,
+            kwh,
+            tomorrow,
+            writes: reset(writes),
+        },
+        SlotPlan::Clear { writes } => SlotPlan::Clear {
+            writes: reset(writes),
+        },
+        SlotPlan::WriteHold {
+            start_hhmm,
+            end_hhmm,
+            target_soc,
+            kwh,
+            tomorrow,
+            writes,
+        } if target_soc >= 100 => SlotPlan::WriteHold {
+            start_hhmm,
+            end_hhmm,
+            target_soc,
+            kwh,
+            tomorrow,
+            writes: reset(writes),
+        },
+        plan => plan,
+    }
+}
+
+/// The planner's armed target after queuing `plan`: a hold below 100 arms
+/// its target, any other successful write leaves the planner owning none,
+/// and a plan that wrote nothing changes nothing.
+fn armed_target_after(plan: &SlotPlan) -> Option<Option<u8>> {
+    match plan {
+        SlotPlan::WriteHold {
+            target_soc,
+            writes: Ok(_),
+            ..
+        } => Some((*target_soc < 100).then_some(*target_soc)),
+        SlotPlan::Write { writes: Ok(_), .. } | SlotPlan::Clear { writes: Ok(_) } => Some(None),
+        SlotPlan::Write { writes: Err(_), .. }
+        | SlotPlan::WriteHold { writes: Err(_), .. }
+        | SlotPlan::Clear { writes: Err(_) }
+        | SlotPlan::NoPlan { .. } => None,
+    }
 }
 
 /// Translate a recommendation into the writes for charge slot 1 on this
@@ -136,8 +201,7 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
                         snapshot,
                     ),
                 ),
-            )
-            .map(|writes| with_stale_target_reset(writes, snapshot)),
+            ),
         },
         PlanRefreshAction::ClearSlot => SlotPlan::Clear {
             writes: crate::server::api::build_charge_slot_writes(
@@ -148,8 +212,7 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
                 0,
                 SLOT_TARGET_SOC_NONE,
                 None,
-            )
-            .map(|writes| with_stale_target_reset(writes, snapshot)),
+            ),
         },
         PlanRefreshAction::WriteSlotWithTarget {
             start_hhmm,
@@ -188,19 +251,6 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
             },
         },
     }
-}
-
-/// Append the reset for a charge target an earlier hold plan left armed
-/// (issue #359), so a full charge or a cleared slot isn't capped by it.
-fn with_stale_target_reset(
-    mut writes: Vec<RegisterWrite>,
-    snapshot: &InverterSnapshot,
-) -> Vec<RegisterWrite> {
-    writes.extend(crate::server::api::stale_charge_target_reset(
-        snapshot.device_type,
-        snapshot.target_soc,
-    ));
-    writes
 }
 
 /// The message to send the user for this outcome. Only the auto-apply
@@ -262,7 +312,8 @@ pub(crate) async fn apply_plan_recommendation(
     rec: &PlanRecommendation,
     trigger: PlanTrigger,
 ) {
-    let plan = plan_slot_plan(rec, snapshot);
+    let planner_armed = Settings::load_async().await.forecast_plan_armed_target_pct;
+    let plan = plan_slot_plan_for(rec, snapshot, planner_armed);
     let label = trigger.label();
     match &plan {
         SlotPlan::Write {
@@ -329,6 +380,17 @@ pub(crate) async fn apply_plan_recommendation(
                 );
             }
         },
+    }
+    if let Some(next) = armed_target_after(&plan) {
+        if next != planner_armed {
+            if let Err(error) = Settings::update_async(move |settings| {
+                settings.forecast_plan_armed_target_pct = next;
+            })
+            .await
+            {
+                tracing::warn!("{label}: could not record the planner's charge target: {error}");
+            }
+        }
     }
     if let Some(text) = plan_notification(&plan, trigger) {
         crate::alerts::send_plan_notification(state, &text).await;

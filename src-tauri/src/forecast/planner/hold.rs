@@ -83,6 +83,7 @@ impl HoldOutcome {
 /// [`crate::forecast::current_schedule`], applied to one occurrence only
 /// like the default planner. `None` when the window has no occurrence or
 /// the parameters can't be simulated.
+#[cfg(test)]
 pub(super) fn simulate_hold(
     sim_hours: &[SimHourInput],
     params: &SimulationParams,
@@ -91,7 +92,26 @@ pub(super) fn simulate_hold(
     target_pct: u8,
 ) -> Option<HoldOutcome> {
     let (selected, next_occurrence_start) = first_reachable_occurrence(sim_hours, window, now_ts);
-    let run = selected?.run;
+    simulate_hold_run(
+        sim_hours,
+        params,
+        window,
+        &selected?.run,
+        next_occurrence_start,
+        target_pct,
+    )
+}
+
+/// Simulate the hold for an occurrence already found: `run` is its hours
+/// and `next_occurrence_start` where the following one begins.
+fn simulate_hold_run(
+    sim_hours: &[SimHourInput],
+    params: &SimulationParams,
+    window: &ChargeWindow,
+    run: &[usize],
+    next_occurrence_start: Option<usize>,
+    target_pct: u8,
+) -> Option<HoldOutcome> {
     let eta_c = params.charge_efficiency.clamp(0.01, 1.0);
     let target = f64::from(target_pct.min(100));
     let mut soc = params.start_soc_pct;
@@ -206,7 +226,21 @@ pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
         return base;
     };
     let params = inputs.params;
-    let simulate = |target: u8| simulate_hold(sim_hours, params, &window, inputs.now_ts, target);
+    let (selected, next_occurrence_start) =
+        first_reachable_occurrence(sim_hours, &window, inputs.now_ts);
+    let Some(occurrence) = selected else {
+        return base;
+    };
+    let simulate = |target: u8| {
+        simulate_hold_run(
+            sim_hours,
+            params,
+            &window,
+            &occurrence.run,
+            next_occurrence_start,
+            target,
+        )
+    };
     let Some(full) = simulate(100) else {
         return base;
     };
@@ -214,16 +248,18 @@ pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
     // Never target below the battery's level when the window opens:
     // whether an inverter discharges down to a lower target during a
     // charge slot is unconfirmed, while charging up to a target and
-    // holding it is what issue #359 confirmed.
-    let first = first_reachable_occurrence(sim_hours, &window, inputs.now_ts)
-        .0
-        .map(|occurrence| occurrence.first_index())
-        .unwrap_or(0);
-    let soc_at_start = first
-        .checked_sub(1)
-        .and_then(|i| full.series.get(i))
-        .map(|h| h.soc_pct)
-        .unwrap_or(params.start_soc_pct);
+    // holding it is what issue #359 confirmed. With the lowest target the
+    // battery only holds from the window's start, so the end of its first
+    // hour reads the level at that moment, even mid-hour. Solar inside
+    // that hour can only lift it, keeping the floor on the safe side.
+    let Some(soc_at_start) = simulate(MIN_TARGET_PCT).and_then(|probe| {
+        probe
+            .series
+            .get(occurrence.first_index())
+            .map(|h| h.soc_pct)
+    }) else {
+        return base;
+    };
     let lowest = soc_at_start.ceil().clamp(f64::from(MIN_TARGET_PCT), 100.0) as u8;
 
     let floor = inputs.target_soc_pct;

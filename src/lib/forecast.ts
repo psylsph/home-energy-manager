@@ -566,8 +566,10 @@ export function chargeTargetReadBack(
 }
 
 /** Device types where charging to a target and then holding it through
- *  the slot has been confirmed on real hardware (issue #359). */
-const HOLD_CONFIRMED_DEVICES = new Set(['Gen3Hybrid', 'Gen3PlusHybrid']);
+ *  the slot has been confirmed on real hardware (issue #359). Gen 3 Plus
+ *  writes its target through a different, flag-gated path, so it isn't
+ *  covered by the Gen 3 confirmation. */
+const HOLD_CONFIRMED_DEVICES = new Set(['Gen3Hybrid']);
 
 /** Caveat under the strategy picker on models where the hold behaviour is
  *  unconfirmed, or null when it's confirmed or the model isn't known yet. */

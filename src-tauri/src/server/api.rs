@@ -4260,45 +4260,75 @@ pub async fn set_charge_slot(
         requested_charge_rate,
     ) {
         Ok(mut writes) => {
-            // Only the Planner's Apply sends a charge rate: a full charge from
-            // it also disarms a target an earlier hold plan left behind.
-            if enabled && target_soc >= 100 && requested_charge_rate_pct.is_some() {
+            // Only the Planner's Apply sends a charge rate (issue #359): a
+            // full charge from it disarms the target an earlier hold plan
+            // armed, and a hold records the target it arms.
+            let planner_apply = enabled && requested_charge_rate_pct.is_some();
+            if planner_apply && target_soc >= 100 {
                 let armed = state
                     .latest_snapshot
                     .lock()
                     .await
                     .as_ref()
                     .map_or(100, |snapshot| snapshot.target_soc);
-                writes.extend(stale_charge_target_reset(device_type, armed));
+                let recorded = crate::settings::Settings::load_async()
+                    .await
+                    .forecast_plan_armed_target_pct;
+                extend_unwritten(
+                    &mut writes,
+                    planner_target_reset(device_type, armed, recorded),
+                );
             }
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
+            if planner_apply {
+                let next = (target_soc < 100).then_some(target_soc);
+                if let Err(error) = crate::settings::Settings::update_async(move |settings| {
+                    settings.forecast_plan_armed_target_pct = next;
+                })
+                .await
+                {
+                    tracing::warn!("Could not record the planner's charge target: {error}");
+                }
+            }
             ok_response(&format!("Charge slot {} configured", slot))
         }
         Err(e) => error_response(&e),
     }
 }
 
-/// The write that disarms a charge target a hold plan left behind (issue
-/// #359): HR 116 back to 100 on single-phase extended-slot models, which
-/// follow the global target without the HR 20 flag, when the inverter still
-/// reports an armed 5–99% target. Flag-gated models (Gen1/2, AC-coupled)
-/// are already disarmed by the HR 20 clear a full charge writes; three-phase
-/// keeps its target elsewhere. Used only for planner-owned writes, so the
-/// Control page's "an explicit 100 never writes HR 116" rule still holds.
-pub(crate) fn stale_charge_target_reset(
+/// The writes that disarm the charge target a hold plan armed (issue #359),
+/// when the inverter still reports exactly that target (`planner_armed`):
+/// HR 116 back to 100 on single-phase extended-slot models, which follow the
+/// global target without the HR 20 flag, or HR 20 cleared on flag-gated
+/// models (Gen1/2, AC-coupled). Three-phase keeps its target elsewhere. A
+/// target the user set, or changed since, is never touched, so the Control
+/// page's "an explicit 100 never writes HR 116" rule still holds.
+pub(crate) fn planner_target_reset(
     device_type: DeviceType,
     armed_target_soc: u8,
+    planner_armed: Option<u8>,
 ) -> Vec<RegisterWrite> {
-    if device_type.uses_extended_schedule_slots()
-        && !device_type.uses_three_phase_schedule_slots()
-        && (5..=99).contains(&armed_target_soc)
+    if planner_armed != Some(armed_target_soc)
+        || !(5..=99).contains(&armed_target_soc)
+        || device_type.uses_three_phase_schedule_slots()
     {
+        return Vec::new();
+    }
+    let command = if device_type.uses_extended_schedule_slots() {
         ControlCommand::SetChargeTargetSocOnly { soc: 100 }
-            .encode()
-            .unwrap_or_default()
     } else {
-        Vec::new()
+        ControlCommand::ClearChargeTargetFlag
+    };
+    command.encode().unwrap_or_default()
+}
+
+/// Append `extra` writes whose register the batch doesn't already write.
+pub(crate) fn extend_unwritten(writes: &mut Vec<RegisterWrite>, extra: Vec<RegisterWrite>) {
+    for write in extra {
+        if !writes.iter().any(|w| w.address == write.address) {
+            writes.push(write);
+        }
     }
 }
 
@@ -8476,13 +8506,21 @@ pub(crate) fn compute_full_plan(
         PlanRecommendation::ChargeAndHold { .. } => hold_charging.as_ref(),
         PlanRecommendation::NoChargeNeeded { .. } | PlanRecommendation::NoPlan { .. } => None,
     };
+    // The whole hold slot is off limits to an export: slot 1 is active,
+    // charging or holding, across all of it.
+    let hold_window = match &charge {
+        PlanRecommendation::ChargeAndHold { window, .. } => Some(window),
+        PlanRecommendation::Charge { .. }
+        | PlanRecommendation::NoChargeNeeded { .. }
+        | PlanRecommendation::NoPlan { .. } => None,
+    };
     let export = crate::forecast::planner::plan_export_window(&ExportPlanInputs {
         sim_hours: &sim_hours,
         params: &params,
         export_tariff,
         import_tariff,
         charge_window,
-        hold_window: None,
+        hold_window,
         floor_pct: min_soc_pct,
         now_ts,
     });
@@ -8775,9 +8813,10 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                 },
             })
         }
-        // Issue #359: still a `charge` to the Planner page, with the
-        // strategy and the slot's target added. The target flows into the
-        // Apply payload so the existing Control endpoint writes it.
+        // Issue #359: still a `charge` to the Planner page, serialised by
+        // the Charge arm, with the strategy and the slot's target added. The
+        // target flows into the Apply payload so the existing Control
+        // endpoint writes it.
         PlanRecommendation::ChargeAndHold {
             window,
             target_soc_pct,
@@ -8791,40 +8830,22 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
             import_tomorrow_with_charge_kwh,
             export_tomorrow_with_charge_kwh,
         } => {
-            let (start_h, start_m, end_h, end_m) = crate::forecast::refresh::plan_slot_hhmm(window);
-            serde_json::json!({
-                "kind": "charge",
-                "strategy": crate::settings::PlanStrategy::HoldWindow,
-                "slot_target_soc_pct": target_soc_pct,
-                "window": {
-                    "start": format!("{:02}:{:02}", start_h, start_m),
-                    "end": format!("{:02}:{:02}", end_h, end_m),
-                    "rate": window.rate,
-                    "tomorrow": window.tomorrow,
-                },
-                "kwh": kwh,
-                "min_soc_pct": min_soc_pct,
-                "observed_min_soc_pct": observed_min_soc_pct,
-                "after_min_soc_pct": after_min_soc_pct,
-                "current_soc_pct": current_soc_pct,
-                "rationale": rationale,
-                "with_charge_series": with_charge_series,
-                "import_tomorrow_with_charge_kwh": import_tomorrow_with_charge_kwh,
-                "export_tomorrow_with_charge_kwh": export_tomorrow_with_charge_kwh,
-                "apply": {
-                    "charge_slot": {
-                        "slot": 1,
-                        "enabled": true,
-                        "start_hour": start_h,
-                        "start_minute": start_m,
-                        "end_hour": end_h,
-                        "end_minute": end_m,
-                        "target_soc": target_soc_pct,
-                        "charge_rate_percent": crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT,
-                    },
-                    "timed_charge": { "enabled": true },
-                },
-            })
+            let mut value = plan_to_json_value(&PlanRecommendation::Charge {
+                window: window.clone(),
+                kwh: *kwh,
+                min_soc_pct: *min_soc_pct,
+                observed_min_soc_pct: *observed_min_soc_pct,
+                after_min_soc_pct: *after_min_soc_pct,
+                current_soc_pct: *current_soc_pct,
+                rationale: rationale.clone(),
+                with_charge_series: with_charge_series.clone(),
+                import_tomorrow_with_charge_kwh: *import_tomorrow_with_charge_kwh,
+                export_tomorrow_with_charge_kwh: *export_tomorrow_with_charge_kwh,
+            });
+            value["strategy"] = serde_json::json!(crate::settings::PlanStrategy::HoldWindow);
+            value["slot_target_soc_pct"] = serde_json::json!(target_soc_pct);
+            value["apply"]["charge_slot"]["target_soc"] = serde_json::json!(target_soc_pct);
+            value
         }
         PlanRecommendation::NoPlan { reason } => serde_json::json!({
             "kind": "no_plan",
