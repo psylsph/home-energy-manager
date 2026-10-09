@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Features — Home Energy Manager</title>
+  <meta name="description" content="A closer look at every Home Energy Manager feature — live monitoring, schedules, the Planner, Octopus automation, alerts and remote access for GivEnergy systems.">
+  <meta property="og:title" content="Home Energy Manager — Features">
+  <meta property="og:description" content="A closer look at every Home Energy Manager feature.">
+  <meta property="og:image" content="screenshots/planner.png">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 0 5px;
+      font-size: 0.88em;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(13,17,23,0.92);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid #21262d;
+    }
+    .topbar-inner {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .topbar .home { color: #e6edf3; font-weight: 600; }
+    .topbar .download {
+      background: #238636;
+      color: #fff;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .topbar .download:hover { background: #2ea043; text-decoration: none; }
+
+    main {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }
+    .intro h1 { font-size: clamp(1.6rem, 4vw, 2.3rem); margin-bottom: 10px; }
+    .intro p { color: #8b949e; font-size: 1.02rem; max-width: 640px; }
+
+    .toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 24px 0 8px;
+      list-style: none;
+    }
+    .toc a {
+      display: inline-block;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 999px;
+      padding: 4px 12px;
+      font-size: 0.84rem;
+      color: #c9d1d9;
+    }
+    .toc a:hover { border-color: #58a6ff; color: #58a6ff; text-decoration: none; }
+
+    .feature {
+      padding: 40px 0 8px;
+      border-top: 1px solid #21262d;
+      margin-top: 32px;
+      scroll-margin-top: 64px;
+    }
+    .feature:target h2 { color: #79c0ff; }
+    .feature .icon { font-size: 1.6rem; }
+    .feature h2 {
+      font-size: 1.45rem;
+      color: #58a6ff;
+      margin: 4px 0 10px;
+    }
+    .feature .lead { font-size: 1.05rem; color: #e6edf3; margin-bottom: 14px; }
+    .feature p { color: #c9d1d9; margin-bottom: 12px; }
+    .feature h3 { font-size: 1.02rem; margin: 20px 0 8px; color: #e6edf3; }
+    .feature ul, .feature ol { padding-left: 22px; margin-bottom: 12px; color: #c9d1d9; }
+    .feature li { margin-bottom: 6px; }
+    .feature li strong, .feature p strong { color: #e6edf3; }
+    .note {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-left: 3px solid #d29922;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: 16px 0;
+      color: #c9d1d9;
+      font-size: 0.93rem;
+    }
+    .feature figure { margin: 20px 0 8px; }
+    .feature figure img {
+      display: block;
+      max-width: 100%;
+      max-height: 560px;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      margin: 0 auto;
+    }
+    .feature figcaption { text-align: center; color: #8b949e; font-size: 0.85rem; margin-top: 8px; }
+    .more { font-size: 0.92rem; color: #8b949e; }
+    .back { display: inline-block; margin-top: 8px; font-size: 0.88rem; }
+
+    footer {
+      text-align: center;
+      color: #8b949e;
+      font-size: 0.85rem;
+      padding: 32px 24px 48px;
+      border-top: 1px solid #21262d;
+    }
+
+    @media (max-width: 600px) {
+      .topbar-inner { padding: 10px 16px; }
+      main { padding: 28px 16px 48px; }
+      .feature { padding-top: 28px; margin-top: 24px; }
+      .feature h2 { font-size: 1.25rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="home" href="./">← Home Energy Manager</a>
+      <a class="download" href="https://github.com/psylsph/home-energy-manager/releases/latest">Download</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <h1>Features</h1>
+      <p>Home Energy Manager talks to your GivEnergy inverter directly over your home network. Nothing here needs a GivEnergy Cloud account, and your data never leaves your network.</p>
+      <ul class="toc">
+        <li><a href="#dashboard">Dashboard</a></li>
+        <li><a href="#energy-flow">Energy flow</a></li>
+        <li><a href="#alerts">Alerts</a></li>
+        <li><a href="#battery">Battery</a></li>
+        <li><a href="#schedules">Schedules</a></li>
+        <li><a href="#overrides">Manual overrides</a></li>
+        <li><a href="#reports">PDF reports</a></li>
+        <li><a href="#history">History &amp; costs</a></li>
+        <li><a href="#planner">Planner</a></li>
+        <li><a href="#octopus-cosy">Octopus Cosy</a></li>
+        <li><a href="#octopus-agile">Octopus Agile</a></li>
+        <li><a href="#octopus-dashboard">Smart-meter dashboard</a></li>
+        <li><a href="#winter-mode">Auto Winter Mode</a></li>
+        <li><a href="#solar">Solar</a></li>
+        <li><a href="#meters">Meters</a></li>
+        <li><a href="#remote-access">Access from anywhere</a></li>
+      </ul>
+    </section>
+
+    <section class="feature" id="dashboard">
+      <div class="icon">📊</div>
+      <h2>Real-time Dashboard</h2>
+      <p class="lead">The Status page shows your whole system at a glance, updating every few seconds.</p>
+      <ul>
+        <li><strong>Solar generation</strong>, <strong>battery charge level</strong>, <strong>grid import/export</strong> and <strong>home consumption</strong>, live.</li>
+        <li>The <strong>Power</strong> page charts solar, battery, grid and home power over any range from 15 minutes to 7 days. Click a legend label to show or hide a line.</li>
+        <li>The <strong>Inverter</strong> page lists the detected model, firmware versions, serial number, temperatures and every electrical reading.</li>
+      </ul>
+      <p>The app reads straight from the inverter's data adapter, so there's no cloud delay. Your WiFi dongle keeps reporting to the GivEnergy cloud as it always has.</p>
+      <figure>
+        <img loading="lazy" src="screenshots/status.png" alt="Status dashboard with live power figures and the energy flow diagram">
+        <figcaption>The Status page</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="energy-flow">
+      <div class="icon">⚡</div>
+      <h2>Energy Flow Diagram</h2>
+      <p class="lead">An animated diagram on the Status page that shows where your power is going right now.</p>
+      <p>Solar, battery, home and grid sit around the diagram, and animated lines show power moving between them, so you can see at a glance whether the battery is charging from solar, the house is running on the grid, or you're exporting.</p>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="alerts">
+      <div class="icon">🔔</div>
+      <h2>Alert Notifications</h2>
+      <p class="lead">Get a message on your phone when something needs your attention, and another when it's back to normal.</p>
+      <ul>
+        <li><strong>What it watches:</strong> battery temperature, inverter temperature, battery charge level, solar clipping, grid offline and battery over-temperature, each with a threshold you set.</li>
+        <li><strong>Where alerts go:</strong> a Telegram bot, ntfy (including self-hosted servers), Pushover, or any combination.</li>
+        <li><strong>A daily report</strong> of yesterday's consumption.</li>
+      </ul>
+      <h3>Telegram commands</h3>
+      <p>Send these in your Telegram chat with the bot:</p>
+      <ul>
+        <li><code>/status</code>: a live snapshot of your system</li>
+        <li><code>/today</code>: today's cost summary</li>
+        <li><code>/report</code>: yesterday's full consumption report</li>
+      </ul>
+      <p class="more">Step-by-step setup for all three channels is in the <a href="https://github.com/psylsph/home-energy-manager/blob/master/NOTIFICATIONS.md">Notification Setup Guide</a>.</p>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="battery">
+      <div class="icon">🔋</div>
+      <h2>Battery Detail</h2>
+      <p class="lead">A battery-by-battery view, down to the individual cells.</p>
+      <ul>
+        <li><strong>Cell voltages</strong> and <strong>temperatures</strong> for every battery module.</li>
+        <li><strong>Health</strong> per module, so you can spot a weak pack early.</li>
+        <li>A <strong>cold battery warning</strong> when the battery temperature drops near freezing, so you can protect it. Pair it with <a href="#winter-mode">Auto Winter Mode</a> to warm the battery automatically.</li>
+        <li><strong>Battery calibration</strong> can be started from the app when your battery needs it.</li>
+      </ul>
+      <figure>
+        <img loading="lazy" src="screenshots/battery.png" alt="Battery page showing per-module cell voltages and temperatures">
+        <figcaption>The Battery page</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="schedules">
+      <div class="icon">📅</div>
+      <h2>Charge Schedules</h2>
+      <p class="lead">Choose when your battery charges from the grid and when it discharges, from the Control page.</p>
+      <ul>
+        <li><strong>Up to 10 charge and 10 discharge slots</strong> on Gen 3, Gen 4, three-phase, HV Gen 3, All-in-One and Gateway systems. Gen 2 and Gen 3 Plus have 2 slots, and Gen 1 and AC Coupled have 1.</li>
+        <li><strong>Battery modes:</strong> Eco (automatic self-consumption), Timed Discharge (discharge or export during your slots), and Pause Discharge, which holds stored energy while still allowing solar or scheduled grid charging.</li>
+        <li><strong>Limits:</strong> battery reserve level, charge target, and charge and discharge power limits.</li>
+      </ul>
+      <div class="note">GivEnergy's cloud portal numbers slots in the opposite order to the inverter. The data is the same, and the Control page points this out when it applies to your system.</div>
+      <figure>
+        <img loading="lazy" src="screenshots/control-1.png" alt="Control page with quick actions, battery mode and charge schedule">
+        <figcaption>The Control page</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="overrides">
+      <div class="icon">🛡️</div>
+      <h2>Manual Overrides</h2>
+      <p class="lead">One-tap control for when you want the battery to do something right now.</p>
+      <ul>
+        <li><strong>Force Charge</strong> fills the battery from the grid straight away.</li>
+        <li><strong>Force Discharge</strong> empties the battery to the house or grid straight away.</li>
+        <li>Click once to start and again to stop. The two are mutually exclusive, so stop one before starting the other, and the button confirms when the inverter has taken the change.</li>
+      </ul>
+      <h3>Automatic guards</h3>
+      <ul>
+        <li><strong>Load Discharge Limiter</strong> pauses battery discharge while the house is drawing more than a threshold you set, such as when an EV charger is running, and restores normal Eco when the load drops. See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md#how-do-i-stop-the-battery-discharging-into-the-car-or-another-large-load">FAQ</a> for suggested settings.</li>
+        <li><strong>Inverter Temperature Limiter</strong> pauses discharge when the inverter gets too hot and restores Eco once it cools.</li>
+      </ul>
+      <figure>
+        <img loading="lazy" src="screenshots/control-2.png" alt="Control page showing battery and power limits and the Load Discharge Limiter">
+        <figcaption>Power limits and the Load Discharge Limiter</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="reports">
+      <div class="icon">📄</div>
+      <h2>PDF Consumption Reports</h2>
+      <p class="lead">Formatted reports you can print or save, covering any time range you choose.</p>
+      <ul>
+        <li>Charts and summary tables for solar, home, grid and battery energy.</li>
+        <li>Total energy, peak power, how much of your use solar covered, and how much you depended on the grid.</li>
+        <li>Cost breakdowns from your tariffs.</li>
+      </ul>
+      <p>Open <strong>Consumption Report</strong> from the Power page, then choose <strong>Print / save as PDF</strong>. Time-bucketed breakdowns can also be exported as CSV.</p>
+      <figure>
+        <img loading="lazy" src="screenshots/power-reports-1.png" alt="Consumption report with energy summary charts">
+        <figcaption>A consumption report</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="history">
+      <div class="icon">📈</div>
+      <h2>History &amp; Costs</h2>
+      <p class="lead">Everything the app records is kept on your machine, so you can look back at any day.</p>
+      <ul>
+        <li><strong>Seven time ranges</strong> from 15 minutes to 7 days.</li>
+        <li><strong>Separate views</strong> for solar, home, grid and battery that share the same time range.</li>
+        <li><strong>Month calendar</strong> with daily energy totals for the whole month.</li>
+        <li><strong>Cost tracking:</strong> enter your import and export tariffs under Settings → Energy Tariffs and running cost estimates appear on your charts.</li>
+        <li><strong>CSV export</strong> of your history for a spreadsheet.</li>
+      </ul>
+      <figure>
+        <img loading="lazy" src="screenshots/history.png" alt="History page with daily generation and consumption charts">
+        <figcaption>The History page</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="planner">
+      <div class="icon">🌤️</div>
+      <h2>Planner</h2>
+      <p class="lead">The Planner looks three days ahead and tells you whether tonight's cheap-rate window needs a grid charge, and how much.</p>
+      <p>Most battery owners either charge to 100% every night, paying for energy the sun would have provided, or guess. The Planner predicts tomorrow's solar and your house's usage, simulates your battery hour by hour, and works out the smallest overnight charge that keeps you off peak-rate grid power.</p>
+
+      <h3>How it works</h3>
+      <ol>
+        <li><strong>Solar forecast.</strong> Live weather data from Open-Meteo (free, no account or API key needed) is turned into a 72-hour generation forecast. The app compares past forecasts with what your panels actually produced over the last two weeks, so it learns how your system really performs: its shading, orientation and real-world efficiency. Until it has about five usable days of history, the forecast is marked <em>preliminary</em>.</li>
+        <li><strong>Consumption profile.</strong> Your typical usage for each hour of the day is learned from your own history, shown with typical low and high ranges.</li>
+        <li><strong>Battery projection.</strong> The two are combined to simulate your battery level hour by hour. You can compare three lines: solar alone, following the plan, or leaving your current inverter schedule as it is.</li>
+        <li><strong>Recommendation.</strong> If the battery would drop below your <strong>Minimum battery level</strong>, the Planner recommends an overnight charge placed in your cheapest import window and sized to be the smallest charge that holds that floor.</li>
+      </ol>
+
+      <h3>What you'll see</h3>
+      <ul>
+        <li><strong>Today's recommendation:</strong> the charge to make, its time window, the lowest the battery will fall, and what the charge will cost. Press <strong>Apply</strong> to write the charge slot to your inverter.</li>
+        <li><strong>Automatic planning:</strong> switch it on and the app re-sizes the charge from your live battery level shortly before each cheap window (30 minutes by default, adjustable up to two hours), writes the slot itself, and sends you a notification saying what it did, or why no charge was needed.</li>
+        <li><strong>Export opportunities:</strong> when your export tariff pays more at certain times, the Planner shows how much you could sell from the battery, when, and what it should earn, without going below your minimum.</li>
+        <li><strong>Tomorrow at a glance:</strong> expected solar, house consumption, export and import for tomorrow, including the plan's charge.</li>
+      </ul>
+
+      <h3>Choosing a minimum battery level</h3>
+      <p>The minimum is the lowest you're happy for the battery to fall before the next cheap period. A higher value keeps more in reserve for a cloudy day or a power cut. A value at or below your inverter's battery reserve means the Planner only charges when the battery would otherwise run empty and draw from the grid. Set it to <code>0%</code> if you never want the Planner to charge from the grid.</p>
+
+      <div class="note">Charge recommendations need your import tariff windows set under <strong>Settings → Energy Tariffs</strong>. The forecast gets more accurate over the first couple of weeks as the app learns your panels.</div>
+
+      <figure>
+        <img loading="lazy" src="screenshots/planner.png" alt="Planner showing today's overnight charge recommendation, automatic planning and the battery projection">
+        <figcaption>Today's recommendation and the battery projection</figcaption>
+      </figure>
+      <figure>
+        <img loading="lazy" src="screenshots/planner-solar.png" alt="Planner 72-hour solar generation forecast">
+        <figcaption>The 72-hour solar forecast</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="octopus-cosy">
+      <div class="icon">🐙</div>
+      <h2>Octopus Cosy <small>(beta)</small></h2>
+      <p class="lead">Charge your battery in every Cosy cheap-rate window without setting up schedules by hand.</p>
+      <p>Enter your three Cosy cheap-rate windows and the app charges the battery during each one, then switches back to Eco in between. If the app restarts in the middle of a cheap slot, it carries on where it left off.</p>
+      <p class="more">The automation runs inside Home Energy Manager, so the app needs to stay running. A Raspberry Pi or always-on machine in <a href="#remote-access">headless mode</a> is ideal.</p>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="octopus-agile">
+      <div class="icon">💷</div>
+      <h2>Octopus Agile <small>(beta)</small></h2>
+      <p class="lead">Let the battery follow Agile's half-hourly prices.</p>
+      <ul>
+        <li>Enter your postcode and two price thresholds.</li>
+        <li>When the price is below your charge threshold, the battery charges. When it's above your discharge threshold, the battery discharges. The rest of the time it stays in Eco.</li>
+        <li>A live 24-hour price grid shows what's coming, with estimated daily savings.</li>
+      </ul>
+      <p class="more">As with Cosy, the app needs to stay running for the automation to work.</p>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="octopus-dashboard">
+      <div class="icon">🔌</div>
+      <h2>Octopus Smart-Meter Dashboard</h2>
+      <p class="lead">See what Octopus has recorded from your smart meter alongside what your inverter measured.</p>
+      <ul>
+        <li>Add your Octopus account number and API key in Settings and the <strong>Octopus</strong> tab appears. It stays hidden until you do.</li>
+        <li>Supplier-recorded electricity import, export and gas usage, with billing costs and monthly and yearly summaries.</li>
+        <li>A comparison against the app's own readings, handy for checking a bill.</li>
+        <li>Export as CSV or PDF.</li>
+      </ul>
+      <p class="more">Smart-meter data often reaches Octopus a day or more late and is sometimes corrected afterwards, so recent days may fill in or change.</p>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="winter-mode">
+      <div class="icon">❄️</div>
+      <h2>Auto Winter Mode</h2>
+      <p class="lead">Protects your battery from the cold by charging it from the grid when the temperature drops.</p>
+      <p>You set a temperature threshold and a target charge level. When the battery gets colder than the threshold, the app charges it from the grid, which helps keep the cells warm. It works like GivEnergy Cloud's winter mode but runs entirely on your own machine, so the app must stay running for it to work.</p>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="solar">
+      <div class="icon">☀️</div>
+      <h2>Solar Monitoring</h2>
+      <p class="lead">See how each of your solar strings is performing.</p>
+      <p>The Solar page shows voltage, current and power for each string, including dual-string systems, so you can spot one string underperforming because of shading, dirt or a fault. For a forecast of what your panels will generate, see the <a href="#planner">Planner</a>.</p>
+      <figure>
+        <img loading="lazy" src="screenshots/solar.png" alt="Solar page with per-string voltage, current and power">
+        <figcaption>The Solar page</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="meters">
+      <div class="icon">📐</div>
+      <h2>Meters Page</h2>
+      <p class="lead">Readings from the external meters and CT clamps connected to your system.</p>
+      <ul>
+        <li>Voltage, current and power for each phase.</li>
+        <li>A CT clamp status card, useful if your grid or home figures ever look wrong.</li>
+        <li>LoRa-linked meters and slow-responding CT clamps are handled at startup, so nothing gets missed.</li>
+      </ul>
+      <figure>
+        <img loading="lazy" src="screenshots/meters.png" alt="Meters page showing per-phase meter readings and CT clamp status">
+        <figcaption>The Meters page</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+
+    <section class="feature" id="remote-access">
+      <div class="icon">📱</div>
+      <h2>Access From Anywhere</h2>
+      <p class="lead">Check and control your system from your phone, at home or away, without a cloud service.</p>
+      <ul>
+        <li><strong>Headless server:</strong> run the app with no window on a Raspberry Pi, an always-on PC, Docker or a Proxmox container, and use it from any browser at <code>http://&lt;machine-ip&gt;:7337</code>. Setup is in the <a href="https://github.com/psylsph/home-energy-manager/blob/master/INSTALL.md">install guide</a>.</li>
+        <li><strong>On your phone:</strong> open the same address in your phone's browser and use <strong>Share → Add to Home Screen</strong> for an app-like icon. The layout adapts to small screens.</li>
+        <li><strong>Away from home:</strong> install <a href="https://tailscale.com">Tailscale</a> (a free VPN) on the machine running the app and on your phone, then browse to its Tailscale address. You don't need port forwarding or a static IP, and the connection is encrypted end to end.</li>
+        <li><strong>Integrations:</strong> an optional authenticated API lets other software read your battery status and, if you allow it, use Force Charge, Force Discharge and Pause. See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/REMOTE_CONTROL.md">Remote Battery Control API guide</a>.</li>
+      </ul>
+      <figure>
+        <img loading="lazy" src="screenshots/status-mobile.png" alt="Status page on a phone">
+        <figcaption>The Status page on a phone</figcaption>
+      </figure>
+      <a class="back" href="./#features">↑ Back to all features</a>
+    </section>
+  </main>
+
+  <footer>
+    <a href="./">Home</a> ·
+    <a href="https://github.com/psylsph/home-energy-manager">GitHub</a> ·
+    <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md">FAQ</a> ·
+    <a href="https://github.com/psylsph/home-energy-manager/releases/latest">Download</a>
+  </footer>
+
+</body>
+</html>

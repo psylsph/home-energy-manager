@@ -207,7 +207,10 @@ instructions on all three channels.
 
 ### How does the Planner tab work?
 
-The Planner tab (called Forecast in older versions) predicts the next 48 hours from live weather data (Open-Meteo — free, no account or API key needed) combined with your own history:
+The Planner tab (called Forecast in older versions) looks three days ahead and
+tells you whether tonight's cheap-rate window needs a grid charge, and how much.
+It combines live weather data (Open-Meteo — free, no account or API key needed)
+with your own history:
 
 - **Solar** is calibrated against your actual generation over the last two weeks, so the prediction learns how your panels really perform. Until roughly five usable days of history exist, the prediction is marked *preliminary*.
 - **Consumption** is learned from your household's typical hourly usage.
@@ -218,7 +221,19 @@ from the grid. A minimum at or below your inverter's battery reserve means the
 planner only charges when the battery would otherwise run empty and draw from
 the grid before the next cheap period.
 
-For charge recommendations to appear, make sure your import tariff windows are configured under **Settings → Energy Tariffs**.
+**Automatic planning** saves you pressing Apply every evening. Switch it on and
+the app re-sizes the charge from your live battery level shortly before each
+cheap window (30 minutes by default, adjustable up to two hours), writes the charge slot itself, and sends you a notification
+saying what it did — or why no charge was needed.
+
+**Export opportunities** appear when your export tariff pays more at certain
+times. The Planner shows how much you could sell from the battery, when, and
+what it should earn, without dropping below your minimum battery level.
+
+For charge recommendations to appear, make sure your import tariff windows are
+configured under **Settings → Energy Tariffs**.
+
+---
 
 ### How do I stop the battery discharging into the car, or another large load?
 

@@ -210,6 +210,7 @@
       font-size: clamp(1.4rem, 3.5vw, 2rem);
       margin-bottom: 24px;
     }
+    .features-sub { text-align: center; color: #8b949e; margin: -12px 0 24px; font-size: 0.95rem; }
     .features-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -229,6 +230,21 @@
     .feature .icon { font-size: 1.5rem; margin-bottom: 8px; }
     .feature h3 { color: #58a6ff; margin-bottom: 6px; font-size: 1.05rem; }
     .feature p { color: #8b949e; font-size: 0.9rem; line-height: 1.55; }
+    a.feature {
+      display: flex;
+      flex-direction: column;
+      color: inherit;
+      text-decoration: none;
+    }
+    a.feature:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+    .feature .more {
+      margin-top: auto;
+      padding-top: 10px;
+      color: #58a6ff;
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+    .feature:hover .more { text-decoration: underline; }
 
     /* ── Screenshots ── */
     .screenshots {
@@ -471,89 +487,106 @@
     </ol>
   </section>
 
-  <section class="features">
+  <section class="features" id="features">
     <h2>Everything you need</h2>
+    <p class="features-sub">Click any feature for the full details, or <a href="features.html">browse them all</a>.</p>
     <div class="features-grid">
-      <div class="feature">
+      <a class="feature" href="features.html#dashboard">
         <div class="icon">📊</div>
         <h3>Real-time Dashboard</h3>
         <p>Solar generation, battery charge, grid import/export, and home consumption — updating live every few seconds.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#energy-flow">
         <div class="icon">⚡</div>
         <h3>Energy Flow Diagram</h3>
         <p>Animated visual showing where your power is flowing right now — solar, battery, home, grid.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#alerts">
         <div class="icon">🔔</div>
         <h3>Alert Notifications</h3>
         <p>Get alerted when battery temperature, SOC, or solar exceeds thresholds — via Telegram, ntfy, or Pushover push notifications. Send <code>/status</code>, <code>/today</code>, or <code>/report</code> in your Telegram chat for a live snapshot, today's cost summary, or yesterday's full consumption report.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#battery">
         <div class="icon">🔋</div>
         <h3>Battery Detail</h3>
         <p>Cell voltages, temperatures, and health for every battery module. Cold battery warnings included.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#schedules">
         <div class="icon">📅</div>
         <h3>Charge Schedules</h3>
         <p>Up to 10 charge and 10 discharge time slots. Switch between Eco, Timed Discharge, and Pause modes.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#overrides">
         <div class="icon">🛡️</div>
         <h3>Manual Overrides</h3>
         <p>Force Charge and Force Discharge buttons for instant control. Click to start, click again to stop.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#reports">
         <div class="icon">📄</div>
         <h3>PDF Consumption Reports</h3>
         <p>Open Consumption Report from the Power page for charts, summary tables, cost breakdowns, and Print / save as PDF. History exports CSV only.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#history">
         <div class="icon">📈</div>
         <h3>History &amp; Costs</h3>
         <p>Charts from 15 minutes to 7 days. Enter your tariffs to see real-time cost estimates, and export History data to CSV.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#planner">
         <div class="icon">🌤️</div>
         <h3>Planner</h3>
         <p>A 72-hour solar forecast from live weather data, calibrated against your own generation history. The Planner sizes tonight's charge for your cheapest rate window and applies it with one click, or every night by itself with a notification. It also flags when exporting from the battery would pay.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#octopus-cosy">
         <div class="icon">🐙</div>
         <h3>Octopus Cosy (beta)</h3>
         <p>Enter your three cheap-rate windows and the app automatically charges your battery during each one.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#octopus-agile">
         <div class="icon">💷</div>
         <h3>Octopus Agile (beta)</h3>
         <p>Set price thresholds and the app charges when prices are low, discharges when high, with a live 24-hour forecast.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#octopus-dashboard">
         <div class="icon">🔌</div>
         <h3>Octopus Smart-Meter Dashboard</h3>
         <p>Link your Octopus account to see supplier-recorded import, export and gas usage — with billing costs and CSV/PDF exports to audit against your inverter.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#winter-mode">
         <div class="icon">❄️</div>
         <h3>Auto Winter Mode</h3>
         <p>Protects your battery from cold by automatically charging it from the grid when the temperature drops.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#solar">
         <div class="icon">☀️</div>
         <h3>Solar Monitoring</h3>
         <p>Voltage, current, and power for each solar string. Supports dual-string systems.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#meters">
         <div class="icon">📐</div>
         <h3>Meters Page</h3>
         <p>External meter readings with per-phase data and CT clamp status card.</p>
-      </div>
-      <div class="feature">
+        <span class="more">Learn more →</span>
+      </a>
+      <a class="feature" href="features.html#remote-access">
         <div class="icon">📱</div>
         <h3>Access From Anywhere</h3>
         <p>Works as a headless server on a Raspberry Pi. Access from your phone via Tailscale — no cloud needed.</p>
-      </div>
+        <span class="more">Learn more →</span>
+      </a>
     </div>
   </section>
 
