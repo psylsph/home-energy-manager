@@ -430,6 +430,9 @@ export function truncateSeriesAtNextChargeStart(
   return series.filter(([timestamp]) => timestamp <= nextStartTimestamp);
 }
 
+/** How the Planner sizes the overnight charge (issue #359). */
+export type PlanStrategy = 'min_soc' | 'hold_window';
+
 export type PlanRecommendation =
   | {
       kind: 'charge';
@@ -462,6 +465,13 @@ export type PlanRecommendation =
       import_tomorrow_with_charge_kwh: number;
       /** Tomorrow's grid export under the recommended plan, kWh. */
       export_tomorrow_with_charge_kwh: number;
+      /** `hold_window` when the slot charges to a target and then holds
+       *  the battery for the rest of the cheap window (issue #359). Absent
+       *  for the minimum-SOC planner. */
+      strategy?: PlanStrategy;
+      /** The hold slot's target SOC, %. Absent for the minimum-SOC planner,
+       *  whose slot always targets 100%. */
+      slot_target_soc_pct?: number;
     }
   | {
       kind: 'no_charge_needed';
@@ -541,6 +551,9 @@ export function minimumSocNote(
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {
     const when = rec.window.tomorrow ? 'Tomorrow' : 'Tonight';
+    if (rec.slot_target_soc_pct != null) {
+      return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, to ${Math.round(rec.slot_target_soc_pct)}% then hold`;
+    }
     return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, ${rec.kwh.toFixed(1)} kWh`;
   }
   if (rec.kind === 'no_charge_needed') {
