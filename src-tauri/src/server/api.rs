@@ -1854,6 +1854,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // cheap charging tariff window and notifies the user.
             "forecast_plan_auto_apply_enabled": settings.forecast_plan_auto_apply_enabled,
             "forecast_plan_auto_apply_lead_minutes": settings.forecast_plan_auto_apply_lead_minutes,
+            // How the Planner sizes the overnight charge (issue #359).
+            "forecast_plan_strategy": settings.forecast_plan_strategy,
         }
         })),
     )
@@ -2227,6 +2229,11 @@ pub async fn update_settings(
                 ));
             }
             persist.forecast_plan_auto_apply_lead_minutes = v as u16;
+        }
+        if let Some(v) = body.get("forecast_plan_strategy") {
+            persist.forecast_plan_strategy = serde_json::from_value(v.clone()).map_err(|_| {
+                "Unknown planner strategy — expected \"min_soc\" or \"hold_window\"".to_string()
+            })?;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
             let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
@@ -8618,7 +8625,7 @@ fn compute_charge_plan_inner<'a>(
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
-    let charge = crate::forecast::planner::plan_overnight_charge(&inputs);
+    let charge = crate::forecast::planner::plan_charge(&inputs, settings.forecast_plan_strategy);
     // The export advice rides the same trajectory: hand over the hourly
     // inputs, params, tariff, and floor. `None` when there is no import
     // tariff — the charge planner has already NoPlan'd on that gate.
@@ -8720,11 +8727,57 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                 },
             })
         }
-        PlanRecommendation::ChargeAndHold { .. } => serde_json::json!({
-            "kind": "no_plan",
-            "reason": "not yet serialised",
-            "apply": null,
-        }),
+        // Issue #359: still a `charge` to the Planner page, with the
+        // strategy and the slot's target added. The target flows into the
+        // Apply payload so the existing Control endpoint writes it.
+        PlanRecommendation::ChargeAndHold {
+            window,
+            target_soc_pct,
+            kwh,
+            min_soc_pct,
+            observed_min_soc_pct,
+            after_min_soc_pct,
+            current_soc_pct,
+            rationale,
+            with_charge_series,
+            import_tomorrow_with_charge_kwh,
+            export_tomorrow_with_charge_kwh,
+        } => {
+            let (start_h, start_m, end_h, end_m) = crate::forecast::refresh::plan_slot_hhmm(window);
+            serde_json::json!({
+                "kind": "charge",
+                "strategy": crate::settings::PlanStrategy::HoldWindow,
+                "slot_target_soc_pct": target_soc_pct,
+                "window": {
+                    "start": format!("{:02}:{:02}", start_h, start_m),
+                    "end": format!("{:02}:{:02}", end_h, end_m),
+                    "rate": window.rate,
+                    "tomorrow": window.tomorrow,
+                },
+                "kwh": kwh,
+                "min_soc_pct": min_soc_pct,
+                "observed_min_soc_pct": observed_min_soc_pct,
+                "after_min_soc_pct": after_min_soc_pct,
+                "current_soc_pct": current_soc_pct,
+                "rationale": rationale,
+                "with_charge_series": with_charge_series,
+                "import_tomorrow_with_charge_kwh": import_tomorrow_with_charge_kwh,
+                "export_tomorrow_with_charge_kwh": export_tomorrow_with_charge_kwh,
+                "apply": {
+                    "charge_slot": {
+                        "slot": 1,
+                        "enabled": true,
+                        "start_hour": start_h,
+                        "start_minute": start_m,
+                        "end_hour": end_h,
+                        "end_minute": end_m,
+                        "target_soc": target_soc_pct,
+                        "charge_rate_percent": crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT,
+                    },
+                    "timed_charge": { "enabled": true },
+                },
+            })
+        }
         PlanRecommendation::NoPlan { reason } => serde_json::json!({
             "kind": "no_plan",
             "reason": reason,

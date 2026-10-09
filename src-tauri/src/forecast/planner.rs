@@ -4376,6 +4376,22 @@ mod tests {
     }
 
     #[test]
+    fn hold_rationale_cost_agrees_with_the_plan_card() {
+        // The Planner card prices the charge as kWh × rate; the rationale
+        // must quote the same figure and list the house's share apart.
+        let (sim, hours, bp) = bruce_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let (window, _, kwh, _, rationale, _) = hold_plan(plan_hold_through_window(&inputs));
+        let charge_cost = format!("£{:.2} to charge", kwh * window.rate);
+        assert!(
+            rationale.contains(&charge_cost),
+            "{charge_cost:?} missing: {rationale}"
+        );
+        assert!(rationale.contains("for the house's use"), "{rationale}");
+    }
+
+    #[test]
     fn hold_target_is_the_lowest_that_holds_the_minimum() {
         let (sim, hours, bp) = bruce_case();
         let bt = bruce_tariff();

@@ -240,11 +240,16 @@ pub fn plan_refresh_action(rec: &PlanRecommendation) -> PlanRefreshAction {
                 end_hhmm: encode_hhmm(end_h, end_m),
             }
         }
-        PlanRecommendation::ChargeAndHold { window, .. } => {
+        PlanRecommendation::ChargeAndHold {
+            window,
+            target_soc_pct,
+            ..
+        } => {
             let (start_h, start_m, end_h, end_m) = plan_slot_hhmm(window);
-            PlanRefreshAction::WriteSlot {
+            PlanRefreshAction::WriteSlotWithTarget {
                 start_hhmm: encode_hhmm(start_h, start_m),
                 end_hhmm: encode_hhmm(end_h, end_m),
+                target_soc: *target_soc_pct,
             }
         }
         PlanRecommendation::NoChargeNeeded { .. } => PlanRefreshAction::ClearSlot,

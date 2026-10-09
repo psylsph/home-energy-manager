@@ -93,6 +93,7 @@ pub(crate) enum SlotPlan {
 pub(crate) fn rec_kwh(rec: &PlanRecommendation) -> f64 {
     match rec {
         PlanRecommendation::Charge { kwh, .. } => *kwh,
+        PlanRecommendation::ChargeAndHold { kwh, .. } => *kwh,
         _ => 0.0,
     }
 }
@@ -141,13 +142,32 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
         PlanRefreshAction::WriteSlotWithTarget {
             start_hhmm,
             end_hhmm,
-            ..
-        } => SlotPlan::Write {
+            target_soc,
+        } => SlotPlan::WriteHold {
             start_hhmm,
             end_hhmm,
+            target_soc,
             kwh: rec_kwh(rec),
-            tomorrow: false,
-            writes: Ok(Vec::new()),
+            tomorrow: matches!(
+                rec,
+                PlanRecommendation::ChargeAndHold { window, .. } if window.tomorrow
+            ),
+            // The rate is still re-asserted at the maximum: the target, not
+            // the rate, decides where charging stops.
+            writes: crate::server::api::build_charge_slot_writes(
+                snapshot.device_type,
+                1,
+                true,
+                start_hhmm,
+                end_hhmm,
+                target_soc,
+                Some(
+                    crate::inverter::power_limit::ChargeRateRequest::for_snapshot(
+                        PLAN_CHARGE_RATE_PERCENT,
+                        snapshot,
+                    ),
+                ),
+            ),
         },
         PlanRefreshAction::None => SlotPlan::NoPlan {
             reason: match rec {
@@ -165,7 +185,8 @@ pub(crate) fn plan_notification(plan: &SlotPlan, trigger: PlanTrigger) -> Option
         return None;
     }
     use crate::alerts::{
-        build_plan_applied_message, build_plan_cleared_message, build_plan_unavailable_message,
+        build_plan_applied_hold_message, build_plan_applied_message, build_plan_cleared_message,
+        build_plan_unavailable_message,
     };
     Some(match plan {
         SlotPlan::Write {
@@ -182,7 +203,17 @@ pub(crate) fn plan_notification(plan: &SlotPlan, trigger: PlanTrigger) -> Option
         SlotPlan::Clear { writes: Err(_) } => {
             build_plan_unavailable_message("the charge slot could not be cleared for this inverter")
         }
-        SlotPlan::WriteHold { .. } => build_plan_cleared_message(),
+        SlotPlan::WriteHold {
+            writes: Ok(_),
+            start_hhmm,
+            end_hhmm,
+            target_soc,
+            kwh,
+            tomorrow,
+        } => build_plan_applied_hold_message(*start_hhmm, *end_hhmm, *target_soc, *kwh, *tomorrow),
+        SlotPlan::WriteHold { writes: Err(_), .. } => {
+            build_plan_unavailable_message("the charge slot could not be encoded for this inverter")
+        }
         SlotPlan::NoPlan { reason } => build_plan_unavailable_message(reason),
     })
 }
@@ -235,7 +266,26 @@ pub(crate) async fn apply_plan_recommendation(
         SlotPlan::Write { writes: Err(e), .. } => {
             tracing::warn!("{label}: could not encode slot writes: {e}");
         }
-        SlotPlan::WriteHold { .. } => {}
+        SlotPlan::WriteHold {
+            start_hhmm,
+            end_hhmm,
+            target_soc,
+            kwh,
+            writes: Ok(writes),
+            ..
+        } => {
+            tracing::info!(
+                start = start_hhmm,
+                end = end_hhmm,
+                target_soc,
+                kwh = format!("{kwh:.2}"),
+                "{label}: writing charge slot 1 to charge to its target and hold through the cheap window"
+            );
+            crate::server::api::queue_writes(state, writes.clone()).await;
+        }
+        SlotPlan::WriteHold { writes: Err(e), .. } => {
+            tracing::warn!("{label}: could not encode slot writes: {e}");
+        }
         SlotPlan::Clear { writes: Ok(writes) } => {
             tracing::info!("{label}: fresh plan needs no charge — clearing charge slot 1");
             crate::server::api::queue_writes(state, writes.clone()).await;

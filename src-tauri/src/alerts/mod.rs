@@ -1075,6 +1075,30 @@ pub fn build_plan_applied_message(
     )
 }
 
+/// Notification text for an auto-applied hold-through-window plan (issue
+/// #359): charge slot 1 spans the cheap window with a target SOC the
+/// inverter charges to and then holds.
+pub fn build_plan_applied_hold_message(
+    start_hhmm: u16,
+    end_hhmm: u16,
+    target_soc: u8,
+    kwh: f64,
+    tomorrow: bool,
+) -> String {
+    let when = if tomorrow { "tomorrow" } else { "tonight" };
+    format!(
+        "📋 Charging plan applied — charge to {}% {} {:02}:{:02}–{:02}:{:02} (about {:.1} kWh), \
+         then hold it there while the grid supplies the house.",
+        target_soc,
+        when,
+        start_hhmm / 100,
+        start_hhmm % 100,
+        end_hhmm / 100,
+        end_hhmm % 100,
+        kwh
+    )
+}
+
 /// Notification text for a no-charge-needed plan: the trigger ran but
 /// cleared charge slot 1 (back to Eco) instead of writing a schedule.
 pub fn build_plan_cleared_message() -> String {
