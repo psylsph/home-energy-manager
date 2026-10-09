@@ -517,27 +517,6 @@ export type PlanResponse = {
   export?: ExportAdvice | null;
 };
 
-/** How far above the inverter's battery reserve the planner's floor sits
- *  (mirrors `RESERVE_FLOOR_MARGIN_PCT` in `forecast/planner.rs`). */
-export const RESERVE_FLOOR_MARGIN_PCT = 1;
-
-/** Note shown under the Minimum battery level input when the saved minimum
- *  is at or below the inverter's battery reserve (issue #360). */
-export function reserveFloorNote(
-  minSocPct: number,
-  reserveSocPct: number | null | undefined,
-): string | null {
-  if (reserveSocPct == null || !Number.isFinite(reserveSocPct) || reserveSocPct >= 100) {
-    return null;
-  }
-  const floor = Math.max(reserveSocPct, 0) + RESERVE_FLOOR_MARGIN_PCT;
-  if (minSocPct >= floor) return null;
-  return (
-    `Your inverter keeps a ${Math.round(reserveSocPct)}% battery reserve, so the planner holds at least ${Math.round(floor)}%. ` +
-    'At or below the reserve the battery would sit empty on grid power.'
-  );
-}
-
 /** Note shown under the Minimum battery level input explaining what a
  *  minimum of 0, or one at or below the inverter's reserve, means to the
  *  planner (issue #360). */
@@ -545,9 +524,17 @@ export function minimumSocNote(
   minSocPct: number,
   reserveSocPct: number | null | undefined,
 ): string | null {
-  void minSocPct;
-  void reserveSocPct;
-  return null;
+  if (minSocPct <= 0) {
+    return 'At 0% the planner never charges from the grid — the battery runs on solar alone.';
+  }
+  if (reserveSocPct == null || !Number.isFinite(reserveSocPct) || reserveSocPct >= 100) {
+    return null;
+  }
+  if (minSocPct > reserveSocPct) return null;
+  return (
+    `Your inverter keeps a ${Math.round(reserveSocPct)}% battery reserve, so at this level the planner only charges ` +
+    'when the battery would otherwise run empty and draw from the grid before the next cheap period.'
+  );
 }
 
 /** Short headline for the Plan card. Degrades gracefully per kind. */

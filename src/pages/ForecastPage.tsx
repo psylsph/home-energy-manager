@@ -36,7 +36,7 @@ import {
   planAutoApplyTriggerLabel,
   insertChargeStartVertices,
   relabelToStateInstants,
-  reserveFloorNote,
+  minimumSocNote,
   shouldRefetchForecast,
   toBatteryChartData,
   toConsumptionChartData,
@@ -644,9 +644,9 @@ export default function ForecastPage() {
   // 23:30–23:59 window landed entirely in the 23:00 bucket's point, so the
   // dashed "if charge enacted" line visibly climbed before the
   // charge-start marker.
-  // Issue #360: a minimum at or below the inverter reserve is lifted by the
-  // planner — say so beside the input rather than leaving the user guessing.
-  const reserveNote = reserveFloorNote(minSocPct, data.battery?.reserve_soc_pct);
+  // Issue #360: explain what a 0% minimum, or one at or below the inverter
+  // reserve, means to the planner beside the input.
+  const reserveNote = minimumSocNote(minSocPct, data.battery?.reserve_soc_pct);
   const anchoredProjection = data.battery
     ? anchorSeriesAtNow(
         relabelToStateInstants(data.battery.hours),

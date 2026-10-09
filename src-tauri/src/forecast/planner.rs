@@ -400,6 +400,8 @@ struct ChargeOutcome {
     /// one-cycle horizon boundary), or `None` when no further occurrence
     /// exists in the horizon.
     next_occurrence_start: Option<usize>,
+    /// The hours the floor is judged across (see [`post_range`]).
+    post: (usize, usize),
     /// Full hourly SOC series produced by the what-if simulation. The
     /// planner slices this at `next_occurrence_start` for the UI's
     /// "assuming charge" overlay; the Tomorrow tiles read import/export
@@ -407,6 +409,22 @@ struct ChargeOutcome {
     /// mid-evening.
     series: Vec<SimHourResult>,
 }
+
+impl ChargeOutcome {
+    /// Whether the what-if trajectory holds `floor` (see [`floor_held`]).
+    fn holds(&self, sim_hours: &[SimHourInput], params: &SimulationParams, floor: f64) -> bool {
+        !self.series.is_empty()
+            && floor_held(
+                &self.series,
+                sim_hours,
+                params,
+                self.post.0,
+                self.post.1,
+                floor,
+            )
+    }
+}
+
 /// Indices (into `sim_hours`) of every contiguous run of hours that
 /// overlap the window. A run may cross midnight.
 fn window_runs(sim_hours: &[SimHourInput], window: &ChargeWindow) -> Vec<Vec<usize>> {
@@ -533,6 +551,7 @@ fn simulate_with_charge(
             trough_pct: f64::NAN,
             charge_level_pct: f64::NAN,
             next_occurrence_start: None,
+            post: (0, 0),
             series: Vec::new(),
         };
     }
@@ -553,10 +572,12 @@ fn simulate_with_charge(
     } else {
         post.iter().map(|h| h.soc_pct).fold(f64::INFINITY, f64::min)
     };
+    let post = post_range(last_of_run, sim.hours.len());
     ChargeOutcome {
         trough_pct,
         charge_level_pct,
         next_occurrence_start: None,
+        post,
         series: sim.hours,
     }
 }
@@ -676,6 +697,7 @@ fn simulate_with_max_rate(
             trough_pct: f64::NAN,
             charge_level_pct: f64::NAN,
             next_occurrence_start: None,
+            post: (0, 0),
             series: Vec::new(),
         };
     };
@@ -694,6 +716,7 @@ fn simulate_with_max_rate(
             trough_pct: f64::NAN,
             charge_level_pct: f64::NAN,
             next_occurrence_start: None,
+            post: (0, 0),
             series: Vec::new(),
         };
     };
@@ -713,26 +736,75 @@ fn simulate_with_max_rate(
         trough_pct,
         charge_level_pct,
         next_occurrence_start,
+        post: post_range(last_of_first, post_end),
         series: sim.series,
     }
 }
 
-/// How far above the inverter's battery reserve the planner's floor must sit.
-pub const RESERVE_FLOOR_MARGIN_PCT: f64 = 1.0;
+/// How close to the reserve, in percentage points, counts as sitting at it.
+const AT_RESERVE_TOLERANCE_PCT: f64 = 0.05;
 
-/// The SOC floor the planners actually hold (issue #360): the user's minimum,
-/// but never at or below the inverter's battery reserve.
-///
-/// The simulation stops discharging at the reserve, so a floor at or under it
-/// is always "held" — the plan would never charge and the export could sell
-/// down to the reserve, leaving the house on grid power until solar arrives.
-/// A battery sitting at its reserve is empty, not on target. A 100% reserve
-/// (battery paused) never discharges, so the user's minimum stands there.
-pub fn effective_floor_pct(min_soc_pct: f64, reserve_soc_pct: f64) -> f64 {
-    if !reserve_soc_pct.is_finite() || reserve_soc_pct >= 100.0 {
-        return min_soc_pct;
+/// The hours an action ending at hour `last` can still change, up to the
+/// next cycle boundary `end`, as `(first, end)`. With no hours left after
+/// the window, the window's own last hour stands in.
+fn post_range(last: usize, end: usize) -> (usize, usize) {
+    if last + 1 < end {
+        (last + 1, end)
+    } else {
+        (last, last + 1)
     }
-    min_soc_pct.max(reserve_soc_pct.max(0.0) + RESERVE_FLOOR_MARGIN_PCT)
+}
+
+/// Whether the battery holds the user's minimum across `first..end` of
+/// `series` (issue #360).
+///
+/// Dropping below a minimum is a miss, and so is running empty: ending an
+/// hour at the reserve with demand the battery couldn't cover, i.e. the
+/// house drawing from the grid. The simulation never discharges below the
+/// reserve, so without that second test a minimum at or below the reserve
+/// was always "held" and the plan never charged an empty battery. Merely
+/// touching the reserve with nothing left to import is fine. A 0% minimum
+/// is the user's "solar only" setting and always holds; a 100% reserve
+/// (battery paused) never discharges, so charging can't stop the import.
+fn floor_held(
+    series: &[SimHourResult],
+    sim_hours: &[SimHourInput],
+    params: &SimulationParams,
+    first: usize,
+    end: usize,
+    floor: f64,
+) -> bool {
+    if floor <= 0.0 {
+        return true;
+    }
+    let reserve = params.reserve_soc_pct;
+    let eta_d = params.discharge_efficiency.clamp(0.01, 1.0);
+    let mut prev = first
+        .checked_sub(1)
+        .and_then(|i| series.get(i))
+        .map(|h| h.soc_pct)
+        .unwrap_or(params.start_soc_pct);
+    for (i, hour) in series
+        .iter()
+        .enumerate()
+        .take(end.min(series.len()))
+        .skip(first)
+    {
+        if hour.soc_pct < floor {
+            return false;
+        }
+        if reserve < 100.0 && hour.soc_pct <= reserve + AT_RESERVE_TOLERANCE_PCT {
+            if let Some(input) = sim_hours.get(i) {
+                let deficit = input.consumption_kwh - input.solar_kwh;
+                let usable_ac = (prev - reserve).max(0.0) / 100.0 * params.capacity_kwh * eta_d;
+                if deficit > usable_ac + 1e-6 {
+                    return false;
+                }
+            }
+        }
+        prev = hour.soc_pct;
+    }
+    true
 }
 
 /// Compute the recommendation. See [`PlanRecommendation`] for the cases.
@@ -761,8 +833,7 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
                 .to_string(),
         };
     };
-    // Never at or below the inverter's reserve (issue #360).
-    let floor = effective_floor_pct(inputs.target_soc_pct, inputs.params.reserve_soc_pct);
+    let floor = inputs.target_soc_pct;
 
     // The planning moment drives both the window pick (minute-of-day)
     // and the one-cycle occurrence anchoring below.
@@ -804,11 +875,42 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         .take(observed_end)
         .map(|h| h.soc_pct)
         .fold(f64::INFINITY, f64::min);
-    if observed_min_soc_pct >= floor {
+    // Judge the floor only across the hours a charge can change: from the
+    // end of the selected window to the next cheap period. A dip before the
+    // window is out of reach, and sending it down the charge path used to
+    // shrink the slot to a meaningless minute.
+    let aligned = selected
+        .as_ref()
+        .filter(|_| sim_hours.len() == inputs.simulation.hours.len());
+    let (charge_needed, decision_low_pct) = match aligned {
+        Some(occ) => {
+            let last = *occ.run.last().expect("non-empty run");
+            let (first, end) = post_range(last, observed_end);
+            let low = inputs.simulation.hours[first..end.min(inputs.simulation.hours.len())]
+                .iter()
+                .map(|h| h.soc_pct)
+                .fold(f64::INFINITY, f64::min);
+            let held = floor_held(
+                &inputs.simulation.hours,
+                sim_hours,
+                inputs.params,
+                first,
+                end,
+                floor,
+            );
+            (!held, low)
+        }
+        // Without aligned hourly inputs, fall back to the whole horizon.
+        None => (
+            floor > 0.0 && observed_min_soc_pct < floor,
+            observed_min_soc_pct,
+        ),
+    };
+    if !charge_needed {
         return PlanRecommendation::NoChargeNeeded {
             current_soc_pct: inputs.current_soc_pct,
             min_soc_pct: floor,
-            observed_min_soc_pct,
+            observed_min_soc_pct: decision_low_pct,
         };
     }
     let (fixable_trough, soc_at_window_end) = match (
@@ -851,19 +953,20 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         with_charge_series,
         import_tomorrow_with_charge_kwh,
         export_tomorrow_with_charge_kwh,
+        reaches_minimum,
     ) = if selected.is_some() {
         let max_duration_min = window_duration_minutes(&base_window);
         let full_outcome =
             simulate_with_max_rate(sim_hours, inputs.params, &base_window, inputs.now_ts);
-        let duration_min = if full_outcome.trough_pct >= floor {
-            let mut lo = 0u16; // known-failing because the observed trough is below target
+        let duration_min = if full_outcome.holds(sim_hours, inputs.params, floor) {
+            let mut lo = 0u16; // known-failing: the uncharged post-window hours miss the floor
             let mut hi = max_duration_min; // known-good
             while hi - lo > 1 {
                 let mid = lo + (hi - lo) / 2;
                 let probe_window = charge_window_for_duration(&base_window, mid);
                 let probe =
                     simulate_with_max_rate(sim_hours, inputs.params, &probe_window, inputs.now_ts);
-                if probe.trough_pct >= floor {
+                if probe.holds(sim_hours, inputs.params, floor) {
                     hi = mid;
                 } else {
                     lo = mid;
@@ -940,6 +1043,9 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
                 .collect(),
             import_tw,
             export_tw,
+            // The midnight clamp can shave a minute off the searched
+            // duration, so allow a hair of slack on the SOC floor.
+            outcome.holds(sim_hours, inputs.params, floor - 0.05),
         )
     } else {
         // Legacy/degraded callers without hourly inputs retain an analytic
@@ -950,23 +1056,50 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         let window = charge_window_for_duration(&base_window, duration_min);
         let kwh = inputs.params.max_charge_kw * window_duration_minutes(&window) as f64 / 60.0;
         let lift = kwh * eta / capacity * 100.0;
+        let after_min = (observed_min_soc_pct + lift).min(100.0);
         (
             window,
             kwh,
-            (observed_min_soc_pct + lift).min(100.0),
+            after_min,
             // No window to inject into, so no with-charge projection to
             // overlay. The Battery tab falls back to solar-only.
             Vec::new(),
             0.0,
             0.0,
+            after_min >= floor - 0.05,
         )
     };
 
     // The honest caveat: when even the full deliverable charge can't
     // hold the minimum, say so instead of pretending the plan succeeds.
-    let reaches_minimum = after_min_soc_pct >= floor - 0.05;
     let duration_min = window_duration_minutes(&window);
-    let rationale = if reaches_minimum {
+    // A minimum at or below the reserve is only ever missed by running
+    // empty (issue #360), so explain the charge in those terms.
+    let reserve = inputs.params.reserve_soc_pct;
+    let rationale = if floor <= reserve {
+        let outcome = if reaches_minimum {
+            "keeps it off the reserve until then"
+        } else {
+            "still leaves it running empty before the next cheap period; the \
+             forecast drain is more than this window can cover"
+        };
+        format!(
+            "Battery is at {:.0}% now and the forecast has it running empty at \
+             its {:.0}% reserve, drawing from the grid, before the next cheap \
+             period. Charging at 100% for {}{} (about {:.1} kWh) in the {:.1}p \
+             window ({}–{}) {} (about £{:.2} per night of grid import).",
+            inputs.current_soc_pct,
+            reserve,
+            if reaches_minimum { "" } else { "the full " },
+            format_duration(duration_min),
+            kwh,
+            window.rate * 100.0,
+            hhmm(window.start_min),
+            hhmm(window.end_min),
+            outcome,
+            kwh * window.rate,
+        )
+    } else if reaches_minimum {
         format!(
             "Battery is at {:.0}% now and the forecast trough drops to {:.0}% \
              before the next cheap period. Charging at 100% for {} (about {:.1} \
@@ -1089,8 +1222,7 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
                 .to_string(),
         };
     }
-    // Never at or below the inverter's reserve (issue #360).
-    let floor = effective_floor_pct(inputs.floor_pct, inputs.params.reserve_soc_pct);
+    let floor = inputs.floor_pct;
     let now_min = chrono::DateTime::from_timestamp(inputs.now_ts, 0)
         .map(|dt| {
             let local = dt.with_timezone(&chrono::Local);
@@ -1210,21 +1342,26 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
     // the export must hold the floor across. The horizon hour itself is
     // excluded: that is when the next cycle's charge takes over.
     let post_end = horizon_idx.min(inputs.sim_hours.len());
-    let trough_after = |series: &[crate::forecast::simulate::SimHourResult], run: &[usize]| {
+    let after_range = |run: &[usize]| {
         let run_last = run
             .last()
             .copied()
             .or_else(|| selected.run.last().copied())
             .expect("occurrence runs are never empty");
-        let post = &series[(run_last + 1).min(post_end)..post_end];
-        if post.is_empty() {
-            series
-                .get(run_last)
-                .map(|h| h.soc_pct)
-                .unwrap_or(f64::INFINITY)
-        } else {
-            post.iter().map(|h| h.soc_pct).fold(f64::INFINITY, f64::min)
-        }
+        post_range(run_last, post_end)
+    };
+    let trough_after = |series: &[SimHourResult], run: &[usize]| {
+        let (first, end) = after_range(run);
+        series[first.min(series.len())..end.min(series.len())]
+            .iter()
+            .map(|h| h.soc_pct)
+            .fold(f64::INFINITY, f64::min)
+    };
+    // Selling must neither breach the floor nor leave the house drawing
+    // from the grid at the reserve before the next cheap period (#360).
+    let held_after = |series: &[SimHourResult], run: &[usize]| {
+        let (first, end) = after_range(run);
+        floor_held(series, inputs.sim_hours, inputs.params, first, end, floor)
     };
     let duration_min = {
         let mut lo = 0u16; // known-good
@@ -1250,7 +1387,7 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
                 hi = mid;
                 continue;
             };
-            if trough_after(&probe.series, &probe_run) >= floor {
+            if held_after(&probe.series, &probe_run) {
                 lo = mid;
             } else {
                 hi = mid;
@@ -1288,7 +1425,7 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
     let final_run = window_runs_for_window(&window, inputs.sim_hours, &selected);
     let kwh = final_sim.export_kwh;
     let after_min_soc_pct = trough_after(&final_sim.series, &final_run);
-    if kwh < EXPORT_MIN_KWH || after_min_soc_pct < floor {
+    if kwh < EXPORT_MIN_KWH || !held_after(&final_sim.series, &final_run) {
         return ExportAdvice::NoExport {
             reason: format!(
                 "only about {:.1} kWh spare above your {:.0}% floor during \

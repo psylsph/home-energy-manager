@@ -213,6 +213,11 @@ The Forecast tab predicts the next 48 hours from live weather data (Open-Meteo �
 - **Consumption** is learned from your household's typical hourly usage.
 - **Battery projection** simulates your charge level hour by hour. When it would dip below your **Minimum battery level**, the planner recommends an overnight grid charge — sized to the smallest charge that holds that floor and placed in your cheapest import tariff window. Press **Apply** to write the charge slot to the inverter.
 
+Set the **Minimum battery level** to `0%` if you never want the planner to charge
+from the grid. A minimum at or below your inverter's battery reserve means the
+planner only charges when the battery would otherwise run empty and draw from
+the grid before the next cheap period.
+
 For charge recommendations to appear, make sure your import tariff windows are configured under **Settings → Energy Tariffs**.
 
 ### How do I stop the battery discharging into the car, or another large load?
