@@ -8482,6 +8482,7 @@ pub(crate) fn compute_full_plan(
         export_tariff,
         import_tariff,
         charge_window,
+        hold_window: None,
         floor_pct: min_soc_pct,
         now_ts,
     });
@@ -10818,35 +10819,62 @@ pub(crate) mod tests {
     }
 
     /// Issue #359: the Planner's Apply (the only caller sending
-    /// `charge_rate_percent`) resets a target a hold plan left armed on an
-    /// extended-slot model, so a full charge isn't capped by it. Other saves
-    /// keep the "100 never writes HR 116" rule pinned below.
+    /// `charge_rate_percent`) records the target a hold plan arms, and a
+    /// later full charge from it resets that target, and only that one.
+    /// Other saves keep the "100 never writes HR 116" rule pinned below.
     #[tokio::test]
-    async fn planner_apply_resets_a_stale_target_on_extended_models() {
+    async fn planner_apply_records_and_resets_only_its_own_target() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::HR_CHARGE_TARGET_SOC;
             let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let apply = |target: u64| {
+                serde_json::json!({
+                    "slot": 1,
+                    "start_hour": 23, "start_minute": 0,
+                    "end_hour": 6, "end_minute": 0,
+                    "enabled": true,
+                    "target_soc": target,
+                    "charge_rate_percent": 100,
+                })
+            };
+            let targets = |writes: &[RegisterWrite]| -> Vec<u16> {
+                writes
+                    .iter()
+                    .filter(|w| w.address == HR_CHARGE_TARGET_SOC)
+                    .map(|w| w.value)
+                    .collect()
+            };
+
+            // A hold plan applied from the Planner records its target.
+            let (status, _) = set_charge_slot(State(state.clone()), Json(apply(62))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(targets(&drain_pending_writes(&state).await), vec![62]);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_armed_target_pct,
+                Some(62)
+            );
+
+            // The inverter now reports 62; a full charge resets it.
             if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
                 snapshot.target_soc = 62;
             }
-            let body = serde_json::json!({
-                "slot": 1,
-                "start_hour": 2, "start_minute": 0,
-                "end_hour": 3, "end_minute": 36,
-                "enabled": true,
-                "target_soc": 100,
-                "charge_rate_percent": 100,
-            });
-            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            let (status, _) = set_charge_slot(State(state.clone()), Json(apply(100))).await;
             assert_eq!(status, StatusCode::OK);
             let writes = drain_pending_writes(&state).await;
             assert_all_whitelisted(&writes);
-            let targets: Vec<u16> = writes
-                .iter()
-                .filter(|w| w.address == HR_CHARGE_TARGET_SOC)
-                .map(|w| w.value)
-                .collect();
-            assert_eq!(targets, vec![100], "{writes:?}");
+            assert_eq!(targets(&writes), vec![100], "{writes:?}");
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_armed_target_pct,
+                None
+            );
+
+            // A target the user set by hand is left alone.
+            if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+                snapshot.target_soc = 80;
+            }
+            let (status, _) = set_charge_slot(State(state.clone()), Json(apply(100))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(targets(&drain_pending_writes(&state).await).is_empty());
         })
         .await;
     }

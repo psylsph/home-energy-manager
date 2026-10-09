@@ -1237,6 +1237,10 @@ pub struct ExportPlanInputs<'a> {
     /// The charge plan's sized window when a charge applies; `None`
     /// when the charge planner said no charge is needed.
     pub charge_window: Option<&'a ChargeWindow>,
+    /// A hold plan's whole slot (issue #359): charge slot 1 is active,
+    /// charging or holding, across all of it, so no export may overlap it.
+    /// `charge_window` carries only the stretch spent charging.
+    pub hold_window: Option<&'a ChargeWindow>,
     /// The user's configured minimum-allowable SOC, % — the export
     /// must never pull the battery below this across the charge cycle.
     pub floor_pct: f64,
@@ -3404,6 +3408,7 @@ mod tests {
             // 9p off-peak) come from the import tariff.
             import_tariff,
             charge_window,
+            hold_window: None,
             floor_pct: 20.0,
             now_ts,
         }
@@ -4644,5 +4649,81 @@ mod tests {
         assert_eq!((capped.start_min, capped.end_min), (23 * 60, 6 * 60));
         // A pure hold charges nothing.
         assert!(hold_charging_window(&window, 0.0, 3.6).is_none());
+    }
+
+    #[test]
+    fn export_advice_never_overlaps_any_part_of_a_hold_slot() {
+        // Planning at 01:00 inside a 23:00–06:00 hold that finished
+        // charging at 03:10: the 04:00–05:00 export peak falls in the held
+        // stretch, while slot 1 is still active, so it must be refused.
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        let mut hours = idle_day_hours(0);
+        hours.extend(idle_day_hours(1));
+        let now = pinned_now_ts(&hours, 0, 60);
+        let export = tariff(&[
+            ("00:00", "04:00", 0.05),
+            ("04:00", "05:00", 0.40),
+            ("05:00", "23:59", 0.05),
+        ]);
+        let hold_window = ChargeWindow {
+            start_min: 23 * 60,
+            end_min: 6 * 60,
+            tomorrow: false,
+            rate: 0.07,
+        };
+        let charging = ChargeWindow {
+            end_min: 3 * 60 + 10,
+            ..hold_window.clone()
+        };
+        let advice = plan_export_window(&ExportPlanInputs {
+            hold_window: Some(&hold_window),
+            ..export_inputs(&hours, &p, &export, &bruce_tariff(), Some(&charging), now)
+        });
+        match advice {
+            ExportAdvice::NoExport { reason } => {
+                assert!(reason.contains("overlaps the planned charge"), "{reason}")
+            }
+            other => panic!("expected an overlap refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hold_reads_the_battery_level_when_a_mid_hour_window_opens() {
+        // Same light day as above, but the cheap window opens at 23:30:
+        // the battery drains for half an hour after 23:00 first, so the
+        // target starts from the 23:30 level, not the 23:00 one.
+        let p = SimulationParams {
+            start_soc_pct: 60.0,
+            ..bruce_params()
+        };
+        let first = hour_ts(22, 0);
+        let hours: Vec<SimHourInput> = (0..48)
+            .map(|i| {
+                let h = (22 + i) % 24;
+                SimHourInput {
+                    timestamp: first + i * 3600,
+                    solar_kwh: if (9..=15).contains(&h) { 0.3 } else { 0.0 },
+                    consumption_kwh: if (6..17).contains(&h) { 0.4 } else { 0.5 },
+                }
+            })
+            .collect();
+        let sim = simulate_battery(&hours, &p);
+        let half_hour_tariff = tariff(&[
+            ("00:00", "06:00", 0.07),
+            ("06:00", "23:30", 0.27),
+            ("23:30", "23:59", 0.07),
+        ]);
+        let inputs = plan_inputs_with_min(&sim, &hours, &p, Some(&half_hour_tariff), 20.0);
+        let (window, target, ..) = hold_plan(plan_hold_through_window(&inputs));
+        assert_eq!(window.start_min, 23 * 60 + 30);
+        let at_2330 = sim.hours[0].soc_pct - 0.25 / 0.95 / 19.0 * 100.0;
+        assert_eq!(
+            f64::from(target),
+            at_2330.ceil(),
+            "23:30 level {at_2330:.2}"
+        );
     }
 }

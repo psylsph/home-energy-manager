@@ -98,6 +98,16 @@ pub(crate) fn rec_kwh(rec: &PlanRecommendation) -> f64 {
     }
 }
 
+/// [`plan_slot_plan`] for a planner that armed `planner_armed_target` with
+/// an earlier hold plan.
+pub(crate) fn plan_slot_plan_for(
+    rec: &PlanRecommendation,
+    snapshot: &InverterSnapshot,
+    _planner_armed_target: Option<u8>,
+) -> SlotPlan {
+    plan_slot_plan(rec, snapshot)
+}
+
 /// Translate a recommendation into the writes for charge slot 1 on this
 /// inverter. Pure.
 pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapshot) -> SlotPlan {
@@ -899,26 +909,90 @@ mod tests {
             .collect()
     }
 
+    fn hold_to(target: u8) -> PlanRecommendation {
+        match hold(false) {
+            PlanRecommendation::ChargeAndHold {
+                window,
+                kwh,
+                min_soc_pct,
+                observed_min_soc_pct,
+                after_min_soc_pct,
+                current_soc_pct,
+                rationale,
+                with_charge_series,
+                import_tomorrow_with_charge_kwh,
+                export_tomorrow_with_charge_kwh,
+                ..
+            } => PlanRecommendation::ChargeAndHold {
+                window,
+                target_soc_pct: target,
+                kwh,
+                min_soc_pct,
+                observed_min_soc_pct,
+                after_min_soc_pct,
+                current_soc_pct,
+                rationale,
+                with_charge_series,
+                import_tomorrow_with_charge_kwh,
+                export_tomorrow_with_charge_kwh,
+            },
+            other => other,
+        }
+    }
+
     #[test]
-    fn a_full_charge_plan_resets_a_stale_target_on_extended_models() {
-        // A hold plan left HR 116 at 62; models that follow the global
+    fn a_full_charge_resets_the_target_the_planner_armed() {
+        // A hold plan armed HR 116 at 62; models that follow the global
         // target would otherwise stop the next full charge at 62%.
         for device in [DeviceType::Gen3Hybrid, DeviceType::AllInOne6kW] {
-            let regs = written(&plan_slot_plan(
+            let regs = written(&plan_slot_plan_for(
                 &charge(120, 300, false, 3.2),
                 &armed(device, 62),
+                Some(62),
             ));
             assert_eq!(writes_to(&regs, 116), vec![100], "{device:?}: {regs:?}");
         }
     }
 
     #[test]
-    fn clearing_the_plan_resets_a_stale_target_on_extended_models() {
-        let regs = written(&plan_slot_plan(
+    fn clearing_the_plan_resets_the_target_the_planner_armed() {
+        let regs = written(&plan_slot_plan_for(
             &no_charge(),
             &armed(DeviceType::AllInOne6kW, 62),
+            Some(62),
         ));
         assert_eq!(writes_to(&regs, 116), vec![100], "{regs:?}");
+        // Flag-gated models disarm by clearing HR 20, which a clear
+        // doesn't otherwise touch.
+        let regs = written(&plan_slot_plan_for(
+            &no_charge(),
+            &armed(DeviceType::Gen2Hybrid, 62),
+            Some(62),
+        ));
+        assert_eq!(writes_to(&regs, 20), vec![0], "{regs:?}");
+        assert!(writes_to(&regs, 116).is_empty(), "{regs:?}");
+    }
+
+    #[test]
+    fn a_target_the_user_set_is_never_reset() {
+        // No record of the planner arming it, or the user has since
+        // changed it: the target is theirs and stays.
+        for (snapshot_target, recorded) in [(80, None), (80, Some(62))] {
+            let snapshot = armed(DeviceType::AllInOne6kW, snapshot_target);
+            for rec in [charge(120, 300, false, 3.2), no_charge()] {
+                let regs = written(&plan_slot_plan_for(&rec, &snapshot, recorded));
+                assert!(
+                    writes_to(&regs, 116).is_empty(),
+                    "{snapshot_target} {recorded:?}: {regs:?}"
+                );
+            }
+        }
+        // The plain entry point knows of no armed target at all.
+        let regs = written(&plan_slot_plan(
+            &charge(120, 300, false, 3.2),
+            &armed(DeviceType::AllInOne6kW, 62),
+        ));
+        assert!(writes_to(&regs, 116).is_empty(), "{regs:?}");
     }
 
     #[test]
@@ -927,30 +1001,61 @@ mod tests {
         for target in [100, 4] {
             let snapshot = armed(DeviceType::AllInOne6kW, target);
             for rec in [charge(120, 300, false, 3.2), no_charge()] {
-                let regs = written(&plan_slot_plan(&rec, &snapshot));
+                let regs = written(&plan_slot_plan_for(&rec, &snapshot, Some(target)));
                 assert!(writes_to(&regs, 116).is_empty(), "{target}: {regs:?}");
             }
         }
     }
 
     #[test]
-    fn flag_gated_models_need_no_target_reset() {
-        // Gen1/2 and AC-coupled disarm a target by clearing HR 20, which a
-        // full charge already does.
-        let regs = written(&plan_slot_plan(
-            &charge(120, 300, false, 3.2),
-            &armed(DeviceType::Gen2Hybrid, 62),
+    fn a_full_hold_resets_the_target_the_planner_armed() {
+        // Even 100% couldn't hold the minimum tonight: the hold slot asks
+        // for 100, which must not leave last night's 62 in HR 116.
+        let regs = written(&plan_slot_plan_for(
+            &hold_to(100),
+            &armed(DeviceType::AllInOne6kW, 62),
+            Some(62),
         ));
-        assert!(writes_to(&regs, 116).is_empty(), "{regs:?}");
+        assert_eq!(writes_to(&regs, 116), vec![100], "{regs:?}");
     }
 
     #[test]
-    fn a_new_hold_target_replaces_a_stale_one_without_a_reset() {
-        let regs = written(&plan_slot_plan(
+    fn a_new_hold_target_replaces_the_armed_one_without_a_reset() {
+        let regs = written(&plan_slot_plan_for(
             &hold(false),
             &armed(DeviceType::Gen3Hybrid, 70),
+            Some(70),
         ));
         assert_eq!(writes_to(&regs, 116), vec![62], "{regs:?}");
+    }
+
+    #[tokio::test]
+    async fn the_planner_records_the_target_it_arms_and_undoes_only_that() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            apply_plan_recommendation(
+                &state,
+                &armed(DeviceType::AllInOne6kW, 100),
+                &hold(false),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert_eq!(Settings::load().forecast_plan_armed_target_pct, Some(62));
+
+            // Next night: a full charge with the inverter still at 62.
+            apply_plan_recommendation(
+                &state,
+                &armed(DeviceType::AllInOne6kW, 62),
+                &charge(120, 300, false, 3.2),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            let batches = queued(&state).await;
+            let last = batches.last().expect("queued");
+            assert_eq!(writes_to(last, 116), vec![100], "{last:?}");
+            assert_eq!(Settings::load().forecast_plan_armed_target_pct, None);
+        })
+        .await;
     }
 
     // ---- plan_notification --------------------------------------------------

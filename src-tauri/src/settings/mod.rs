@@ -1462,6 +1462,12 @@ pub struct Settings {
     /// to [`PlanStrategy::MinSoc`], the original behaviour.
     #[serde(default, deserialize_with = "deserialize_plan_strategy")]
     pub forecast_plan_strategy: PlanStrategy,
+    /// The charge target a hold plan last armed on the inverter (issue
+    /// #359), so the planner can undo that target, and only that one, when
+    /// a later plan charges to full or clears the slot. `None` when the
+    /// planner owns no target.
+    #[serde(default)]
+    pub forecast_plan_armed_target_pct: Option<u8>,
 
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
@@ -1988,6 +1994,7 @@ impl Default for Settings {
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
+            forecast_plan_armed_target_pct: None,
             check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
@@ -2630,6 +2637,7 @@ mod tests {
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
+            forecast_plan_armed_target_pct: None,
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -2925,6 +2933,21 @@ mod tests {
         assert_eq!(json["forecast_plan_strategy"], "hold_window");
         let decoded: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.forecast_plan_strategy, PlanStrategy::HoldWindow);
+    }
+
+    #[test]
+    fn planner_armed_target_defaults_to_none_and_round_trips() {
+        let legacy = r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
+            "poll_interval": 60, "auto_connect": true}"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.forecast_plan_armed_target_pct, None);
+        let original = Settings {
+            forecast_plan_armed_target_pct: Some(62),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.forecast_plan_armed_target_pct, Some(62));
     }
 
     /// A strategy written by a newer build must not make an older one
@@ -3332,6 +3355,7 @@ mod tests {
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
+            forecast_plan_armed_target_pct: None,
             octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),

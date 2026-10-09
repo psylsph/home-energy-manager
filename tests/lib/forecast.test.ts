@@ -703,9 +703,9 @@ describe('hold plans (issue #359 review)', () => {
 
   it('flags the hold as unconfirmed off Gen3', () => {
     expect(holdStrategyNote('Gen3Hybrid')).toBeNull();
-    expect(holdStrategyNote('Gen3PlusHybrid')).toBeNull();
     expect(holdStrategyNote(undefined)).toBeNull();
-    for (const device of ['Gen2Hybrid', 'ACCoupled', 'AllInOne6kW', 'ThreePhase']) {
+    // Gen 3 Plus takes a different register path from the confirmed Gen 3.
+    for (const device of ['Gen3PlusHybrid', 'Gen2Hybrid', 'ACCoupled', 'AllInOne6kW', 'ThreePhase']) {
       expect(holdStrategyNote(device)).toMatch(/confirmed on Gen 3/i);
     }
   });
