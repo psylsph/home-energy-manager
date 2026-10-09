@@ -3666,29 +3666,12 @@ mod tests {
         );
     }
     // ----------------------------------------------------------------
-    // Reserve-aware floor (issue #360)
+    // Running empty at the reserve (issue #360)
     // ----------------------------------------------------------------
 
-    #[test]
-    fn effective_floor_sits_just_above_the_reserve() {
-        // Above the reserve the user's minimum stands.
-        assert_eq!(effective_floor_pct(20.0, 4.0), 20.0);
-        // At or below it, the floor lifts to just above the reserve.
-        assert_eq!(effective_floor_pct(4.0, 4.0), 5.0);
-        assert_eq!(effective_floor_pct(0.0, 10.0), 11.0);
-        assert_eq!(effective_floor_pct(0.0, 0.0), 1.0);
-        // A 100% reserve (battery paused) never discharges, so lifting the
-        // floor past it would ask for an impossible charge.
-        assert_eq!(effective_floor_pct(20.0, 100.0), 20.0);
-    }
-
-    #[test]
-    fn min_soc_at_or_below_the_reserve_still_charges_an_empty_battery() {
-        // The simulation never discharges below the 10% reserve, so with the
-        // minimum at (or under) the reserve the projected low always "held"
-        // the floor and the plan never charged — even though the battery
-        // sat empty on grid power through the morning peak.
-        let p = params();
+    /// Overnight drain the 10% reserve can't cover: the uncharged battery
+    /// sits empty on grid power through the 03:00–05:00 load and beyond.
+    fn drains_to_the_reserve() -> (SimulationOutput, Vec<SimHourInput>) {
         let solar = {
             let mut s = [0.0; 24];
             for h in 10..=15 {
@@ -3698,13 +3681,18 @@ mod tests {
         };
         let cons: [f64; 24] =
             std::array::from_fn(|h| if (3..=5).contains(&h) { 1.0 } else { 0.25 });
-        let (sim, sim_hours) = fixed_48h(30.0, solar, cons, &p);
-        assert!(
-            sim.hours.iter().map(|h| h.import_kwh).sum::<f64>() > 1.0,
-            "fixture must import while the battery sits at the reserve"
-        );
+        fixed_48h(30.0, solar, cons, &params())
+    }
+
+    #[test]
+    fn min_soc_at_or_below_the_reserve_charges_when_the_battery_would_run_empty() {
+        // The simulation never discharges below the 10% reserve, so a
+        // minimum at or under it was always "held" and the plan never
+        // charged, even with the battery empty on grid power until solar.
+        let p = params();
+        let (sim, sim_hours) = drains_to_the_reserve();
         let flux = flux_tariff();
-        for min in [10.0, 4.0, 0.0] {
+        for min in [10.0, 4.0] {
             match plan_overnight_charge(&plan_inputs_with_min(
                 &sim,
                 &sim_hours,
@@ -3716,13 +3704,18 @@ mod tests {
                     kwh,
                     min_soc_pct,
                     after_min_soc_pct,
+                    rationale,
                     ..
                 } => {
                     assert!(kwh > 0.0, "min {min}: expected a charge");
-                    assert_eq!(min_soc_pct, 11.0, "min {min}: reports the floor it held");
+                    assert_eq!(min_soc_pct, min, "min {min}: reports the user's setting");
                     assert!(
-                        after_min_soc_pct >= 11.0 - 0.05,
-                        "min {min}: charge must keep the battery off the reserve, got {after_min_soc_pct}"
+                        after_min_soc_pct > 10.0,
+                        "min {min}: the charge must keep the battery off the reserve, got {after_min_soc_pct}"
+                    );
+                    assert!(
+                        rationale.contains("reserve"),
+                        "min {min}: rationale should explain the empty battery: {rationale}"
                     );
                 }
                 other => panic!("min {min}: expected Charge, got {other:?}"),
@@ -3731,9 +3724,25 @@ mod tests {
     }
 
     #[test]
-    fn min_soc_at_the_reserve_with_a_battery_that_never_empties_needs_no_charge() {
-        // The lifted floor must not invent charges: a sunny day that never
-        // drains the battery to the reserve still needs nothing.
+    fn zero_minimum_never_charges_from_the_grid() {
+        // 0% is the user's "solar only" setting: no grid charge, even when
+        // the battery will run empty.
+        let p = params();
+        let (sim, sim_hours) = drains_to_the_reserve();
+        match plan_overnight_charge(&plan_inputs_with_min(
+            &sim,
+            &sim_hours,
+            &p,
+            Some(&flux_tariff()),
+            0.0,
+        )) {
+            PlanRecommendation::NoChargeNeeded { min_soc_pct, .. } => assert_eq!(min_soc_pct, 0.0),
+            other => panic!("expected NoChargeNeeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_battery_that_never_runs_empty_needs_no_charge_at_a_reserve_minimum() {
         let p = params();
         let solar = {
             let mut s = [0.0; 24];
@@ -3743,26 +3752,109 @@ mod tests {
             s
         };
         let (sim, sim_hours) = fixed_48h(50.0, solar, [0.3; 24], &p);
-        let flux = flux_tariff();
         match plan_overnight_charge(&plan_inputs_with_min(
             &sim,
             &sim_hours,
             &p,
-            Some(&flux),
+            Some(&flux_tariff()),
             10.0,
         )) {
-            PlanRecommendation::NoChargeNeeded { min_soc_pct, .. } => {
-                assert_eq!(min_soc_pct, 11.0);
-            }
+            PlanRecommendation::NoChargeNeeded { min_soc_pct, .. } => assert_eq!(min_soc_pct, 10.0),
             other => panic!("expected NoChargeNeeded, got {other:?}"),
         }
     }
 
     #[test]
-    fn export_advice_never_sells_the_battery_down_to_the_reserve() {
-        // Floor configured at the 10% reserve: selling to exactly 10% would
-        // leave the house on grid power until the next cheap window, so the
-        // export holds just above the reserve instead.
+    fn touching_the_reserve_without_drawing_from_the_grid_needs_no_charge() {
+        // 12% start on a 10 kWh pack with a 10% reserve: 0.19 kWh AC is
+        // usable, and the 08:00 load is exactly that. The battery ends the
+        // hour at the reserve but the house never imports, and midday solar
+        // refills it — no charge to buy.
+        let p = SimulationParams {
+            start_soc_pct: 12.0,
+            ..params()
+        };
+        let mut solar = [0.0; 24];
+        solar[10..=15].fill(1.0);
+        let mut cons = [0.0; 24];
+        cons[8] = 0.19;
+        let (sim, sim_hours) = fixed_48h(12.0, solar, cons, &p);
+        match plan_overnight_charge(&plan_inputs_with_min(
+            &sim,
+            &sim_hours,
+            &p,
+            Some(&flux_tariff()),
+            10.0,
+        )) {
+            PlanRecommendation::NoChargeNeeded { .. } => {}
+            other => panic!("expected NoChargeNeeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paused_battery_at_a_full_reserve_needs_no_charge() {
+        // A 100% reserve holds the battery (load limiter pause): it never
+        // discharges, so charging can't stop the import and must not try.
+        let p = SimulationParams {
+            start_soc_pct: 50.0,
+            reserve_soc_pct: 100.0,
+            ..params()
+        };
+        let (sim, sim_hours) = fixed_48h(50.0, [0.0; 24], [0.5; 24], &p);
+        match plan_overnight_charge(&plan_inputs_with_min(
+            &sim,
+            &sim_hours,
+            &p,
+            Some(&flux_tariff()),
+            10.0,
+        )) {
+            PlanRecommendation::NoChargeNeeded { .. } => {}
+            other => panic!("expected NoChargeNeeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dip_before_the_cheap_window_alone_needs_no_charge() {
+        // Daytime cheap window 13:00–16:00. The battery dips below the 20%
+        // minimum at 07:00–10:00 — before the window, where no charge can
+        // reach — and midday solar refills it for the rest of the cycle.
+        // That used to fall through to the charge path and shrink the slot
+        // to a meaningless minute.
+        let p = params();
+        let cheap_afternoon = tariff(&[
+            ("00:00", "13:00", 0.30),
+            ("13:00", "16:00", 0.10),
+            ("16:00", "23:59", 0.30),
+        ]);
+        let mut solar = [0.0; 24];
+        solar[11..=17].fill(2.0);
+        let cons: [f64; 24] = std::array::from_fn(|h| if (6..=9).contains(&h) { 1.0 } else { 0.1 });
+        let (sim, sim_hours) = fixed_48h(30.0, solar, cons, &p);
+        let inputs = PlanInputs {
+            now_ts: pinned_now_ts(&sim_hours, 0, 0),
+            ..plan_inputs_with_min(&sim, &sim_hours, &p, Some(&cheap_afternoon), 20.0)
+        };
+        assert!(
+            sim.hours.iter().take(12).any(|h| h.soc_pct < 20.0),
+            "fixture must dip below the minimum before the window"
+        );
+        match plan_overnight_charge(&inputs) {
+            PlanRecommendation::NoChargeNeeded {
+                observed_min_soc_pct,
+                ..
+            } => assert!(
+                observed_min_soc_pct >= 20.0,
+                "reports the low across the hours a charge could change, got {observed_min_soc_pct}"
+            ),
+            other => panic!("expected NoChargeNeeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn export_advice_sells_down_to_the_reserve_when_nothing_follows() {
+        // Floor at the 10% reserve with an idle house after the window: the
+        // battery can be sold right down to the reserve — nothing is left
+        // to import.
         let p = SimulationParams {
             start_soc_pct: 80.0,
             ..params()
@@ -3781,10 +3873,44 @@ mod tests {
         else {
             panic!("expected an export recommendation, got {advice:?}");
         };
-        assert_eq!(min_soc_pct, 11.0);
+        assert_eq!(min_soc_pct, 10.0);
         assert!(
-            after_min_soc_pct >= 11.0,
-            "export must stop above the reserve, got {after_min_soc_pct}"
+            after_min_soc_pct < 10.5,
+            "sells to the reserve, got {after_min_soc_pct}"
         );
+    }
+
+    #[test]
+    fn export_advice_keeps_enough_to_cover_the_evening_at_a_reserve_floor() {
+        // Floor at the 10% reserve, 0.5 kWh/h of load 21:00–02:00 after the
+        // 16:00–21:00 export window. Selling to the reserve would leave that
+        // load on grid power, so the export keeps 2.5 kWh AC (2.63 kWh
+        // stored) back: 8 − 1 − 2.63 = 4.37 kWh stored → 4.15 kWh AC →
+        // 99 whole minutes at 2.5 kW.
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..params()
+        };
+        let mut hours = idle_day_hours(0);
+        hours.extend(idle_day_hours(1));
+        for h in [21, 22, 23, 24, 25] {
+            hours[h].consumption_kwh = 0.5;
+        }
+        let now = pinned_now_ts(&hours, 0, 12 * 60);
+        let advice = plan_export_window(&ExportPlanInputs {
+            floor_pct: 10.0,
+            ..export_inputs(&hours, &p, &flux_tariff(), &flux_tariff(), None, now)
+        });
+        let ExportAdvice::Export {
+            window,
+            min_soc_pct,
+            ..
+        } = advice
+        else {
+            panic!("expected an export recommendation, got {advice:?}");
+        };
+        assert_eq!(min_soc_pct, 10.0);
+        assert_eq!(window.start_min, 16 * 60);
+        assert_eq!(window.end_min, 16 * 60 + 99);
     }
 }

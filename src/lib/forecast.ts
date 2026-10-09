@@ -538,6 +538,18 @@ export function reserveFloorNote(
   );
 }
 
+/** Note shown under the Minimum battery level input explaining what a
+ *  minimum of 0, or one at or below the inverter's reserve, means to the
+ *  planner (issue #360). */
+export function minimumSocNote(
+  minSocPct: number,
+  reserveSocPct: number | null | undefined,
+): string | null {
+  void minSocPct;
+  void reserveSocPct;
+  return null;
+}
+
 /** Short headline for the Plan card. Degrades gracefully per kind. */
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {

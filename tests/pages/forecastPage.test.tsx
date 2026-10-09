@@ -1212,11 +1212,19 @@ describe('ForecastPage minimum vs battery reserve (issue #360)', () => {
     });
   };
 
-  it('explains the lifted floor when the minimum sits at or below the reserve', async () => {
+  it('explains a minimum at or below the reserve', async () => {
     mockWithMinSoc(10);
     render(<ForecastPage />);
     expect(await screen.findByTestId('forecast-min-soc-reserve-note')).toHaveTextContent(
-      /15% battery reserve, so the planner holds at least 16%/,
+      /keeps a 15% battery reserve, so at this level the planner only charges when the battery would otherwise run empty/,
+    );
+  });
+
+  it('says a 0% minimum never charges from the grid', async () => {
+    mockWithMinSoc(0);
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-min-soc-reserve-note')).toHaveTextContent(
+      /never charges from the grid/,
     );
   });
 

@@ -7,7 +7,7 @@ import {
   truncateSeriesAtNextChargeStart,
   formatForecastXAxisTick,
   forecastPlanTitle,
-  reserveFloorNote,
+  minimumSocNote,
   planAutoApplyTriggerLabel,
   parseLeadMinutes,
   forecastStatusMessages,
@@ -619,24 +619,31 @@ describe('parseLeadMinutes', () => {
   });
 });
 
-describe('reserveFloorNote (issue #360)', () => {
-  it('explains the lifted floor when the minimum is at or below the reserve', () => {
-    expect(reserveFloorNote(4, 4)).toBe(
-      'Your inverter keeps a 4% battery reserve, so the planner holds at least 5%. ' +
-        'At or below the reserve the battery would sit empty on grid power.',
+describe('minimumSocNote (issue #360)', () => {
+  it('says a 0% minimum never charges from the grid', () => {
+    expect(minimumSocNote(0, 4)).toBe(
+      'At 0% the planner never charges from the grid — the battery runs on solar alone.',
     );
-    expect(reserveFloorNote(0, 10)).toMatch(/holds at least 11%/);
+    expect(minimumSocNote(0, null)).toMatch(/never charges from the grid/);
+  });
+
+  it('explains a minimum at or below the reserve', () => {
+    expect(minimumSocNote(4, 4)).toBe(
+      'Your inverter keeps a 4% battery reserve, so at this level the planner only charges ' +
+        'when the battery would otherwise run empty and draw from the grid before the next cheap period.',
+    );
+    expect(minimumSocNote(10, 15)).toMatch(/keeps a 15% battery reserve/);
   });
 
   it('stays quiet when the minimum is above the reserve', () => {
-    expect(reserveFloorNote(20, 4)).toBeNull();
-    expect(reserveFloorNote(5, 4)).toBeNull();
+    expect(minimumSocNote(20, 4)).toBeNull();
+    expect(minimumSocNote(5, 4)).toBeNull();
   });
 
   it('stays quiet without a usable reserve or with the battery paused at 100%', () => {
-    expect(reserveFloorNote(4, null)).toBeNull();
-    expect(reserveFloorNote(4, undefined)).toBeNull();
-    expect(reserveFloorNote(4, Number.NaN)).toBeNull();
-    expect(reserveFloorNote(20, 100)).toBeNull();
+    expect(minimumSocNote(4, null)).toBeNull();
+    expect(minimumSocNote(4, undefined)).toBeNull();
+    expect(minimumSocNote(4, Number.NaN)).toBeNull();
+    expect(minimumSocNote(20, 100)).toBeNull();
   });
 });
