@@ -8720,6 +8720,11 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                 },
             })
         }
+        PlanRecommendation::ChargeAndHold { .. } => serde_json::json!({
+            "kind": "no_plan",
+            "reason": "not yet serialised",
+            "apply": null,
+        }),
         PlanRecommendation::NoPlan { reason } => serde_json::json!({
             "kind": "no_plan",
             "reason": reason,
@@ -19871,6 +19876,58 @@ pub(crate) mod tests {
     /// Issue #283 planner v2: the settings endpoint accepts and validates
     /// `forecast_min_soc_pct` (0..=100, the SOC floor for the forecast
     /// window). Out-of-range values are rejected and leave disk untouched.
+    /// Issue #359: the planner strategy saves, validates, and reads back.
+    /// Unknown values are rejected and leave disk untouched.
+    #[tokio::test]
+    async fn update_settings_validates_forecast_plan_strategy() {
+        with_isolated_config_dir_async(|| async {
+            use crate::settings::PlanStrategy;
+            let state = test_state();
+            for bad in [json!("bogus"), json!(7), json!(null)] {
+                let (status, body) = update_settings(
+                    State(state.clone()),
+                    Json(json!({ "forecast_plan_strategy": bad })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+                assert!(
+                    body["error"].as_str().unwrap().contains("strategy"),
+                    "{bad}: {}",
+                    body.0
+                );
+                assert_eq!(
+                    crate::settings::Settings::load().forecast_plan_strategy,
+                    PlanStrategy::MinSoc
+                );
+            }
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "hold_window" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_strategy,
+                PlanStrategy::HoldWindow
+            );
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_strategy"], "hold_window");
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "min_soc" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_strategy,
+                PlanStrategy::MinSoc
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn update_settings_validates_forecast_min_soc_pct() {
         with_isolated_config_dir_async(|| async {
@@ -23684,5 +23741,143 @@ pub(crate) mod tests {
             );
         })
         .await;
+    }
+
+    // ---- golden plan JSON (issue #359, Phase 0) -----------------------------
+
+    /// The full JSON the Planner page and its Apply button consume today,
+    /// for each recommendation kind. The #359 strategies may only add to
+    /// this shape; the default planner's output must stay identical.
+    #[test]
+    fn default_plan_json_matches_the_golden_shape() {
+        use crate::forecast::planner::{ChargeWindow, PlanRecommendation};
+
+        let charge = PlanRecommendation::Charge {
+            window: ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 3 * 60 + 34,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            kwh: 16.44,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 4.0,
+            after_min_soc_pct: 20.5,
+            current_soc_pct: 30.0,
+            rationale: "why".into(),
+            with_charge_series: vec![(1_000, 21.0), (4_600, 38.0)],
+            import_tomorrow_with_charge_kwh: 12.84,
+            export_tomorrow_with_charge_kwh: 0.5,
+        };
+        assert_eq!(
+            plan_to_json_value(&charge),
+            json!({
+                "kind": "charge",
+                "window": {"start": "23:00", "end": "03:34", "rate": 0.07, "tomorrow": false},
+                "kwh": 16.44,
+                "min_soc_pct": 20.0,
+                "observed_min_soc_pct": 4.0,
+                "after_min_soc_pct": 20.5,
+                "current_soc_pct": 30.0,
+                "rationale": "why",
+                "with_charge_series": [[1_000, 21.0], [4_600, 38.0]],
+                "import_tomorrow_with_charge_kwh": 12.84,
+                "export_tomorrow_with_charge_kwh": 0.5,
+                "apply": {
+                    "charge_slot": {
+                        "slot": 1,
+                        "enabled": true,
+                        "start_hour": 23,
+                        "start_minute": 0,
+                        "end_hour": 3,
+                        "end_minute": 34,
+                        "target_soc": 100,
+                        "charge_rate_percent": 100,
+                    },
+                    "timed_charge": {"enabled": true},
+                },
+            })
+        );
+
+        let no_charge = PlanRecommendation::NoChargeNeeded {
+            current_soc_pct: 80.0,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 45.0,
+        };
+        assert_eq!(
+            plan_to_json_value(&no_charge),
+            json!({
+                "kind": "no_charge_needed",
+                "min_soc_pct": 20.0,
+                "observed_min_soc_pct": 45.0,
+                "current_soc_pct": 80.0,
+                "rationale": "Battery is at 80% now and the forecast trough stays above your 20% minimum — nothing to schedule.",
+                "apply": null,
+            })
+        );
+
+        let no_plan = PlanRecommendation::NoPlan {
+            reason: "no tariff".into(),
+        };
+        assert_eq!(
+            plan_to_json_value(&no_plan),
+            json!({"kind": "no_plan", "reason": "no tariff", "apply": null})
+        );
+    }
+
+    /// Issue #359: a hold plan is still a `charge` to the Planner page, with
+    /// its strategy and target added and the target flowing into Apply.
+    #[test]
+    fn hold_plan_json_adds_its_strategy_and_target() {
+        use crate::forecast::planner::{ChargeWindow, PlanRecommendation};
+        let rec = PlanRecommendation::ChargeAndHold {
+            window: ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 6 * 60,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            target_soc_pct: 62,
+            kwh: 5.4,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 4.0,
+            after_min_soc_pct: 21.0,
+            current_soc_pct: 30.0,
+            rationale: "why".into(),
+            with_charge_series: vec![(1_000, 62.0)],
+            import_tomorrow_with_charge_kwh: 9.1,
+            export_tomorrow_with_charge_kwh: 0.0,
+        };
+        assert_eq!(
+            plan_to_json_value(&rec),
+            json!({
+                "kind": "charge",
+                "strategy": "hold_window",
+                "slot_target_soc_pct": 62,
+                "window": {"start": "23:00", "end": "06:00", "rate": 0.07, "tomorrow": false},
+                "kwh": 5.4,
+                "min_soc_pct": 20.0,
+                "observed_min_soc_pct": 4.0,
+                "after_min_soc_pct": 21.0,
+                "current_soc_pct": 30.0,
+                "rationale": "why",
+                "with_charge_series": [[1_000, 62.0]],
+                "import_tomorrow_with_charge_kwh": 9.1,
+                "export_tomorrow_with_charge_kwh": 0.0,
+                "apply": {
+                    "charge_slot": {
+                        "slot": 1,
+                        "enabled": true,
+                        "start_hour": 23,
+                        "start_minute": 0,
+                        "end_hour": 6,
+                        "end_minute": 0,
+                        "target_soc": 62,
+                        "charge_rate_percent": 100,
+                    },
+                    "timed_charge": {"enabled": true},
+                },
+            })
+        );
     }
 }

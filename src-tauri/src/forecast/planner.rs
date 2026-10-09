@@ -15,7 +15,7 @@ use crate::forecast::time_windows::{
     window_overlap_hours as absolute_window_overlap_hours,
     window_overlap_segments as absolute_window_overlap_segments,
 };
-use crate::settings::TariffConfig;
+use crate::settings::{PlanStrategy, TariffConfig};
 use chrono::{NaiveDate, TimeZone, Timelike};
 
 /// One candidate charging window derived from the import tariff slots.
@@ -90,6 +90,25 @@ pub enum PlanRecommendation {
         import_tomorrow_with_charge_kwh: f64,
         /// Tomorrow's grid export under the recommended plan, kWh
         /// (tomorrow's what-if hours, summed).
+        export_tomorrow_with_charge_kwh: f64,
+    },
+    /// Hold-through-window strategy (issue #359): a slot spanning the
+    /// whole cheap window with target `target_soc_pct`. The inverter
+    /// charges to the target, then holds it while the grid supplies the
+    /// house until the window ends. Fields mirror [`Self::Charge`]; `kwh`
+    /// is the AC energy drawn into the battery, not the house's share.
+    ChargeAndHold {
+        window: ChargeWindow,
+        /// The slot's target SOC, % — the register value written.
+        target_soc_pct: u8,
+        kwh: f64,
+        min_soc_pct: f64,
+        observed_min_soc_pct: f64,
+        after_min_soc_pct: f64,
+        current_soc_pct: f64,
+        rationale: String,
+        with_charge_series: Vec<(i64, f64)>,
+        import_tomorrow_with_charge_kwh: f64,
         export_tomorrow_with_charge_kwh: f64,
     },
     /// Inputs insufficient for a plan (no tariff config, no
@@ -1147,6 +1166,18 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         with_charge_series,
         import_tomorrow_with_charge_kwh,
         export_tomorrow_with_charge_kwh,
+    }
+}
+
+mod hold;
+pub use hold::plan_hold_through_window;
+
+/// Compute the recommendation for the user's chosen strategy (issue
+/// #359). [`PlanStrategy::MinSoc`] is exactly [`plan_overnight_charge`].
+pub fn plan_charge(inputs: &PlanInputs, strategy: PlanStrategy) -> PlanRecommendation {
+    match strategy {
+        PlanStrategy::MinSoc => plan_overnight_charge(inputs),
+        PlanStrategy::HoldWindow => plan_hold_through_window(inputs),
     }
 }
 
@@ -4049,5 +4080,469 @@ mod tests {
         assert_eq!(min_soc_pct, 10.0);
         assert_eq!(window.start_min, 16 * 60);
         assert_eq!(window.end_min, 16 * 60 + 99);
+    }
+
+    // ----------------------------------------------------------------
+    // Golden outputs (issue #359, Phase 0)
+    // ----------------------------------------------------------------
+    //
+    // The planner strategies #359 adds must leave the default planner
+    // untouched. These pin the complete output of `plan_overnight_charge`
+    // for every recommendation shape — window, energy, SOC figures,
+    // rationale, overlay series and the Tomorrow tiles — so any drift in
+    // the existing behaviour fails here. Timestamps are rendered as hour
+    // offsets from the first input hour, keeping the strings independent
+    // of the machine's timezone.
+
+    /// Canonical text form of a recommendation, stable to 4 decimals.
+    fn golden_render(rec: &PlanRecommendation, sim_hours: &[SimHourInput]) -> String {
+        let origin = sim_hours.first().map(|h| h.timestamp).unwrap_or(0);
+        match rec {
+            PlanRecommendation::NoChargeNeeded {
+                current_soc_pct,
+                min_soc_pct,
+                observed_min_soc_pct,
+            } => format!(
+                "no_charge current={current_soc_pct:.4} min={min_soc_pct:.4} \
+                 observed={observed_min_soc_pct:.4}"
+            ),
+            PlanRecommendation::Charge {
+                window,
+                kwh,
+                min_soc_pct,
+                observed_min_soc_pct,
+                after_min_soc_pct,
+                current_soc_pct,
+                rationale,
+                with_charge_series,
+                import_tomorrow_with_charge_kwh,
+                export_tomorrow_with_charge_kwh,
+            } => {
+                let series: Vec<String> = with_charge_series
+                    .iter()
+                    .map(|(ts, soc)| format!("{}:{soc:.4}", (ts - origin) / 3600))
+                    .collect();
+                format!(
+                    "charge window={}-{} tomorrow={} rate={:.4} kwh={kwh:.4} \
+                     min={min_soc_pct:.4} observed={observed_min_soc_pct:.4} \
+                     after={after_min_soc_pct:.4} current={current_soc_pct:.4} \
+                     import_tw={import_tomorrow_with_charge_kwh:.4} \
+                     export_tw={export_tomorrow_with_charge_kwh:.4}\n\
+                     rationale={rationale}\nseries={}",
+                    hhmm(window.start_min),
+                    hhmm(window.end_min),
+                    window.tomorrow,
+                    window.rate,
+                    series.join(" "),
+                )
+            }
+            PlanRecommendation::ChargeAndHold { .. } => {
+                panic!("the default planner never holds: {rec:?}")
+            }
+            PlanRecommendation::NoPlan { reason } => format!("no_plan reason={reason}"),
+        }
+    }
+
+    /// Bruce's setup from issue #359: 19 kWh battery, 3.6 kW inverter,
+    /// cheap 23:00–06:00 split across the tariff's boundary rows.
+    fn bruce_tariff() -> TariffConfig {
+        tariff(&[
+            ("00:00", "06:00", 0.07),
+            ("06:00", "23:00", 0.27),
+            ("23:00", "23:59", 0.07),
+        ])
+    }
+
+    fn bruce_params() -> SimulationParams {
+        SimulationParams {
+            capacity_kwh: 19.0,
+            start_soc_pct: 40.0,
+            reserve_soc_pct: 4.0,
+            max_charge_kw: 3.6,
+            max_discharge_kw: 3.6,
+            charge_efficiency: 0.9,
+            discharge_efficiency: 0.95,
+        }
+    }
+
+    /// Every recommendation shape the default planner produces, as
+    /// `(name, rendered output)`.
+    fn golden_scenarios() -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        let p = params();
+        let flux = flux_tariff();
+        let midday_solar = {
+            let mut s = [0.0; 24];
+            for h in 10..=15 {
+                s[h as usize] = 1.0;
+            }
+            s
+        };
+        let morning_peak: [f64; 24] =
+            std::array::from_fn(|h| if (3..=5).contains(&h) { 1.0 } else { 0.25 });
+
+        // Cloudy day: the drain exceeds the window, so the plan saturates.
+        let (sim, hours) = simulate_tomorrow(0.2, 0.5, &p);
+        let rec = plan_overnight_charge(&plan_inputs(&sim, &hours, &p, Some(&flux)));
+        out.push(("cloudy_day_saturates", golden_render(&rec, &hours)));
+
+        // Sunny day: nothing to schedule.
+        let sunny_solar: [f64; 24] =
+            std::array::from_fn(|h| if (6..=19).contains(&h) { 1.4 } else { 0.0 });
+        let p_high = SimulationParams {
+            start_soc_pct: 80.0,
+            ..p
+        };
+        let (sim, hours) = simulate_tomorrow_at(80.0, sunny_solar, [0.15; 24], &p_high);
+        let rec = plan_overnight_charge(&plan_inputs(&sim, &hours, &p_high, Some(&flux)));
+        out.push(("sunny_day_no_charge", golden_render(&rec, &hours)));
+
+        // Overnight dip the shortest slot can hold above a 20% minimum.
+        let (sim, hours) = fixed_48h(30.0, midday_solar, morning_peak, &p);
+        let rec = plan_overnight_charge(&plan_inputs_with_min(&sim, &hours, &p, Some(&flux), 20.0));
+        out.push(("overnight_dip_min_20", golden_render(&rec, &hours)));
+
+        // Minimums at, below and under the reserve (issue #360).
+        for (name, min) in [
+            ("runs_empty_min_10", 10.0),
+            ("runs_empty_min_4", 4.0),
+            ("runs_empty_min_0", 0.0),
+        ] {
+            let rec =
+                plan_overnight_charge(&plan_inputs_with_min(&sim, &hours, &p, Some(&flux), min));
+            out.push((name, golden_render(&rec, &hours)));
+        }
+
+        // One-hour window that cannot deliver enough.
+        let narrow = tariff(&[("00:00", "01:00", 0.05), ("01:00", "23:59", 0.30)]);
+        let (sim, hours) = fixed_72h(30.0, [0.0; 24], [0.025; 24], &p);
+        let rec =
+            plan_overnight_charge(&plan_inputs_with_min(&sim, &hours, &p, Some(&narrow), 45.0));
+        out.push(("capped_narrow_window", golden_render(&rec, &hours)));
+
+        // Bruce's wrapping 23:00–06:00 window on a winter day: today's
+        // behaviour is the shortest slot at 100%, then Eco.
+        let bp = bruce_params();
+        let bruce_bt = bruce_tariff();
+        let winter_solar: [f64; 24] =
+            std::array::from_fn(|h| if (9..=15).contains(&h) { 0.3 } else { 0.0 });
+        let evening_load: [f64; 24] =
+            std::array::from_fn(|h| if (17..=21).contains(&h) { 1.2 } else { 0.5 });
+        let (sim, hours) = fixed_48h(40.0, winter_solar, evening_load, &bp);
+        let rec = plan_overnight_charge(&plan_inputs_with_min(
+            &sim,
+            &hours,
+            &bp,
+            Some(&bruce_bt),
+            20.0,
+        ));
+        out.push(("bruce_wrapping_window_min_20", golden_render(&rec, &hours)));
+
+        // Callers without hourly inputs keep the analytic estimate.
+        let (sim, hours) = fixed_48h(30.0, midday_solar, morning_peak, &p);
+        let rec = plan_overnight_charge(&PlanInputs {
+            sim_hours: None,
+            ..plan_inputs_with_min(&sim, &hours, &p, Some(&flux), 20.0)
+        });
+        out.push(("legacy_without_hourly_inputs", golden_render(&rec, &hours)));
+
+        // The NoPlan gates.
+        let rec = plan_overnight_charge(&plan_inputs_with_min(&sim, &hours, &p, None, 20.0));
+        out.push(("no_tariff", golden_render(&rec, &hours)));
+        let rec = plan_overnight_charge(&PlanInputs {
+            consumption_sufficient: false,
+            ..plan_inputs_with_min(&sim, &hours, &p, Some(&flux), 20.0)
+        });
+        out.push(("insufficient_history", golden_render(&rec, &hours)));
+        let empty = SimulationOutput {
+            hours: Vec::new(),
+            total_import_kwh: 0.0,
+            total_export_kwh: 0.0,
+        };
+        let rec = plan_overnight_charge(&plan_inputs_with_min(&empty, &[], &p, Some(&flux), 20.0));
+        out.push(("no_projection", golden_render(&rec, &[])));
+        let flat = tariff(&[("00:00", "23:59", 0.25)]);
+        let rec = plan_overnight_charge(&plan_inputs_with_min(&sim, &hours, &p, Some(&flat), 20.0));
+        out.push(("flat_tariff", golden_render(&rec, &hours)));
+
+        out
+    }
+
+    /// The golden file split into `(name, rendered output)` sections.
+    fn golden_expected() -> Vec<(String, String)> {
+        let mut sections: Vec<(String, String)> = Vec::new();
+        for line in include_str!("testdata/planner_golden.txt").lines() {
+            if let Some(name) = line
+                .strip_prefix("=====[")
+                .and_then(|rest| rest.strip_suffix("]====="))
+            {
+                sections.push((name.to_string(), String::new()));
+            } else if let Some((_, body)) = sections.last_mut() {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(line);
+            }
+        }
+        sections
+    }
+
+    #[test]
+    fn default_planner_output_matches_the_golden_file() {
+        let expected = golden_expected();
+        let actual = golden_scenarios();
+        let expected_names: Vec<&str> = expected.iter().map(|(n, _)| n.as_str()).collect();
+        let actual_names: Vec<&str> = actual.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            actual_names, expected_names,
+            "scenario list drifted from testdata/planner_golden.txt"
+        );
+        for ((name, rendered), (_, golden)) in actual.iter().zip(&expected) {
+            assert_eq!(
+                rendered, golden,
+                "default planner output changed for scenario `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn golden_file_covers_every_recommendation_kind() {
+        // Guards the harness itself: an empty or truncated golden file
+        // would otherwise pass vacuously.
+        let expected = golden_expected();
+        for kind in ["charge ", "no_charge ", "no_plan "] {
+            assert!(
+                expected.iter().any(|(_, body)| body.starts_with(kind)),
+                "golden file has no `{kind}` scenario"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Hold-through-window strategy (issue #359)
+    // ----------------------------------------------------------------
+
+    /// Bruce's winter day from issue #359: 19 kWh, 3.6 kW, cheap
+    /// 23:00–06:00, light solar, evening peak. Planned at 22:00.
+    fn bruce_case() -> (SimulationOutput, Vec<SimHourInput>, SimulationParams) {
+        let bp = bruce_params();
+        let winter_solar: [f64; 24] =
+            std::array::from_fn(|h| if (9..=15).contains(&h) { 0.3 } else { 0.0 });
+        let evening_load: [f64; 24] =
+            std::array::from_fn(|h| if (17..=21).contains(&h) { 1.2 } else { 0.5 });
+        let (sim, hours) = fixed_48h(40.0, winter_solar, evening_load, &bp);
+        (sim, hours, bp)
+    }
+
+    fn hold_plan(rec: PlanRecommendation) -> (ChargeWindow, u8, f64, f64, String, Vec<(i64, f64)>) {
+        match rec {
+            PlanRecommendation::ChargeAndHold {
+                window,
+                target_soc_pct,
+                kwh,
+                after_min_soc_pct,
+                rationale,
+                with_charge_series,
+                ..
+            } => (
+                window,
+                target_soc_pct,
+                kwh,
+                after_min_soc_pct,
+                rationale,
+                with_charge_series,
+            ),
+            other => panic!("expected ChargeAndHold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hold_strategy_spans_the_whole_cheap_window_with_a_target_below_full() {
+        let (sim, hours, bp) = bruce_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let (window, target, kwh, after, rationale, _) =
+            hold_plan(plan_hold_through_window(&inputs));
+        assert_eq!((window.start_min, window.end_min), (23 * 60, 6 * 60));
+        assert!(!window.tomorrow);
+        assert!((20..100).contains(&target), "target {target}");
+        assert!(after >= 19.95, "after {after}");
+        assert!(kwh > 0.0 && kwh <= 3.6 * 7.0, "kwh {kwh}");
+        assert!(rationale.contains("hold"), "rationale: {rationale}");
+        assert!(
+            rationale.contains(&format!("{target}%")),
+            "rationale: {rationale}"
+        );
+    }
+
+    #[test]
+    fn hold_target_is_the_lowest_that_holds_the_minimum() {
+        let (sim, hours, bp) = bruce_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let (window, target, ..) = hold_plan(plan_hold_through_window(&inputs));
+        let at = |t: u8| {
+            hold::simulate_hold(&hours, &bp, &window, inputs.now_ts, t)
+                .expect("simulates")
+                .holds(&hours, &bp, 20.0)
+        };
+        assert!(at(target), "target {target} must hold the minimum");
+        assert!(!at(target - 1), "target {} would also hold", target - 1);
+    }
+
+    #[test]
+    fn hold_keeps_the_battery_flat_until_the_window_ends() {
+        // After reaching the target the grid covers the house: no drain
+        // through 06:00, unlike today's slot which ends at 03:34 and
+        // lets Eco run the battery down.
+        let (sim, hours, bp) = bruce_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let (_, target, _, _, _, series) = hold_plan(plan_hold_through_window(&inputs));
+        let target = f64::from(target);
+        // Hour buckets 23:00 (index 23) to 05:00 (index 29, ends 06:00).
+        let window_socs: Vec<f64> = series[23..=29].iter().map(|(_, soc)| *soc).collect();
+        let reached = window_socs
+            .iter()
+            .position(|soc| *soc >= target - 0.01)
+            .expect("reaches the target inside the window");
+        for soc in &window_socs[reached..] {
+            assert!(
+                (soc - target).abs() < 0.01,
+                "held at {target}%, got {window_socs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hold_never_targets_below_the_battery_at_the_window_start() {
+        // 60% at 22:00 and a light next day: holding the battery through
+        // the window is enough, but a target below where it starts would
+        // ask the inverter to discharge to it, which isn't confirmed
+        // behaviour. The target starts at the battery's level instead.
+        let p = bruce_params();
+        let first = hour_ts(22, 0);
+        let hours: Vec<SimHourInput> = (0..48)
+            .map(|i| {
+                let ts = first + i * 3600;
+                let h = (22 + i) % 24;
+                SimHourInput {
+                    timestamp: ts,
+                    solar_kwh: if (9..=15).contains(&h) { 0.3 } else { 0.0 },
+                    consumption_kwh: if (6..17).contains(&h) { 0.4 } else { 0.5 },
+                }
+            })
+            .collect();
+        let p = SimulationParams {
+            start_soc_pct: 60.0,
+            ..p
+        };
+        let sim = simulate_battery(&hours, &p);
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &p, Some(&bt), 20.0);
+        assert!(
+            matches!(
+                plan_overnight_charge(&inputs),
+                PlanRecommendation::Charge { .. }
+            ),
+            "fixture must need a charge under the default planner"
+        );
+        let (_, target, kwh, ..) = hold_plan(plan_hold_through_window(&inputs));
+        let at_start = sim.hours[0].soc_pct;
+        assert!(
+            f64::from(target) >= at_start,
+            "target {target} is below the {at_start:.1}% the window starts at"
+        );
+        assert_eq!(f64::from(target), at_start.ceil());
+        assert!(kwh < 0.5, "only tops up to its own level, got {kwh}");
+    }
+
+    #[test]
+    fn hold_reports_honestly_when_even_full_cannot_hold() {
+        let p = params();
+        let (sim, hours) = simulate_tomorrow(0.2, 0.5, &p);
+        let flux = flux_tariff();
+        let (window, target, _, after, rationale, _) = hold_plan(plan_hold_through_window(
+            &plan_inputs(&sim, &hours, &p, Some(&flux)),
+        ));
+        assert_eq!((window.start_min, window.end_min), (2 * 60, 5 * 60));
+        assert_eq!(target, 100);
+        assert!(after < 60.0, "after {after}");
+        assert!(rationale.contains("still below"), "rationale: {rationale}");
+    }
+
+    #[test]
+    fn hold_at_a_reserve_minimum_keeps_the_battery_off_the_reserve() {
+        let p = params();
+        let (sim, hours) = drains_to_the_reserve();
+        let flux = flux_tariff();
+        let (_, target, _, after, rationale, _) = hold_plan(plan_hold_through_window(
+            &plan_inputs_with_min(&sim, &hours, &p, Some(&flux), 10.0),
+        ));
+        assert!(target < 100, "target {target}");
+        assert!(after > 10.0, "after {after}");
+        assert!(rationale.contains("reserve"), "rationale: {rationale}");
+    }
+
+    #[test]
+    fn hold_passes_no_charge_and_no_plan_through_unchanged() {
+        let p = params();
+        let flux = flux_tariff();
+        let sunny: [f64; 24] =
+            std::array::from_fn(|h| if (6..=19).contains(&h) { 1.4 } else { 0.0 });
+        let p_high = SimulationParams {
+            start_soc_pct: 80.0,
+            ..p
+        };
+        let (sim, hours) = simulate_tomorrow_at(80.0, sunny, [0.15; 24], &p_high);
+        for inputs in [
+            plan_inputs(&sim, &hours, &p_high, Some(&flux)),
+            plan_inputs(&sim, &hours, &p_high, None),
+        ] {
+            assert_eq!(
+                plan_hold_through_window(&inputs),
+                plan_overnight_charge(&inputs)
+            );
+        }
+    }
+
+    #[test]
+    fn hold_without_hourly_inputs_keeps_the_default_plan() {
+        // No hourly inputs means no way to simulate a hold, so the
+        // analytic default plan stands rather than a guessed target.
+        let (sim, hours, bp) = bruce_case();
+        let bt = bruce_tariff();
+        let inputs = PlanInputs {
+            sim_hours: None,
+            ..plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0)
+        };
+        assert_eq!(
+            plan_hold_through_window(&inputs),
+            plan_overnight_charge(&inputs)
+        );
+    }
+
+    #[test]
+    fn min_soc_strategy_is_exactly_the_original_planner() {
+        let p = params();
+        let flux = flux_tariff();
+        let (cloudy, cloudy_hours) = simulate_tomorrow(0.2, 0.5, &p);
+        let (empty, empty_hours) = drains_to_the_reserve();
+        let (bruce, bruce_hours, bp) = bruce_case();
+        let bt = bruce_tariff();
+        for inputs in [
+            plan_inputs(&cloudy, &cloudy_hours, &p, Some(&flux)),
+            plan_inputs_with_min(&empty, &empty_hours, &p, Some(&flux), 10.0),
+            plan_inputs_with_min(&bruce, &bruce_hours, &bp, Some(&bt), 20.0),
+        ] {
+            assert_eq!(
+                plan_charge(&inputs, PlanStrategy::MinSoc),
+                plan_overnight_charge(&inputs)
+            );
+            assert_eq!(
+                plan_charge(&inputs, PlanStrategy::HoldWindow),
+                plan_hold_through_window(&inputs)
+            );
+        }
     }
 }

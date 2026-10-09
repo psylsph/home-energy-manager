@@ -76,6 +76,17 @@ pub(crate) enum SlotPlan {
     },
     /// No usable plan this cycle.
     NoPlan { reason: String },
+    /// Write the whole cheap window with a target SOC the inverter charges
+    /// to and then holds (issue #359), and arm Timed Charge.
+    WriteHold {
+        start_hhmm: u16,
+        end_hhmm: u16,
+        target_soc: u8,
+        kwh: f64,
+        /// The window starts tomorrow rather than tonight.
+        tomorrow: bool,
+        writes: Result<Vec<RegisterWrite>, String>,
+    },
 }
 
 /// AC kWh a recommendation asks to charge (0 when it asks for none).
@@ -127,6 +138,17 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
                 None,
             ),
         },
+        PlanRefreshAction::WriteSlotWithTarget {
+            start_hhmm,
+            end_hhmm,
+            ..
+        } => SlotPlan::Write {
+            start_hhmm,
+            end_hhmm,
+            kwh: rec_kwh(rec),
+            tomorrow: false,
+            writes: Ok(Vec::new()),
+        },
         PlanRefreshAction::None => SlotPlan::NoPlan {
             reason: match rec {
                 PlanRecommendation::NoPlan { reason } => reason.clone(),
@@ -160,6 +182,7 @@ pub(crate) fn plan_notification(plan: &SlotPlan, trigger: PlanTrigger) -> Option
         SlotPlan::Clear { writes: Err(_) } => {
             build_plan_unavailable_message("the charge slot could not be cleared for this inverter")
         }
+        SlotPlan::WriteHold { .. } => build_plan_cleared_message(),
         SlotPlan::NoPlan { reason } => build_plan_unavailable_message(reason),
     })
 }
@@ -212,6 +235,7 @@ pub(crate) async fn apply_plan_recommendation(
         SlotPlan::Write { writes: Err(e), .. } => {
             tracing::warn!("{label}: could not encode slot writes: {e}");
         }
+        SlotPlan::WriteHold { .. } => {}
         SlotPlan::Clear { writes: Ok(writes) } => {
             tracing::info!("{label}: fresh plan needs no charge — clearing charge slot 1");
             crate::server::api::queue_writes(state, writes.clone()).await;
@@ -474,7 +498,9 @@ mod tests {
 
     fn written(plan: &SlotPlan) -> Vec<(u16, u16)> {
         let writes = match plan {
-            SlotPlan::Write { writes, .. } | SlotPlan::Clear { writes } => writes,
+            SlotPlan::Write { writes, .. }
+            | SlotPlan::WriteHold { writes, .. }
+            | SlotPlan::Clear { writes } => writes,
             SlotPlan::NoPlan { .. } => panic!("no writes for {plan:?}"),
         };
         writes
@@ -577,6 +603,216 @@ mod tests {
             regs.iter().all(|(a, _)| *a != 94 && *a != 95),
             "must not write the single-phase slot: {regs:?}"
         );
+    }
+
+    // ---- golden register writes (issue #359, Phase 0) ---------------------
+
+    /// Every device family the planner can drive, with the snapshot fields
+    /// the slot encoder reads.
+    fn golden_devices() -> Vec<(&'static str, InverterSnapshot)> {
+        [
+            ("gen1", DeviceType::Gen1Hybrid),
+            ("gen2", DeviceType::Gen2Hybrid),
+            ("gen3", DeviceType::Gen3Hybrid),
+            ("gen3_plus", DeviceType::Gen3PlusHybrid),
+            ("gen4", DeviceType::Gen4Hybrid),
+            ("ac_coupled", DeviceType::ACCoupled),
+            ("three_phase", DeviceType::ThreePhase),
+            ("aio", DeviceType::AllInOne6kW),
+            ("hv_gen3", DeviceType::HybridHvGen3),
+            ("gateway", DeviceType::Gateway),
+        ]
+        .into_iter()
+        .map(|(name, device_type)| {
+            (
+                name,
+                InverterSnapshot {
+                    device_type,
+                    battery_capacity_kwh: 19.0,
+                    max_battery_power_w: 3600,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
+    }
+
+    fn golden_writes(plan: &SlotPlan) -> String {
+        let writes = match plan {
+            SlotPlan::Write { writes, .. }
+            | SlotPlan::WriteHold { writes, .. }
+            | SlotPlan::Clear { writes } => writes,
+            SlotPlan::NoPlan { reason } => return format!("no_plan {reason}"),
+        };
+        match writes {
+            Ok(writes) => writes
+                .iter()
+                .map(|w| format!("{}={}", w.address, w.value))
+                .collect::<Vec<_>>()
+                .join(" "),
+            Err(error) => format!("error {error}"),
+        }
+    }
+
+    /// The exact writes the default planner queues today, per device family:
+    /// `(device, wrapping 23:00-03:34 charge, clear)`. The #359 strategies
+    /// add new write paths; these must stay byte-identical.
+    const GOLDEN_WRITES: &[(&str, &str, &str)] = &[
+        ("gen1", "94=2300 95=334 20=0 96=1 111=50", "94=0 95=0 96=0"),
+        ("gen2", "94=2300 95=334 20=0 96=1 111=50", "94=0 95=0 96=0"),
+        (
+            "gen3",
+            "94=2300 95=334 20=0 96=1 111=50 242=100",
+            "94=0 95=0 96=0",
+        ),
+        (
+            "gen3_plus",
+            "94=2300 95=334 20=0 96=1 111=50",
+            "94=0 95=0 96=0",
+        ),
+        (
+            "gen4",
+            "94=2300 95=334 20=0 96=1 111=50 242=100",
+            "94=0 95=0 96=0",
+        ),
+        (
+            "ac_coupled",
+            "94=2300 95=334 20=0 96=1 313=100",
+            "94=0 95=0 96=0",
+        ),
+        (
+            "three_phase",
+            "1113=2300 1114=334 1110=100 242=100",
+            "1113=0 1114=0",
+        ),
+        (
+            "aio",
+            "94=2300 95=334 20=0 96=1 111=50 242=100",
+            "94=0 95=0 96=0",
+        ),
+        (
+            "hv_gen3",
+            "1113=2300 1114=334 1110=100 242=100",
+            "1113=0 1114=0",
+        ),
+        (
+            "gateway",
+            "94=2300 95=334 20=0 96=1 313=100",
+            "94=0 95=0 96=0",
+        ),
+    ];
+
+    #[test]
+    fn default_plan_writes_match_the_golden_table() {
+        let devices = golden_devices();
+        assert_eq!(devices.len(), GOLDEN_WRITES.len());
+        for ((name, snapshot), (golden_name, golden_charge, golden_clear)) in
+            devices.iter().zip(GOLDEN_WRITES)
+        {
+            assert_eq!(name, golden_name);
+            let charge_plan = plan_slot_plan(&charge(23 * 60, 3 * 60 + 34, false, 16.44), snapshot);
+            assert_eq!(
+                golden_writes(&charge_plan),
+                *golden_charge,
+                "{name}: charge writes changed"
+            );
+            assert_eq!(
+                golden_writes(&plan_slot_plan(&no_charge(), snapshot)),
+                *golden_clear,
+                "{name}: clear writes changed"
+            );
+            assert_eq!(
+                golden_writes(&plan_slot_plan(&no_plan("why"), snapshot)),
+                "no_plan why",
+                "{name}: no-plan must queue nothing"
+            );
+        }
+    }
+
+    // ---- hold-through-window plans (issue #359) ----------------------------
+
+    fn hold(tomorrow: bool) -> PlanRecommendation {
+        PlanRecommendation::ChargeAndHold {
+            window: ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 6 * 60,
+                tomorrow,
+                rate: 0.07,
+            },
+            target_soc_pct: 62,
+            kwh: 5.4,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 4.0,
+            after_min_soc_pct: 21.0,
+            current_soc_pct: 30.0,
+            rationale: "why".into(),
+            with_charge_series: Vec::new(),
+            import_tomorrow_with_charge_kwh: 0.0,
+            export_tomorrow_with_charge_kwh: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_hold_plan_carries_its_target_and_window() {
+        let plan = plan_slot_plan(&hold(true), &gen2());
+        let SlotPlan::WriteHold {
+            start_hhmm,
+            end_hhmm,
+            target_soc,
+            kwh,
+            tomorrow,
+            writes,
+        } = &plan
+        else {
+            panic!("expected a hold write, got {plan:?}");
+        };
+        assert_eq!((*start_hhmm, *end_hhmm, *target_soc), (2300, 600, 62));
+        assert_eq!(*kwh, 5.4);
+        assert!(*tomorrow);
+        assert!(writes.is_ok());
+    }
+
+    #[test]
+    fn a_hold_plan_writes_its_target_on_gen3() {
+        // Gen3 (Bruce's inverter): the global and per-slot targets, with the
+        // charge-target flag left cleared so it never force-charges.
+        let gen3 = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            battery_capacity_kwh: 19.0,
+            max_battery_power_w: 3600,
+            ..Default::default()
+        };
+        assert_eq!(
+            golden_writes(&plan_slot_plan(&hold(false), &gen3)),
+            "94=2300 95=600 116=62 20=0 96=1 111=50 242=62"
+        );
+    }
+
+    #[test]
+    fn a_hold_plan_writes_its_target_on_gen2() {
+        // Gen1/2 take the target through HR 116 with the charge-target flag,
+        // the same writes the Control page makes for a slot target.
+        let regs = written(&plan_slot_plan(&hold(false), &gen2()));
+        for expected in [
+            (94, 2300),
+            (95, 600),
+            (20, 1),
+            (116, 62),
+            (96, 1),
+            (111, 50),
+        ] {
+            assert!(regs.contains(&expected), "missing {expected:?} in {regs:?}");
+        }
+    }
+
+    #[test]
+    fn a_hold_plan_notification_names_the_target() {
+        let plan = plan_slot_plan(&hold(false), &gen2());
+        let text = plan_notification(&plan, PlanTrigger::AutoApply).expect("auto-apply notifies");
+        for needle in ["62%", "23:00", "06:00", "tonight", "hold"] {
+            assert!(text.contains(needle), "{needle:?} missing from {text:?}");
+        }
+        assert!(plan_notification(&plan, PlanTrigger::Refresh).is_none());
     }
 
     // ---- plan_notification --------------------------------------------------

@@ -56,6 +56,13 @@ pub enum PlanRefreshAction {
     /// The fresh plan needs no charge: clear slot 1 and return to Eco so
     /// the previously applied slot cannot keep charging nightly.
     ClearSlot,
+    /// Hold-through-window plan (issue #359): rewrite charge slot 1 across
+    /// the whole cheap window with `target_soc`, and arm Timed Charge.
+    WriteSlotWithTarget {
+        start_hhmm: u16,
+        end_hhmm: u16,
+        target_soc: u8,
+    },
 }
 
 /// Cheap gate run every poll: true when the auto-refresh is enabled, has
@@ -227,6 +234,13 @@ pub fn plan_auto_apply_adaptive_warning_due(
 pub fn plan_refresh_action(rec: &PlanRecommendation) -> PlanRefreshAction {
     match rec {
         PlanRecommendation::Charge { window, .. } => {
+            let (start_h, start_m, end_h, end_m) = plan_slot_hhmm(window);
+            PlanRefreshAction::WriteSlot {
+                start_hhmm: encode_hhmm(start_h, start_m),
+                end_hhmm: encode_hhmm(end_h, end_m),
+            }
+        }
+        PlanRecommendation::ChargeAndHold { window, .. } => {
             let (start_h, start_m, end_h, end_m) = plan_slot_hhmm(window);
             PlanRefreshAction::WriteSlot {
                 start_hhmm: encode_hhmm(start_h, start_m),
@@ -851,5 +865,36 @@ mod tests {
             plan_refresh_action(&plan_at(15.0, 0.05)),
             PlanRefreshAction::WriteSlot { .. }
         ));
+    }
+
+    #[test]
+    fn a_hold_plan_rewrites_the_whole_window_with_its_target() {
+        use crate::forecast::planner::ChargeWindow;
+        let rec = PlanRecommendation::ChargeAndHold {
+            window: ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 6 * 60,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            target_soc_pct: 62,
+            kwh: 5.4,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 4.0,
+            after_min_soc_pct: 21.0,
+            current_soc_pct: 30.0,
+            rationale: "why".into(),
+            with_charge_series: Vec::new(),
+            import_tomorrow_with_charge_kwh: 0.0,
+            export_tomorrow_with_charge_kwh: 0.0,
+        };
+        assert_eq!(
+            plan_refresh_action(&rec),
+            PlanRefreshAction::WriteSlotWithTarget {
+                start_hhmm: 2300,
+                end_hhmm: 600,
+                target_soc: 62,
+            }
+        );
     }
 }

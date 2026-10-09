@@ -1270,6 +1270,64 @@ mod tests {
         }
     }
 
+    /// Issue #359: the plan the API serves and the automation applies
+    /// follows the configured strategy.
+    #[test]
+    fn plan_follows_the_configured_strategy() {
+        use crate::forecast::planner::PlanRecommendation;
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        seed_full_forecast_state(&db, now);
+        // Overcast: no solar at all, so the battery runs down overnight.
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 0.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![slot("00:00", "05:00", 0.07), slot("05:00", "23:59", 0.27)],
+        });
+        let snap = battery_snapshot();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+
+        let default_plan = crate::server::api::compute_plan_recommendation(
+            &payload,
+            &settings,
+            Some(&snap),
+            now_ts,
+        );
+        assert!(
+            matches!(default_plan, PlanRecommendation::Charge { .. }),
+            "{default_plan:?}"
+        );
+
+        settings.forecast_plan_strategy = crate::settings::PlanStrategy::HoldWindow;
+        let hold_plan = crate::server::api::compute_plan_recommendation(
+            &payload,
+            &settings,
+            Some(&snap),
+            now_ts,
+        );
+        assert!(
+            matches!(hold_plan, PlanRecommendation::ChargeAndHold { .. }),
+            "{hold_plan:?}"
+        );
+    }
+
     #[test]
     fn payload_builds_full_forecast() {
         let db = test_db();

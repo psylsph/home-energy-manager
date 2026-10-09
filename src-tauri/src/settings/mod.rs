@@ -793,6 +793,34 @@ impl AgileScope {
     }
 }
 
+/// How the Planner sizes the overnight grid charge (issue #359).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStrategy {
+    /// The shortest full-rate slot that keeps the battery above the
+    /// minimum, then back to Eco for the rest of the cheap window — the
+    /// issue #283 planner, unchanged.
+    #[default]
+    MinSoc,
+    /// A slot spanning the whole cheap window with the lowest target SOC
+    /// that lasts until the next one: the inverter charges to the target,
+    /// then holds it while the grid supplies the house until the window
+    /// ends, so the battery isn't charged only to be drained at the cheap
+    /// rate.
+    HoldWindow,
+}
+
+/// Read `forecast_plan_strategy` leniently: a value this version doesn't
+/// know (a newer build's strategy, after a downgrade) falls back to the
+/// default instead of failing the whole settings file.
+fn deserialize_plan_strategy<'de, D>(deserializer: D) -> Result<PlanStrategy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 /// User-facing charging mode. Existing Cosy/Agile settings remain persisted
 /// separately for backwards compatibility; this enum is the unified API and
 /// snapshot representation.
@@ -1430,6 +1458,10 @@ pub struct Settings {
     /// to 0–120 by `POST /api/settings`. Defaults to 30.
     #[serde(default = "default_forecast_plan_auto_apply_lead_minutes")]
     pub forecast_plan_auto_apply_lead_minutes: u16,
+    /// How the Planner sizes the overnight charge (issue #359). Defaults
+    /// to [`PlanStrategy::MinSoc`], the original behaviour.
+    #[serde(default, deserialize_with = "deserialize_plan_strategy")]
+    pub forecast_plan_strategy: PlanStrategy,
 
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
@@ -1955,6 +1987,7 @@ impl Default for Settings {
             forecast_plan_auto_refresh: false,
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
+            forecast_plan_strategy: PlanStrategy::MinSoc,
             check_for_updates: default_check_for_updates(),
             octopus_enabled: false,
             octopus_api_key: String::new(),
@@ -2596,6 +2629,7 @@ mod tests {
             forecast_plan_auto_refresh: false,
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
+            forecast_plan_strategy: PlanStrategy::MinSoc,
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -2865,6 +2899,52 @@ mod tests {
         // Issue #283 planner v2: legacy files without the new key get the
         // default; the user can tune it on the Forecast page.
         assert!((decoded.forecast_min_soc_pct - 20.0).abs() < 1e-9);
+    }
+
+    /// Issue #359: files written before the planner strategy existed load
+    /// with the original minimum-SOC planner.
+    #[test]
+    fn legacy_settings_without_plan_strategy_default_to_min_soc() {
+        let legacy = r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
+            "poll_interval": 60, "auto_connect": true}"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.forecast_plan_strategy, PlanStrategy::MinSoc);
+        assert_eq!(
+            Settings::default().forecast_plan_strategy,
+            PlanStrategy::MinSoc
+        );
+    }
+
+    #[test]
+    fn plan_strategy_round_trips_as_snake_case() {
+        let original = Settings {
+            forecast_plan_strategy: PlanStrategy::HoldWindow,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&original).unwrap();
+        assert_eq!(json["forecast_plan_strategy"], "hold_window");
+        let decoded: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.forecast_plan_strategy, PlanStrategy::HoldWindow);
+    }
+
+    /// A strategy written by a newer build must not make an older one
+    /// discard the whole settings file after a downgrade.
+    #[test]
+    fn unknown_plan_strategy_falls_back_without_losing_other_settings() {
+        for raw in [r#""cheapest""#, "42", "null", r#"{"x":1}"#] {
+            let file = format!(
+                r#"{{"host": "192.168.1.77", "port": 8899, "serial": "",
+                "poll_interval": 60, "auto_connect": true, "forecast_plan_strategy": {raw}}}"#
+            );
+            let decoded: Settings = serde_json::from_str(&file)
+                .unwrap_or_else(|e| panic!("{raw}: settings failed to load: {e}"));
+            assert_eq!(
+                decoded.forecast_plan_strategy,
+                PlanStrategy::MinSoc,
+                "{raw}"
+            );
+            assert_eq!(decoded.host, "192.168.1.77", "{raw}");
+        }
     }
 
     /// `settings.json` written before auto-discovery became opt-in must
@@ -3251,6 +3331,7 @@ mod tests {
             forecast_plan_auto_refresh: false,
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
+            forecast_plan_strategy: PlanStrategy::MinSoc,
             octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
