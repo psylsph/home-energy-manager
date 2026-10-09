@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.85.7] - 2026-10-09
+
+### Fixed
+
+- **The planner charges overnight again when the battery would otherwise run flat.** With the Minimum battery level at or below your inverter's battery reserve, the planner said no charge was needed even when the battery would sit empty on grid power until the sun came up. It now charges in the cheap window whenever the battery would otherwise run empty before the next one, and the export advice no longer sells energy you'll need to buy back later that night (#360).
+- **A Minimum battery level of 0% means the planner never charges from the grid.** The setting explains this beside the input, along with what a minimum at or below your battery reserve does.
+- **The planner no longer suggests a pointless one-minute charge.** A dip before the cheap window, which charging in that window can't help, is no longer treated as a reason to charge.
+
+### Improved
+
+- **The Forecast tab is now called Planner.** It's the name everyone uses for it. Bookmarks and your panel visibility settings carry over unchanged.
+
 ## [0.85.6] - 2026-10-06
 
 ### Improved
