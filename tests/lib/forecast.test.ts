@@ -509,6 +509,23 @@ describe('forecastPlanTitle', () => {
     expect(forecastPlanTitle(charge)).toMatch(/02:00/);
     expect(forecastPlanTitle(charge)).toMatch(/05:00/);
   });
+
+  it('names the target for a hold-through-window plan (issue #359)', () => {
+    const hold: Extract<PlanRecommendation, { kind: 'charge' }> = {
+      ...charge,
+      window: { start: '23:00', end: '06:00', rate: 0.07, tomorrow: false },
+      kwh: 15,
+      strategy: 'hold_window',
+      slot_target_soc_pct: 75,
+    };
+    expect(forecastPlanTitle(hold)).toBe(
+      'Overnight charge — Tonight 23:00\u201306:00, to 75% then hold',
+    );
+  });
+
+  it('keeps the minimum-SOC headline unchanged', () => {
+    expect(forecastPlanTitle(charge)).toBe('Overnight charge — Tomorrow 02:00\u201305:00, 3.2 kWh');
+  });
 });
 
 describe('shouldRefetchForecast', () => {

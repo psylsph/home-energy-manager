@@ -1197,6 +1197,125 @@ describe('ForecastPage min SOC input', () => {
   });
 });
 
+describe('ForecastPage planner strategy (issue #359)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  const holdPlan = () => {
+    const plan = planPayload('charge');
+    const data = plan.data as {
+      recommendation: Record<string, unknown>;
+      apply: { charge_slot: Record<string, unknown> };
+    };
+    Object.assign(data.recommendation, {
+      strategy: 'hold_window',
+      slot_target_soc_pct: 75,
+      window: { start: '23:00', end: '06:00', rate: 0.07, tomorrow: false },
+      kwh: 15,
+    });
+    Object.assign(data.apply.charge_slot, {
+      start_hour: 23,
+      start_minute: 0,
+      end_hour: 6,
+      end_minute: 0,
+      target_soc: 75,
+    });
+    return plan;
+  };
+
+  const mockPage = (
+    plan: { ok: true; data: unknown },
+    settings: Record<string, unknown> = { forecast_min_soc_pct: 20 },
+  ) => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return plan;
+      if (path === '/api/settings') return { ok: true, data: settings };
+      return { ok: true, data: {} };
+    });
+  };
+
+  it('defaults the strategy to keeping a minimum when none is saved', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    const select = (await screen.findByTestId('forecast-plan-strategy')) as HTMLSelectElement;
+    expect(select.value).toBe('min_soc');
+    expect(screen.getByRole('option', { name: /keep a minimum/i })).toBeTruthy();
+    expect(screen.getByRole('option', { name: /hold through the cheap window/i })).toBeTruthy();
+  });
+
+  it('shows the saved strategy', async () => {
+    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect((screen.getByTestId('forecast-plan-strategy') as HTMLSelectElement).value).toBe(
+        'hold_window',
+      );
+    });
+  });
+
+  it('saves a new strategy and refetches the plan', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    const select = await screen.findByTestId('forecast-plan-strategy');
+    apiPostMocked.mockClear();
+    apiGetMock.mockClear();
+    fireEvent.change(select, { target: { value: 'hold_window' } });
+    await waitFor(() => {
+      expect(apiPostMocked).toHaveBeenCalledWith('/api/settings', {
+        forecast_plan_strategy: 'hold_window',
+      });
+    });
+    await waitFor(() => {
+      expect(apiGetMock.mock.calls.some((c) => c[0] === '/api/forecast/plan')).toBe(true);
+    });
+  });
+
+  it('reports a failed strategy save and keeps the previous choice', async () => {
+    mockPage(planPayload('charge'));
+    apiPostMocked.mockRejectedValueOnce(new Error('Unknown planner strategy'));
+    render(<ForecastPage />);
+    const select = (await screen.findByTestId('forecast-plan-strategy')) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'hold_window' } });
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan-strategy-error')).toHaveTextContent(
+        /unknown planner strategy/i,
+      );
+    });
+    expect(select.value).toBe('min_soc');
+  });
+
+  it('shows the hold target on the plan card and applies it', async () => {
+    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
+    render(<ForecastPage />);
+    const target = await screen.findByTestId('forecast-plan-target');
+    expect(target).toHaveTextContent('to 75%, then hold');
+    fireEvent.click(screen.getByTestId('forecast-plan-apply'));
+    await waitFor(() => {
+      const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');
+      expect(slotCall?.[1]).toMatchObject({
+        start_hour: 23,
+        end_hour: 6,
+        target_soc: 75,
+        charge_rate_percent: 100,
+      });
+    });
+  });
+
+  it('shows no target for a minimum-SOC plan', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-apply');
+    expect(screen.queryByTestId('forecast-plan-target')).toBeNull();
+  });
+});
+
 describe('ForecastPage minimum vs battery reserve (issue #360)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
