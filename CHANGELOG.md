@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.86.0] - 2026-10-09
+
+### Added
+
+- **The planner can charge to a target and then hold it through the cheap window.** Pick "Hold through the cheap window" under Plan settings and the planner charges only as far as the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house until the cheap rate ends. Until now it charged at full rate for as short a time as possible and let the battery run the house for the rest of the cheap window, losing energy charging the battery only to empty it again. Keeping a minimum is still the default (#359).
+- **Holding at a target is confirmed on Gen 3 hybrids.** On other inverters the planner shows a note asking you to check, on the first night, that the battery stays flat once it reaches the target.
+
 ## [0.85.7] - 2026-10-09
 
 ### Fixed
