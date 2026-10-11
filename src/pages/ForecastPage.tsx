@@ -1659,6 +1659,7 @@ export default function ForecastPage() {
               {past && (
                 <ReferenceLine
                   x={pastNow}
+                  yAxisId="solar"
                   stroke="#94a3b8"
                   strokeDasharray="2 3"
                   label={{ value: 'now', fill: '#94a3b8', fontSize: 10 }}
