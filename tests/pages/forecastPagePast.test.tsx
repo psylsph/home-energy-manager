@@ -96,6 +96,20 @@ const { forwardPayload, planResponse, pastDecision } = vi.hoisted(() => {
   return { forwardPayload, planResponse, pastDecision };
 });
 
+// Counts how often the past series is stitched, so a re-render that changes
+// nothing about the past can be shown not to rebuild it.
+const { stitchSpy } = vi.hoisted(() => ({ stitchSpy: vi.fn() }));
+vi.mock('../../src/lib/planHistory', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/planHistory')>();
+  return {
+    ...actual,
+    stitchPlannedBattery: (...args: Parameters<typeof actual.stitchPlannedBattery>) => {
+      stitchSpy();
+      return actual.stitchPlannedBattery(...args);
+    },
+  };
+});
+
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(),
   apiPost: vi.fn(async () => ({ ok: true })),
@@ -103,8 +117,8 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 vi.mock('recharts', () => {
-  const Line = ({ name, dataKey }: { name?: string; dataKey?: string }) => (
-    <div data-testid={`line-${dataKey}`}>{name}</div>
+  const Line = ({ name, dataKey, yAxisId }: { name?: string; dataKey?: string; yAxisId?: string }) => (
+    <div data-testid={`line-${dataKey}`} data-yaxis-id={yAxisId ?? ''}>{name}</div>
   );
   return {
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -119,13 +133,17 @@ vi.mock('recharts', () => {
   ),
   ComposedChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   LineChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Area: ({ name }: { name?: string }) => <div>{name}</div>,
+  Area: ({ name, dataKey, yAxisId }: { name?: string; dataKey?: string; yAxisId?: string }) => (
+    <div data-testid={`area-${dataKey}`} data-yaxis-id={yAxisId ?? ''}>{name}</div>
+  ),
   Line,
   Customized: () => <div />,
   XAxis: ({ domain }: { domain?: [number, number] }) => (
     <div data-testid="x-axis" data-domain={JSON.stringify(domain ?? null)} />
   ),
-  YAxis: () => <div />,
+  YAxis: ({ unit, yAxisId }: { unit?: string; yAxisId?: string }) => (
+    <div data-testid="y-axis" data-unit={unit ?? ''} data-yaxis-id={yAxisId ?? ''} />
+  ),
   Tooltip: () => <div />,
   CartesianGrid: () => <div />,
   ReferenceLine: ({ x, label }: { x?: number; label?: { value?: string } }) => (
@@ -223,11 +241,29 @@ describe('ForecastPage — Show past (issue #361)', () => {
     await choose('24 hours');
     await waitFor(() => expect(calledWith('/api/history?')).toHaveLength(1));
     const decisions = new URLSearchParams(calledWith('/api/forecast/plan-history')[0].split('?')[1]);
-    expect(decisions.get('from')).toBe(String(G - 24 * HOUR));
+    expect(decisions.get('from')).toBe(String(G - 24 * HOUR + 1));
     expect(decisions.get('to')).toBe(String(G + 1));
     const history = new URLSearchParams(calledWith('/api/history?')[0].split('?')[1]);
     expect(history.get('fields')).toBe('soc,solar_power');
     expect(history.get('start_ms')).toBe(String((G - 24 * HOUR) * 1000));
+  });
+
+  it('offers 30 and 90 day views and reads the full window for the longest one', async () => {
+    render(<ForecastPage />);
+    const control = await screen.findByTestId('forecast-past-range');
+    expect(within(control).getByRole('button', { name: '30 days' })).toBeTruthy();
+    await choose('90 days');
+    await waitFor(() => expect(calledWith('/api/history?')).toHaveLength(1));
+    const decisions = new URLSearchParams(calledWith('/api/forecast/plan-history')[0].split('?')[1]);
+    expect(decisions.get('from')).toBe(String(G - 90 * 24 * HOUR + 1));
+    const history = new URLSearchParams(calledWith('/api/history?')[0].split('?')[1]);
+    expect(history.get('range')).toBe('7d');
+    expect(history.get('start_ms')).toBe(String((G - 90 * 24 * HOUR) * 1000));
+    await screen.findByTestId('line-pastPlanned');
+    const domains = screen
+      .getAllByTestId('x-axis')
+      .map((axis) => JSON.parse(axis.getAttribute('data-domain') ?? 'null') as [number, number]);
+    expect(domains.some(([start]) => start === G - 90 * 24 * HOUR)).toBe(true);
   });
 
   it('draws the past plan and the actual SOC on the battery chart, in their own colours', async () => {
@@ -240,6 +276,21 @@ describe('ForecastPage — Show past (issue #361)', () => {
     expect(within(legend).getByRole('button', { name: /Actual/ })).toBeTruthy();
     // The forward lines are still there.
     expect(screen.getByTestId('line-soc')).toBeTruthy();
+  });
+
+  it('does not rebuild the past series for an unrelated store update', async () => {
+    render(<ForecastPage />);
+    await choose('24 hours');
+    await screen.findByTestId('line-pastPlanned');
+    const before = stitchSpy.mock.calls.length;
+    expect(before).toBeGreaterThan(0);
+    act(() => {
+      useInverterStore.setState({ gridLineWeight: 'subtle' });
+    });
+    act(() => {
+      useInverterStore.setState({ gridLineWeight: 'standard' });
+    });
+    expect(stitchSpy.mock.calls.length).toBe(before);
   });
 
   it('lets the past lines be hidden from the legend like the others', async () => {
@@ -265,6 +316,32 @@ describe('ForecastPage — Show past (issue #361)', () => {
       .filter((line) => line.getAttribute('data-label') === 'now');
     expect(now.length).toBeGreaterThan(0);
     expect(now[0].getAttribute('data-x')).toBe(String(G));
+  });
+
+  it('binds every solar series to the solar axis, or recharts cannot draw them', async () => {
+    // A series whose yAxisId matches no YAxis resolves to an undefined axis
+    // and throws while drawing, so the solar chart's series and its axis must
+    // share one id, with or without past data.
+    render(<ForecastPage />);
+    await choose('24 hours');
+    await screen.findByTestId('line-pastSolar');
+    const solarAxisIds = screen
+      .getAllByTestId('y-axis')
+      .map((axis) => axis.getAttribute('data-yaxis-id'));
+    expect(solarAxisIds).toContain('solar');
+    for (const id of ['line-pastSolar', 'line-actualSolar', 'area-kwh', 'area-low', 'area-high']) {
+      expect(screen.getByTestId(id).getAttribute('data-yaxis-id'), id).toBe('solar');
+    }
+  });
+
+  it('labels the solar chart in kW, because each hourly point is an average power', async () => {
+    render(<ForecastPage />);
+    await choose('24 hours');
+    await screen.findByTestId('line-pastSolar');
+    const solarAxis = screen
+      .getAllByTestId('y-axis')
+      .find((axis) => axis.getAttribute('data-yaxis-id') === 'solar');
+    expect(solarAxis?.getAttribute('data-unit')).toBe('kW');
   });
 
   it('draws the past forecast and the measured generation on the solar chart', async () => {

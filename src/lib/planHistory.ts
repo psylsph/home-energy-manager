@@ -10,6 +10,17 @@ import type { ForecastData, PlanResponse } from './forecast';
 
 const HOUR = 3600;
 
+/** The only forecast fields `GET /api/forecast/plan-history` returns (the
+ *  server's `project_forecast`). Everything else in a stored forecast is
+ *  dropped, so it is not typed here. `solar` is null when the stored JSON
+ *  had no solar series. */
+export type PastViewForecast = {
+  /** Null when the stored forecast had no generation time. */
+  generated_at: number | null;
+  solar: ForecastData['solar'] | null;
+  battery: ForecastData['battery'];
+};
+
 /** One stored planner decision, as `GET /api/forecast/plan-history` serves
  *  it. `plan` or `forecast` is null when the stored JSON could not be read. */
 export type PlanHistorySnapshot = {
@@ -18,7 +29,7 @@ export type PlanHistorySnapshot = {
   kind: string;
   strategy: string;
   plan: PlanResponse | null;
-  forecast: ForecastData | null;
+  forecast: PastViewForecast | null;
 };
 
 /** A history point as `/api/history` returns it: milliseconds and a value. */
@@ -27,7 +38,7 @@ export type HistoryPoint = { t: number; v: number };
 /** A `[unix seconds, value]` point; null breaks the line. */
 export type SeriesPoint = [number, number | null];
 
-export type PastRange = 'off' | '24h' | '3d' | '7d';
+export type PastRange = 'off' | '24h' | '3d' | '7d' | '30d' | '90d';
 
 /** The choices offered by the Planner's "Show past" control. */
 export const PAST_RANGES: { key: PastRange; label: string }[] = [
@@ -35,6 +46,8 @@ export const PAST_RANGES: { key: PastRange; label: string }[] = [
   { key: '24h', label: '24 hours' },
   { key: '3d', label: '3 days' },
   { key: '7d', label: '7 days' },
+  { key: '30d', label: '30 days' },
+  { key: '90d', label: '90 days' },
 ];
 
 /** How far back a range reaches, in seconds (0 for Off). */
@@ -46,6 +59,10 @@ export function pastRangeSeconds(range: PastRange): number {
       return 3 * 24 * HOUR;
     case '7d':
       return 7 * 24 * HOUR;
+    case '30d':
+      return 30 * 24 * HOUR;
+    case '90d':
+      return 90 * 24 * HOUR;
     default:
       return 0;
   }
@@ -72,7 +89,7 @@ const floorHour = (ts: number) => Math.floor(ts / HOUR) * HOUR;
 function expectedSocSeries(snapshot: PlanHistorySnapshot): [number, number][] {
   const forecast = snapshot.forecast;
   const battery = forecast?.battery;
-  if (!forecast || !battery) return [];
+  if (!forecast || !battery || forecast.generated_at == null) return [];
   const recommendation = snapshot.plan?.recommendation;
   const withCharge =
     recommendation?.kind === 'charge' ? recommendation.with_charge_series : [];
@@ -112,7 +129,7 @@ export function stitchPlannedBattery(
 }
 
 /** The solar forecast each completed past hour was made under: the latest
- *  decision recorded at or before that hour. kWh per hour, hour-aligned. */
+ *  decision recorded at or before that hour. Hourly kWh, hour-aligned. */
 export function stitchPlannedSolar(
   snapshots: PlanHistorySnapshot[],
   nowSec: number,
@@ -147,9 +164,10 @@ export function actualSocSeries(
   return out;
 }
 
-/** Measured solar generation per completed hour, kWh, from `/api/history`
- *  power points (watts): the mean power in an hour is that hour's energy. */
-export function actualSolarKwhByHour(
+/** Measured solar generation per completed hour, as average kW, from
+ *  `/api/history` power points (watts). The mean power over an hour is the
+ *  kW the chart draws; it is not the energy (kWh) for that hour. */
+export function actualSolarAverageKwByHour(
   points: HistoryPoint[] | undefined,
   nowSec: number,
 ): [number, number][] {
@@ -312,13 +330,19 @@ export function decisionRows(snapshots: PlanHistorySnapshot[]): DecisionRow[] {
   });
 }
 
+/** The `/api/history` bucket range for a past range. The explicit window sets
+ *  the exact span; this only picks the bucket size. Every range longer than a
+ *  day uses the 30-minute (`7d`) buckets: the planner's solar line compares
+ *  hourly averages, and coarser buckets would average the night into the day. */
+function pastBucketRange(range: PastRange): string {
+  return range === '24h' ? '24h' : '7d';
+}
+
 /** `/api/history` request for the measured SOC and solar power over the
- *  visible past. The explicit window sets the exact span; the range only
- *  picks the bucket size, and the endpoint has no 3-day one, so 3 days use
- *  the 7-day (half-hour) buckets. */
+ *  visible past. */
 export function pastHistoryPath(range: PastRange, nowSec: number): string {
   const params = new URLSearchParams({
-    range: range === '24h' ? '24h' : '7d',
+    range: pastBucketRange(range),
     fields: 'soc,solar_power',
     start_ms: String((nowSec - pastRangeSeconds(range)) * 1000),
     end_ms: String(nowSec * 1000),
@@ -327,10 +351,12 @@ export function pastHistoryPath(range: PastRange, nowSec: number): string {
 }
 
 /** `/api/forecast/plan-history` request for the decisions in the visible
- *  past. `to` is exclusive, so a decision made this second is included. */
+ *  past. `to` is exclusive, so a decision made this second is included. `from`
+ *  sits one second inside the range so `to - from` is exactly the range: the
+ *  server caps a request at 90 days, and the 90 day view must not exceed it. */
 export function planHistoryPath(range: PastRange, nowSec: number): string {
   const params = new URLSearchParams({
-    from: String(nowSec - pastRangeSeconds(range)),
+    from: String(nowSec - pastRangeSeconds(range) + 1),
     to: String(nowSec + 1),
   });
   return `/api/forecast/plan-history?${params}`;
@@ -339,5 +365,7 @@ export function planHistoryPath(range: PastRange, nowSec: number): string {
 /** Spacing of the x-axis labels: longer views are labelled daily so the
  *  axis stays readable. */
 export function pastTickStepSeconds(range: PastRange): number {
-  return pastRangeSeconds(range) > 24 * HOUR ? 24 * HOUR : 12 * HOUR;
+  const span = pastRangeSeconds(range);
+  if (span > 7 * 24 * HOUR) return 7 * 24 * HOUR;
+  return span > 24 * HOUR ? 24 * HOUR : 12 * HOUR;
 }

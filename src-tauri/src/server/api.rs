@@ -8387,7 +8387,35 @@ pub struct PlanHistoryQuery {
 }
 
 /// Longest range `GET /api/forecast/plan-history` serves in one request.
-pub const PLAN_HISTORY_MAX_SPAN_SECS: i64 = 31 * 24 * 3600;
+pub const PLAN_HISTORY_MAX_SPAN_SECS: i64 =
+    crate::history::PLAN_SNAPSHOT_RETENTION_DAYS * 24 * 3600;
+
+/// The forecast fields the Planner's past view draws: the generation and
+/// battery projections, plus the time they were made. The rest of a stored
+/// forecast (consumption profile, status text) is left out of
+/// `plan-history` so a 90 day request stays a manageable size.
+fn project_forecast(text: &str) -> Value {
+    // Only the three kept fields are deserialised; serde skips everything else
+    // without building it, so the discarded consumption data costs no
+    // allocation. A stored forecast that doesn't parse becomes null, as before.
+    #[derive(serde::Deserialize)]
+    struct PastViewForecast {
+        #[serde(default)]
+        generated_at: Value,
+        #[serde(default)]
+        solar: Value,
+        #[serde(default)]
+        battery: Value,
+    }
+    match serde_json::from_str::<PastViewForecast>(text) {
+        Ok(view) => json!({
+            "generated_at": view.generated_at,
+            "solar": view.solar,
+            "battery": view.battery,
+        }),
+        Err(_) => Value::Null,
+    }
+}
 
 /// GET /api/forecast/plan-history — the Planner decisions recorded in a
 /// time range, each with the forecast it was computed from (issue #361).
@@ -8418,7 +8446,10 @@ pub(crate) async fn get_plan_history_at(
     match to.checked_sub(from) {
         Some(span) if span < 0 => return error_response("'from' must not be after 'to'"),
         Some(span) if span > PLAN_HISTORY_MAX_SPAN_SECS => {
-            return error_response("Plan history can be read at most 31 days at a time")
+            return error_response(&format!(
+                "Plan history can be read at most {} days at a time",
+                PLAN_HISTORY_MAX_SPAN_SECS / 86_400
+            ))
         }
         Some(_) => {}
         None => return error_response("Plan history range is out of bounds"),
@@ -8445,7 +8476,7 @@ pub(crate) async fn get_plan_history_at(
                 "kind": row.kind,
                 "strategy": row.strategy,
                 "plan": parse(&row.plan_json),
-                "forecast": parse(&row.forecast_json),
+                "forecast": project_forecast(&row.forecast_json),
             })
         })
         .collect();
@@ -24268,6 +24299,129 @@ pub(crate) mod tests {
                 .await;
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{from}..{to}");
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_names_the_span_cap_in_days_from_its_constant() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[]).await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(PLAN_HISTORY_MAX_SPAN_SECS + 1),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let days = PLAN_HISTORY_MAX_SPAN_SECS / 86_400;
+            assert_eq!(
+                body.0["error"],
+                json!(format!(
+                    "Plan history can be read at most {days} days at a time"
+                ))
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_only_the_forecast_fields_the_past_view_draws() {
+        with_isolated_config_dir_async(|| async {
+            // A stored forecast carries the consumption profile and the status
+            // text too; the past view draws only the solar and battery lines,
+            // so those extras are dropped to keep a 90 day response small.
+            let mut row = history_row(1_000, "refresh");
+            row.forecast_json = r#"{
+                "generated_at": 1000,
+                "status": ["ok"],
+                "solar": [{"timestamp": 1, "kwh": 0.5}],
+                "battery": {"start_soc_pct": 40.0, "hours": []},
+                "consumption_weekday": [{"hour": 0, "median_kwh": 0.2}],
+                "consumption_weekend": [{"hour": 0, "median_kwh": 0.3}]
+            }"#
+            .to_string();
+            let state = state_with_plan_history(&[row]).await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(2_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let forecast = &body["data"]["snapshots"][0]["forecast"];
+            assert_eq!(forecast["generated_at"], 1000, "{forecast}");
+            assert_eq!(forecast["solar"][0]["kwh"], 0.5, "{forecast}");
+            assert_eq!(forecast["battery"]["start_soc_pct"], 40.0, "{forecast}");
+            let kept: Vec<&str> = forecast
+                .as_object()
+                .expect("forecast object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert!(
+                kept.iter()
+                    .all(|key| matches!(*key, "generated_at" | "solar" | "battery")),
+                "{kept:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_null_for_a_forecast_that_does_not_parse() {
+        with_isolated_config_dir_async(|| async {
+            let mut row = history_row(1_000, "refresh");
+            row.forecast_json = "not json".to_string();
+            let state = state_with_plan_history(&[row]).await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(2_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body["data"]["snapshots"][0]["forecast"].is_null(),
+                "{}",
+                body.0
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_reads_the_full_retention_window_in_one_request() {
+        with_isolated_config_dir_async(|| async {
+            // The 90 day view asks for the whole retained period at once, so
+            // the span cap must cover it and still refuse anything longer.
+            let state = state_with_plan_history(&[]).await;
+            let retention = crate::history::PLAN_SNAPSHOT_RETENTION_DAYS * 24 * 3600;
+            let to = 1_800_000_000;
+            let (status, _) = get_plan_history(
+                State(state.clone()),
+                Query(PlanHistoryQuery {
+                    from: Some(to - retention),
+                    to: Some(to),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, _) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(to - retention - 1),
+                    to: Some(to),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
         })
         .await;
     }

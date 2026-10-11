@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   CartesianGrid,
@@ -47,7 +47,7 @@ import {
 import type { ForecastData, PlanResponse, PlanStrategy } from '../lib/forecast';
 import {
   actualSocSeries,
-  actualSolarKwhByHour,
+  actualSolarAverageKwByHour,
   compareBattery,
   compareSolar,
   decisionRows,
@@ -719,6 +719,31 @@ export default function ForecastPage() {
     }
   };
 
+  // Past view (issue #361). Only the result for the range on screen counts:
+  // a stale one from an earlier choice, or one still loading, draws nothing.
+  // The stitched series are derived once per fetched result rather than on
+  // every render, so an unrelated re-render does not re-walk the whole past.
+  // This sits above the early returns below so the hook order never changes.
+  const past = pastRange !== 'off' && pastResult?.range === pastRange ? pastResult : null;
+  const generatedAt = data?.generated_at;
+  const pastSeries = useMemo(() => {
+    const seriesNow = past?.nowSec ?? generatedAt ?? 0;
+    const spanSecs = pastRangeSeconds(pastRange);
+    const plannedSoc = past ? stitchPlannedBattery(past.snapshots, seriesNow) : [];
+    const actualSoc = past ? actualSocSeries(past.soc, seriesNow - spanSecs, seriesNow) : [];
+    const plannedSolar = past ? stitchPlannedSolar(past.snapshots, seriesNow) : [];
+    const actualSolar = past ? actualSolarAverageKwByHour(past.solarPower, seriesNow) : [];
+    return {
+      pastPlannedSoc: plannedSoc,
+      pastActualSoc: actualSoc,
+      pastPlannedSolar: plannedSolar,
+      pastActualSolar: actualSolar,
+      batteryAccuracy: compareBattery(plannedSoc, actualSoc),
+      solarAccuracy: compareSolar(plannedSolar, actualSolar),
+      pastDecisions: past ? decisionRows(past.snapshots) : [],
+    };
+  }, [past, pastRange, generatedAt]);
+
   if (error) {
     return (
       <div data-testid="forecast-error" className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-sm text-text-primary">
@@ -826,23 +851,21 @@ export default function ForecastPage() {
       : undefined;
     return match ? { ...p, withCurrent: match[1] } : { ...p, withCurrent: undefined };
   });
-  // Past view (issue #361). Only the result for the range on screen counts:
-  // a stale one from an earlier choice, or one still loading, draws nothing.
-  const past = pastRange !== 'off' && pastResult?.range === pastRange ? pastResult : null;
   const pastLoading = pastRange !== 'off' && past === null;
   const pastNow = past?.nowSec ?? data.generated_at;
-  const pastSpan = pastRangeSeconds(pastRange);
-  const pastPlannedSoc = past ? stitchPlannedBattery(past.snapshots, pastNow) : [];
-  const pastActualSoc = past ? actualSocSeries(past.soc, pastNow - pastSpan, pastNow) : [];
-  const pastPlannedSolar = past ? stitchPlannedSolar(past.snapshots, pastNow) : [];
-  const pastActualSolar = past ? actualSolarKwhByHour(past.solarPower, pastNow) : [];
+  const {
+    pastPlannedSoc,
+    pastActualSoc,
+    pastPlannedSolar,
+    pastActualSolar,
+    batteryAccuracy,
+    solarAccuracy,
+    pastDecisions,
+  } = pastSeries;
   const hasPastPlanned = pastPlannedSoc.length > 0;
   const hasPastActual = pastActualSoc.length > 0;
   const hasPastSolar = pastPlannedSolar.length > 0;
   const hasPastActualSolar = pastActualSolar.length > 0;
-  const batteryAccuracy = compareBattery(pastPlannedSoc, pastActualSoc);
-  const solarAccuracy = compareSolar(pastPlannedSolar, pastActualSolar);
-  const pastDecisions = past ? decisionRows(past.snapshots) : [];
   const batteryRows = past
     ? mergeSeries(batteryChartData, {
         pastPlanned: pastPlannedSoc,
@@ -1616,10 +1639,13 @@ export default function ForecastPage() {
                 textAnchor="end"
                 height={42}
               />
+              {/* Each hourly point is an average power over that hour, so the
+                  solar chart is in kW (issue #359). The daily totals stay kWh. */}
               <YAxis
+                yAxisId="solar"
                 stroke="#94a3b8"
                 fontSize={10}
-                unit="kWh"
+                unit="kW"
                 width={48}
                 domain={[0, solarYAxis.max]}
                 ticks={solarYAxis.ticks}
@@ -1628,7 +1654,7 @@ export default function ForecastPage() {
               <Tooltip
                 {...tooltipStyleProps}
                 labelFormatter={(ts) => formatForecastXAxisTick(Number(ts))}
-                formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`}
+                formatter={(value: number | string) => `${Number(value).toFixed(2)} kW`}
               />
               {past && (
                 <ReferenceLine
@@ -1642,6 +1668,7 @@ export default function ForecastPage() {
                 <Line
                   type="monotone"
                   dataKey="pastSolar"
+                  yAxisId="solar"
                   stroke={PAST_PLANNED_COLOUR}
                   strokeWidth={2}
                   strokeDasharray="6 4"
@@ -1655,6 +1682,7 @@ export default function ForecastPage() {
                 <Line
                   type="monotone"
                   dataKey="actualSolar"
+                  yAxisId="solar"
                   stroke={PAST_ACTUAL_COLOUR}
                   strokeWidth={2}
                   dot={false}
@@ -1666,6 +1694,7 @@ export default function ForecastPage() {
               <Area
                 type="monotone"
                 dataKey="kwh"
+                yAxisId="solar"
                 stroke="#f59e0b"
                 fill="#f59e0b"
                 fillOpacity={0.25}
@@ -1675,6 +1704,7 @@ export default function ForecastPage() {
               <Area
                 type="monotone"
                 dataKey="low"
+                yAxisId="solar"
                 stroke="none"
                 fill="transparent"
                 name="Low"
@@ -1683,6 +1713,7 @@ export default function ForecastPage() {
               <Area
                 type="monotone"
                 dataKey="high"
+                yAxisId="solar"
                 stroke="none"
                 fill="transparent"
                 name="High"

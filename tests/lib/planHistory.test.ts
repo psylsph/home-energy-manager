@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   actualSocSeries,
-  actualSolarKwhByHour,
+  actualSolarAverageKwByHour,
   compareBattery,
   compareSolar,
   decisionRows,
@@ -98,6 +98,8 @@ describe('pastRangeSeconds', () => {
     expect(pastRangeSeconds('off')).toBe(0);
     expect(pastRangeSeconds('24h')).toBe(24 * H);
     expect(pastRangeSeconds('3d')).toBe(3 * 24 * H);
+    expect(pastRangeSeconds('30d')).toBe(30 * 24 * H);
+    expect(pastRangeSeconds('90d')).toBe(90 * 24 * H);
     expect(pastRangeSeconds('7d')).toBe(7 * 24 * H);
   });
 });
@@ -113,6 +115,14 @@ describe('pastAxisDomain', () => {
 });
 
 describe('stitchPlannedBattery', () => {
+  it('leaves out a stored forecast with no generation time rather than plotting a null instant', () => {
+    const broken = {
+      ...snap(T0, forecast(T0, 50, [[T0, 48]])),
+      forecast: { ...forecast(T0, 50, [[T0, 48]]), generated_at: null },
+    } as unknown as PlanHistorySnapshot;
+    expect(stitchPlannedBattery([broken], T0 + 5 * H)).toEqual([]);
+  });
+
   it('draws each decision from when it was made until the next one replaces it', () => {
     const first = snap(
       T0,
@@ -254,15 +264,15 @@ describe('actualSocSeries', () => {
   });
 });
 
-describe('actualSolarKwhByHour', () => {
-  it('averages the watts in each completed hour into kWh', () => {
+describe('actualSolarAverageKwByHour', () => {
+  it('averages the watts in each completed hour into kW', () => {
     const points = [
       { t: (T0 + 0) * 1000, v: 1000 },
       { t: (T0 + 1800) * 1000, v: 3000 },
       { t: (T0 + H) * 1000, v: 500 },
       { t: (T0 + H + 1800) * 1000, v: 500 },
     ];
-    expect(actualSolarKwhByHour(points, T0 + 2 * H)).toEqual([
+    expect(actualSolarAverageKwByHour(points, T0 + 2 * H)).toEqual([
       [T0, 2],
       [T0 + H, 0.5],
     ]);
@@ -273,11 +283,11 @@ describe('actualSolarKwhByHour', () => {
       { t: T0 * 1000, v: 1000 },
       { t: (T0 + H) * 1000, v: 1000 },
     ];
-    expect(actualSolarKwhByHour(points, T0 + H + 600)).toEqual([[T0, 1]]);
+    expect(actualSolarAverageKwByHour(points, T0 + H + 600)).toEqual([[T0, 1]]);
   });
 
   it('copes with a missing series', () => {
-    expect(actualSolarKwhByHour(undefined, T0)).toEqual([]);
+    expect(actualSolarAverageKwByHour(undefined, T0)).toEqual([]);
   });
 });
 
@@ -467,6 +477,16 @@ describe('pastHistoryPath', () => {
     expect(three.get('range')).toBe('7d');
     expect(three.get('start_ms')).toBe(String((now - 3 * 24 * H) * 1000));
     expect(new URLSearchParams(pastHistoryPath('7d', now).split('?')[1]).get('range')).toBe('7d');
+
+    // 30 and 90 days use the 30-minute buckets too, so the solar comparison
+    // still averages to one real hour per point; each is cut to its window.
+    const thirty = new URLSearchParams(pastHistoryPath('30d', now).split('?')[1]);
+    expect(thirty.get('range')).toBe('7d');
+    expect(thirty.get('start_ms')).toBe(String((now - 30 * 24 * H) * 1000));
+    const ninety = new URLSearchParams(pastHistoryPath('90d', now).split('?')[1]);
+    expect(ninety.get('range')).toBe('7d');
+    expect(ninety.get('start_ms')).toBe(String((now - 90 * 24 * H) * 1000));
+    expect(ninety.get('end_ms')).toBe(String(now * 1000));
   });
 });
 
@@ -475,8 +495,25 @@ describe('planHistoryPath', () => {
     const now = 1_800_000_000;
     const params = new URLSearchParams(planHistoryPath('3d', now).split('?')[1]);
     expect(planHistoryPath('3d', now).startsWith('/api/forecast/plan-history?')).toBe(true);
-    expect(params.get('from')).toBe(String(now - 3 * 24 * H));
+    expect(params.get('from')).toBe(String(now - 3 * 24 * H + 1));
     expect(params.get('to')).toBe(String(now + 1));
+  });
+
+  it('asks for a window no longer than the 90 day server limit, for every range', () => {
+    const now = 1_800_000_000;
+    for (const range of ['24h', '3d', '7d', '30d', '90d'] as const) {
+      const params = new URLSearchParams(planHistoryPath(range, now).split('?')[1]);
+      const span = Number(params.get('to')) - Number(params.get('from'));
+      expect(span, range).toBeLessThanOrEqual(90 * 24 * H);
+    }
+  });
+
+  it('reaches back the full 30 and 90 day windows', () => {
+    const now = 1_800_000_000;
+    expect(new URLSearchParams(planHistoryPath('30d', now).split('?')[1]).get('from'))
+      .toBe(String(now - 30 * 24 * H + 1));
+    expect(new URLSearchParams(planHistoryPath('90d', now).split('?')[1]).get('from'))
+      .toBe(String(now - 90 * 24 * H + 1));
   });
 });
 
@@ -486,5 +523,10 @@ describe('pastTickStepSeconds', () => {
     expect(pastTickStepSeconds('24h')).toBe(12 * H);
     expect(pastTickStepSeconds('3d')).toBe(24 * H);
     expect(pastTickStepSeconds('7d')).toBe(24 * H);
+  });
+
+  it('labels weekly for the 30 and 90 day views so the axis stays readable', () => {
+    expect(pastTickStepSeconds('30d')).toBe(7 * 24 * H);
+    expect(pastTickStepSeconds('90d')).toBe(7 * 24 * H);
   });
 });
