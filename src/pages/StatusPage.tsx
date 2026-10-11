@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { useReconnect } from '../hooks/useReconnect';
+import { useNow } from '../hooks/useNow';
 import EnergyOrbitDiagram from '../components/EnergyOrbitDiagram';
 import BatteryPanel from '../components/BatteryPanel';
 import SummaryTiles from '../components/SummaryTiles';
@@ -46,12 +46,7 @@ export default function StatusPage() {
   } = useInverterStore();
 
   // Re-compute uptime every second while connected.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (connectionState !== 'connected') return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [connectionState]);
+  const now = useNow(connectionState === 'connected' ? 1000 : null);
 
   const { reconnect, reconnecting } = useReconnect();
 

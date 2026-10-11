@@ -18,6 +18,8 @@ export type EvcConnectionState = 'never_connected' | 'connected' | 'degraded' | 
 
 interface InverterState {
   snapshot: InverterSnapshot | null;
+  /** When this browser received `snapshot`, in ms on the local clock (#362). */
+  snapshotReceivedAt: number | null;
   connectionState: ConnectionState;
   connectedHost: string | null;
   developerMode: boolean;
@@ -449,6 +451,7 @@ function savePendingDischargeSlots(slots: Record<number, ScheduleSlot>) {
 
 export const useInverterStore = create<InverterState>((set) => ({
   snapshot: null,
+  snapshotReceivedAt: null,
   connectionState: 'disconnected',
   connectedHost: null,
   connectedSince: null,
@@ -490,8 +493,8 @@ export const useInverterStore = create<InverterState>((set) => ({
   evcLastSuccessAtEpochMs: null,
   evcAgeSeconds: null,
   lastConnectedDurationSec: null,
-  setSnapshot: (snapshot) => set({ snapshot }),
-  clearSnapshot: () => set({ snapshot: null }),
+  setSnapshot: (snapshot) => set({ snapshot, snapshotReceivedAt: Date.now() }),
+  clearSnapshot: () => set({ snapshot: null, snapshotReceivedAt: null }),
   setConnection: (state, host, connectedSince) =>
     set((prev) => ({
       connectionState: state,

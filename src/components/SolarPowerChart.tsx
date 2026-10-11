@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNow } from '../hooks/useNow';
 import {
   Area,
   AreaChart,
@@ -48,15 +49,6 @@ interface PvRow {
   pv2_power: number | null;
 }
 
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60000);
-    return () => clearInterval(id);
-  }, []);
-  return now;
-}
-
 /** Find the maximum power value across PV1 (and PV2 if present) in chart rows.
  *  Rounds up to a generous coarse ceiling (every 5kW) so the Y-axis stays
  *  stable across time ranges that have different AVG bucket sizes.
@@ -87,7 +79,7 @@ export default function SolarPowerChart() {
   const solarArrays = useInverterStore((state) => state.snapshot?.solar_arrays);
   const range = scale;
   const rolling = isRollingHistoryRange(range);
-  const now = useNow();
+  const now = useNow(60_000);
   const refreshKey = shouldRefreshHistoryRange(range, 0) ? now : 0;
   const [pv1, setPv1] = useState<TimePoint[] | null>(null);
   const [pv2, setPv2] = useState<TimePoint[]>([]);

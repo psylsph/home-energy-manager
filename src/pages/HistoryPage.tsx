@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
+import { useNow } from '../hooks/useNow';
 import {
   AreaChart,
   Area,
@@ -763,15 +764,6 @@ function exportCSV(
 // History Page
 // ---------------------------------------------------------------------------
 
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60000);
-    return () => clearInterval(id);
-  }, []);
-  return now;
-}
-
 export default function HistoryPage() {
   const [tab, setTab] = useState<MetricTab>('battery');
   const range = useInverterStore((state) => state.chartRange);
@@ -806,7 +798,7 @@ export default function HistoryPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const now = useNow();
+  const now = useNow(60_000);
   const rolling = isRollingHistoryRange(range);
   useEffect(() => {
     lastDateRef.current = getHistoryPickerValue(range, offset);

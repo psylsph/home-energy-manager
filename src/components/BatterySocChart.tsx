@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNow } from '../hooks/useNow';
 import {
   Area,
   AreaChart,
@@ -39,21 +40,12 @@ function emptyStateMessage(scale: 'today' | '24h'): string {
   return scale === '24h' ? 'No SOC history in the last 24h' : 'No SOC history yet today';
 }
 
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60000);
-    return () => clearInterval(id);
-  }, []);
-  return now;
-}
-
 export default function BatterySocChart() {
   const scale = useInverterStore((state) => state.panelGraphsScale);
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const range = scale;
   const rolling = isRollingHistoryRange(range);
-  const now = useNow();
+  const now = useNow(60_000);
   const refreshKey = shouldRefreshHistoryRange(range, 0) ? now : 0;
   const [points, setPoints] = useState<TimePoint[] | null>(null);
   const [error, setError] = useState(false);

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNow } from '../hooks/useNow';
 import {
   Area,
   CartesianGrid,
@@ -199,15 +200,6 @@ function formatAxisWatts(value: number): string {
 
 function formatAxisPercent(value: number): string {
   return `${Math.round(value)}%`;
-}
-
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60000);
-    return () => clearInterval(id);
-  }, []);
-  return now;
 }
 
 function PowerStat({ label, value, color, direction, waiting }: {
@@ -743,7 +735,7 @@ export default function PowerPage() {
   const range = useInverterStore((state) => state.chartRange);
   const setRange = useInverterStore((state) => state.setChartRange);
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
-  const now = useNow();
+  const now = useNow(60_000);
   const rolling = isRollingHistoryRange(range);
   const [offset, setOffset] = useState(0);
   const lastDateRef = useRef(getHistoryPickerValue(range, offset));

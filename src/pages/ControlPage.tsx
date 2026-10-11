@@ -1,4 +1,5 @@
 import { Fragment, useState, useCallback, useEffect, useRef } from 'react';
+import { useNow } from '../hooks/useNow';
 import { createPortal } from 'react-dom';
 import { useInverterStore } from '../store/useInverterStore';
 import type { BatteryModeKind } from '../store/useInverterStore';
@@ -13,6 +14,7 @@ import {
   usesDirectChargeLimit,
 } from '../lib/deviceCapabilities';
 import { waitForSnapshotReadback } from '../lib/readback';
+import { describeLiveReadout, liveReadout } from '../lib/liveReadback';
 import { formatPowerLimitLabel, percentToRawLimit, percentToWatts, rawLimitToPercent, resolveLimitDraft, snapLimitPercent } from '../lib/powerLimit';
 import type { LimitDraft, LimitScale } from '../lib/powerLimit';
 import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
@@ -373,6 +375,29 @@ function waitForTimedDischargeReadback(
     unsubscribe = useInverterStore.subscribe(check);
     check();
   });
+}
+
+/**
+ * The read-only "Inverter Charge Rate" line (#362). It owns its own clock, so
+ * ageing a stale reading re-renders this one line rather than the whole page.
+ */
+function ChargeLimitReadout({
+  connected,
+  percent,
+  watts,
+  receivedAtMs,
+}: {
+  connected: boolean;
+  percent: number | undefined;
+  watts: number | null;
+  receivedAtMs: number | null;
+}) {
+  // Only a live, dated reading ages on screen; anything else is "unknown" and
+  // never changes, so it needs no clock.
+  const ageable = connected && receivedAtMs != null && percent != null;
+  const nowMs = useNow(ageable ? 5000 : null);
+  const text = describeLiveReadout(liveReadout({ connected, percent, watts, receivedAtMs, nowMs }));
+  return <p className="text-text-secondary text-xs">{text}</p>;
 }
 
 function ScheduleSlotEditor({
@@ -2353,7 +2378,6 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
   );
 }
 
-
 interface TemperatureLimiterConfig {
   enabled: boolean;
   high_threshold: number;
@@ -3088,6 +3112,10 @@ export default function ControlPage() {
   const chargeWatts = percentToWatts(chargeShown, maxBatteryPowerW);
   const dischargeWatts = percentToWatts(dischargeShown, maxBatteryPowerW);
   const chargeLimitLabel = formatPowerLimitLabel(chargeShown, chargeWatts);
+  // What the inverter last reported, independent of the slider draft (#362).
+  const snapshotChargeShown = snapshotChargeRate == null ? undefined : snapLimitPercent(snapshotChargeRate, limitScale);
+  const snapshotReceivedAt = useInverterStore((state) => state.snapshotReceivedAt);
+  const inverterConnected = useInverterStore((state) => state.connectionState === 'connected');
   const dischargeLimitLabel = formatPowerLimitLabel(dischargeShown, dischargeWatts);
   const activePowerLabel = formatPowerLimitLabel(activePowerRate, activePowerWatts);
 
@@ -3722,7 +3750,6 @@ export default function ControlPage() {
         )}
       </section>
 
-
       {/* Section 2: Independent battery mechanisms */}
       <section className="space-y-3">
         <div className="flex items-center gap-3">
@@ -4259,6 +4286,12 @@ export default function ControlPage() {
                 {chargeRateSaving ? 'Applying…' : 'Save'}
               </button>
             </div>
+            <ChargeLimitReadout
+              connected={inverterConnected}
+              percent={snapshotChargeShown}
+              watts={percentToWatts(snapshotChargeShown, maxBatteryPowerW)}
+              receivedAtMs={snapshotReceivedAt}
+            />
             {adaptiveOwnsChargeRate && (
               <p className="text-accent text-xs">
                 {chargeMode === 'adaptive'

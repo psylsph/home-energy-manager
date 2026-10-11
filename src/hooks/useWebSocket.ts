@@ -31,13 +31,11 @@ export interface EvcSnapshot {
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<number>(0);
-  const lastSnapshotReceivedAt = useRef<number | null>(null);
   const evcGenerationRef = useRef(0);
   const connectRef = useRef<() => void>(() => {});
   const { setSnapshot, clearSnapshot, setConnection, setEvcData, setEvcStatus } = useInverterStore();
 
   const markBrowserDisconnected = useCallback(() => {
-    lastSnapshotReceivedAt.current = null;
     clearSnapshot();
     setConnection('disconnected');
   }, [clearSnapshot, setConnection]);
@@ -165,8 +163,8 @@ export function useWebSocket() {
             void _;
             return rest as InverterSnapshot;
           })();
+          // The store stamps when this snapshot arrived (snapshotReceivedAt).
           setSnapshot(snapshot);
-          lastSnapshotReceivedAt.current = Date.now();
         } else if (data.type === 'connection') {
           setConnection(
             data.state as ConnectionState,
@@ -180,7 +178,6 @@ export function useWebSocket() {
           // Clear stale snapshot when connection drops so the UI shows
           // "waiting for data" instead of frozen old values.
           if (data.state !== 'connected') {
-            lastSnapshotReceivedAt.current = null;
             clearSnapshot();
           }
         } else if (data.type === 'evc') {
@@ -293,7 +290,7 @@ export function useWebSocket() {
   // data. Stop rendering the cached snapshot after a bounded grace period.
   useEffect(() => {
     const id = window.setInterval(() => {
-      const receivedAt = lastSnapshotReceivedAt.current;
+      const receivedAt = useInverterStore.getState().snapshotReceivedAt;
       if (receivedAt != null && Date.now() - receivedAt >= SNAPSHOT_STALE_AFTER_MS) {
         markBrowserDisconnected();
         // Force the half-open socket through its normal reconnect path. This
