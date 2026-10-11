@@ -5092,22 +5092,35 @@ mod tests {
 
     #[test]
     fn cheapest_holds_a_battery_that_would_otherwise_drain_in_the_window() {
-        // Already at 80% with a heavy night and bright day ahead: nothing
-        // to charge, but sitting out the window on grid power at the cheap
-        // rate keeps stored energy that Eco would burn and later pay round
-        // trip losses to refill. That is a plan, not "no charge needed".
+        // Already at 80% with a heavy night and only modest sun ahead:
+        // nothing to charge, but sitting out the window on grid power at
+        // the cheap rate keeps stored energy that Eco would burn and later
+        // pay round trip losses to refill. That is a plan, not "no charge
+        // needed". (With a bright day the battery would refill either way
+        // and the hold would be worth nothing.)
         let p = SimulationParams {
             start_soc_pct: 80.0,
             ..bruce_params()
         };
         let solar: [f64; 24] =
-            std::array::from_fn(|h| if (9..=15).contains(&h) { 3.0 } else { 0.0 });
-        let load: [f64; 24] = std::array::from_fn(|h| if h >= 23 || h < 6 { 1.2 } else { 0.3 });
+            std::array::from_fn(|h| if (9..=15).contains(&h) { 1.0 } else { 0.0 });
+        let load: [f64; 24] = std::array::from_fn(|h| if (6..23).contains(&h) { 0.3 } else { 1.2 });
         let (sim, hours) = build_48h_series(80.0, solar, load, &p);
         let bt = bruce_tariff();
         let inputs = plan_inputs_with_min(&sim, &hours, &p, Some(&bt), 20.0);
         let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &CostInputs::default()));
-        assert!(cheapest.kwh < 0.1, "charges nothing, got {}", cheapest.kwh);
+        // At most the fraction of a point that rounds the level up.
+        assert!(cheapest.kwh < 0.3, "charges nothing, got {}", cheapest.kwh);
+        assert!(
+            cheapest.rationale.starts_with("Battery is at"),
+            "{}",
+            cheapest.rationale
+        );
+        assert!(
+            cheapest.rationale.contains("Holding the battery at"),
+            "{}",
+            cheapest.rationale
+        );
         assert!(
             cheapest.target >= 75,
             "holds the level, got {}",

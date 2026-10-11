@@ -42,6 +42,10 @@ pub(super) struct HoldOutcome {
     /// AC kWh the grid supplies during the window: the charge plus the
     /// house load the held battery no longer covers.
     pub(super) grid_kwh: f64,
+    /// The part of each hour's `import_kwh` that is that in-window supply,
+    /// by hour, so it can be priced at the window's rate even when the
+    /// window opens or closes part-way through an hour.
+    pub(super) window_grid: Vec<f64>,
     /// The hours the minimum is judged across (see [`post_range`]).
     post: (usize, usize),
     /// Hour index where the next cheap-window occurrence begins.
@@ -93,23 +97,29 @@ pub(super) fn simulate_hold(
     target_pct: u8,
 ) -> Option<HoldOutcome> {
     let (selected, next_occurrence_start) = first_reachable_occurrence(sim_hours, window, now_ts);
+    let run = selected?.run;
+    let last = *run.last()?;
     simulate_hold_run(
         sim_hours,
         params,
         window,
-        &selected?.run,
+        &run,
+        last,
         next_occurrence_start,
         target_pct,
     )
 }
 
-/// Simulate the hold for an occurrence already found: `run` is its hours
-/// and `next_occurrence_start` where the following one begins.
+/// Simulate the hold for an occurrence already found: `run` is the hours
+/// the slot is active (empty for plain Eco), `last_of_run` the occurrence's
+/// last hour, from which the minimum is judged, and `next_occurrence_start`
+/// where the following one begins.
 fn simulate_hold_run(
     sim_hours: &[SimHourInput],
     params: &SimulationParams,
     window: &ChargeWindow,
     run: &[usize],
+    last_of_run: usize,
     next_occurrence_start: Option<usize>,
     target_pct: u8,
 ) -> Option<HoldOutcome> {
@@ -117,10 +127,12 @@ fn simulate_hold_run(
     let target = f64::from(target_pct.min(100));
     let mut soc = params.start_soc_pct;
     let mut series = Vec::with_capacity(sim_hours.len());
+    let mut window_grid = Vec::with_capacity(sim_hours.len());
     let mut charge_kwh = 0.0;
     let mut grid_kwh = 0.0;
 
     for (index, hour) in sim_hours.iter().copied().enumerate() {
+        let mut hour_drawn = 0.0;
         let active = if run.contains(&index) {
             window_overlap_segments(hour.timestamp, window)
         } else {
@@ -162,6 +174,7 @@ fn simulate_hold_run(
             let res = simulate_battery_segment(segment_hour, &segment_params, fraction)?;
             soc = res.soc_pct;
             grid_kwh += drawn;
+            hour_drawn += drawn;
             combined.soc_pct = res.soc_pct;
             combined.import_kwh += res.import_kwh + drawn;
             combined.export_kwh += res.export_kwh;
@@ -169,14 +182,18 @@ fn simulate_hold_run(
             combined.discharge_kwh += res.discharge_kwh;
         }
         series.push(combined);
+        window_grid.push(hour_drawn);
     }
 
-    let last = *run.last()?;
-    let post = post_range(last, next_occurrence_start.unwrap_or(sim_hours.len()));
+    let post = post_range(
+        last_of_run,
+        next_occurrence_start.unwrap_or(sim_hours.len()),
+    );
     Some(HoldOutcome {
         series,
         charge_kwh,
         grid_kwh,
+        window_grid,
         post,
         next_occurrence_start,
     })
@@ -201,6 +218,7 @@ pub(super) struct HoldContext<'a> {
     pub(super) sim_hours: &'a [SimHourInput],
     pub(super) window: ChargeWindow,
     run: Vec<usize>,
+    last: usize,
     pub(super) first_index: usize,
     pub(super) next_occurrence_start: Option<usize>,
     /// The battery's level when the window opens, rounded up: never target
@@ -234,8 +252,27 @@ impl HoldContext<'_> {
             params,
             &self.window,
             &self.run,
+            self.last,
             self.next_occurrence_start,
             target,
+        )
+    }
+
+    /// The same hours with no slot at all: plain Eco, the battery running
+    /// the house through the window. The baseline a hold is worth beating.
+    pub(super) fn simulate_eco(
+        &self,
+        hours: &[SimHourInput],
+        params: &SimulationParams,
+    ) -> Option<HoldOutcome> {
+        simulate_hold_run(
+            hours,
+            params,
+            &self.window,
+            &[],
+            self.last,
+            self.next_occurrence_start,
+            100,
         )
     }
 }
@@ -260,6 +297,7 @@ pub(super) fn prepare_hold<'a>(inputs: &PlanInputs<'a>) -> Option<HoldContext<'a
     let occurrence = selected?;
     let first_index = occurrence.first_index();
     let run = occurrence.run;
+    let last = *run.last()?;
     let params = inputs.params;
     let simulate = |target: u8| {
         simulate_hold_run(
@@ -267,6 +305,7 @@ pub(super) fn prepare_hold<'a>(inputs: &PlanInputs<'a>) -> Option<HoldContext<'a
             params,
             &window,
             &run,
+            last,
             next_occurrence_start,
             target,
         )
@@ -281,6 +320,7 @@ pub(super) fn prepare_hold<'a>(inputs: &PlanInputs<'a>) -> Option<HoldContext<'a
         sim_hours,
         window,
         run,
+        last,
         first_index,
         next_occurrence_start,
         lowest,
@@ -380,7 +420,6 @@ pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
     let base = plan_overnight_charge(inputs);
     let PlanRecommendation::Charge {
         observed_min_soc_pct,
-        current_soc_pct,
         ..
     } = base
     else {
@@ -389,15 +428,33 @@ pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
     let Some(ctx) = prepare_hold(inputs) else {
         return base;
     };
-    let params = inputs.params;
-    let floor = inputs.target_soc_pct;
-    let (target, reaches_minimum, outcome) = lowest_holding_target(&ctx, params, floor);
+    let (target, reaches_minimum, outcome) =
+        lowest_holding_target(&ctx, inputs.params, inputs.target_soc_pct);
+    build_hold_plan(
+        inputs,
+        ctx,
+        observed_min_soc_pct,
+        (target, reaches_minimum, outcome),
+        PlanStrategy::HoldWindow,
+    )
+}
 
+/// The hold recommendation for a target search result `(target, whether it
+/// keeps the minimum, its simulation)`, with the explanation in the default
+/// planner's voice.
+pub(super) fn build_hold_plan(
+    inputs: &PlanInputs,
+    ctx: HoldContext,
+    observed_min_soc_pct: f64,
+    (target, reaches_minimum, outcome): (u8, bool, HoldOutcome),
+    strategy: PlanStrategy,
+) -> PlanRecommendation {
+    let params = inputs.params;
     let rationale = hold_rationale(&HoldRationale {
-        current_soc_pct,
+        current_soc_pct: inputs.current_soc_pct,
         observed_min_soc_pct,
         after_min_soc_pct: outcome.trough_pct(),
-        floor,
+        floor: inputs.target_soc_pct,
         reserve: params.reserve_soc_pct,
         target,
         reaches_minimum,
@@ -412,7 +469,7 @@ pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
         &outcome,
         observed_min_soc_pct,
         rationale,
-        PlanStrategy::HoldWindow,
+        strategy,
     )
 }
 
