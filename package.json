@@ -44,7 +44,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.7.0",
-    "jsdom": "^30.0.1",
+    "jsdom": "^30.1.2",
     "markdownlint-cli": "^0.49.1",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
@@ -53,8 +53,8 @@
     "vitest": "^5.0.0"
   },
   "dependencies": {
-    "@tauri-apps/plugin-autostart": "~2.6.0",
-    "@tauri-apps/plugin-opener": "~2.6.0",
+    "@tauri-apps/plugin-autostart": "~2.7.0",
+    "@tauri-apps/plugin-opener": "~2.7.0",
     "jspdf": "^4.2.1",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
@@ -69,7 +69,7 @@
   },
   "optionalDependencies": {
     "@rolldown/binding-darwin-arm64": "^1.2.12",
-    "@rolldown/binding-darwin-x64": "^1.2.0",
+    "@rolldown/binding-darwin-x64": "^1.2.13",
     "@rolldown/binding-linux-x64-gnu": "^1.2.8",
     "@rolldown/binding-win32-x64-msvc": "^1.2.6",
     "@tailwindcss/oxide-darwin-arm64": "^4.3.3",
