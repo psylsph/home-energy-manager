@@ -28,7 +28,6 @@ import {
   forecastExportTitle,
   forecastPlanTitle,
   chargeTargetReadBack,
-  holdStrategyNote,
   holdTargetPct,
   forecastStatusMessages,
   forecastXAxisTicks,
@@ -763,7 +762,6 @@ export default function ForecastPage() {
   // Issue #360: explain what a 0% minimum, or one at or below the inverter
   // reserve, means to the planner beside the input.
   const reserveNote = minimumSocNote(minSocPct, data.battery?.reserve_soc_pct);
-  const holdNote = planStrategy !== 'min_soc' ? holdStrategyNote(snapshot?.device_type) : null;
   const holdTarget = plan?.recommendation ? holdTargetPct(plan.recommendation) : null;
   const anchoredProjection = data.battery
     ? anchorSeriesAtNow(
@@ -1189,11 +1187,6 @@ export default function ForecastPage() {
                   ? 'Charges to the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house for the rest of the cheap window.'
                   : 'Charges at full rate for just long enough to stay above your minimum, then lets the battery run the house again.'}
             </p>
-            {holdNote && (
-              <p data-testid="forecast-plan-strategy-note" className="text-[11px] text-amber-300 font-sans">
-                {holdNote}
-              </p>
-            )}
           </div>
           {/* Planner floor — the planner sizes the overnight charge so the
               battery never dips below this percentage across the forward

@@ -1312,27 +1312,16 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     });
   });
 
-  it('notes the hold is unconfirmed on a model other than Gen3', async () => {
-    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
-    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
-    render(<ForecastPage />);
-    expect(await screen.findByTestId('forecast-plan-strategy-note')).toHaveTextContent(
-      /confirmed on Gen 3/i,
-    );
-  });
-
-  it('shows no hold note on a Gen3 or for the minimum strategy', async () => {
-    useInverterStore.setState({ snapshot: { device_type: 'Gen3Hybrid' } } as never);
-    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
-    render(<ForecastPage />);
-    await screen.findByTestId('forecast-plan-target');
-    expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
-    cleanup();
-    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
-    mockPage(planPayload('charge'));
-    render(<ForecastPage />);
-    await screen.findByTestId('forecast-plan-apply');
-    expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
+  it('shows no caution about holding on any model (hold plans or not)', async () => {
+    for (const device of ['Gen3Hybrid', 'Gen2Hybrid', 'Gen3PlusHybrid']) {
+      useInverterStore.setState({ snapshot: { device_type: device } } as never);
+      mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
+      render(<ForecastPage />);
+      await screen.findByTestId('forecast-plan-target');
+      expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
+      expect(screen.queryByText(/only been confirmed/i)).toBeNull();
+      cleanup();
+    }
   });
 
   const cheapestPlan = () => {
@@ -1393,13 +1382,12 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     });
   });
 
-  it('shows the unconfirmed-hold note for cheapest on Gen2Hybrid', async () => {
+  it('shows no hold caution for cheapest either', async () => {
     useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
     mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
     render(<ForecastPage />);
-    expect(await screen.findByTestId('forecast-plan-strategy-note')).toHaveTextContent(
-      /confirmed on Gen 3/i,
-    );
+    await screen.findByTestId('forecast-plan-target');
+    expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
   });
 
   it('shows no target for a minimum-SOC plan', async () => {

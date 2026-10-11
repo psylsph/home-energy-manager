@@ -8,7 +8,6 @@ import {
   formatForecastXAxisTick,
   forecastPlanTitle,
   chargeTargetReadBack,
-  holdStrategyNote,
   holdTargetPct,
   minimumSocNote,
   planAutoApplyTriggerLabel,
@@ -736,14 +735,5 @@ describe('hold plans (issue #359 review)', () => {
     expect(chargeTargetReadBack(75, 75)).toBe(true);
     expect(chargeTargetReadBack(75, 62)).toBe(false);
     expect(chargeTargetReadBack(75, undefined)).toBe(false);
-  });
-
-  it('flags the hold as unconfirmed off Gen3', () => {
-    expect(holdStrategyNote('Gen3Hybrid')).toBeNull();
-    expect(holdStrategyNote(undefined)).toBeNull();
-    // Gen 3 Plus takes a different register path from the confirmed Gen 3.
-    for (const device of ['Gen3PlusHybrid', 'Gen2Hybrid', 'ACCoupled', 'AllInOne6kW', 'ThreePhase']) {
-      expect(holdStrategyNote(device)).toMatch(/confirmed on Gen 3/i);
-    }
   });
 });

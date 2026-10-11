@@ -576,22 +576,6 @@ export function chargeTargetReadBack(
   return desiredTargetSoc >= 100 || actualTargetSoc === desiredTargetSoc;
 }
 
-/** Device types where charging to a target and then holding it through
- *  the slot has been confirmed on real hardware (issue #359). Gen 3 Plus
- *  writes its target through a different, flag-gated path, so it isn't
- *  covered by the Gen 3 confirmation. */
-const HOLD_CONFIRMED_DEVICES = new Set(['Gen3Hybrid']);
-
-/** Caveat under the strategy picker on models where the hold behaviour is
- *  unconfirmed, or null when it's confirmed or the model isn't known yet. */
-export function holdStrategyNote(deviceType: string | undefined): string | null {
-  if (deviceType == null || HOLD_CONFIRMED_DEVICES.has(deviceType)) return null;
-  return (
-    'Holding the battery at its target has only been confirmed on Gen 3 hybrids so far. ' +
-    'On the first night, check the battery stays flat once it reaches the target.'
-  );
-}
-
 /** Short headline for the Plan card. Degrades gracefully per kind. */
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {
