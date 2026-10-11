@@ -233,6 +233,11 @@ jobs:
 
       - name: Install Tauri CLI
         shell: bash
+        env:
+          # Authenticates binstall's GitHub API lookups. Unauthenticated, a
+          # shared runner gets 403 rate-limited, binstall gives up on the
+          # prebuilt binary and compiles from source instead.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/94dc7fe43d6ed7bfa6a6ea24f60f85e3f41dd104/install-from-binstall-release.sh | bash
           # --force bypasses binstall's "already installed" tracking, which
@@ -240,7 +245,7 @@ jobs:
           # `cargo tauri` unfindable ("no such command: tauri"). Retry to
           # absorb transient GitHub-release download blips.
           for attempt in 1 2 3; do
-            if cargo binstall --force --no-confirm tauri-cli@2.11.2; then exit 0; fi
+            if cargo binstall --force --locked --no-confirm tauri-cli@2.11.2; then exit 0; fi
             echo "tauri-cli install failed on attempt $attempt; retrying in 15s..."
             sleep 15
           done
@@ -615,6 +620,11 @@ jobs:
 
       - name: Install Tauri CLI
         shell: bash
+        env:
+          # Authenticates binstall's GitHub API lookups. Unauthenticated, a
+          # shared runner gets 403 rate-limited, binstall gives up on the
+          # prebuilt binary and compiles from source instead.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/94dc7fe43d6ed7bfa6a6ea24f60f85e3f41dd104/install-from-binstall-release.sh | bash
           # --force bypasses binstall's "already installed" tracking, which
@@ -622,7 +632,7 @@ jobs:
           # `cargo tauri` unfindable ("no such command: tauri"). Retry to
           # absorb transient GitHub-release download blips.
           for attempt in 1 2 3; do
-            if cargo binstall --force --no-confirm tauri-cli@2.11.2; then exit 0; fi
+            if cargo binstall --force --locked --no-confirm tauri-cli@2.11.2; then exit 0; fi
             echo "tauri-cli install failed on attempt $attempt; retrying in 15s..."
             sleep 15
           done

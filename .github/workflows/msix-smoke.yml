@@ -35,9 +35,14 @@ jobs:
 
       - name: Install Tauri CLI
         shell: bash
+        env:
+          # Authenticates binstall's GitHub API lookups. Unauthenticated, a
+          # shared runner gets 403 rate-limited, binstall gives up on the
+          # prebuilt binary and compiles from source instead.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/94dc7fe43d6ed7bfa6a6ea24f60f85e3f41dd104/install-from-binstall-release.sh | bash
-          cargo binstall --force --no-confirm tauri-cli@2.11.2
+          cargo binstall --force --locked --no-confirm tauri-cli@2.11.2
 
       - name: Build Tauri executable
         run: cargo tauri build --target x86_64-pc-windows-msvc --no-bundle
