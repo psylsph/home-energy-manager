@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Local, NaiveDate};
+use chrono::{DateTime, Local, NaiveDate, Timelike};
 
 use crate::forecast::planner::PlanRecommendation;
 use crate::forecast::refresh::{
@@ -409,7 +409,7 @@ async fn compute_plan(
     settings: &Settings,
     snapshot: &InverterSnapshot,
     now: DateTime<Local>,
-) -> Result<PlanRecommendation, tokio::task::JoinError> {
+) -> Result<ComputedPlan, tokio::task::JoinError> {
     let (weather_enabled, coords) = {
         let ws = state.weather.lock().await;
         (
@@ -429,14 +429,72 @@ async fn compute_plan(
             weather_coords: coords,
             now,
         });
-        crate::server::api::compute_plan_recommendation(
+        let (rec, export) = crate::server::api::compute_full_plan(
             &forecast,
             &settings,
             Some(&live_snapshot),
             now.timestamp(),
-        )
+        );
+        ComputedPlan {
+            rec,
+            export,
+            forecast,
+        }
     })
     .await
+}
+
+/// A freshly computed plan with the export advice and forecast behind it.
+struct ComputedPlan {
+    rec: PlanRecommendation,
+    export: Option<crate::forecast::planner::ExportAdvice>,
+    forecast: crate::forecast::ForecastPayload,
+}
+
+/// Store a Planner decision and the forecast behind it in the plan history
+/// (issue #361), pruning decisions past the retention period. Failures are
+/// logged and never affect the plan itself.
+async fn record_plan_snapshot(
+    state: &Arc<AppState>,
+    settings: &Settings,
+    kind: &'static str,
+    plan: &ComputedPlan,
+    now: DateTime<Local>,
+) {
+    let Some(db) = state.history.lock().await.clone() else {
+        return;
+    };
+    let forecast_json = match serde_json::to_string(&plan.forecast) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::warn!("Plan history: could not serialise the forecast: {error}");
+            return;
+        }
+    };
+    let row = crate::history::PlanSnapshotRow {
+        recorded_at: now.timestamp(),
+        kind: kind.to_string(),
+        strategy: serde_json::to_value(settings.forecast_plan_strategy)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default(),
+        // Exactly what GET /api/forecast/plan served: the recommendation,
+        // its Apply payload and the export advice.
+        plan_json: crate::server::api::plan_response_json(&plan.rec, plan.export.as_ref())
+            .to_string(),
+        forecast_json,
+    };
+    let cutoff = now.timestamp() - crate::history::PLAN_SNAPSHOT_RETENTION_DAYS * 24 * 3600;
+    let stored = tokio::task::spawn_blocking(move || {
+        db.insert_plan_snapshot(&row)?;
+        db.prune_plan_snapshots(cutoff)
+    })
+    .await;
+    match stored {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::warn!("Plan history: could not store the decision: {error}"),
+        Err(error) => tracing::warn!("Plan history: store task failed: {error}"),
+    }
 }
 
 /// Whether Adaptive Charge currently owns the charge-limit register (the plan
@@ -465,7 +523,10 @@ pub(crate) async fn run_plan_refresh(
         // failure can't turn into a per-poll write storm.
         *state.forecast_plan_refresh_date.lock().await = Some(now.date_naive());
         match planned {
-            Ok(rec) => apply_plan_recommendation(state, snapshot, &rec, PlanTrigger::Refresh).await,
+            Ok(plan) => {
+                record_plan_snapshot(state, settings, "refresh", &plan, now).await;
+                apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::Refresh).await
+            }
             Err(e) => tracing::warn!("Forecast plan refresh failed: {e}"),
         }
     } else if adaptive_owns_rate && plan_refresh_due(now, last, tariff) {
@@ -529,8 +590,10 @@ pub(crate) async fn run_plan_auto_apply(
             // failure can't turn into a per-poll write/notification storm.
             *state.forecast_plan_apply_date.lock().await = Some(now.date_naive());
             match planned {
-                Ok(rec) => {
-                    apply_plan_recommendation(state, snapshot, &rec, PlanTrigger::AutoApply).await
+                Ok(plan) => {
+                    record_plan_snapshot(state, settings, "auto_apply", &plan, now).await;
+                    apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::AutoApply)
+                        .await
                 }
                 Err(e) => {
                     tracing::warn!("Forecast plan auto-apply failed: {e}");
@@ -548,18 +611,66 @@ pub(crate) async fn run_plan_auto_apply(
 }
 
 /// Minutes before the cheap window at which the Planner's decision is
-/// recorded for the plan history (issue #361) when no automation did.
-pub const PLAN_SNAPSHOT_LEAD_MINUTES: u16 = 15;
+/// recorded for the plan history (issue #361) when no automation did. Wide
+/// enough that a few missed polls still land inside it; if none does (the
+/// app asleep or restarting through the whole lead), that night has no
+/// row rather than a late one, which would describe the following night.
+pub const PLAN_SNAPSHOT_LEAD_MINUTES: u16 = 30;
 
 /// Record the Planner's decision shortly before the cheap window for the
-/// plan history (issue #361), once a day, unless the auto-refresh or
-/// auto-apply already recorded the plan they acted on today.
+/// plan history (issue #361), once per window, for installs where no
+/// automation records it. With auto-apply or the nightly refresh running,
+/// they record the plan they acted on instead; if Adaptive Charge owns the
+/// charge rate they stand down, so this records instead. Needs the solar
+/// forecast (weather with coordinates), without which there is no plan.
 pub(crate) async fn run_plan_snapshot(
-    _state: &Arc<AppState>,
-    _settings: &Settings,
-    _snapshot: &InverterSnapshot,
-    _now: DateTime<Local>,
+    state: &Arc<AppState>,
+    settings: &Settings,
+    snapshot: &InverterSnapshot,
+    now: DateTime<Local>,
 ) {
+    let automation_records = (settings.forecast_plan_auto_apply_enabled
+        || settings.forecast_plan_auto_refresh)
+        && !adaptive_owns_rate(settings);
+    if automation_records || state.history.lock().await.is_none() {
+        return;
+    }
+    let weather_ready = {
+        let weather = state.weather.lock().await;
+        weather.config.enabled
+            && weather.config.latitude.is_some()
+            && weather.config.longitude.is_some()
+    };
+    if !weather_ready {
+        return;
+    }
+    let Some(tariff) = settings.import_tariff_config.as_ref() else {
+        return;
+    };
+    let now_min = now.hour() as u16 * 60 + now.minute() as u16;
+    let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30) else {
+        return;
+    };
+    let until_start = (window.start_min + 1440 - now_min) % 1440;
+    if until_start > PLAN_SNAPSHOT_LEAD_MINUTES {
+        return;
+    }
+    // One record per window occurrence, keyed on the date the window opens,
+    // so a window just after midnight isn't recorded again once the date
+    // rolls over.
+    let window_date = (now + chrono::Duration::minutes(i64::from(until_start))).date_naive();
+    {
+        let mut recorded = state.forecast_plan_snapshot_date.lock().await;
+        if *recorded == Some(window_date) {
+            return;
+        }
+        // Mark first so a failing computation can't retry every poll.
+        *recorded = Some(window_date);
+    }
+    match compute_plan(state, settings, snapshot, now).await {
+        Ok(plan) => record_plan_snapshot(state, settings, "before_window", &plan, now).await,
+        Err(error) => tracing::warn!("Plan history: plan computation failed: {error}"),
+    }
 }
 
 #[cfg(test)]
@@ -1526,16 +1637,17 @@ mod tests {
     // ---- plan history (issue #361) ----------------------------------------------
 
     async fn state_with_history() -> Arc<AppState> {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-plan-snapshot-test-{}-{id}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create plan snapshot test dir");
+        let dir = crate::test_util::make_unique_test_dir("plan-snapshot");
         let db = crate::history::HistoryDb::open(&dir.join("history.db")).expect("open db");
         let state = Arc::new(AppState::new());
         *state.history.lock().await = Some(Arc::new(db));
+        // The solar forecast needs weather with coordinates.
+        state.weather.lock().await.config = crate::settings::WeatherConfig {
+            enabled: true,
+            latitude: Some(51.5),
+            longitude: Some(-0.13),
+            ..Default::default()
+        };
         state
     }
 
@@ -1571,7 +1683,12 @@ mod tests {
             assert_eq!(rows[0].strategy, "hold_window");
             assert_eq!(rows[0].recorded_at, now.timestamp());
             let plan: serde_json::Value = serde_json::from_str(&rows[0].plan_json).unwrap();
-            assert!(plan["kind"].is_string(), "{plan}");
+            // The same shape GET /api/forecast/plan serves.
+            assert!(plan["recommendation"]["kind"].is_string(), "{plan}");
+            assert!(
+                plan.get("apply").is_some() && plan.get("export").is_some(),
+                "{plan}"
+            );
             let forecast: serde_json::Value = serde_json::from_str(&rows[0].forecast_json).unwrap();
             assert!(forecast["solar"].is_array(), "{forecast}");
 
@@ -1596,7 +1713,7 @@ mod tests {
                 &state,
                 &snapshot_settings(),
                 &gen2(),
-                local_dt(2026, 8, 31, 1, 30),
+                local_dt(2026, 8, 31, 1, 20),
             )
             .await;
             assert!(recorded(&state).await.is_empty());
@@ -1606,13 +1723,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_extra_decision_is_recorded_after_an_automation_ran_today() {
+    async fn no_extra_decision_is_recorded_while_an_automation_records_the_plan() {
         with_isolated_config_dir_async(|| async {
             let state = state_with_history().await;
             let now = local_dt(2026, 8, 31, 1, 50);
-            *state.forecast_plan_apply_date.lock().await = Some(now.date_naive());
+            for (auto_apply, auto_refresh) in [(true, false), (false, true)] {
+                let settings = Settings {
+                    forecast_plan_auto_apply_enabled: auto_apply,
+                    forecast_plan_auto_refresh: auto_refresh,
+                    ..snapshot_settings()
+                };
+                run_plan_snapshot(&state, &settings, &gen2(), now).await;
+            }
+            assert!(recorded(&state).await.is_empty());
+            // Adaptive Charge makes the automation stand down, so the
+            // decision is recorded here instead.
+            let adaptive = Settings {
+                forecast_plan_auto_apply_enabled: true,
+                adaptive_charge_enabled: true,
+                ..snapshot_settings()
+            };
+            run_plan_snapshot(&state, &adaptive, &gen2(), now).await;
+            assert_eq!(recorded(&state).await.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_window_just_after_midnight_is_recorded_once_across_the_date_change() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let settings = Settings {
+                import_tariff_config: Some(TariffConfig {
+                    slots: vec![
+                        TariffSlot {
+                            start: "00:00".into(),
+                            end: "00:30".into(),
+                            rate: 0.26,
+                        },
+                        TariffSlot {
+                            start: "00:30".into(),
+                            end: "05:30".into(),
+                            rate: 0.07,
+                        },
+                        TariffSlot {
+                            start: "05:30".into(),
+                            end: "23:59".into(),
+                            rate: 0.26,
+                        },
+                    ],
+                }),
+                ..snapshot_settings()
+            };
+            // 00:10 and 00:20 are both inside the lead of the 00:30 window
+            // and belong to the same occurrence.
+            run_plan_snapshot(&state, &settings, &gen2(), local_dt(2026, 8, 31, 0, 10)).await;
+            run_plan_snapshot(&state, &settings, &gen2(), local_dt(2026, 8, 31, 0, 20)).await;
+            assert_eq!(recorded(&state).await.len(), 1);
+            run_plan_snapshot(&state, &settings, &gen2(), local_dt(2026, 9, 1, 0, 10)).await;
+            assert_eq!(
+                recorded(&state).await.len(),
+                2,
+                "next night is a new window"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn nothing_is_recorded_without_the_solar_forecast_or_a_history_db() {
+        with_isolated_config_dir_async(|| async {
+            let now = local_dt(2026, 8, 31, 1, 50);
+            // No weather: there is no solar forecast to plan from.
+            let state = state_with_history().await;
+            state.weather.lock().await.config.enabled = false;
             run_plan_snapshot(&state, &snapshot_settings(), &gen2(), now).await;
             assert!(recorded(&state).await.is_empty());
+            // No history database.
+            let bare = Arc::new(AppState::new());
+            run_plan_snapshot(&bare, &snapshot_settings(), &gen2(), now).await;
+            assert_eq!(*bare.forecast_plan_snapshot_date.lock().await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn recording_prunes_decisions_past_the_retention_period() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let now = local_dt(2026, 8, 31, 1, 50);
+            let db = state.history.lock().await.clone().expect("db");
+            let day = 24 * 3600;
+            for age_days in [crate::history::PLAN_SNAPSHOT_RETENTION_DAYS + 1, 5] {
+                db.insert_plan_snapshot(&crate::history::PlanSnapshotRow {
+                    recorded_at: now.timestamp() - age_days * day,
+                    kind: "before_window".into(),
+                    strategy: "min_soc".into(),
+                    plan_json: "{}".into(),
+                    forecast_json: "{}".into(),
+                })
+                .unwrap();
+            }
+            run_plan_snapshot(&state, &snapshot_settings(), &gen2(), now).await;
+            let ages: Vec<i64> = recorded(&state)
+                .await
+                .iter()
+                .map(|row| (now.timestamp() - row.recorded_at) / day)
+                .collect();
+            assert_eq!(ages, vec![5, 0], "the old row is pruned, newer ones kept");
         })
         .await;
     }
@@ -1627,6 +1845,23 @@ mod tests {
             assert_eq!(rows.len(), 1, "{rows:?}");
             assert_eq!(rows[0].kind, "auto_apply");
             assert_eq!(rows[0].strategy, "min_soc");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_nightly_refresh_records_the_plan_it_acted_on() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let settings = Settings {
+                forecast_plan_auto_refresh: true,
+                import_tariff_config: Some(flux_tariff()),
+                ..Default::default()
+            };
+            run_plan_refresh(&state, &settings, &gen2(), before_the_cheap_window()).await;
+            let rows = recorded(&state).await;
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0].kind, "refresh");
         })
         .await;
     }

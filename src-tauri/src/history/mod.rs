@@ -279,10 +279,6 @@ fn same_utc_day(a_ms: i64, b_ms: i64) -> bool {
 // Cost / income series
 // ---------------------------------------------------------------------------
 
-/// Derived field names for the History "Cost" tab. These are NOT stored
-/// columns - the server computes them from the `today_*_kwh` counters and the
-/// configured tariff (see [`HistoryDb::query_cost_series`]). The frontend
-/// requests them like any other field; the history handler routes them here.
 /// How long Planner decisions are kept (issue #361).
 pub const PLAN_SNAPSHOT_RETENTION_DAYS: i64 = 90;
 
@@ -301,6 +297,10 @@ pub struct PlanSnapshotRow {
     pub forecast_json: String,
 }
 
+/// Derived field names for the History "Cost" tab. These are NOT stored
+/// columns - the server computes them from the `today_*_kwh` counters and the
+/// configured tariff (see [`HistoryDb::query_cost_series`]). The frontend
+/// requests them like any other field; the history handler routes them here.
 pub const IMPORT_COST_FIELD: &str = "_import_cost";
 pub const EXPORT_INCOME_FIELD: &str = "_export_income";
 
@@ -2424,7 +2424,24 @@ impl HistoryDb {
 
     /// Store one Planner decision (issue #361). A row with the same
     /// `recorded_at` and `kind` is replaced.
-    pub fn insert_plan_snapshot(&self, _row: &PlanSnapshotRow) -> Result<(), String> {
+    pub fn insert_plan_snapshot(&self, row: &PlanSnapshotRow) -> Result<(), String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO plan_snapshots \
+             (recorded_at, kind, strategy, plan_json, forecast_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                row.recorded_at,
+                row.kind,
+                row.strategy,
+                row.plan_json,
+                row.forecast_json
+            ],
+        )
+        .map_err(|e| format!("Failed to store plan snapshot: {e}"))?;
         Ok(())
     }
 
@@ -2432,16 +2449,48 @@ impl HistoryDb {
     /// first.
     pub fn query_plan_snapshots(
         &self,
-        _since_ts: i64,
-        _until_ts: i64,
+        since_ts: i64,
+        until_ts: i64,
     ) -> Result<Vec<PlanSnapshotRow>, String> {
-        Ok(Vec::new())
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT recorded_at, kind, strategy, plan_json, forecast_json \
+                 FROM plan_snapshots WHERE recorded_at >= ?1 AND recorded_at < ?2 \
+                 ORDER BY recorded_at ASC, kind ASC",
+            )
+            .map_err(|e| format!("Failed to prepare plan snapshot query: {e}"))?;
+        let rows = stmt
+            .query_map(params![since_ts, until_ts], |row| {
+                Ok(PlanSnapshotRow {
+                    recorded_at: row.get(0)?,
+                    kind: row.get(1)?,
+                    strategy: row.get(2)?,
+                    plan_json: row.get(3)?,
+                    forecast_json: row.get(4)?,
+                })
+            })
+            .map_err(|e| format!("Plan snapshot query failed: {e}"))?
+            .collect::<SqlResult<Vec<_>>>()
+            .map_err(|e| format!("Failed to read plan snapshot row: {e}"))?;
+        Ok(rows)
     }
 
     /// Delete Planner decisions recorded before `before_ts`. Returns the
     /// number of rows removed.
-    pub fn prune_plan_snapshots(&self, _before_ts: i64) -> Result<usize, String> {
-        Ok(0)
+    pub fn prune_plan_snapshots(&self, before_ts: i64) -> Result<usize, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.execute(
+            "DELETE FROM plan_snapshots WHERE recorded_at < ?1",
+            params![before_ts],
+        )
+        .map_err(|e| format!("Failed to prune plan snapshots: {e}"))
     }
 
     /// Batch-upsert forecast variable samples into `forecast_values`.

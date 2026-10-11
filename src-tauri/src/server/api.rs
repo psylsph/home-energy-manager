@@ -8378,10 +8378,6 @@ pub(crate) async fn get_forecast_at(
     (StatusCode::OK, Json(json!({ "ok": true, "data": payload })))
 }
 
-/// GET /api/forecast/plan — tariff-aware overnight charge recommendation
-/// (issue #283, Phase 2). Same inputs as `/api/forecast` plus the user's
-/// import-tariff config; never writes any register — Apply happens only
-/// from the UI through the existing control endpoints.
 /// Query for `GET /api/forecast/plan-history` (issue #361): unix-second
 /// bounds, `from` inclusive and `to` exclusive. Defaults to the last week.
 #[derive(Debug, Deserialize)]
@@ -8396,15 +8392,73 @@ pub const PLAN_HISTORY_MAX_SPAN_SECS: i64 = 31 * 24 * 3600;
 /// GET /api/forecast/plan-history — the Planner decisions recorded in a
 /// time range, each with the forecast it was computed from (issue #361).
 pub async fn get_plan_history(
-    State(_state): State<Arc<AppState>>,
-    Query(_params): Query<PlanHistoryQuery>,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PlanHistoryQuery>,
 ) -> (StatusCode, Json<Value>) {
+    get_plan_history_at(state, params, chrono::Utc::now().timestamp()).await
+}
+
+/// [`get_plan_history`] with the clock passed in, so the default range can
+/// be tested deterministically.
+pub(crate) async fn get_plan_history_at(
+    state: Arc<AppState>,
+    params: PlanHistoryQuery,
+    now_ts: i64,
+) -> (StatusCode, Json<Value>) {
+    let to = params.to.unwrap_or_else(|| now_ts.saturating_add(1));
+    // Checked: both bounds come from the query string, and an overflowing
+    // span must be refused rather than wrap past the size limit.
+    let from = match params.from {
+        Some(from) => from,
+        None => match to.checked_sub(7 * 24 * 3600) {
+            Some(from) => from,
+            None => return error_response("'to' is too early to read a week before it"),
+        },
+    };
+    match to.checked_sub(from) {
+        Some(span) if span < 0 => return error_response("'from' must not be after 'to'"),
+        Some(span) if span > PLAN_HISTORY_MAX_SPAN_SECS => {
+            return error_response("Plan history can be read at most 31 days at a time")
+        }
+        Some(_) => {}
+        None => return error_response("Plan history range is out of bounds"),
+    }
+    let Some(db) = state.history.lock().await.clone() else {
+        return (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "data": { "snapshots": [] } })),
+        );
+    };
+    let rows = match tokio::task::spawn_blocking(move || db.query_plan_snapshots(from, to)).await {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => return server_error(&error),
+        Err(error) => return server_error(&format!("Plan history worker failed: {error}")),
+    };
+    // Rows hold the JSON the Planner served; return it as JSON, falling
+    // back to null for a row that somehow doesn't parse.
+    let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
+    let snapshots: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "recorded_at": row.recorded_at,
+                "kind": row.kind,
+                "strategy": row.strategy,
+                "plan": parse(&row.plan_json),
+                "forecast": parse(&row.forecast_json),
+            })
+        })
+        .collect();
     (
         StatusCode::OK,
-        Json(json!({ "ok": true, "data": { "snapshots": [] } })),
+        Json(json!({ "ok": true, "data": { "snapshots": snapshots } })),
     )
 }
 
+/// GET /api/forecast/plan — tariff-aware overnight charge recommendation
+/// (issue #283, Phase 2). Same inputs as `/api/forecast` plus the user's
+/// import-tariff config; never writes any register — Apply happens only
+/// from the UI through the existing control endpoints.
 pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     get_forecast_plan_at(state, chrono::Local::now()).await
 }
@@ -8439,34 +8493,40 @@ pub(crate) async fn get_forecast_plan_at(
         Ok(plan) => plan,
         Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
     };
-    let rec_value = plan_to_json_value(&charge);
-    let apply = rec_value
-        .get("apply")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "data": plan_response_json(&charge, export_advice.as_ref()),
+        })),
+    )
+}
+
+/// The `data` block of `GET /api/forecast/plan`: the recommendation, its
+/// Apply payload and the export advice. Also what the plan history stores
+/// (issue #361), so a past night reads exactly as it was shown.
+pub(crate) fn plan_response_json(
+    charge: &crate::forecast::planner::PlanRecommendation,
+    export_advice: Option<&crate::forecast::planner::ExportAdvice>,
+) -> Value {
+    let rec_value = plan_to_json_value(charge);
+    let apply = rec_value.get("apply").cloned().unwrap_or(Value::Null);
     let recommendation = {
         let mut r = rec_value.as_object().cloned().unwrap_or_default();
         r.remove("apply");
-        serde_json::Value::Object(r)
+        Value::Object(r)
     };
     // The export advice has no Apply path yet (read-only v1) — when it
     // stands down with the charge plan it serialises as null so the UI
     // hides the card entirely.
     let export = export_advice
-        .as_ref()
         .map(export_advice_to_json)
-        .unwrap_or(serde_json::Value::Null);
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "data": {
-                "recommendation": recommendation,
-                "apply": apply,
-                "export": export,
-            }
-        })),
-    )
+        .unwrap_or(Value::Null);
+    json!({
+        "recommendation": recommendation,
+        "apply": apply,
+        "export": export,
+    })
 }
 
 /// Compute the typed plan recommendation from a forecast payload, plus
@@ -8554,6 +8614,7 @@ pub(crate) fn compute_full_plan(
 /// by the API handler (which serialises it) and the poll loop's nightly
 /// auto-refresh (which acts on it), so the applied slot and the displayed
 /// plan can never come from different computations.
+#[cfg(test)]
 pub(crate) fn compute_plan_recommendation(
     forecast: &crate::forecast::ForecastPayload,
     settings: &crate::settings::Settings,
@@ -8749,7 +8810,9 @@ fn compute_charge_plan_inner<'a>(
 
 /// Serialise a `PlanRecommendation` into the JSON shape the UI/Apply
 /// path expects.
-fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> serde_json::Value {
+pub(crate) fn plan_to_json_value(
+    rec: &crate::forecast::planner::PlanRecommendation,
+) -> serde_json::Value {
     use crate::forecast::planner::PlanRecommendation;
     match rec {
         PlanRecommendation::NoChargeNeeded {
@@ -24090,14 +24153,8 @@ pub(crate) mod tests {
     // ---- plan history (issue #361) ------------------------------------------
 
     async fn state_with_plan_history(rows: &[crate::history::PlanSnapshotRow]) -> Arc<AppState> {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-plan-history-api-test-{}-{id}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create test dir");
-        let db = crate::history::HistoryDb::open(&dir.join("history.db")).expect("open db");
+        let path = crate::test_util::make_unique_test_dir("api-plan-history").join("history.db");
+        let db = crate::history::HistoryDb::open(&path).expect("open db");
         for row in rows {
             db.insert_plan_snapshot(row).expect("insert");
         }
@@ -24169,18 +24226,20 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn plan_history_defaults_to_the_last_week() {
         with_isolated_config_dir_async(|| async {
-            let now = chrono::Utc::now().timestamp();
+            // A pinned clock: the handler's default range is relative to it.
+            let now = 1_800_000_000;
             let state = state_with_plan_history(&[
                 history_row(now - 8 * 24 * 3600, "before_window"),
                 history_row(now - 3600, "before_window"),
             ])
             .await;
-            let (status, body) = get_plan_history(
-                State(state),
-                Query(PlanHistoryQuery {
+            let (status, body) = get_plan_history_at(
+                state,
+                PlanHistoryQuery {
                     from: None,
                     to: None,
-                }),
+                },
+                now,
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -24189,5 +24248,73 @@ pub(crate) mod tests {
             assert_eq!(snapshots[0]["recorded_at"], now - 3600);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_rejects_ranges_that_overflow() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[]).await;
+            for (from, to) in [
+                (Some(i64::MIN), Some(0)),
+                (Some(i64::MIN), Some(i64::MAX)),
+                (None, Some(i64::MIN)),
+            ] {
+                let (status, _) = get_plan_history_at(
+                    state.clone(),
+                    PlanHistoryQuery { from, to },
+                    1_800_000_000,
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{from:?}..{to:?}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_null_for_a_row_that_does_not_parse() {
+        with_isolated_config_dir_async(|| async {
+            let mut broken = history_row(1_000, "before_window");
+            broken.plan_json = "not json".to_string();
+            let state = state_with_plan_history(&[broken]).await;
+            let (status, body) = get_plan_history_at(
+                state,
+                PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(2_000),
+                },
+                1_800_000_000,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["snapshots"][0]["plan"], Value::Null);
+            assert_eq!(
+                body["data"]["snapshots"][0]["forecast"]["solar"][0]["kwh"],
+                0.5
+            );
+        })
+        .await;
+    }
+
+    /// The history stores what the Planner page is served: the shared
+    /// builder carries the recommendation, its Apply payload and the export
+    /// advice.
+    #[test]
+    fn plan_response_json_has_the_planner_pages_shape() {
+        use crate::forecast::planner::{ExportAdvice, PlanRecommendation};
+        let rec = PlanRecommendation::NoChargeNeeded {
+            current_soc_pct: 80.0,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 45.0,
+        };
+        let advice = ExportAdvice::NoExport {
+            reason: "none".to_string(),
+        };
+        let data = plan_response_json(&rec, Some(&advice));
+        assert_eq!(data["recommendation"]["kind"], "no_charge_needed");
+        assert!(data["recommendation"].get("apply").is_none());
+        assert_eq!(data["apply"], Value::Null);
+        assert_eq!(data["export"], export_advice_to_json(&advice));
+        assert_eq!(plan_response_json(&rec, None)["export"], Value::Null);
     }
 }

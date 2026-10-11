@@ -2240,6 +2240,26 @@ async fn forecast_endpoint_includes_current_schedule_when_slots_enabled() {
 }
 
 // ====================================================================
+// GET /api/forecast/plan-history — issue #361
+// ====================================================================
+
+/// The route is wired: an empty state answers with no recorded decisions,
+/// and a backwards range is rejected.
+#[tokio::test]
+async fn plan_history_endpoint_is_routed() {
+    let _config = IsolatedConfig::enter();
+    let router = create_router(Arc::new(AppState::new()));
+
+    let (status, body) = get_json(&router, "/api/forecast/plan-history").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["snapshots"], serde_json::json!([]));
+
+    let (status, _) = get_json(&router, "/api/forecast/plan-history?from=500&to=100").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ====================================================================
 // GET /api/forecast/plan — issue #283 Phase 2
 // ====================================================================
 
