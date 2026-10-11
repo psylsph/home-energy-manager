@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.87.0] - 2026-10-11
+
+### Added
+
+- **A "Cheapest overall" charging strategy for the planner.** Choose it under Plan settings and the planner picks whichever charge target costs least until the next cheap period, then holds it through the cheap window. It charges further when the sun might not show up, so the house doesn't end up on peak-rate power, and leaves room for the day's solar when exports earn little. To judge that it needs your import rates, and your export rates if you have them, set in Settings. It never goes below what your Minimum battery level needs, and a minimum of 0% still means no grid charging. "Keep a minimum" stays the default (#359).
+- **Octopus Go style cheap windows that start on the half hour are priced at their own rate** when the planner compares how much to charge.
+
 ## [0.86.1] - 2026-10-11
 
 ### Added
