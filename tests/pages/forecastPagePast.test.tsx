@@ -146,8 +146,8 @@ vi.mock('recharts', () => {
   ),
   Tooltip: () => <div />,
   CartesianGrid: () => <div />,
-  ReferenceLine: ({ x, label }: { x?: number; label?: { value?: string } }) => (
-    <div data-testid="reference-line" data-x={x} data-label={label?.value} />
+  ReferenceLine: ({ x, label, yAxisId }: { x?: number; label?: { value?: string }; yAxisId?: string }) => (
+    <div data-testid="reference-line" data-x={x} data-label={label?.value} data-yaxis-id={yAxisId ?? ''} />
   ),
   Legend: () => <div />,
   };
@@ -332,6 +332,22 @@ describe('ForecastPage — Show past (issue #361)', () => {
     for (const id of ['line-pastSolar', 'line-actualSolar', 'area-kwh', 'area-low', 'area-high']) {
       expect(screen.getByTestId(id).getAttribute('data-yaxis-id'), id).toBe('solar');
     }
+  });
+
+  it('binds the solar chart\'s "now" marker to the solar axis, or the page crashes (issue #364)', async () => {
+    // A ReferenceLine without a yAxisId looks up axis 0, which the solar chart
+    // does not have, and recharts throws "Invariant failed" as soon as a past
+    // range puts the marker on screen.
+    const { container } = render(<ForecastPage />);
+    await choose('24 hours');
+    await screen.findByTestId('line-pastSolar');
+    const panel = container.querySelector<HTMLElement>('#forecast-chart-panel-solar');
+    expect(panel).not.toBeNull();
+    const now = within(panel!)
+      .getAllByTestId('reference-line')
+      .filter((line) => line.getAttribute('data-label') === 'now');
+    expect(now.length).toBe(1);
+    expect(now[0].getAttribute('data-yaxis-id')).toBe('solar');
   });
 
   it('labels the solar chart in kW, because each hourly point is an average power', async () => {
