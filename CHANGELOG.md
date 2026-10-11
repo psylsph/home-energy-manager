@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.88.0] - 2026-10-11
+
+### Added
+
+- **The Planner can now show the past.** Pick 24 hours, 3 days or 7 days under "Show past" on the Battery and Solar charts and the earlier decisions appear behind the forward view: the battery level and solar the planner expected at the time, in their own colours, against what the battery and the sun really did. Short notes say how far out the plan and the forecast were, and a list underneath gives each night's decision with the reason the planner gave, so you can see why it did what it did (#361).
+
+### Changed
+
+- **The planner no longer warns that holding at a target is unconfirmed.** The note under the strategy picker asking you to check the battery on the first night is gone from every model. If a hold doesn't behave on your inverter, please report it.
+
+### Security
+
+- **Updated bundled libraries** to pick up fixes for the security advisories GitHub flagged, along with the usual Tauri and tooling updates.
+
 ## [0.87.0] - 2026-10-11
 
 ### Added
