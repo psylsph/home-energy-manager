@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.89.1] - 2026-10-11
+
+### Fixed
+
+- **The Planner no longer crashes when you open the Solar chart with a past range shown.** Choosing a range under "Show past" and switching to Solar showed "Something went wrong — Invariant failed" instead of the chart. Both charts now draw for every range (#364).
+
 ## [0.89.0] - 2026-10-11
 
 ### Added
