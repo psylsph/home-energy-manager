@@ -266,11 +266,20 @@ export type ForecastYAxisScale = {
   ticks: number[];
 };
 
-/** Return dated x-axis ticks at 12-hour intervals, including both bounds. */
-export function forecastXAxisTicks(start: number, end: number): number[] {
+/** Return dated x-axis ticks at 12-hour intervals (or `stepSeconds`),
+ *  including both bounds. A step that could not advance falls back to 12 h. */
+export function forecastXAxisTicks(
+  start: number,
+  end: number,
+  stepSeconds: number = FORECAST_X_AXIS_TICK_INTERVAL_SECONDS,
+): number[] {
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  const step =
+    Number.isFinite(stepSeconds) && stepSeconds > 0
+      ? stepSeconds
+      : FORECAST_X_AXIS_TICK_INTERVAL_SECONDS;
   const ticks: number[] = [];
-  for (let tick = start; tick <= end; tick += FORECAST_X_AXIS_TICK_INTERVAL_SECONDS) {
+  for (let tick = start; tick <= end; tick += step) {
     ticks.push(tick);
   }
   if (ticks[ticks.length - 1] !== end) ticks.push(end);

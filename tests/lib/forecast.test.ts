@@ -146,6 +146,25 @@ describe('forecastXAxisTicks', () => {
     expect(ticks).toEqual(Array.from({ length: 7 }, (_, i) => start + i * 12 * 3600));
     expect(formatForecastXAxisTick(start)).toMatch(/31 Aug 12:00/);
   });
+
+  it('takes a wider step so a long past view stays readable (issue #361)', () => {
+    const start = 1_700_000_000;
+    const end = start + 10 * 24 * 3600;
+    const ticks = forecastXAxisTicks(start, end, 24 * 3600);
+    expect(ticks).toHaveLength(11);
+    expect(ticks[1] - ticks[0]).toBe(24 * 3600);
+  });
+
+  it('ignores a step that could never advance', () => {
+    const start = 1_700_000_000;
+    for (const step of [0, -3600, Number.NaN]) {
+      expect(forecastXAxisTicks(start, start + 24 * 3600, step)).toEqual([
+        start,
+        start + 12 * 3600,
+        start + 24 * 3600,
+      ]);
+    }
+  });
 });
 
 describe('forecastYAxisScale', () => {

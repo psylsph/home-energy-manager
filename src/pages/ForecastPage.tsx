@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Area,
-  AreaChart,
   CartesianGrid,
   ComposedChart,
   Customized,
@@ -47,6 +46,23 @@ import {
   tomorrowSummary,
 } from '../lib/forecast';
 import type { ForecastData, PlanResponse, PlanStrategy } from '../lib/forecast';
+import {
+  actualSocSeries,
+  actualSolarKwhByHour,
+  compareBattery,
+  compareSolar,
+  decisionRows,
+  mergeSeries,
+  PAST_RANGES,
+  pastAxisDomain,
+  pastHistoryPath,
+  pastRangeSeconds,
+  pastTickStepSeconds,
+  planHistoryPath,
+  stitchPlannedBattery,
+  stitchPlannedSolar,
+} from '../lib/planHistory';
+import type { HistoryPoint, PastRange, PlanHistorySnapshot } from '../lib/planHistory';
 import type { InverterSnapshot } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 
@@ -60,6 +76,23 @@ import { useInverterStore } from '../store/useInverterStore';
  * degradation state renders an explanation — never zeros pretending to be
  * a prediction.
  */
+
+/** How far the forecast's generation time must move before the past view is
+ *  fetched again. */
+const PAST_REFRESH_SECS = 600;
+
+/** What the past fetch brought back for one range (issue #361). */
+type PastResult = {
+  range: PastRange;
+  /** The instant the window ends at: the forecast's generation time. */
+  nowSec: number;
+  snapshots: PlanHistorySnapshot[];
+  /** True when the decisions could not be fetched (as opposed to none). */
+  decisionsFailed: boolean;
+  soc: HistoryPoint[] | undefined;
+  solarPower: HistoryPoint[] | undefined;
+  errors: string[];
+};
 
 function ChartCard({
   title,
@@ -347,6 +380,13 @@ export default function ForecastPage() {
   const [effSaving, setEffSaving] = useState(false);
   const [effError, setEffError] = useState<string | null>(null);
   const [activeChart, setActiveChart] = useState<ForecastChart>('battery');
+  // "Show past" (issue #361): earlier planner decisions and what the
+  // battery and the sun actually did, drawn behind the forward charts.
+  const [pastRange, setPastRange] = useState<PastRange>('off');
+  const [pastResult, setPastResult] = useState<PastResult | null>(null);
+  // The payload's generation time, read by the past fetch so a refetch of
+  // the forecast never restarts it.
+  const generatedAtRef = useRef(0);
   // Roving-tabindex refs for the chart tab strip: after an arrow-key
   // selection the newly active tab must receive focus (WAI-ARIA tabs).
   const chartTabRefs = useRef<Record<ForecastChart, HTMLButtonElement | null>>({
@@ -392,6 +432,7 @@ export default function ForecastPage() {
           } & Record<string, unknown>;
         }>('/api/settings'),
       ]);
+      generatedAtRef.current = forecastRes.data.generated_at;
       setData(forecastRes.data);
       setPlan(planRes.data);
       if (settingsRes.data.forecast_min_soc_pct != null) {
@@ -469,6 +510,49 @@ export default function ForecastPage() {
       lastTriggerRef.current = { soc: newSoc, maxPowerW: newMaxPower };
     }
   }, [snapshot]);
+
+  // The past window ends at the forecast's generation time, which moves on
+  // as the page refetches; the past is fetched again each time it has moved
+  // a few minutes so the measured lines and recent decisions keep up.
+  const pastWindowKey = data ? Math.floor(data.generated_at / PAST_REFRESH_SECS) : 0;
+  // Fetch the recorded decisions and the measured history for the chosen
+  // past range. The two are independent: if one fails the other still
+  // draws. A late answer for a range that is no longer selected is dropped.
+  useEffect(() => {
+    if (pastRange === 'off') return;
+    let cancelled = false;
+    const nowSec = generatedAtRef.current;
+    void (async () => {
+      const [decisions, measured] = await Promise.allSettled([
+        apiGet<{ ok: boolean; data: { snapshots: PlanHistorySnapshot[] } }>(
+          planHistoryPath(pastRange, nowSec),
+        ),
+        apiGet<{ ok: boolean; data: Record<string, HistoryPoint[]> }>(
+          pastHistoryPath(pastRange, nowSec),
+        ),
+      ]);
+      if (cancelled) return;
+      const reason = (result: PromiseRejectedResult) =>
+        result.reason instanceof Error ? result.reason.message : 'request failed';
+      setPastResult({
+        range: pastRange,
+        nowSec,
+        snapshots: decisions.status === 'fulfilled' ? decisions.value.data?.snapshots ?? [] : [],
+        decisionsFailed: decisions.status === 'rejected',
+        soc: measured.status === 'fulfilled' ? measured.value.data?.soc : undefined,
+        solarPower: measured.status === 'fulfilled' ? measured.value.data?.solar_power : undefined,
+        errors: [
+          ...(decisions.status === 'rejected'
+            ? [`planner decisions: ${reason(decisions)}`]
+            : []),
+          ...(measured.status === 'rejected' ? [`measured history: ${reason(measured)}`] : []),
+        ],
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pastRange, pastWindowKey]);
 
   const saveMinSoc = async () => {
     if (minSocPctInput.trim() === '') {
@@ -744,6 +828,39 @@ export default function ForecastPage() {
       : undefined;
     return match ? { ...p, withCurrent: match[1] } : { ...p, withCurrent: undefined };
   });
+  // Past view (issue #361). Only the result for the range on screen counts:
+  // a stale one from an earlier choice, or one still loading, draws nothing.
+  const past = pastRange !== 'off' && pastResult?.range === pastRange ? pastResult : null;
+  const pastLoading = pastRange !== 'off' && past === null;
+  const pastNow = past?.nowSec ?? data.generated_at;
+  const pastSpan = pastRangeSeconds(pastRange);
+  const pastPlannedSoc = past ? stitchPlannedBattery(past.snapshots, pastNow) : [];
+  const pastActualSoc = past ? actualSocSeries(past.soc, pastNow - pastSpan, pastNow) : [];
+  const pastPlannedSolar = past ? stitchPlannedSolar(past.snapshots, pastNow) : [];
+  const pastActualSolar = past ? actualSolarKwhByHour(past.solarPower, pastNow) : [];
+  const hasPastPlanned = pastPlannedSoc.length > 0;
+  const hasPastActual = pastActualSoc.length > 0;
+  const hasPastSolar = pastPlannedSolar.length > 0;
+  const hasPastActualSolar = pastActualSolar.length > 0;
+  const batteryAccuracy = compareBattery(pastPlannedSoc, pastActualSoc);
+  const solarAccuracy = compareSolar(pastPlannedSolar, pastActualSolar);
+  const pastDecisions = past ? decisionRows(past.snapshots) : [];
+  const batteryRows = past
+    ? mergeSeries(batteryChartData, {
+        pastPlanned: pastPlannedSoc,
+        actualSoc: pastActualSoc,
+      })
+    : batteryChartData;
+  const solarRows = past
+    ? mergeSeries(solarChart, {
+        pastSolar: pastPlannedSolar,
+        actualSolar: pastActualSolar,
+      })
+    : solarChart;
+  // Past lines have their own colours: violet for what the planner
+  // expected, pale for what really happened.
+  const PAST_PLANNED_COLOUR = '#a78bfa';
+  const PAST_ACTUAL_COLOUR = '#e2e8f0';
   const lineVisible = (key: string) => !hiddenLines.has(key);
   // Legend descriptions: SOC always (the no-grid-charging baseline); the
   // what-if lines only when data exists for them.
@@ -768,6 +885,19 @@ export default function ForecastPage() {
             style: 'dotted' as const,
           },
         ]
+      : []),
+    ...(hasPastPlanned
+      ? [
+          {
+            key: 'pastPlanned',
+            label: 'Planned (past)',
+            colour: PAST_PLANNED_COLOUR,
+            style: 'dashed' as const,
+          },
+        ]
+      : []),
+    ...(hasPastActual
+      ? [{ key: 'actualSoc', label: 'Actual', colour: PAST_ACTUAL_COLOUR, style: 'solid' as const }]
       : []),
   ];
   // The consumption profile is a typical-day hour-of-day series; tile it
@@ -801,8 +931,21 @@ export default function ForecastPage() {
     forecastAxisDomain[0],
     forecastAxisDomain[1],
   );
+  // The battery and solar charts stretch back over the past view; the
+  // home-use chart has no past data and keeps the forward axis.
+  const chartAxisDomain = pastAxisDomain(pastRange, forecastAxisDomain[0], forecastAxisDomain[1]);
+  const chartAxisTicks = forecastXAxisTicks(
+    chartAxisDomain[0],
+    chartAxisDomain[1],
+    pastTickStepSeconds(pastRange),
+  );
   const solarYAxis = forecastYAxisScale(
-    Math.max(0, ...solarChart.map((point) => point.high)),
+    Math.max(
+      0,
+      ...solarChart.map((point) => point.high),
+      ...pastPlannedSolar.map(([, kwh]) => kwh),
+      ...pastActualSolar.map(([, kwh]) => kwh),
+    ),
   );
   const consumptionYAxis = forecastYAxisScale(
     Math.max(
@@ -1363,6 +1506,44 @@ export default function ForecastPage() {
           ))}
         </div>
 
+        {activeChart !== 'consumption' && (
+          <div
+            role="group"
+            aria-label="Show past"
+            data-testid="forecast-past-range"
+            className="flex flex-wrap items-center gap-2"
+          >
+            <span className="text-xs font-medium text-text-secondary">Show past</span>
+            <div className="inline-flex rounded-lg bg-bg-surface p-1">
+              {PAST_RANGES.map(({ key, label }) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={pastRange === key}
+                  onClick={() => {
+                    setPastRange(key);
+                    // Leaving the past view drops what was fetched, so
+                    // coming back never shows a stale window.
+                    if (key === 'off') setPastResult(null);
+                  }}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                    pastRange === key
+                      ? 'bg-bg-elevated text-text-primary shadow-sm'
+                      : 'text-text-secondary hover:text-text-primary'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {pastLoading && (
+              <span role="status" className="text-xs text-text-secondary animate-pulse">
+                Loading the past…
+              </span>
+            )}
+          </div>
+        )}
+
       <div
         role="tabpanel"
         id="forecast-chart-panel-solar"
@@ -1370,14 +1551,54 @@ export default function ForecastPage() {
         className={activeChart === 'solar' ? '' : 'hidden'}
         aria-hidden={activeChart !== 'solar'}
       >
-      <ChartCard title="Expected solar generation · next 72 hours">
-        {solarChart.length === 0 ? (
+      <ChartCard
+        title="Expected solar generation · next 72 hours"
+        footer={
+          hasPastSolar || hasPastActualSolar ? (
+            <>
+              <p className="text-[11px] text-text-secondary/70 font-sans leading-snug">
+                {hasPastSolar ? (
+                  <>
+                    <span
+                      aria-hidden
+                      className="inline-block w-3 h-px align-middle mr-1"
+                      style={{ borderTop: `2px dashed ${PAST_PLANNED_COLOUR}` }}
+                    />
+                    Forecast made at the time
+                  </>
+                ) : null}
+                {hasPastActualSolar ? (
+                  <>
+                    <span
+                      aria-hidden
+                      className={`inline-block w-3 h-px align-middle mr-1 ${hasPastSolar ? 'ml-3' : ''}`}
+                      style={{ borderTop: `2px solid ${PAST_ACTUAL_COLOUR}` }}
+                    />
+                    Actual generation
+                  </>
+                ) : null}
+              </p>
+              {solarAccuracy ? (
+                <p
+                  data-testid="forecast-past-solar-accuracy"
+                  className="mt-1 text-[11px] text-text-secondary/70 font-sans leading-snug"
+                >
+                  Solar: {solarAccuracy.forecastKwh.toFixed(1)} kWh forecast against{' '}
+                  {solarAccuracy.actualKwh.toFixed(1)} kWh generated over {solarAccuracy.hours}{' '}
+                  {solarAccuracy.hours === 1 ? 'hour' : 'hours'}.
+                </p>
+              ) : null}
+            </>
+          ) : undefined
+        }
+      >
+        {solarRows.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             No forecast data yet.
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={solarChart}>
+            <ComposedChart data={solarRows}>
               <CartesianGrid
                 {...getHistoryChartGridProps(gridLineWeight)}
                 horizontal={false}
@@ -1393,8 +1614,8 @@ export default function ForecastPage() {
                 stroke="#94a3b8"
                 fontSize={10}
                 {...timeAxisProps}
-                domain={forecastAxisDomain}
-                ticks={forecastAxisTicks}
+                domain={chartAxisDomain}
+                ticks={chartAxisTicks}
                 tickFormatter={formatForecastXAxisTick}
                 interval={0}
                 minTickGap={0}
@@ -1416,6 +1637,39 @@ export default function ForecastPage() {
                 labelFormatter={(ts) => formatForecastXAxisTick(Number(ts))}
                 formatter={(value: number | string) => `${Number(value).toFixed(2)} kWh`}
               />
+              {past && (
+                <ReferenceLine
+                  x={pastNow}
+                  stroke="#94a3b8"
+                  strokeDasharray="2 3"
+                  label={{ value: 'now', fill: '#94a3b8', fontSize: 10 }}
+                />
+              )}
+              {hasPastSolar && lineVisible('pastSolar') && (
+                <Line
+                  type="monotone"
+                  dataKey="pastSolar"
+                  stroke={PAST_PLANNED_COLOUR}
+                  strokeWidth={2}
+                  strokeDasharray="6 4"
+                  dot={false}
+                  name="Forecast (past)"
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              )}
+              {hasPastActualSolar && lineVisible('actualSolar') && (
+                <Line
+                  type="monotone"
+                  dataKey="actualSolar"
+                  stroke={PAST_ACTUAL_COLOUR}
+                  strokeWidth={2}
+                  dot={false}
+                  name="Actual"
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              )}
               <Area
                 type="monotone"
                 dataKey="kwh"
@@ -1441,7 +1695,7 @@ export default function ForecastPage() {
                 name="High"
                 legendType="none"
               />
-            </AreaChart>
+            </ComposedChart>
           </ResponsiveContainer>
         )}
       </ChartCard>
@@ -1569,7 +1823,7 @@ export default function ForecastPage() {
       <ChartCard
         title="Battery projection · next 72 hours"
         legend={
-          batteryChart.length > 0 ? (
+          batteryRows.length > 0 ? (
             <LineToggleLegend
               lines={batteryLegendLines}
               hidden={hiddenLines}
@@ -1578,7 +1832,8 @@ export default function ForecastPage() {
           ) : undefined
         }
         footer={
-          (data.battery != null && lineVisible('soc')) ||
+          <>
+          {(data.battery != null && lineVisible('soc')) ||
           (hasWithCharge && lineVisible('withCharge')) ||
           (hasWithSchedule && lineVisible('withCurrent')) ||
           (chargeMarkers.length > 0 && lineVisible('withCharge')) ? (
@@ -1649,16 +1904,45 @@ export default function ForecastPage() {
                 </p>
               ) : null}
             </>
-          ) : undefined
+          ) : undefined}
+            {hasPastPlanned && lineVisible('pastPlanned') ? (
+              <p
+                data-testid="forecast-past-plan-note"
+                className="text-[11px] text-text-secondary/70 font-sans leading-snug"
+              >
+                <span
+                  aria-hidden
+                  className="inline-block w-3 h-px align-middle mr-1"
+                  style={{ borderTop: `2px dashed ${PAST_PLANNED_COLOUR}` }}
+                />
+                SOC the planner expected at the time, if its recommendation was followed.
+              </p>
+            ) : null}
+            {batteryAccuracy ? (
+              <p
+                data-testid="forecast-past-battery-accuracy"
+                className="mt-1 text-[11px] text-text-secondary/70 font-sans leading-snug"
+              >
+                Battery: over this period the charge averaged{' '}
+                {batteryAccuracy.meanAbsErrorPct.toFixed(1)} points away from the plan
+                {Math.abs(batteryAccuracy.biasPct) >= 0.05
+                  ? `, ending ${Math.abs(batteryAccuracy.biasPct).toFixed(1)} points ${
+                      batteryAccuracy.biasPct < 0 ? 'below' : 'above'
+                    } it on average`
+                  : ''}
+                .
+              </p>
+            ) : null}
+          </>
         }
       >
-        {batteryChart.length === 0 ? (
+        {batteryRows.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             No battery projection — connect to the inverter.
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={batteryChartData}>
+            <LineChart data={batteryRows}>
               <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
               {lineVisible('withCharge') &&
                 chargeMarkers.map((marker) => {
@@ -1677,8 +1961,8 @@ export default function ForecastPage() {
                 stroke="#94a3b8"
                 fontSize={10}
                 {...timeAxisProps}
-                domain={forecastAxisDomain}
-                ticks={forecastAxisTicks}
+                domain={chartAxisDomain}
+                ticks={chartAxisTicks}
                 tickFormatter={formatForecastXAxisTick}
                 interval={0}
                 minTickGap={0}
@@ -1709,6 +1993,38 @@ export default function ForecastPage() {
                     label={{ value: `min ${minSocPct}%`, fill: '#fbbf24', fontSize: 10 }}
                   />
                 </>
+              )}
+              {past && (
+                <ReferenceLine
+                  x={pastNow}
+                  stroke="#94a3b8"
+                  strokeDasharray="2 3"
+                  label={{ value: 'now', fill: '#94a3b8', fontSize: 10 }}
+                />
+              )}
+              {hasPastPlanned && lineVisible('pastPlanned') && (
+                <Line
+                  type="monotone"
+                  dataKey="pastPlanned"
+                  stroke={PAST_PLANNED_COLOUR}
+                  strokeWidth={2}
+                  strokeDasharray="6 4"
+                  dot={false}
+                  name="Planned (past)"
+                  isAnimationActive={false}
+                />
+              )}
+              {hasPastActual && lineVisible('actualSoc') && (
+                <Line
+                  type="monotone"
+                  dataKey="actualSoc"
+                  stroke={PAST_ACTUAL_COLOUR}
+                  strokeWidth={2}
+                  dot={false}
+                  name="Actual"
+                  connectNulls
+                  isAnimationActive={false}
+                />
               )}
               {lineVisible('soc') && (
                 <Line
@@ -1752,6 +2068,54 @@ export default function ForecastPage() {
         )}
       </ChartCard>
       </div>
+
+      {past && activeChart !== 'consumption' && (
+        <section
+          aria-label="Past planner decisions"
+          className="bg-bg-surface rounded-lg p-3 sm:p-4 flex flex-col gap-2"
+        >
+          <h2 className="text-sm font-semibold text-text-primary">Past planner decisions</h2>
+          {past.errors.length > 0 && (
+            <p
+              data-testid="forecast-past-error"
+              role="alert"
+              className="text-xs text-red-400"
+            >
+              Couldn’t load the {past.errors.join(' or the ')}.
+            </p>
+          )}
+          {pastDecisions.length > 0 && (
+            <ul data-testid="forecast-past-decisions" className="flex flex-col gap-2">
+              {pastDecisions.map((decision) => (
+                <li
+                  key={`${decision.recordedAt}-${decision.kind}`}
+                  data-testid="forecast-past-decision"
+                  className="rounded-lg bg-bg-elevated p-3"
+                >
+                  <div className="flex flex-wrap items-baseline gap-x-2 text-[11px] text-text-secondary">
+                    <span className="font-semibold">
+                      {formatForecastXAxisTick(decision.recordedAt)}
+                    </span>
+                    <span>{decision.kindLabel}</span>
+                  </div>
+                  <div className="mt-0.5 text-sm font-semibold text-text-primary">
+                    {decision.title}
+                  </div>
+                  {decision.rationale && (
+                    <p className="mt-0.5 text-xs text-text-secondary">{decision.rationale}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {pastDecisions.length === 0 && !past.decisionsFailed && (
+            <p data-testid="forecast-past-empty" className="text-xs text-text-secondary">
+              No planner decisions were recorded in this period. The planner records one before each
+              cheap window once weather is set up, so there is nothing to look back on yet.
+            </p>
+          )}
+        </section>
+      )}
       </div>
 
     </div>

@@ -389,7 +389,11 @@ describe('ForecastPage', () => {
 
   it('uses a composed chart so both consumption median lines render and join the tooltip', async () => {
     render(<ForecastPage />);
-    expect(await screen.findByTestId('forecast-composed-chart')).toBeTruthy();
+    // The solar chart is composed too (it draws the past lines), so scope
+    // to the consumption panel.
+    await screen.findByText('Weekday median');
+    const panel = document.getElementById('forecast-chart-panel-consumption')!;
+    expect(within(panel).getByTestId('forecast-composed-chart')).toBeTruthy();
     expect(screen.getByText('Weekday median')).toBeTruthy();
     expect(screen.getByText('Weekend median')).toBeTruthy();
   });
