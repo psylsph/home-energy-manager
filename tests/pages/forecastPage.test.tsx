@@ -1331,6 +1331,73 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
   });
 
+  const cheapestPlan = () => {
+    const plan = holdPlan();
+    (plan.data as { recommendation: Record<string, unknown> }).recommendation.strategy = 'cheapest';
+    return plan;
+  };
+
+  it('offers a cheapest-overall strategy option', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-strategy');
+    expect(screen.getByRole('option', { name: /cheapest overall/i })).toBeTruthy();
+  });
+
+  it('shows the saved cheapest strategy as selected', async () => {
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect((screen.getByTestId('forecast-plan-strategy') as HTMLSelectElement).value).toBe(
+        'cheapest',
+      );
+    });
+  });
+
+  it('saves the cheapest strategy when chosen', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    const select = await screen.findByTestId('forecast-plan-strategy');
+    apiPostMocked.mockClear();
+    fireEvent.change(select, { target: { value: 'cheapest' } });
+    await waitFor(() => {
+      expect(apiPostMocked).toHaveBeenCalledWith('/api/settings', {
+        forecast_plan_strategy: 'cheapest',
+      });
+    });
+  });
+
+  it('explains the cheapest strategy in the description', async () => {
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-target');
+    expect(
+      screen.getByText(/Charges as far as the cheap rate saves money, then holds the battery there/),
+    ).toBeTruthy();
+  });
+
+  it('shows the cheapest target on the plan card and applies it', async () => {
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-plan-target')).toHaveTextContent(
+      'to 75%, then hold',
+    );
+    fireEvent.click(screen.getByTestId('forecast-plan-apply'));
+    await waitFor(() => {
+      const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');
+      expect(slotCall?.[1]).toMatchObject({ target_soc: 75 });
+    });
+  });
+
+  it('shows the unconfirmed-hold note for cheapest on Gen2Hybrid', async () => {
+    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-plan-strategy-note')).toHaveTextContent(
+      /confirmed on Gen 3/i,
+    );
+  });
+
   it('shows no target for a minimum-SOC plan', async () => {
     mockPage(planPayload('charge'));
     render(<ForecastPage />);

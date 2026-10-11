@@ -401,7 +401,10 @@ export default function ForecastPage() {
       setPlanAutoRefresh(settingsRes.data.forecast_plan_auto_refresh ?? false);
       setPlanAutoApply(settingsRes.data.forecast_plan_auto_apply_enabled ?? false);
       setPlanStrategy(
-        settingsRes.data.forecast_plan_strategy === 'hold_window' ? 'hold_window' : 'min_soc',
+        settingsRes.data.forecast_plan_strategy === 'hold_window' ||
+          settingsRes.data.forecast_plan_strategy === 'cheapest'
+          ? settingsRes.data.forecast_plan_strategy
+          : 'min_soc',
       );
       if (syncForm) {
         if (settingsRes.data.forecast_min_soc_pct != null) {
@@ -676,7 +679,7 @@ export default function ForecastPage() {
   // Issue #360: explain what a 0% minimum, or one at or below the inverter
   // reserve, means to the planner beside the input.
   const reserveNote = minimumSocNote(minSocPct, data.battery?.reserve_soc_pct);
-  const holdNote = planStrategy === 'hold_window' ? holdStrategyNote(snapshot?.device_type) : null;
+  const holdNote = planStrategy !== 'min_soc' ? holdStrategyNote(snapshot?.device_type) : null;
   const holdTarget = plan?.recommendation ? holdTargetPct(plan.recommendation) : null;
   const anchoredProjection = data.battery
     ? anchorSeriesAtNow(
@@ -1028,6 +1031,7 @@ export default function ForecastPage() {
               >
                 <option value="min_soc">Keep a minimum</option>
                 <option value="hold_window">Hold through the cheap window</option>
+                <option value="cheapest">Cheapest overall</option>
               </select>
               {planStrategyError && (
                 <span data-testid="forecast-plan-strategy-error" className="text-xs text-red-400">
@@ -1036,9 +1040,11 @@ export default function ForecastPage() {
               )}
             </div>
             <p className="text-[11px] text-text-secondary font-sans">
-              {planStrategy === 'hold_window'
-                ? 'Charges to the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house for the rest of the cheap window.'
-                : 'Charges at full rate for just long enough to stay above your minimum, then lets the battery run the house again.'}
+              {planStrategy === 'cheapest'
+                ? 'Charges as far as the cheap rate saves money, then holds the battery there. Plans against the low solar estimate, so a dull day costs less, and leaves room for the sun when exports earn little.'
+                : planStrategy === 'hold_window'
+                  ? 'Charges to the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house for the rest of the cheap window.'
+                  : 'Charges at full rate for just long enough to stay above your minimum, then lets the battery run the house again.'}
             </p>
             {holdNote && (
               <p data-testid="forecast-plan-strategy-note" className="text-[11px] text-amber-300 font-sans">

@@ -431,7 +431,7 @@ export function truncateSeriesAtNextChargeStart(
 }
 
 /** How the Planner sizes the overnight charge (issue #359). */
-export type PlanStrategy = 'min_soc' | 'hold_window';
+export type PlanStrategy = 'min_soc' | 'hold_window' | 'cheapest';
 
 export type PlanRecommendation =
   | {
@@ -547,11 +547,13 @@ export function minimumSocNote(
   );
 }
 
-/** The slot target of a hold-through-window plan, % (issue #359), or null
- *  for any other plan. Keyed on the strategy: a target alone doesn't make
- *  a plan a hold. */
+/** The slot target of a hold-through-window plan, % (issue #359; the
+ *  cheapest-overall strategy shares the same charge-then-hold slot), or
+ *  null for any other plan. Keyed on the strategy: a target alone doesn't
+ *  make a plan a hold. */
 export function holdTargetPct(rec: PlanRecommendation): number | null {
-  if (rec.kind !== 'charge' || rec.strategy !== 'hold_window') return null;
+  if (rec.kind !== 'charge') return null;
+  if (rec.strategy !== 'hold_window' && rec.strategy !== 'cheapest') return null;
   return rec.slot_target_soc_pct ?? null;
 }
 

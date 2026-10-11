@@ -694,6 +694,24 @@ describe('hold plans (issue #359 review)', () => {
     ).toBe('Overnight charge — Tonight 23:00\u201306:00, 15.0 kWh');
   });
 
+  it('reads the target from a cheapest-overall plan too (issue #359)', () => {
+    expect(holdTargetPct({ ...charge, strategy: 'cheapest', slot_target_soc_pct: 75 })).toBe(75);
+    // Still null without a strategy, even with a target present.
+    expect(holdTargetPct({ ...charge, slot_target_soc_pct: 75 })).toBeNull();
+  });
+
+  it('titles a cheapest-overall plan with its target', () => {
+    expect(
+      forecastPlanTitle({
+        ...charge,
+        window: { start: '23:00', end: '06:00', rate: 0.07, tomorrow: false },
+        kwh: 15,
+        strategy: 'cheapest',
+        slot_target_soc_pct: 75,
+      }),
+    ).toBe('Overnight charge — Tonight 23:00\u201306:00, to 75% then hold');
+  });
+
   it('only needs a target read back when one below 100 was requested', () => {
     expect(chargeTargetReadBack(100, 62)).toBe(true);
     expect(chargeTargetReadBack(75, 75)).toBe(true);
