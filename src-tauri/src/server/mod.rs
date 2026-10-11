@@ -239,6 +239,7 @@ fn create_router_at(
         .route("/api/weather/backfill", post(api::backfill_weather))
         .route("/api/forecast", forecast_route)
         .route("/api/forecast/plan", forecast_plan_route)
+        .route("/api/forecast/plan-history", get(api::get_plan_history))
         // Reconnect control
         .route("/api/reconnect", post(api::post_reconnect))
         // Discovery

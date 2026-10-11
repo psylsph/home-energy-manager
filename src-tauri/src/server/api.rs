@@ -8382,6 +8382,29 @@ pub(crate) async fn get_forecast_at(
 /// (issue #283, Phase 2). Same inputs as `/api/forecast` plus the user's
 /// import-tariff config; never writes any register — Apply happens only
 /// from the UI through the existing control endpoints.
+/// Query for `GET /api/forecast/plan-history` (issue #361): unix-second
+/// bounds, `from` inclusive and `to` exclusive. Defaults to the last week.
+#[derive(Debug, Deserialize)]
+pub struct PlanHistoryQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+/// Longest range `GET /api/forecast/plan-history` serves in one request.
+pub const PLAN_HISTORY_MAX_SPAN_SECS: i64 = 31 * 24 * 3600;
+
+/// GET /api/forecast/plan-history — the Planner decisions recorded in a
+/// time range, each with the forecast it was computed from (issue #361).
+pub async fn get_plan_history(
+    State(_state): State<Arc<AppState>>,
+    Query(_params): Query<PlanHistoryQuery>,
+) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "data": { "snapshots": [] } })),
+    )
+}
+
 pub async fn get_forecast_plan(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     get_forecast_plan_at(state, chrono::Local::now()).await
 }
@@ -24062,5 +24085,109 @@ pub(crate) mod tests {
                 },
             })
         );
+    }
+
+    // ---- plan history (issue #361) ------------------------------------------
+
+    async fn state_with_plan_history(rows: &[crate::history::PlanSnapshotRow]) -> Arc<AppState> {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-plan-history-api-test-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let db = crate::history::HistoryDb::open(&dir.join("history.db")).expect("open db");
+        for row in rows {
+            db.insert_plan_snapshot(row).expect("insert");
+        }
+        let state = test_state();
+        *state.history.lock().await = Some(Arc::new(db));
+        state
+    }
+
+    fn history_row(recorded_at: i64, kind: &str) -> crate::history::PlanSnapshotRow {
+        crate::history::PlanSnapshotRow {
+            recorded_at,
+            kind: kind.to_string(),
+            strategy: "hold_window".to_string(),
+            plan_json: r#"{"kind":"charge","slot_target_soc_pct":75}"#.to_string(),
+            forecast_json: r#"{"solar":[{"timestamp":1,"kwh":0.5}]}"#.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_the_decisions_in_the_range() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[
+                history_row(1_000, "before_window"),
+                history_row(2_000, "auto_apply"),
+                history_row(5_000, "refresh"),
+            ])
+            .await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(1_000),
+                    to: Some(3_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let snapshots = body["data"]["snapshots"].as_array().expect("snapshots");
+            assert_eq!(snapshots.len(), 2, "{}", body.0);
+            assert_eq!(snapshots[0]["recorded_at"], 1_000);
+            assert_eq!(snapshots[0]["kind"], "before_window");
+            assert_eq!(snapshots[1]["kind"], "auto_apply");
+            assert_eq!(snapshots[1]["strategy"], "hold_window");
+            // The stored JSON comes back as objects, not strings.
+            assert_eq!(snapshots[0]["plan"]["slot_target_soc_pct"], 75);
+            assert_eq!(snapshots[0]["forecast"]["solar"][0]["kwh"], 0.5);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_rejects_a_backwards_or_oversized_range() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[]).await;
+            for (from, to) in [(5_000, 1_000), (0, PLAN_HISTORY_MAX_SPAN_SECS + 1)] {
+                let (status, _) = get_plan_history(
+                    State(state.clone()),
+                    Query(PlanHistoryQuery {
+                        from: Some(from),
+                        to: Some(to),
+                    }),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{from}..{to}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_defaults_to_the_last_week() {
+        with_isolated_config_dir_async(|| async {
+            let now = chrono::Utc::now().timestamp();
+            let state = state_with_plan_history(&[
+                history_row(now - 8 * 24 * 3600, "before_window"),
+                history_row(now - 3600, "before_window"),
+            ])
+            .await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: None,
+                    to: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let snapshots = body["data"]["snapshots"].as_array().expect("snapshots");
+            assert_eq!(snapshots.len(), 1, "{}", body.0);
+            assert_eq!(snapshots[0]["recorded_at"], now - 3600);
+        })
+        .await;
     }
 }

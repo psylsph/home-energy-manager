@@ -283,6 +283,24 @@ fn same_utc_day(a_ms: i64, b_ms: i64) -> bool {
 /// columns - the server computes them from the `today_*_kwh` counters and the
 /// configured tariff (see [`HistoryDb::query_cost_series`]). The frontend
 /// requests them like any other field; the history handler routes them here.
+/// How long Planner decisions are kept (issue #361).
+pub const PLAN_SNAPSHOT_RETENTION_DAYS: i64 = 90;
+
+/// One stored Planner decision (issue #361).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanSnapshotRow {
+    /// When the plan was computed, unix seconds.
+    pub recorded_at: i64,
+    /// What recorded it: `before_window`, `auto_apply` or `refresh`.
+    pub kind: String,
+    /// The planner strategy in force, as saved in settings.
+    pub strategy: String,
+    /// The recommendation JSON the Planner page shows.
+    pub plan_json: String,
+    /// The forecast payload the plan was computed from.
+    pub forecast_json: String,
+}
+
 pub const IMPORT_COST_FIELD: &str = "_import_cost";
 pub const EXPORT_INCOME_FIELD: &str = "_export_income";
 
@@ -959,6 +977,18 @@ CREATE TABLE IF NOT EXISTS octopus_tariff_prices (
 -- forecast wins per hour+variable+source) so predicted-vs-actual
 -- tracking can later compare any stored forecast hour against the
 -- reading that materialised.
+-- What the Planner decided and the forecast it decided from (issue #361),
+-- so a past night can be compared with what actually happened. One row
+-- per decision: the recommendation JSON the Planner page shows and the
+-- full forecast payload behind it. Kept for PLAN_SNAPSHOT_RETENTION_DAYS.
+CREATE TABLE IF NOT EXISTS plan_snapshots (
+    recorded_at   INTEGER NOT NULL,
+    kind          TEXT NOT NULL,
+    strategy      TEXT NOT NULL,
+    plan_json     TEXT NOT NULL,
+    forecast_json TEXT NOT NULL,
+    PRIMARY KEY (recorded_at, kind)
+);
 CREATE TABLE IF NOT EXISTS forecast_values (
     timestamp  INTEGER NOT NULL,
     variable   TEXT NOT NULL,
@@ -2392,6 +2422,28 @@ impl HistoryDb {
         Ok(())
     }
 
+    /// Store one Planner decision (issue #361). A row with the same
+    /// `recorded_at` and `kind` is replaced.
+    pub fn insert_plan_snapshot(&self, _row: &PlanSnapshotRow) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Planner decisions with `since_ts <= recorded_at < until_ts`, oldest
+    /// first.
+    pub fn query_plan_snapshots(
+        &self,
+        _since_ts: i64,
+        _until_ts: i64,
+    ) -> Result<Vec<PlanSnapshotRow>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Delete Planner decisions recorded before `before_ts`. Returns the
+    /// number of rows removed.
+    pub fn prune_plan_snapshots(&self, _before_ts: i64) -> Result<usize, String> {
+        Ok(0)
+    }
+
     /// Batch-upsert forecast variable samples into `forecast_values`.
     /// Returns the number of rows written. All-or-nothing via a
     /// transaction so a partial fetch never leaves a half-updated
@@ -3423,6 +3475,67 @@ mod tests {
         let dir = unique_test_dir("givenergy-history-test");
         let path = dir.join("test_history.db");
         HistoryDb::open(&path).unwrap()
+    }
+
+    fn plan_row(recorded_at: i64, kind: &str, plan: &str) -> PlanSnapshotRow {
+        PlanSnapshotRow {
+            recorded_at,
+            kind: kind.to_string(),
+            strategy: "hold_window".to_string(),
+            plan_json: plan.to_string(),
+            forecast_json: r#"{"solar":[]}"#.to_string(),
+        }
+    }
+
+    #[test]
+    fn plan_snapshots_round_trip_in_time_order_within_the_range() {
+        let db = test_db();
+        for row in [
+            plan_row(300, "auto_apply", r#"{"kind":"charge"}"#),
+            plan_row(100, "before_window", r#"{"kind":"no_plan"}"#),
+            plan_row(200, "refresh", r#"{"kind":"no_charge_needed"}"#),
+            plan_row(400, "before_window", r#"{"kind":"charge"}"#),
+        ] {
+            db.insert_plan_snapshot(&row).unwrap();
+        }
+        let rows = db.query_plan_snapshots(100, 400).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.recorded_at).collect::<Vec<_>>(),
+            vec![100, 200, 300],
+            "until is exclusive"
+        );
+        assert_eq!(rows[2], plan_row(300, "auto_apply", r#"{"kind":"charge"}"#));
+    }
+
+    #[test]
+    fn a_plan_snapshot_with_the_same_time_and_kind_is_replaced() {
+        let db = test_db();
+        db.insert_plan_snapshot(&plan_row(100, "auto_apply", "{}"))
+            .unwrap();
+        db.insert_plan_snapshot(&plan_row(100, "auto_apply", r#"{"kind":"charge"}"#))
+            .unwrap();
+        db.insert_plan_snapshot(&plan_row(100, "refresh", "{}"))
+            .unwrap();
+        let rows = db.query_plan_snapshots(0, 1_000).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == "auto_apply" && r.plan_json.contains("charge")));
+    }
+
+    #[test]
+    fn pruning_drops_only_plan_snapshots_before_the_cutoff() {
+        let db = test_db();
+        for at in [100, 200, 300] {
+            db.insert_plan_snapshot(&plan_row(at, "before_window", "{}"))
+                .unwrap();
+        }
+        assert_eq!(db.prune_plan_snapshots(200).unwrap(), 1);
+        let rows = db.query_plan_snapshots(0, 1_000).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.recorded_at).collect::<Vec<_>>(),
+            vec![200, 300]
+        );
     }
 
     #[test]

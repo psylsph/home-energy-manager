@@ -617,6 +617,10 @@ pub struct AppState {
     /// skipped because Adaptive Charge owns the charge rate. In-memory
     /// only, so the warning fires at most once per day.
     pub forecast_plan_apply_warned: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// Last date the poll loop recorded the Planner's decision shortly
+    /// before the cheap window (issue #361). In-memory only: a restart in
+    /// the lead window records one more snapshot, which is harmless.
+    pub forecast_plan_snapshot_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
     /// Weather subsystem state — current config, last fetch result, backfill
     /// progress. Always present (not `Option<…>` like `history`) so the API
     /// layer doesn't have to special-case "weather not yet initialised".
@@ -797,6 +801,7 @@ impl AppState {
             forecast_plan_refresh_date: Arc::new(Mutex::new(None)),
             forecast_plan_refresh_warned: Arc::new(Mutex::new(None)),
             forecast_plan_apply_date: Arc::new(Mutex::new(None)),
+            forecast_plan_snapshot_date: Arc::new(Mutex::new(None)),
             forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
             evc_reachability: Arc::new(Mutex::new(crate::evc::EvcReachability::default())),
@@ -4136,6 +4141,16 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 )
                                 .await;
                                 crate::inverter::forecast_plan::run_plan_auto_apply(
+                                    &state,
+                                    &poll_settings,
+                                    &snapshot,
+                                    plan_now,
+                                )
+                                .await;
+                                // Record the Planner's decision shortly before the
+                                // cheap window for the plan history (issue #361),
+                                // unless an automation above already did today.
+                                crate::inverter::forecast_plan::run_plan_snapshot(
                                     &state,
                                     &poll_settings,
                                     &snapshot,

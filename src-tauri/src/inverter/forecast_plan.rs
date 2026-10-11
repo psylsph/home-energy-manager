@@ -547,6 +547,21 @@ pub(crate) async fn run_plan_auto_apply(
     }
 }
 
+/// Minutes before the cheap window at which the Planner's decision is
+/// recorded for the plan history (issue #361) when no automation did.
+pub const PLAN_SNAPSHOT_LEAD_MINUTES: u16 = 15;
+
+/// Record the Planner's decision shortly before the cheap window for the
+/// plan history (issue #361), once a day, unless the auto-refresh or
+/// auto-apply already recorded the plan they acted on today.
+pub(crate) async fn run_plan_snapshot(
+    _state: &Arc<AppState>,
+    _settings: &Settings,
+    _snapshot: &InverterSnapshot,
+    _now: DateTime<Local>,
+) {
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1504,6 +1519,114 @@ mod tests {
             settings.adaptive_charge_enabled = true;
             run_plan_refresh(&state, &settings, &gen2(), local_dt(2026, 8, 31, 15, 0)).await;
             assert_eq!(*state.forecast_plan_refresh_warned.lock().await, None);
+        })
+        .await;
+    }
+
+    // ---- plan history (issue #361) ----------------------------------------------
+
+    async fn state_with_history() -> Arc<AppState> {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-plan-snapshot-test-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create plan snapshot test dir");
+        let db = crate::history::HistoryDb::open(&dir.join("history.db")).expect("open db");
+        let state = Arc::new(AppState::new());
+        *state.history.lock().await = Some(Arc::new(db));
+        state
+    }
+
+    async fn recorded(state: &Arc<AppState>) -> Vec<crate::history::PlanSnapshotRow> {
+        state
+            .history
+            .lock()
+            .await
+            .clone()
+            .expect("history db")
+            .query_plan_snapshots(0, i64::MAX)
+            .expect("query")
+    }
+
+    fn snapshot_settings() -> Settings {
+        Settings {
+            import_tariff_config: Some(flux_tariff()),
+            forecast_plan_strategy: crate::settings::PlanStrategy::HoldWindow,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_decision_is_recorded_once_shortly_before_the_cheap_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            // Ten minutes before Flux's 02:00 window.
+            let now = local_dt(2026, 8, 31, 1, 50);
+            run_plan_snapshot(&state, &snapshot_settings(), &gen2(), now).await;
+            let rows = recorded(&state).await;
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0].kind, "before_window");
+            assert_eq!(rows[0].strategy, "hold_window");
+            assert_eq!(rows[0].recorded_at, now.timestamp());
+            let plan: serde_json::Value = serde_json::from_str(&rows[0].plan_json).unwrap();
+            assert!(plan["kind"].is_string(), "{plan}");
+            let forecast: serde_json::Value = serde_json::from_str(&rows[0].forecast_json).unwrap();
+            assert!(forecast["solar"].is_array(), "{forecast}");
+
+            // Later polls the same day record nothing more.
+            run_plan_snapshot(
+                &state,
+                &snapshot_settings(),
+                &gen2(),
+                now + chrono::Duration::minutes(5),
+            )
+            .await;
+            assert_eq!(recorded(&state).await.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn no_decision_is_recorded_outside_the_lead_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            run_plan_snapshot(
+                &state,
+                &snapshot_settings(),
+                &gen2(),
+                local_dt(2026, 8, 31, 1, 30),
+            )
+            .await;
+            assert!(recorded(&state).await.is_empty());
+            assert_eq!(*state.forecast_plan_snapshot_date.lock().await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn no_extra_decision_is_recorded_after_an_automation_ran_today() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let now = local_dt(2026, 8, 31, 1, 50);
+            *state.forecast_plan_apply_date.lock().await = Some(now.date_naive());
+            run_plan_snapshot(&state, &snapshot_settings(), &gen2(), now).await;
+            assert!(recorded(&state).await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn auto_apply_records_the_plan_it_acted_on() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let now = before_the_cheap_window();
+            run_plan_auto_apply(&state, &auto_apply_settings(), &gen2(), now).await;
+            let rows = recorded(&state).await;
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0].kind, "auto_apply");
+            assert_eq!(rows[0].strategy, "min_soc");
         })
         .await;
     }
