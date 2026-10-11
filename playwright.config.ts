@@ -19,6 +19,7 @@ export default defineConfig({
     '**/timed-export-stop-restart.spec.ts',
     '**/websocket-stale-timeout.spec.ts',
     '**/charge-slot-target-soc.spec.ts',
+    '**/forecast-past.spec.ts',
   ],
   fullyParallel: false,
   workers: 1,
