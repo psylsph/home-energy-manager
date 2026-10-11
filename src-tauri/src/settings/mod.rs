@@ -808,6 +808,12 @@ pub enum PlanStrategy {
     /// ends, so the battery isn't charged only to be drained at the cheap
     /// rate.
     HoldWindow,
+    /// The hold strategy at whichever target costs least over the cycle
+    /// (issue #359): charge further at the cheap rate whenever that
+    /// replaces dearer grid import later, up to what the window and the
+    /// battery can hold. Plans against the low solar estimate, so a
+    /// forecast that doesn't show up costs less.
+    Cheapest,
 }
 
 /// Read `forecast_plan_strategy` leniently: a value this version doesn't
@@ -2954,7 +2960,7 @@ mod tests {
     /// discard the whole settings file after a downgrade.
     #[test]
     fn unknown_plan_strategy_falls_back_without_losing_other_settings() {
-        for raw in [r#""cheapest""#, "42", "null", r#"{"x":1}"#] {
+        for raw in [r#""fastest""#, "42", "null", r#"{"x":1}"#] {
             let file = format!(
                 r#"{{"host": "192.168.1.77", "port": 8899, "serial": "",
                 "poll_interval": 60, "auto_connect": true, "forecast_plan_strategy": {raw}}}"#

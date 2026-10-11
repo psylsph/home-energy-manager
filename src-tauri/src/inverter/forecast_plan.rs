@@ -1003,6 +1003,7 @@ mod tests {
                 rate: 0.07,
             },
             target_soc_pct: 62,
+            strategy: crate::settings::PlanStrategy::HoldWindow,
             kwh: 5.4,
             min_soc_pct: 20.0,
             observed_min_soc_pct: 4.0,
@@ -1114,6 +1115,7 @@ mod tests {
             } => PlanRecommendation::ChargeAndHold {
                 window,
                 target_soc_pct: target,
+                strategy: crate::settings::PlanStrategy::HoldWindow,
                 kwh,
                 min_soc_pct,
                 observed_min_soc_pct,

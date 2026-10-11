@@ -2232,7 +2232,7 @@ pub async fn update_settings(
         }
         if let Some(v) = body.get("forecast_plan_strategy") {
             persist.forecast_plan_strategy = serde_json::from_value(v.clone()).map_err(|_| {
-                "Unknown planner strategy — expected \"min_soc\" or \"hold_window\"".to_string()
+                "Unknown planner strategy — expected \"min_soc\", \"hold_window\" or \"cheapest\"".to_string()
             })?;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
@@ -8624,6 +8624,52 @@ pub(crate) fn compute_plan_recommendation(
     compute_full_plan(forecast, settings, snapshot, now_ts).0
 }
 
+/// Which solar estimate [`forecast_sim_hours`] builds the series from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolarBand {
+    /// The calibrated median forecast.
+    Median,
+    /// The low end of the forecast band, capped at the median.
+    Low,
+}
+
+/// Rebuild the planner's hourly inputs from the forecast payload: its solar
+/// series paired with the weekday/weekend consumption profile for each
+/// hour. Re-running the simulation on these is how the planner sizes a
+/// charge against the real post-charge trajectory.
+pub(crate) fn forecast_sim_hours(
+    forecast: &crate::forecast::ForecastPayload,
+    band: SolarBand,
+) -> Vec<crate::forecast::simulate::SimHourInput> {
+    use chrono::{Datelike, Timelike};
+    forecast
+        .solar
+        .iter()
+        .map(|s| {
+            let local = chrono::DateTime::from_timestamp(s.timestamp, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local));
+            let local_hour = local.map(|dt| dt.hour() as usize).unwrap_or(0);
+            let is_weekend = local
+                .map(|dt| dt.weekday().number_from_monday() >= 6)
+                .unwrap_or(false);
+            let profile = if is_weekend {
+                &forecast.consumption_weekend
+            } else {
+                &forecast.consumption_weekday
+            };
+            let consumption_kwh = profile.get(local_hour).map(|c| c.kwh).unwrap_or(0.0);
+            crate::forecast::simulate::SimHourInput {
+                timestamp: s.timestamp,
+                solar_kwh: match band {
+                    SolarBand::Median => s.kwh,
+                    SolarBand::Low => s.band_low.min(s.kwh),
+                },
+                consumption_kwh,
+            }
+        })
+        .collect()
+}
+
 /// The context the export advice needs to ride the charge plan's
 /// trajectory: the reconstructed hourly inputs, the simulation params,
 /// the import tariff, and the user's SOC floor.
@@ -8647,9 +8693,7 @@ fn compute_charge_plan_inner<'a>(
     crate::forecast::planner::PlanRecommendation,
     Option<ExportContext<'a>>,
 ) {
-    use crate::forecast::simulate::{
-        SimHourInput, SimHourResult, SimulationOutput, SimulationParams,
-    };
+    use crate::forecast::simulate::{SimHourResult, SimulationOutput, SimulationParams};
     let import_tariff = settings.import_tariff_config.as_ref();
 
     if forecast
@@ -8746,29 +8790,12 @@ fn compute_charge_plan_inner<'a>(
     // untouched. The forecast payload exposes `solar` (per-timestamp)
     // and the weekday/weekend consumption profiles (per-hour-of-day); pair them back up so the
     // re-simulation sees the same hourly inputs the original did.
-    let sim_hours: Vec<SimHourInput> = forecast
-        .solar
-        .iter()
-        .map(|s| {
-            let local = chrono::DateTime::from_timestamp(s.timestamp, 0)
-                .map(|dt| dt.with_timezone(&chrono::Local));
-            let local_hour = local.map(|dt| dt.hour() as usize).unwrap_or(0);
-            let is_weekend = local
-                .map(|dt| dt.weekday().number_from_monday() >= 6)
-                .unwrap_or(false);
-            let profile = if is_weekend {
-                &forecast.consumption_weekend
-            } else {
-                &forecast.consumption_weekday
-            };
-            let cons = profile.get(local_hour).map(|c| c.kwh).unwrap_or(0.0);
-            SimHourInput {
-                timestamp: s.timestamp,
-                solar_kwh: s.kwh,
-                consumption_kwh: cons,
-            }
-        })
-        .collect();
+    let sim_hours = forecast_sim_hours(forecast, SolarBand::Median);
+    // The cheapest strategy also prices the low solar estimate (issue
+    // #359); no other strategy reads it, so it is only built for that one.
+    let low_solar_hours = (settings.forecast_plan_strategy
+        == crate::settings::PlanStrategy::Cheapest)
+        .then(|| forecast_sim_hours(forecast, SolarBand::Low));
 
     let params = SimulationParams {
         capacity_kwh,
@@ -8795,7 +8822,14 @@ fn compute_charge_plan_inner<'a>(
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
-    let charge = crate::forecast::planner::plan_charge(&inputs, settings.forecast_plan_strategy);
+    let charge = crate::forecast::planner::plan_charge(
+        &inputs,
+        settings.forecast_plan_strategy,
+        &crate::forecast::planner::CostInputs {
+            export_tariff: settings.export_tariff_config.as_ref(),
+            low_solar_hours: low_solar_hours.as_deref(),
+        },
+    );
     // The export advice rides the same trajectory: hand over the hourly
     // inputs, params, tariff, and floor. `None` when there is no import
     // tariff — the charge planner has already NoPlan'd on that gate.
@@ -8906,6 +8940,7 @@ pub(crate) fn plan_to_json_value(
         PlanRecommendation::ChargeAndHold {
             window,
             target_soc_pct,
+            strategy,
             kwh,
             min_soc_pct,
             observed_min_soc_pct,
@@ -8928,7 +8963,7 @@ pub(crate) fn plan_to_json_value(
                 import_tomorrow_with_charge_kwh: *import_tomorrow_with_charge_kwh,
                 export_tomorrow_with_charge_kwh: *export_tomorrow_with_charge_kwh,
             });
-            value["strategy"] = serde_json::json!(crate::settings::PlanStrategy::HoldWindow);
+            value["strategy"] = serde_json::json!(strategy);
             value["slot_target_soc_pct"] = serde_json::json!(target_soc_pct);
             value["apply"]["charge_slot"]["target_soc"] = serde_json::json!(target_soc_pct);
             value
@@ -20182,6 +20217,19 @@ pub(crate) mod tests {
 
             let (status, _) = update_settings(
                 State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "cheapest" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_strategy,
+                PlanStrategy::Cheapest
+            );
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_strategy"], "cheapest");
+
+            let (status, _) = update_settings(
+                State(state.clone()),
                 Json(json!({ "forecast_plan_strategy": "min_soc" })),
             )
             .await;
@@ -24107,6 +24155,7 @@ pub(crate) mod tests {
                 rate: 0.07,
             },
             target_soc_pct: 62,
+            strategy: crate::settings::PlanStrategy::HoldWindow,
             kwh: 5.4,
             min_soc_pct: 20.0,
             observed_min_soc_pct: 4.0,
@@ -24316,5 +24365,69 @@ pub(crate) mod tests {
         assert_eq!(data["apply"], Value::Null);
         assert_eq!(data["export"], export_advice_to_json(&advice));
         assert_eq!(plan_response_json(&rec, None)["export"], Value::Null);
+    }
+
+    // ---- cheapest-overall inputs (issue #359) ----------------------------
+
+    fn forecast_with_bands(bands: &[(f64, f64, f64)]) -> crate::forecast::ForecastPayload {
+        let flat: Vec<crate::forecast::ForecastConsumptionHour> = (0..24u8)
+            .map(|hour| crate::forecast::ForecastConsumptionHour {
+                hour,
+                kwh: 0.5,
+                p25: 0.4,
+                p75: 0.6,
+            })
+            .collect();
+        crate::forecast::ForecastPayload {
+            generated_at: 0,
+            forecast_fetched_at: None,
+            forecast_age_seconds: None,
+            status: Vec::new(),
+            performance_ratio: None,
+            performance_ratio_days: None,
+            solar: bands
+                .iter()
+                .enumerate()
+                .map(|(i, (kwh, low, high))| crate::forecast::ForecastSolarHour {
+                    timestamp: 1_800_000_000 + i as i64 * 3600,
+                    kwh: *kwh,
+                    band_low: *low,
+                    band_high: *high,
+                })
+                .collect(),
+            solar_today_remaining_kwh: 0.0,
+            solar_tomorrow_kwh: 0.0,
+            consumption_weekday: flat.clone(),
+            consumption_weekend: flat,
+            consumption_days_observed: 7,
+            consumption_sufficient: true,
+            consumption_tomorrow_kwh: 12.0,
+            battery: None,
+            import_tomorrow_kwh: 0.0,
+            export_tomorrow_kwh: 0.0,
+        }
+    }
+
+    #[test]
+    fn the_planner_hours_use_the_median_or_the_low_solar_band() {
+        let forecast = forecast_with_bands(&[(2.0, 1.2, 2.8), (0.0, 0.0, 0.0), (1.0, 1.4, 1.6)]);
+        let median = forecast_sim_hours(&forecast, SolarBand::Median);
+        let low = forecast_sim_hours(&forecast, SolarBand::Low);
+        assert_eq!(
+            median.iter().map(|h| h.solar_kwh).collect::<Vec<_>>(),
+            vec![2.0, 0.0, 1.0]
+        );
+        // Never above the median, even if the band is malformed.
+        assert_eq!(
+            low.iter().map(|h| h.solar_kwh).collect::<Vec<_>>(),
+            vec![1.2, 0.0, 1.0]
+        );
+        // Same hours, same consumption.
+        for (m, l) in median.iter().zip(&low) {
+            assert_eq!(
+                (m.timestamp, m.consumption_kwh),
+                (l.timestamp, l.consumption_kwh)
+            );
+        }
     }
 }

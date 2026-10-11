@@ -101,6 +101,8 @@ pub enum PlanRecommendation {
         window: ChargeWindow,
         /// The slot's target SOC, % — the register value written.
         target_soc_pct: u8,
+        /// Which strategy chose the target: `HoldWindow` or `Cheapest`.
+        strategy: PlanStrategy,
         kwh: f64,
         min_soc_pct: f64,
         observed_min_soc_pct: f64,
@@ -1169,15 +1171,23 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     }
 }
 
+mod cost;
 mod hold;
+pub use cost::{plan_cheapest_overall, CostInputs};
 pub use hold::{hold_charging_window, plan_hold_through_window};
 
 /// Compute the recommendation for the user's chosen strategy (issue
 /// #359). [`PlanStrategy::MinSoc`] is exactly [`plan_overnight_charge`].
-pub fn plan_charge(inputs: &PlanInputs, strategy: PlanStrategy) -> PlanRecommendation {
+/// `extras` carries what only the cheapest strategy uses.
+pub fn plan_charge(
+    inputs: &PlanInputs,
+    strategy: PlanStrategy,
+    extras: &CostInputs,
+) -> PlanRecommendation {
     match strategy {
         PlanStrategy::MinSoc => plan_overnight_charge(inputs),
         PlanStrategy::HoldWindow => plan_hold_through_window(inputs),
+        PlanStrategy::Cheapest => plan_cheapest_overall(inputs, extras),
     }
 }
 
@@ -4562,11 +4572,11 @@ mod tests {
             plan_inputs_with_min(&bruce, &bruce_hours, &bp, Some(&bt), 20.0),
         ] {
             assert_eq!(
-                plan_charge(&inputs, PlanStrategy::MinSoc),
+                plan_charge(&inputs, PlanStrategy::MinSoc, &CostInputs::default()),
                 plan_overnight_charge(&inputs)
             );
             assert_eq!(
-                plan_charge(&inputs, PlanStrategy::HoldWindow),
+                plan_charge(&inputs, PlanStrategy::HoldWindow, &CostInputs::default()),
                 plan_hold_through_window(&inputs)
             );
         }
@@ -4729,6 +4739,425 @@ mod tests {
             f64::from(target),
             at_2330.ceil(),
             "23:30 level {at_2330:.2}"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Cheapest-overall strategy (issue #359)
+    // ----------------------------------------------------------------
+
+    struct CheapestPlan {
+        window: ChargeWindow,
+        target: u8,
+        strategy: PlanStrategy,
+        kwh: f64,
+        rationale: String,
+    }
+
+    fn cheapest_plan(rec: PlanRecommendation) -> CheapestPlan {
+        match rec {
+            PlanRecommendation::ChargeAndHold {
+                window,
+                target_soc_pct,
+                strategy,
+                kwh,
+                rationale,
+                ..
+            } => CheapestPlan {
+                window,
+                target: target_soc_pct,
+                strategy,
+                kwh,
+                rationale,
+            },
+            other => panic!("expected ChargeAndHold, got {other:?}"),
+        }
+    }
+
+    /// A winter day with real but uncertain sun: 0.8 kWh/h from 09:00 to
+    /// 15:00 against a house that draws 1.2 kWh/h through the evening. The
+    /// second return value is the same day if the sun doesn't show up.
+    fn uncertain_winter_case() -> (
+        SimulationOutput,
+        Vec<SimHourInput>,
+        Vec<SimHourInput>,
+        SimulationParams,
+    ) {
+        let bp = bruce_params();
+        let solar: [f64; 24] =
+            std::array::from_fn(|h| if (9..=15).contains(&h) { 0.8 } else { 0.0 });
+        let load: [f64; 24] =
+            std::array::from_fn(|h| if (17..=21).contains(&h) { 1.2 } else { 0.5 });
+        let (sim, hours) = fixed_48h(40.0, solar, load, &bp);
+        let no_sun: Vec<SimHourInput> = hours
+            .iter()
+            .map(|h| SimHourInput {
+                solar_kwh: 0.0,
+                ..*h
+            })
+            .collect();
+        (sim, hours, no_sun, bp)
+    }
+
+    /// Grid import over the day after Bruce's 23:00–06:00 window, kWh.
+    fn import_after_window(
+        hours: &[SimHourInput],
+        p: &SimulationParams,
+        now: i64,
+        target: u8,
+    ) -> f64 {
+        let window = ChargeWindow {
+            start_min: 23 * 60,
+            end_min: 6 * 60,
+            tomorrow: false,
+            rate: 0.07,
+        };
+        let outcome = hold::simulate_hold(hours, p, &window, now, target).expect("simulates");
+        // Index 30 is 06:00 on the second day, 46 the hour before the next
+        // window opens.
+        outcome.series[30..47].iter().map(|h| h.import_kwh).sum()
+    }
+
+    fn with_low_sun<'a>(low: &'a [SimHourInput]) -> CostInputs<'a> {
+        CostInputs {
+            low_solar_hours: Some(low),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cheapest_charges_further_than_the_minimum_when_the_sun_may_underdeliver() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let (_, hold_target, ..) = hold_plan(plan_hold_through_window(&inputs));
+        let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &with_low_sun(&no_sun)));
+        assert_eq!(cheapest.strategy, PlanStrategy::Cheapest);
+        assert_eq!(
+            (cheapest.window.start_min, cheapest.window.end_min),
+            (23 * 60, 6 * 60)
+        );
+        assert!(
+            cheapest.target > hold_target,
+            "cheapest {} vs minimum-holding {hold_target}",
+            cheapest.target
+        );
+        // The extra charge replaces peak-rate import if the sun is missing.
+        let at_hold = import_after_window(&no_sun, &bp, inputs.now_ts, hold_target);
+        let at_cheapest = import_after_window(&no_sun, &bp, inputs.now_ts, cheapest.target);
+        assert!(at_hold > 1.0, "the minimum-holding plan imports {at_hold}");
+        assert!(at_cheapest < at_hold - 1.0, "{at_cheapest} vs {at_hold}");
+    }
+
+    #[test]
+    fn cheapest_stops_once_charging_further_costs_more_than_it_saves() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &with_low_sun(&no_sun)));
+        assert!(cheapest.target < 100, "target {}", cheapest.target);
+    }
+
+    #[test]
+    fn cheapest_matches_the_minimum_without_a_low_solar_estimate() {
+        // With one forecast and a minimum above the reserve, the minimum
+        // plan already avoids every unit of peak import: nothing to save.
+        let (sim, hours, _, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let (_, hold_target, ..) = hold_plan(plan_hold_through_window(&inputs));
+        let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &CostInputs::default()));
+        assert_eq!(cheapest.target, hold_target);
+    }
+
+    #[test]
+    fn cheapest_never_targets_below_what_the_minimum_needs() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        for min in [0.0, 10.0, 20.0, 50.0] {
+            let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), min);
+            let hold_target = match plan_hold_through_window(&inputs) {
+                PlanRecommendation::ChargeAndHold { target_soc_pct, .. } => target_soc_pct,
+                _ => continue,
+            };
+            if let PlanRecommendation::ChargeAndHold { target_soc_pct, .. } =
+                plan_cheapest_overall(&inputs, &with_low_sun(&no_sun))
+            {
+                assert!(target_soc_pct >= hold_target, "min {min}");
+            }
+        }
+    }
+
+    #[test]
+    fn cheapest_does_not_charge_further_when_the_cheap_rate_loses_to_the_day_rate() {
+        // 26p at the wall is about 30p stored and returned, dearer than
+        // the 27p it would replace: only the minimum is worth charging for.
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let dear_night = tariff(&[
+            ("00:00", "06:00", 0.26),
+            ("06:00", "23:00", 0.27),
+            ("23:00", "23:59", 0.26),
+        ]);
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&dear_night), 20.0);
+        let (_, hold_target, ..) = hold_plan(plan_hold_through_window(&inputs));
+        let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &with_low_sun(&no_sun)));
+        assert_eq!(cheapest.target, hold_target);
+    }
+
+    #[test]
+    fn cheapest_needs_no_charge_when_solar_covers_the_day_even_on_the_low_estimate() {
+        let p = params();
+        let flux = flux_tariff();
+        let sunny: [f64; 24] =
+            std::array::from_fn(|h| if (6..=19).contains(&h) { 1.4 } else { 0.0 });
+        let p_high = SimulationParams {
+            start_soc_pct: 80.0,
+            ..p
+        };
+        let (sim, hours) = simulate_tomorrow_at(80.0, sunny, [0.15; 24], &p_high);
+        // Low estimate: the sun at 60%, still plenty.
+        let low: Vec<SimHourInput> = hours
+            .iter()
+            .map(|h| SimHourInput {
+                solar_kwh: h.solar_kwh * 0.6,
+                ..*h
+            })
+            .collect();
+        let inputs = plan_inputs(&sim, &hours, &p_high, Some(&flux));
+        assert!(matches!(
+            plan_cheapest_overall(&inputs, &with_low_sun(&low)),
+            PlanRecommendation::NoChargeNeeded { .. }
+        ));
+    }
+
+    #[test]
+    fn cheapest_never_charges_from_the_grid_at_a_zero_minimum() {
+        // 0% is the "solar only" setting, in every strategy.
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 0.0);
+        assert!(matches!(
+            plan_cheapest_overall(&inputs, &with_low_sun(&no_sun)),
+            PlanRecommendation::NoChargeNeeded { .. }
+        ));
+    }
+
+    #[test]
+    fn cheapest_passes_the_no_plan_gates_through() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        for inputs in [
+            plan_inputs_with_min(&sim, &hours, &bp, None, 20.0),
+            PlanInputs {
+                consumption_sufficient: false,
+                ..plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0)
+            },
+        ] {
+            let plan = plan_cheapest_overall(&inputs, &with_low_sun(&no_sun));
+            assert!(
+                matches!(plan, PlanRecommendation::NoPlan { .. }),
+                "{plan:?}"
+            );
+            assert_eq!(plan, plan_overnight_charge(&inputs));
+        }
+    }
+
+    #[test]
+    fn cheapest_reports_honestly_when_even_full_cannot_hold_the_minimum() {
+        let p = params();
+        let (sim, hours) = simulate_tomorrow(0.2, 0.5, &p);
+        let flux = flux_tariff();
+        let cheapest = cheapest_plan(plan_cheapest_overall(
+            &plan_inputs(&sim, &hours, &p, Some(&flux)),
+            &CostInputs::default(),
+        ));
+        assert_eq!(cheapest.strategy, PlanStrategy::Cheapest);
+        assert_eq!(cheapest.target, 100);
+        assert!(
+            cheapest.rationale.contains("still below"),
+            "{}",
+            cheapest.rationale
+        );
+    }
+
+    #[test]
+    fn cheapest_explains_what_it_saves() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &with_low_sun(&no_sun)));
+        let r = &cheapest.rationale;
+        assert!(r.contains("cheapest"), "{r}");
+        assert!(r.contains(&format!("{}%", cheapest.target)), "{r}");
+        assert!(r.contains("less than"), "{r}");
+        assert!(r.contains("low solar"), "{r}");
+        assert!(r.contains('£'), "{r}");
+        assert!(cheapest.kwh > 0.0);
+    }
+
+    #[test]
+    fn exports_are_priced_when_choosing_how_far_to_charge() {
+        // A sunny day on a small battery. If exports earn nothing, every
+        // kWh charged at night is a kWh of the day's solar with nowhere to
+        // go, so the plan leaves room for the sun. Paid well for exports,
+        // filling the battery cheaply and selling the sun beats storing it.
+        let p = SimulationParams {
+            start_soc_pct: 30.0,
+            ..bruce_params()
+        };
+        let solar: [f64; 24] =
+            std::array::from_fn(|h| if (9..=15).contains(&h) { 3.0 } else { 0.0 });
+        // Starts at the planning moment (22:00), so only the hours ahead
+        // differ between the two forecasts.
+        let (sim, hours) = build_48h_series(30.0, solar, [0.4; 24], &p);
+        let no_sun: Vec<SimHourInput> = hours
+            .iter()
+            .map(|h| SimHourInput {
+                solar_kwh: 0.0,
+                ..*h
+            })
+            .collect();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &p, Some(&bt), 20.0);
+        let unpaid = cheapest_plan(plan_cheapest_overall(&inputs, &with_low_sun(&no_sun)));
+        let generous = tariff(&[("00:00", "23:59", 0.60)]);
+        let paid = cheapest_plan(plan_cheapest_overall(
+            &inputs,
+            &CostInputs {
+                export_tariff: Some(&generous),
+                low_solar_hours: Some(&no_sun),
+            },
+        ));
+        assert!(
+            unpaid.target < 60,
+            "room left for the sun: {}",
+            unpaid.target
+        );
+        assert!(
+            paid.target > unpaid.target + 20,
+            "paid {} vs unpaid {}",
+            paid.target,
+            unpaid.target
+        );
+    }
+
+    #[test]
+    fn a_low_solar_estimate_of_the_wrong_length_is_ignored() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let truncated = &no_sun[..no_sun.len() - 1];
+        assert_eq!(
+            plan_cheapest_overall(&inputs, &with_low_sun(truncated)),
+            plan_cheapest_overall(&inputs, &CostInputs::default())
+        );
+    }
+
+    #[test]
+    fn plan_charge_dispatches_the_cheapest_strategy() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let extras = with_low_sun(&no_sun);
+        assert_eq!(
+            plan_charge(&inputs, PlanStrategy::Cheapest, &extras),
+            plan_cheapest_overall(&inputs, &extras)
+        );
+    }
+
+    #[test]
+    fn cheapest_prices_a_window_that_starts_on_the_half_hour_at_its_own_rate() {
+        // Octopus Go style: 00:30–05:30. The hour before the window opens
+        // must not be billed halfway to the day rate for charging that
+        // only happens in its second half.
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let go = tariff(&[
+            ("00:00", "00:30", 0.28),
+            ("00:30", "05:30", 0.07),
+            ("05:30", "23:59", 0.28),
+        ]);
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&go), 20.0);
+        let (_, hold_target, ..) = hold_plan(plan_hold_through_window(&inputs));
+        let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &with_low_sun(&no_sun)));
+        assert_eq!(
+            (cheapest.window.start_min, cheapest.window.end_min),
+            (30, 5 * 60 + 30)
+        );
+        assert!(
+            cheapest.target > hold_target,
+            "cheapest {} vs minimum-holding {hold_target}",
+            cheapest.target
+        );
+    }
+
+    #[test]
+    fn cheapest_holds_a_battery_that_would_otherwise_drain_in_the_window() {
+        // Already at 80% with a heavy night and bright day ahead: nothing
+        // to charge, but sitting out the window on grid power at the cheap
+        // rate keeps stored energy that Eco would burn and later pay round
+        // trip losses to refill. That is a plan, not "no charge needed".
+        let p = SimulationParams {
+            start_soc_pct: 80.0,
+            ..bruce_params()
+        };
+        let solar: [f64; 24] =
+            std::array::from_fn(|h| if (9..=15).contains(&h) { 3.0 } else { 0.0 });
+        let load: [f64; 24] = std::array::from_fn(|h| if h >= 23 || h < 6 { 1.2 } else { 0.3 });
+        let (sim, hours) = build_48h_series(80.0, solar, load, &p);
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &p, Some(&bt), 20.0);
+        let cheapest = cheapest_plan(plan_cheapest_overall(&inputs, &CostInputs::default()));
+        assert!(cheapest.kwh < 0.1, "charges nothing, got {}", cheapest.kwh);
+        assert!(
+            cheapest.target >= 75,
+            "holds the level, got {}",
+            cheapest.target
+        );
+    }
+
+    #[test]
+    fn cheapest_rationale_does_not_quote_a_clamped_or_blended_net_cost() {
+        let (sim, hours, no_sun, bp) = uncertain_winter_case();
+        let bt = bruce_tariff();
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&bt), 20.0);
+        let r = cheapest_plan(plan_cheapest_overall(&inputs, &with_low_sun(&no_sun))).rationale;
+        assert!(!r.contains("net cost"), "{r}");
+        assert!(r.contains("on average"), "{r}");
+    }
+
+    #[test]
+    fn grid_draw_inside_a_half_hour_window_is_priced_at_the_window_rate() {
+        // Octopus Go style 00:30–05:30 at 7p, 28p outside it. Charge to
+        // full: the cycle's cost is the window's grid draw at 7p, plus any
+        // import outside it at 28p, less the value of what's left, with
+        // none of the 00:00 hour billed at a rate halfway between.
+        let (sim, hours, _, bp) = uncertain_winter_case();
+        let go = tariff(&[
+            ("00:00", "00:30", 0.28),
+            ("00:30", "05:30", 0.07),
+            ("05:30", "23:59", 0.28),
+        ]);
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&go), 20.0);
+        let ctx = hold::prepare_hold(&inputs).expect("a window to plan");
+        let full = ctx.simulate(&bp, 100).expect("simulates");
+        let end = ctx.next_occurrence_start.unwrap_or(full.series.len());
+        let day_import: f64 = full.series[ctx.first_index..end]
+            .iter()
+            .map(|h| h.import_kwh)
+            .sum::<f64>()
+            - full.grid_kwh;
+        // The battery runs flat in the half hour before the window opens,
+        // which is real day-rate import and must stay at the day rate.
+        assert!(day_import > 0.0, "the fixture needs some day-rate import");
+        let cost = cost::cycle_cost(&ctx, &full, &bp, &go, None);
+        let left_over = (full.series[end - 1].soc_pct - bp.reserve_soc_pct) / 100.0
+            * bp.capacity_kwh
+            * bp.discharge_efficiency;
+        let expected = full.grid_kwh * 0.07 + day_import * 0.28
+            - left_over * 0.07 / (bp.charge_efficiency * bp.discharge_efficiency);
+        assert!(
+            (cost - expected).abs() < 1e-6,
+            "cost {cost} vs expected {expected}"
         );
     }
 }
