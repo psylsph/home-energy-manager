@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.89.0] - 2026-10-11
+
+### Added
+
+- **The Planner's past view now reaches back 30 and 90 days.** Choose 30 days or 90 days under "Show past" to compare earlier nights' plans with what the battery and the sun actually did over a longer stretch.
+- **The charge rate shows what the inverter last reported.** Beside the charge setting, the page now shows the rate the inverter is holding, so an unsaved slider can't pass for the inverter's own value. Once a reading is more than a minute old, it says how long ago it was read.
+
+### Security
+
+- **Patched katex**, a development-tooling dependency that GitHub flagged for a prototype pollution advisory. It isn't part of the shipped app, so nothing changes for users.
+
 ## [0.88.0] - 2026-10-11
 
 ### Added
