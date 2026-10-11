@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.86.1] - 2026-10-11
+
+### Added
+
+- **The planner now keeps a history of its decisions.** Each night's plan, with the solar forecast it was based on, is stored for 90 days, so a past night can be compared with what the battery and the sun actually did. A page to browse it is coming next; recording starts now, so there is history to look at when it arrives (#361).
+
 ## [0.86.0] - 2026-10-09
 
 ### Added
