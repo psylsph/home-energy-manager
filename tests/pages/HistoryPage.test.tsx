@@ -73,6 +73,33 @@ async function clickRange(label: string) {
   fireEvent.click(btn);
 }
 
+/**
+ * Replace the Blob download plumbing with spies so an export never reaches
+ * jsdom's own blob URL support (which differs between jsdom releases) and
+ * records what was downloaded. `settled()` waits for the page's delayed
+ * cleanup (revoke) so nothing fires after the test has torn down.
+ */
+function stubBlobDownload() {
+  const downloads: string[] = [];
+  const createSpy = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:test');
+  const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+  const clickSpy = vi
+    .spyOn(HTMLAnchorElement.prototype, 'click')
+    .mockImplementation(function mockClick(this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
+  return {
+    downloads,
+    settled: () =>
+      waitFor(() => expect(revokeSpy).toHaveBeenCalledWith('blob:test'), { timeout: 3000 }),
+    restore: () => {
+      clickSpy.mockRestore();
+      revokeSpy.mockRestore();
+      createSpy.mockRestore();
+    },
+  };
+}
+
 describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
   beforeEach(() => {
     silenceConsoleError();
@@ -424,63 +451,60 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
     });
 
     it('clicking Export all fetches the union of all six tabs\' fields', async () => {
-      // Populate a synthetic response so the button is enabled. The shape
-      // mirrors what the real backend returns: { field: [{t, v}, ...] }.
-      const samplePoint = { t: 1700000000000, v: 1 };
-      fetchHistoryMock.mockImplementationOnce(async (...args: unknown[]) => {
-        const [range, fields, offset, rolling] = args as [string, string[], number, boolean];
-        fetchHistoryCalls.push({ range, fields: [...fields], offset, rolling });
-        const result: Record<string, typeof samplePoint[]> = {};
-        for (const f of fields) result[f] = [samplePoint];
-        return result;
-      });
+      const download = stubBlobDownload();
+      try {
+        // Populate a synthetic response so the button is enabled. The shape
+        // mirrors what the real backend returns: { field: [{t, v}, ...] }.
+        const samplePoint = { t: 1700000000000, v: 1 };
+        fetchHistoryMock.mockImplementationOnce(async (...args: unknown[]) => {
+          const [range, fields, offset, rolling] = args as [string, string[], number, boolean];
+          fetchHistoryCalls.push({ range, fields: [...fields], offset, rolling });
+          const result: Record<string, typeof samplePoint[]> = {};
+          for (const f of fields) result[f] = [samplePoint];
+          return result;
+        });
 
-      render(<HistoryPage />);
-      await waitFor(() => {
-        expect(fetchHistoryCalls.length).toBeGreaterThan(0);
-      });
+        render(<HistoryPage />);
+        await waitFor(() => {
+          expect(fetchHistoryCalls.length).toBeGreaterThan(0);
+        });
 
-      // Initial Battery tab fetch is the per-tab one. Capture its field count
-      // so we can assert the combined fetch is wider.
-      const perTabFieldCount = fetchHistoryCalls[0]!.fields.length;
+        // Initial Battery tab fetch is the per-tab one. Capture its field count
+        // so we can assert the combined fetch is wider.
+        const perTabFieldCount = fetchHistoryCalls[0]!.fields.length;
 
-      const exportAllBtn = screen.getByRole('button', {
-        name: 'Export all tabs as a single combined CSV',
-      });
-      fireEvent.click(exportAllBtn);
+        const exportAllBtn = screen.getByRole('button', {
+          name: 'Export all tabs as a single combined CSV',
+        });
+        fireEvent.click(exportAllBtn);
 
-      await waitFor(() => {
-        // Two fetches total now: initial mount + combined export.
-        expect(fetchHistoryCalls.length).toBe(2);
-      });
-      const combined = fetchHistoryCalls[1]!;
-      // The combined call should ask for more fields than the active tab's
-      // per-tab fetch — every series from every tab, deduplicated.
-      expect(combined.fields.length).toBeGreaterThan(perTabFieldCount);
-      // Sanity: a few canonical fields from non-Battery tabs must be present
-      // so we know it actually pulled from the full union, not just the
-      // active tab's series.
-      expect(combined.fields).toContain('pv1_power');
-      expect(combined.fields).toContain('grid_voltage');
-      expect(combined.fields).toContain('home_power');
-      expect(combined.fields).toContain('battery_temperature');
-      expect(combined.fields).toContain('_import_cost');
+        await waitFor(() => {
+          // Two fetches total now: initial mount + combined export.
+          expect(fetchHistoryCalls.length).toBe(2);
+        });
+        const combined = fetchHistoryCalls[1]!;
+        // The combined call should ask for more fields than the active tab's
+        // per-tab fetch — every series from every tab, deduplicated.
+        expect(combined.fields.length).toBeGreaterThan(perTabFieldCount);
+        // Sanity: a few canonical fields from non-Battery tabs must be present
+        // so we know it actually pulled from the full union, not just the
+        // active tab's series.
+        expect(combined.fields).toContain('pv1_power');
+        expect(combined.fields).toContain('grid_voltage');
+        expect(combined.fields).toContain('home_power');
+        expect(combined.fields).toContain('battery_temperature');
+        expect(combined.fields).toContain('_import_cost');
+        await download.settled();
+      } finally {
+        download.restore();
+      }
     });
 
     it('combined export uses "history" as the file label (issue #199)', async () => {
       // Intercept the download link's `download` attribute (the only place
       // the filename flows through in jsdom — there's no real file system).
-      const downloads: string[] = [];
-      const originalCreate = URL.createObjectURL;
-      URL.createObjectURL = vi.fn(() => {
-        const blobUrl = 'blob:test';
-        return blobUrl;
-      });
-      const clickSpy = vi
-        .spyOn(HTMLAnchorElement.prototype, 'click')
-        .mockImplementation(function mockClick(this: HTMLAnchorElement) {
-          downloads.push(this.download);
-        });
+      const download = stubBlobDownload();
+      const { downloads } = download;
 
       const samplePoint = { t: 1700000000000, v: 1 };
       fetchHistoryMock.mockImplementationOnce(async (...args: unknown[]) => {
@@ -508,9 +532,9 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
         // The combined filename starts with `givenergy_history_` so it's
         // distinct from the per-tab files (e.g. `givenergy_soc_…`).
         expect(downloads[0]).toMatch(/^givenergy_history_/);
+        await download.settled();
       } finally {
-        clickSpy.mockRestore();
-        URL.createObjectURL = originalCreate;
+        download.restore();
       }
     });
   });
