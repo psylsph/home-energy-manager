@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.89.3] - 2026-10-12
+
+### Fixed
+
+- **A stalled browser connection can no longer freeze the app's live data.** Opening the page from a phone on flaky Wi-Fi or a dropped Tailscale route could hold up polling and the status pages for everyone until the connection timed out. New connections that don't take their first update within ten seconds are now dropped (#365).
+
 ## [0.89.2] - 2026-10-12
 
 ### Fixed
