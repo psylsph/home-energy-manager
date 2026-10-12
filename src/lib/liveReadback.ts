@@ -7,8 +7,16 @@ import { formatPowerLimitLabel } from './powerLimit';
  * does not hold.
  */
 
-/** Age after which a snapshot is shown as "as last read" rather than current. */
-export const LIVE_READBACK_STALE_AFTER_SECONDS = 60;
+/**
+ * Age after which a snapshot is shown as "as last read" rather than current:
+ * one default 60 s poll cycle plus 30 s for the cycle's own reads. A single
+ * cycle (the old 60 s) called healthy readings stale just before each new one
+ * landed. It must stay below the browser's connection watchdog
+ * (`SNAPSHOT_STALE_AFTER_MS` in useWebSocket, 120 s), which clears the
+ * snapshot: past that the page shows "unknown" and this state is never seen.
+ * A test holds the two in that order.
+ */
+export const LIVE_READBACK_STALE_AFTER_SECONDS = 90;
 
 export type LiveReadout =
   | { kind: 'live'; label: string }
@@ -57,19 +65,23 @@ export function liveReadout({
   if (percent == null || !Number.isFinite(percent)) return { kind: 'unknown' };
   if (receivedAtMs == null || !Number.isFinite(receivedAtMs)) return { kind: 'unknown' };
   const label = formatPowerLimitLabel(percent, watts);
-  // Round first: the age is compared as the whole seconds it is shown as, so
-  // a reading that displays as 60 s is not called stale at the 60 s threshold.
-  const ageSeconds = Math.round(Math.max(0, (nowMs - receivedAtMs) / 1000));
+  // Whole elapsed seconds, compared as they are shown: a reading 90.9 s old
+  // is not called stale at a 90 s threshold, and a part second (or part
+  // minute) is never shown as the next one.
+  const ageSeconds = Math.floor(Math.max(0, (nowMs - receivedAtMs) / 1000));
   if (ageSeconds > staleAfterSeconds) {
     return { kind: 'stale', label, ageSeconds };
   }
   return { kind: 'live', label };
 }
 
-/** Human-readable age: seconds under a minute, whole minutes after that. */
+/** Human-readable age: seconds under two minutes, so a reading just past the
+ *  90 s threshold reads "95s ago" rather than "1 min ago" (younger readings
+ *  are shown as live); whole elapsed minutes after that (119 s is still
+ *  seconds, 150 s is "2 min ago", never rounded up). */
 function formatAge(ageSeconds: number): string {
-  if (ageSeconds < 60) return `${ageSeconds}s ago`;
-  return `${Math.round(ageSeconds / 60)} min ago`;
+  if (ageSeconds < 120) return `${ageSeconds}s ago`;
+  return `${Math.floor(ageSeconds / 60)} min ago`;
 }
 
 /** The sentence shown beside a charge setting for a given readout. */
