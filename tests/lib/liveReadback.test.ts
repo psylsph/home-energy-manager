@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { liveReadout, describeLiveReadout, LIVE_READBACK_STALE_AFTER_SECONDS } from '../../src/lib/liveReadback';
+import { SNAPSHOT_STALE_AFTER_MS } from '../../src/hooks/useWebSocket';
 
 // The read-only "Inverter Charge Rate" line beside a charge setting. Its age
 // is measured from when this browser received the snapshot, not from the
@@ -32,13 +33,14 @@ describe('liveReadout', () => {
     expect(readout.kind).toBe('live');
   });
 
-  it('judges staleness on the age it displays, so 60.4 s reads as live at 60 s', () => {
+  it('judges staleness on the whole seconds it displays, so 60.9 s reads as live at 60 s', () => {
     const readout = liveReadout({
       connected: true,
       percent: 62,
       watts: 1612,
-      receivedAtMs: NOW_MS - 60_400,
+      receivedAtMs: NOW_MS - 60_900,
       nowMs: NOW_MS,
+      staleAfterSeconds: 60,
     });
     expect(readout.kind).toBe('live');
   });
@@ -48,10 +50,25 @@ describe('liveReadout', () => {
       connected: true,
       percent: 62,
       watts: 1612,
-      receivedAtMs: NOW_MS - 60_500,
+      receivedAtMs: NOW_MS - 61_000,
       nowMs: NOW_MS,
+      staleAfterSeconds: 60,
     });
     expect(readout).toEqual({ kind: 'stale', label: '62% (1.6 kW)', ageSeconds: 61 });
+  });
+
+  it('counts whole elapsed seconds, so a part second is never shown as the next one', () => {
+    // 119.6 s has not reached two minutes; rounding would make it "2 min ago".
+    const readout = liveReadout({
+      connected: true,
+      percent: 62,
+      watts: null,
+      receivedAtMs: NOW_MS - 119_600,
+      nowMs: NOW_MS,
+      staleAfterSeconds: 60,
+    });
+    expect(readout).toEqual({ kind: 'stale', label: '62%', ageSeconds: 119 });
+    expect(describeLiveReadout(readout)).toBe('Inverter Charge Rate: 62% · as last read 119s ago');
   });
 
   it('reports stale with its age once it is older than the threshold', () => {
@@ -147,8 +164,24 @@ describe('liveReadout', () => {
     })).toEqual({ kind: 'unknown' });
   });
 
-  it('uses a 60 second stale threshold by default', () => {
-    expect(LIVE_READBACK_STALE_AFTER_SECONDS).toBe(60);
+  it('keeps a reading live through a whole default poll cycle and its reads', () => {
+    // The default poll loop sleeps 60 s after its reads. A 60 s threshold
+    // called every healthy reading stale just before the next one landed.
+    expect(LIVE_READBACK_STALE_AFTER_SECONDS).toBe(90);
+    const readout = liveReadout({
+      connected: true,
+      percent: 62,
+      watts: 1612,
+      receivedAtMs: NOW_MS - 85_000,
+      nowMs: NOW_MS,
+    });
+    expect(readout.kind).toBe('live');
+  });
+
+  it('turns stale before the connection watchdog clears the reading', () => {
+    // Past the watchdog the snapshot is cleared and the readout says
+    // "unknown", so a threshold at or above it would never show its age.
+    expect(LIVE_READBACK_STALE_AFTER_SECONDS * 1000).toBeLessThan(SNAPSHOT_STALE_AFTER_MS);
   });
 });
 
@@ -162,12 +195,23 @@ describe('describeLiveReadout', () => {
     expect(describeLiveReadout({ kind: 'unknown' })).toBe('Inverter Charge Rate: unknown');
   });
 
-  it('gives a stale value its age in seconds under a minute', () => {
+  it('gives a stale value its age in seconds under two minutes', () => {
     expect(describeLiveReadout({ kind: 'stale', label: '62%', ageSeconds: 42 }))
       .toBe('Inverter Charge Rate: 62% · as last read 42s ago');
+    // Just past the 90 s threshold, where younger readings show as live: a
+    // minute count would read as younger than readings shown as current.
+    expect(describeLiveReadout({ kind: 'stale', label: '62%', ageSeconds: 95 }))
+      .toBe('Inverter Charge Rate: 62% · as last read 95s ago');
   });
 
-  it('gives a stale value its age in whole minutes beyond a minute', () => {
+  it('counts whole elapsed minutes from two minutes, never rounding a part minute up', () => {
+    expect(describeLiveReadout({ kind: 'stale', label: '62%', ageSeconds: 120 }))
+      .toBe('Inverter Charge Rate: 62% · as last read 2 min ago');
+    expect(describeLiveReadout({ kind: 'stale', label: '62%', ageSeconds: 179 }))
+      .toBe('Inverter Charge Rate: 62% · as last read 2 min ago');
+  });
+
+  it('gives an older stale value its age in whole minutes', () => {
     expect(describeLiveReadout({ kind: 'stale', label: '62% (1.6 kW)', ageSeconds: 300 }))
       .toBe('Inverter Charge Rate: 62% (1.6 kW) · as last read 5 min ago');
   });

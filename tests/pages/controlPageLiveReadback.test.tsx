@@ -198,11 +198,27 @@ describe('Control page: inverter-reported charge limit', () => {
     renderWith(makeSnapshot(), NOW_MS);
     expect(screen.getByText('Inverter Charge Rate: 62% (1.6 kW)')).toBeTruthy();
     // Advancing the faked timers also moves Date on, so one call is enough.
-    // The clock ticks every 5 s, so 65 s is the first tick past the 60 s threshold.
+    // The clock ticks every 5 s, so 95 s is the first tick past 90 s, before
+    // the 120 s connection watchdog would clear the reading.
     await act(async () => {
-      vi.advanceTimersByTime(65_000);
+      vi.advanceTimersByTime(90_000);
     });
-    expect(screen.getByText(/as last read 1 min ago/)).toBeTruthy();
+    expect(screen.queryByText(/as last read/)).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(screen.getByText(/as last read 95s ago/)).toBeTruthy();
+  });
+
+  it('stays live through a whole default poll cycle and its reads', async () => {
+    // A default install polls every 60 s, plus the time the reads take. The
+    // reading must not flip to "as last read" just before each new one lands.
+    renderWith(makeSnapshot(), NOW_MS);
+    await act(async () => {
+      vi.advanceTimersByTime(85_000);
+    });
+    expect(screen.getByText('Inverter Charge Rate: 62% (1.6 kW)')).toBeTruthy();
+    expect(screen.queryByText(/as last read/)).toBeNull();
   });
 
   it('does not show a replayed reading as current while the inverter is offline', () => {
