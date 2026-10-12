@@ -159,11 +159,23 @@ enum InitialSendError<E> {
     TimedOut,
 }
 
+impl<E: std::fmt::Display> std::fmt::Display for InitialSendError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(e) => write!(f, "send failed: {e}"),
+            Self::TimedOut => write!(f, "send timed out"),
+        }
+    }
+}
+
 /// Send one frame to a freshly connected client, giving up after `limit`.
 ///
 /// A half-open client can park a send until TCP gives up, which would keep
 /// `handle_ws` from ever reaching the keepalive loop that evicts dead
 /// connections, so the first frames get the same grace as the idle probe.
+/// The frames are small (a connection notice and one snapshot, a few KB),
+/// so ten seconds only elapses for a link that is effectively dead; dropping
+/// such a client and letting it reconnect is deliberate.
 async fn send_bounded<E, Fut>(limit: Duration, send: Fut) -> Result<(), InitialSendError<E>>
 where
     Fut: std::future::Future<Output = Result<(), E>>,
@@ -177,11 +189,11 @@ where
 
 /// Serialise an outgoing frame, logging and returning `None` on failure so
 /// the caller skips it instead of sending an empty frame.
-fn encode_frame<T: serde::Serialize>(msg: &T) -> Option<String> {
+fn encode_frame<T: serde::Serialize>(label: &str, msg: &T) -> Option<String> {
     match serde_json::to_string(msg) {
         Ok(text) => Some(text),
         Err(e) => {
-            tracing::warn!("Failed to serialise initial WebSocket frame: {}", e);
+            tracing::warn!("Failed to serialise WebSocket {label} frame: {}", e);
             None
         }
     }
@@ -210,7 +222,10 @@ where
     let Some(snapshot) = snapshot else {
         return Ok(());
     };
-    let Some(msg) = encode_frame(&PollMessage::Snapshot(Box::new(snapshot))) else {
+    let Some(msg) = encode_frame(
+        "initial snapshot",
+        &PollMessage::Snapshot(Box::new(snapshot)),
+    ) else {
         return Ok(());
     };
     send_bounded(limit, send(msg)).await
@@ -249,7 +264,8 @@ async fn handle_ws(
             socket.send(Message::Text(cs_str.to_string().into())),
         )
         .await;
-        if sent.is_err() {
+        if let Err(e) = sent {
+            tracing::debug!("WebSocket client {peer} dropped before its first frame: {e}");
             state.connected_clients.lock().remove(client_id);
             return;
         }
@@ -260,8 +276,9 @@ async fn handle_ws(
         socket.send(Message::Text(msg.into())).await
     })
     .await;
-    if sent.is_err() {
+    if let Err(e) = sent {
         // Client disconnected immediately, or never took the frame.
+        tracing::debug!("WebSocket client {peer} dropped before its snapshot: {e}");
         state.connected_clients.lock().remove(client_id);
         return;
     }
@@ -292,12 +309,8 @@ async fn handle_ws(
             broadcast = rx.recv() => {
                 match broadcast {
                     Ok(poll_msg) => {
-                        let text = match serde_json::to_string(&poll_msg) {
-                            Ok(t) => t,
-                            Err(e) => {
-                                tracing::warn!("Failed to serialise WebSocket message: {}", e);
-                                continue;
-                            }
+                        let Some(text) = encode_frame("broadcast", &poll_msg) else {
+                            continue;
                         };
                         if socket.send(Message::Text(text.into())).await.is_err() {
                             break;
@@ -517,8 +530,20 @@ mod tests {
                 Err(serde::ser::Error::custom("boom"))
             }
         }
-        assert_eq!(encode_frame(&Unserialisable), None);
-        assert_eq!(encode_frame(&"ok").as_deref(), Some("\"ok\""));
+        assert_eq!(encode_frame("test", &Unserialisable), None);
+        assert_eq!(encode_frame("test", &"ok").as_deref(), Some("\"ok\""));
+    }
+
+    #[test]
+    fn initial_send_error_display_names_the_cause() {
+        assert_eq!(
+            InitialSendError::Failed("closed").to_string(),
+            "send failed: closed"
+        );
+        assert_eq!(
+            InitialSendError::<&str>::TimedOut.to_string(),
+            "send timed out"
+        );
     }
 
     #[tokio::test(start_paused = true)]
