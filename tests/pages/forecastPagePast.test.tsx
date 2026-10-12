@@ -117,8 +117,8 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 vi.mock('recharts', () => {
-  const Line = ({ name, dataKey, yAxisId }: { name?: string; dataKey?: string; yAxisId?: string }) => (
-    <div data-testid={`line-${dataKey}`} data-yaxis-id={yAxisId ?? ''}>{name}</div>
+  const Line = ({ name, dataKey, yAxisId, xAxisId }: { name?: string; dataKey?: string; yAxisId?: string | number; xAxisId?: string | number }) => (
+    <div data-testid={`line-${dataKey}`} data-yaxis-id={String(yAxisId ?? 0)} data-xaxis-id={String(xAxisId ?? 0)}>{name}</div>
   );
   return {
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -133,21 +133,25 @@ vi.mock('recharts', () => {
   ),
   ComposedChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   LineChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Area: ({ name, dataKey, yAxisId }: { name?: string; dataKey?: string; yAxisId?: string }) => (
-    <div data-testid={`area-${dataKey}`} data-yaxis-id={yAxisId ?? ''}>{name}</div>
+  Area: ({ name, dataKey, yAxisId, xAxisId }: { name?: string; dataKey?: string; yAxisId?: string | number; xAxisId?: string | number }) => (
+    <div data-testid={`area-${dataKey}`} data-yaxis-id={String(yAxisId ?? 0)} data-xaxis-id={String(xAxisId ?? 0)}>{name}</div>
   ),
   Line,
   Customized: () => <div />,
-  XAxis: ({ domain }: { domain?: [number, number] }) => (
-    <div data-testid="x-axis" data-domain={JSON.stringify(domain ?? null)} />
+  XAxis: ({ domain, xAxisId }: { domain?: [number, number]; xAxisId?: string | number }) => (
+    <div
+      data-testid="x-axis"
+      data-domain={JSON.stringify(domain ?? null)}
+      data-xaxis-id={String(xAxisId ?? 0)}
+    />
   ),
-  YAxis: ({ unit, yAxisId }: { unit?: string; yAxisId?: string }) => (
-    <div data-testid="y-axis" data-unit={unit ?? ''} data-yaxis-id={yAxisId ?? ''} />
+  YAxis: ({ unit, yAxisId }: { unit?: string; yAxisId?: string | number }) => (
+    <div data-testid="y-axis" data-unit={unit ?? ''} data-yaxis-id={String(yAxisId ?? 0)} />
   ),
   Tooltip: () => <div />,
   CartesianGrid: () => <div />,
-  ReferenceLine: ({ x, label, yAxisId }: { x?: number; label?: { value?: string }; yAxisId?: string }) => (
-    <div data-testid="reference-line" data-x={x} data-label={label?.value} data-yaxis-id={yAxisId ?? ''} />
+  ReferenceLine: ({ x, label, yAxisId, xAxisId }: { x?: number; label?: { value?: string }; yAxisId?: string | number; xAxisId?: string | number }) => (
+    <div data-testid="reference-line" data-x={x} data-label={label?.value} data-yaxis-id={String(yAxisId ?? 0)} data-xaxis-id={String(xAxisId ?? 0)} />
   ),
   Legend: () => <div />,
   };
@@ -318,46 +322,49 @@ describe('ForecastPage — Show past (issue #361)', () => {
     expect(now[0].getAttribute('data-x')).toBe(String(G));
   });
 
-  it('binds every solar series to the solar axis, or recharts cannot draw them', async () => {
-    // A series whose yAxisId matches no YAxis resolves to an undefined axis
-    // and throws while drawing, so the solar chart's series and its axis must
-    // share one id, with or without past data.
-    render(<ForecastPage />);
-    await choose('24 hours');
-    await screen.findByTestId('line-pastSolar');
-    const solarAxisIds = screen
-      .getAllByTestId('y-axis')
-      .map((axis) => axis.getAttribute('data-yaxis-id'));
-    expect(solarAxisIds).toContain('solar');
-    for (const id of ['line-pastSolar', 'line-actualSolar', 'area-kwh', 'area-low', 'area-high']) {
-      expect(screen.getByTestId(id).getAttribute('data-yaxis-id'), id).toBe('solar');
-    }
-  });
-
-  it('binds the solar chart\'s "now" marker to the solar axis, or the page crashes (issue #364)', async () => {
-    // A ReferenceLine without a yAxisId looks up axis 0, which the solar chart
-    // does not have, and recharts throws "Invariant failed" as soon as a past
-    // range puts the marker on screen.
+  it('binds everything on every chart to an axis that chart has, or the page crashes (issue #364)', async () => {
+    // Recharts looks each series and reference line up by its yAxisId, which
+    // defaults to 0. One whose id matches no YAxis in its chart throws
+    // "Invariant failed" while drawing; a past range is what puts the "now"
+    // marker on screen, which is how the solar chart crashed in 0.89.0.
+    // A home-use profile, so the third chart draws too.
+    const profile = Array.from({ length: 24 }, (_, hour) => ({ hour, kwh: 0.5, p25: 0.3, p75: 0.8 }));
+    forward = () => ({ ...forwardPayload(), consumption_weekday: profile, consumption_weekend: profile });
     const { container } = render(<ForecastPage />);
     await choose('24 hours');
     await screen.findByTestId('line-pastSolar');
-    const panel = container.querySelector<HTMLElement>('#forecast-chart-panel-solar');
-    expect(panel).not.toBeNull();
-    const now = within(panel!)
-      .getAllByTestId('reference-line')
-      .filter((line) => line.getAttribute('data-label') === 'now');
-    expect(now.length).toBe(1);
-    expect(now[0].getAttribute('data-yaxis-id')).toBe('solar');
+    for (const chart of ['battery', 'solar', 'consumption']) {
+      const panel = container.querySelector<HTMLElement>(`#forecast-chart-panel-${chart}`);
+      expect(panel, chart).not.toBeNull();
+      const bound = within(panel!).queryAllByTestId(/^(line-|area-|reference-line)/);
+      expect(bound.length, `${chart} draws something`).toBeGreaterThan(0);
+      const yAxisIds = new Set(
+        within(panel!).getAllByTestId('y-axis').map((axis) => axis.getAttribute('data-yaxis-id')),
+      );
+      const xAxisIds = new Set(
+        within(panel!).getAllByTestId('x-axis').map((axis) => axis.getAttribute('data-xaxis-id')),
+      );
+      for (const element of bound) {
+        const label = `${chart}: ${element.getAttribute('data-testid')}`;
+        expect(yAxisIds.has(element.getAttribute('data-yaxis-id')), `${label} y axis`).toBe(true);
+        expect(xAxisIds.has(element.getAttribute('data-xaxis-id')), `${label} x axis`).toBe(true);
+      }
+    }
+    // The solar chart's "now" marker is among them once a past range is shown.
+    const solarPanel = container.querySelector<HTMLElement>('#forecast-chart-panel-solar')!;
+    expect(
+      within(solarPanel)
+        .getAllByTestId('reference-line')
+        .filter((line) => line.getAttribute('data-label') === 'now'),
+    ).toHaveLength(1);
   });
 
   it('labels the solar chart in kW, because each hourly point is an average power', async () => {
-    render(<ForecastPage />);
+    const { container } = render(<ForecastPage />);
     await choose('24 hours');
     await screen.findByTestId('line-pastSolar');
-    const solarAxis = screen
-      .getAllByTestId('y-axis')
-      .find((axis) => axis.getAttribute('data-yaxis-id') === 'solar');
-    expect(solarAxis?.getAttribute('data-unit')).toBe('kW');
+    const solarPanel = container.querySelector<HTMLElement>('#forecast-chart-panel-solar')!;
+    expect(within(solarPanel).getByTestId('y-axis').getAttribute('data-unit')).toBe('kW');
   });
 
   it('draws the past forecast and the measured generation on the solar chart', async () => {

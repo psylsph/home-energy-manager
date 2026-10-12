@@ -1642,7 +1642,6 @@ export default function ForecastPage() {
               {/* Each hourly point is an average power over that hour, so the
                   solar chart is in kW (issue #359). The daily totals stay kWh. */}
               <YAxis
-                yAxisId="solar"
                 stroke="#94a3b8"
                 fontSize={10}
                 unit="kW"
@@ -1659,7 +1658,6 @@ export default function ForecastPage() {
               {past && (
                 <ReferenceLine
                   x={pastNow}
-                  yAxisId="solar"
                   stroke="#94a3b8"
                   strokeDasharray="2 3"
                   label={{ value: 'now', fill: '#94a3b8', fontSize: 10 }}
@@ -1669,7 +1667,6 @@ export default function ForecastPage() {
                 <Line
                   type="monotone"
                   dataKey="pastSolar"
-                  yAxisId="solar"
                   stroke={PAST_PLANNED_COLOUR}
                   strokeWidth={2}
                   strokeDasharray="6 4"
@@ -1683,7 +1680,6 @@ export default function ForecastPage() {
                 <Line
                   type="monotone"
                   dataKey="actualSolar"
-                  yAxisId="solar"
                   stroke={PAST_ACTUAL_COLOUR}
                   strokeWidth={2}
                   dot={false}
@@ -1695,7 +1691,6 @@ export default function ForecastPage() {
               <Area
                 type="monotone"
                 dataKey="kwh"
-                yAxisId="solar"
                 stroke="#f59e0b"
                 fill="#f59e0b"
                 fillOpacity={0.25}
@@ -1705,7 +1700,6 @@ export default function ForecastPage() {
               <Area
                 type="monotone"
                 dataKey="low"
-                yAxisId="solar"
                 stroke="none"
                 fill="transparent"
                 name="Low"
@@ -1714,7 +1708,6 @@ export default function ForecastPage() {
               <Area
                 type="monotone"
                 dataKey="high"
-                yAxisId="solar"
                 stroke="none"
                 fill="transparent"
                 name="High"
