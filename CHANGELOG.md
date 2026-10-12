@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.89.2] - 2026-10-12
+
+### Fixed
+
+- **The charge rate on the Control page no longer flickers to "as last read".** It only allowed a minute, the same as the default poll interval, so a healthy reading was marked out of date just before each new one arrived. It now allows 90 seconds, and the age reads in seconds until two minutes.
+
 ## [0.89.1] - 2026-10-11
 
 ### Fixed
