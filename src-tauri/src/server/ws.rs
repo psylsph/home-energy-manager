@@ -14,6 +14,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
+use crate::inverter::model::InverterSnapshot;
 use crate::inverter::poll::{AppState, PollMessage};
 
 /// Timing knobs for the WebSocket idle probe. Production uses the defaults;
@@ -151,6 +152,70 @@ async fn probe_alive(
     }
 }
 
+/// Why the first frames could not be delivered to a new client.
+#[derive(Debug, PartialEq, Eq)]
+enum InitialSendError<E> {
+    Failed(E),
+    TimedOut,
+}
+
+/// Send one frame to a freshly connected client, giving up after `limit`.
+///
+/// A half-open client can park a send until TCP gives up, which would keep
+/// `handle_ws` from ever reaching the keepalive loop that evicts dead
+/// connections, so the first frames get the same grace as the idle probe.
+async fn send_bounded<E, Fut>(limit: Duration, send: Fut) -> Result<(), InitialSendError<E>>
+where
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    match tokio::time::timeout(limit, send).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(InitialSendError::Failed(e)),
+        Err(_) => Err(InitialSendError::TimedOut),
+    }
+}
+
+/// Serialise an outgoing frame, logging and returning `None` on failure so
+/// the caller skips it instead of sending an empty frame.
+fn encode_frame<T: serde::Serialize>(msg: &T) -> Option<String> {
+    match serde_json::to_string(msg) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            tracing::warn!("Failed to serialise initial WebSocket frame: {}", e);
+            None
+        }
+    }
+}
+
+/// Send the latest snapshot (if any) to a freshly connected client.
+///
+/// The `latest_snapshot` guard is held only long enough to clone the
+/// snapshot; serialisation and the send happen after it drops (issue #365).
+/// A slow or half-open client can park `send` until TCP gives up, and
+/// holding the lock across that would stall the poll loop's publish and
+/// every API handler that reads the snapshot. The send itself is bounded by
+/// `limit` (see [`send_bounded`]). A snapshot that fails to serialise is
+/// logged and skipped rather than sent as an empty frame the client cannot
+/// parse; the next broadcast will carry the data.
+async fn send_initial_snapshot<E, F, Fut>(
+    latest_snapshot: &tokio::sync::Mutex<Option<InverterSnapshot>>,
+    limit: Duration,
+    send: F,
+) -> Result<(), InitialSendError<E>>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    let snapshot = latest_snapshot.lock().await.clone();
+    let Some(snapshot) = snapshot else {
+        return Ok(());
+    };
+    let Some(msg) = encode_frame(&PollMessage::Snapshot(Box::new(snapshot))) else {
+        return Ok(());
+    };
+    send_bounded(limit, send(msg)).await
+}
+
 /// Inner WebSocket loop — runs for the lifetime of a single connection.
 async fn handle_ws(
     mut socket: WebSocket,
@@ -179,18 +244,26 @@ async fn handle_ws(
             "host": state.settings.lock().await.host.clone(),
             "connected_since_epoch_ms": connected_since_epoch_ms,
         });
-        let _ = socket.send(Message::Text(cs_str.to_string().into())).await;
-    }
-
-    // Send the current snapshot immediately on connect (if available).
-    if let Some(snapshot) = state.latest_snapshot.lock().await.as_ref() {
-        let msg = serde_json::to_string(&PollMessage::Snapshot(Box::new(snapshot.clone())))
-            .unwrap_or_default();
-        if socket.send(Message::Text(msg.into())).await.is_err() {
-            // Client disconnected immediately.
+        let sent = send_bounded(
+            keepalive.probe_grace,
+            socket.send(Message::Text(cs_str.to_string().into())),
+        )
+        .await;
+        if sent.is_err() {
             state.connected_clients.lock().remove(client_id);
             return;
         }
+    }
+
+    // Send the current snapshot immediately on connect (if available).
+    let sent = send_initial_snapshot(&state.latest_snapshot, keepalive.probe_grace, |msg| async {
+        socket.send(Message::Text(msg.into())).await
+    })
+    .await;
+    if sent.is_err() {
+        // Client disconnected immediately, or never took the frame.
+        state.connected_clients.lock().remove(client_id);
+        return;
     }
 
     // Detect half-open connections: if the client hasn't sent any message
@@ -358,5 +431,100 @@ mod tests {
         }
         assert_eq!(clients.count(), 100);
         assert_eq!(clients.list().len(), 100);
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_send_does_not_hold_the_snapshot_lock() {
+        // A client whose send never completes (half-open connection) must
+        // not stop another task taking the lock. Needs a concurrent task:
+        // a sequential test can never observe the guard held across send.
+        let latest = Arc::new(tokio::sync::Mutex::new(Some(InverterSnapshot::default())));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let sender = {
+            let latest = Arc::clone(&latest);
+            tokio::spawn(async move {
+                let _ = send_initial_snapshot(&latest, Duration::from_secs(3600), |_msg| async {
+                    let _ = entered_tx.send(());
+                    std::future::pending::<Result<(), ()>>().await
+                })
+                .await;
+            })
+        };
+        entered_rx.await.expect("send was never reached");
+
+        let writer = tokio::time::timeout(Duration::from_secs(1), async {
+            *latest.lock().await = None;
+        })
+        .await;
+        sender.abort();
+        assert!(
+            writer.is_ok(),
+            "snapshot lock stayed held while the initial send was blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_sends_serialised_snapshot() {
+        let latest = tokio::sync::Mutex::new(Some(InverterSnapshot::default()));
+        let mut sent = None;
+        let res: Result<(), InitialSendError<()>> =
+            send_initial_snapshot(&latest, Duration::from_secs(1), |msg| {
+                sent = Some(msg);
+                async { Ok(()) }
+            })
+            .await;
+        assert!(res.is_ok());
+        let v: serde_json::Value = serde_json::from_str(&sent.expect("nothing sent")).unwrap();
+        assert_eq!(v["type"], "snapshot");
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_skips_send_when_none_available() {
+        let latest = tokio::sync::Mutex::new(None);
+        let res: Result<(), InitialSendError<()>> =
+            send_initial_snapshot(&latest, Duration::from_secs(1), |_msg| async {
+                panic!("must not send without a snapshot")
+            })
+            .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_propagates_send_error() {
+        let latest = tokio::sync::Mutex::new(Some(InverterSnapshot::default()));
+        let res = send_initial_snapshot(&latest, Duration::from_secs(1), |_msg| async {
+            Err("closed")
+        })
+        .await;
+        assert_eq!(res, Err(InitialSendError::Failed("closed")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_snapshot_send_gives_up_on_a_stalled_client() {
+        let latest = tokio::sync::Mutex::new(Some(InverterSnapshot::default()));
+        let res = send_initial_snapshot(&latest, Duration::from_secs(10), |_msg| {
+            std::future::pending::<Result<(), ()>>()
+        })
+        .await;
+        assert_eq!(res, Err(InitialSendError::TimedOut));
+    }
+
+    #[test]
+    fn encode_frame_returns_none_when_serialisation_fails() {
+        struct Unserialisable;
+        impl serde::Serialize for Unserialisable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+        assert_eq!(encode_frame(&Unserialisable), None);
+        assert_eq!(encode_frame(&"ok").as_deref(), Some("\"ok\""));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_bounded_passes_through_fast_sends() {
+        let res: Result<(), InitialSendError<()>> =
+            send_bounded(Duration::from_secs(10), async { Ok(()) }).await;
+        assert_eq!(res, Ok(()));
     }
 }
