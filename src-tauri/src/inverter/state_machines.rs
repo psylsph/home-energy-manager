@@ -2044,7 +2044,7 @@ pub fn export_window_contains(slots: &[ScheduleSlot], minute_of_day: u16) -> boo
 /// - The machine mid-transition always claims it.
 /// - A HEM-managed schedule claims it inside a window, or whenever the
 ///   inverter is not confirmed in Eco (armed outside a window, or a pending
-///   repair).
+///   repair) — unless the machine has errored out and will not repair it.
 /// - With no managed schedule, a non-Eco inverter claims it only when no
 ///   physical slot is configured: that is the slotless invalid state, whereas
 ///   an export set up elsewhere (e.g. the GivEnergy portal) has a slot and is
@@ -2066,7 +2066,13 @@ pub(crate) fn timed_export_claims_discharge(
         .iter()
         .any(ScheduleSlot::is_configured);
     if config.schedule_enabled {
-        has_slots && (in_window || !eco_confirmed)
+        // An errored machine has given up (it never writes again until the
+        // schedule is edited), so a non-Eco readback outside a window is no
+        // longer a repair in progress. Holding the claim then would lock
+        // Cosy/Agile out indefinitely with nothing left to clear it.
+        let repair_pending =
+            !eco_confirmed && !matches!(machine_state, TimedExportState::Error { .. });
+        has_slots && (in_window || repair_pending)
     } else {
         !eco_confirmed && !physical_slot_configured
     }
@@ -3518,6 +3524,52 @@ mod tests {
             &TimedExportState::Off,
             &armed_snapshot(false),
             EVENING
+        ));
+    }
+
+    #[test]
+    fn errored_machine_outside_window_does_not_pin_automations() {
+        // Issue #366: once exit retries are exhausted the machine parks in
+        // Error and never writes again, so a claim that depends on the
+        // inverter reaching Eco would hold Cosy off for good.
+        let config = TimedExportConfig {
+            schedule_enabled: true,
+            slots: vec![configured_slot()],
+            ..Default::default()
+        };
+        let mut state = TimedExportState::Error {
+            reason: "exit writes failed after retries".to_string(),
+        };
+        let snap = armed_snapshot(true);
+        // Premise: the machine really is stuck (no repair writes).
+        let decision = check_timed_export_with_defaults(
+            &snap,
+            &config,
+            &mut state,
+            EVENING,
+            DeviceType::Gen3Hybrid,
+        );
+        assert!(decision.writes.is_empty());
+        assert!(!timed_export_claims_discharge(
+            &config, &state, &snap, EVENING
+        ));
+    }
+
+    #[test]
+    fn errored_machine_inside_window_still_claims() {
+        let config = TimedExportConfig {
+            schedule_enabled: true,
+            slots: vec![configured_slot()],
+            ..Default::default()
+        };
+        let state = TimedExportState::Error {
+            reason: "entry writes failed after retries".to_string(),
+        };
+        assert!(timed_export_claims_discharge(
+            &config,
+            &state,
+            &armed_snapshot(true),
+            17 * 60
         ));
     }
 

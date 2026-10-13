@@ -2516,7 +2516,14 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
             .as_ref()
             .is_some_and(|s| s.discharge_slots.iter().any(ScheduleSlot::is_configured));
         timed_export_state.owns_discharge_control()
-            || (timed_export_config.schedule_enabled && has_slots && (in_window || export_armed))
+            || (timed_export_config.schedule_enabled
+                && has_slots
+                && (in_window
+                    || (export_armed
+                        && !matches!(
+                            timed_export_state,
+                            crate::inverter::state_machines::TimedExportState::Error { .. }
+                        ))))
             || (!timed_export_config.schedule_enabled && export_armed && !physical_slot_configured)
     };
 
