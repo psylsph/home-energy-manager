@@ -4279,26 +4279,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     let config = state.timed_export_config.lock().await.clone();
                                     let machine_state =
                                         state.timed_export_state.lock().await.clone();
-                                    let has_slots =
-                                        config.slots.iter().any(ScheduleSlot::is_configured);
-                                    let in_window = crate::inverter::state_machines::export_window_contains(
-                                        &config.slots,
+                                    crate::inverter::state_machines::timed_export_claims_discharge(
+                                        &config,
+                                        &machine_state,
+                                        &snapshot,
                                         inverter_minute,
-                                    );
-                                    let eco_confirmed =
-                                        snapshot.battery_power_mode == 1
-                                            && !snapshot.enable_discharge;
-                                    let physical_slot_configured = snapshot
-                                        .discharge_slots
-                                        .iter()
-                                        .any(ScheduleSlot::is_configured);
-                                    machine_state.owns_discharge_control()
-                                        || (config.schedule_enabled
-                                            && has_slots
-                                            && (in_window || !eco_confirmed))
-                                        || (!config.schedule_enabled
-                                            && !eco_confirmed
-                                            && !physical_slot_configured)
+                                    )
                                 };
                                 if timed_export_candidate {
                                     discharge_arbiter.request(DischargeControlOwner::TimedExport);

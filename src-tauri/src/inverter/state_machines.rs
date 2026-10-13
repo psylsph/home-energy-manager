@@ -2038,6 +2038,40 @@ pub fn export_window_contains(slots: &[ScheduleSlot], minute_of_day: u16) -> boo
     is_in_export_window(slots, minute_of_day)
 }
 
+/// Whether Timed Export asks for the discharge-control domain this poll,
+/// judged from the fresh snapshot. Cosy and Agile defer whenever this is true.
+///
+/// - The machine mid-transition always claims it.
+/// - A HEM-managed schedule claims it inside a window, or whenever the
+///   inverter is not confirmed in Eco (armed outside a window, or a pending
+///   repair).
+/// - With no managed schedule, a non-Eco inverter claims it only when no
+///   physical slot is configured: that is the slotless invalid state, whereas
+///   an export set up elsewhere (e.g. the GivEnergy portal) has a slot and is
+///   left to the automations to restore at their next boundary.
+pub(crate) fn timed_export_claims_discharge(
+    config: &TimedExportConfig,
+    machine_state: &TimedExportState,
+    snapshot: &InverterSnapshot,
+    minute_of_day: u16,
+) -> bool {
+    if machine_state.owns_discharge_control() {
+        return true;
+    }
+    let has_slots = config.slots.iter().any(ScheduleSlot::is_configured);
+    let in_window = export_window_contains(&config.slots, minute_of_day);
+    let eco_confirmed = snapshot.battery_power_mode == 1 && !snapshot.enable_discharge;
+    let physical_slot_configured = snapshot
+        .discharge_slots
+        .iter()
+        .any(ScheduleSlot::is_configured);
+    if config.schedule_enabled {
+        has_slots && (in_window || !eco_confirmed)
+    } else {
+        !eco_confirmed && !physical_slot_configured
+    }
+}
+
 fn is_in_export_window(slots: &[ScheduleSlot], minute_of_day: u16) -> bool {
     slots.iter().any(|slot| {
         if !slot.enabled {
@@ -3365,6 +3399,141 @@ mod tests {
             end_minute: 0,
             target_soc: 4,
         }
+    }
+
+    // ---- timed_export_claims_discharge (issue #366) ----------------------
+
+    fn armed_snapshot(with_physical_slot: bool) -> InverterSnapshot {
+        let mut snap = InverterSnapshot {
+            battery_power_mode: 0,
+            enable_discharge: true,
+            ..Default::default()
+        };
+        if with_physical_slot {
+            snap.discharge_slots[0] = ScheduleSlot {
+                start_hour: 18,
+                end_hour: 19,
+                ..configured_slot()
+            };
+        }
+        snap
+    }
+
+    fn claim_eco() -> InverterSnapshot {
+        InverterSnapshot {
+            battery_power_mode: 1,
+            enable_discharge: false,
+            ..Default::default()
+        }
+    }
+
+    const EVENING: u16 = 22 * 60;
+
+    #[test]
+    fn portal_export_does_not_block_automations_when_hem_schedule_is_off() {
+        // The path the reporter relied on: export armed in the GivEnergy
+        // portal, HEM has no schedule of its own.
+        let config = TimedExportConfig::default();
+        assert!(!timed_export_claims_discharge(
+            &config,
+            &TimedExportState::Off,
+            &armed_snapshot(true),
+            EVENING
+        ));
+    }
+
+    #[test]
+    fn enabled_hem_schedule_blocks_automations_while_portal_export_is_armed() {
+        // Issue #366: a HEM schedule left enabled makes an externally armed
+        // export (outside its window) claim the domain, so Cosy stands down.
+        let config = TimedExportConfig {
+            schedule_enabled: true,
+            slots: vec![configured_slot()],
+            ..Default::default()
+        };
+        assert!(timed_export_claims_discharge(
+            &config,
+            &TimedExportState::Off,
+            &armed_snapshot(true),
+            EVENING
+        ));
+    }
+
+    #[test]
+    fn cleared_hem_schedule_releases_the_claim() {
+        // Same snapshot as above, but the slot was cleared (0-0): no claim.
+        let config = TimedExportConfig {
+            schedule_enabled: false,
+            slots: vec![ScheduleSlot {
+                enabled: false,
+                start_hour: 0,
+                end_hour: 0,
+                ..configured_slot()
+            }],
+            ..Default::default()
+        };
+        assert!(!timed_export_claims_discharge(
+            &config,
+            &TimedExportState::Off,
+            &armed_snapshot(true),
+            EVENING
+        ));
+    }
+
+    #[test]
+    fn enabled_schedule_outside_window_with_eco_confirmed_does_not_claim() {
+        let config = TimedExportConfig {
+            schedule_enabled: true,
+            slots: vec![configured_slot()],
+            ..Default::default()
+        };
+        assert!(!timed_export_claims_discharge(
+            &config,
+            &TimedExportState::Off,
+            &claim_eco(),
+            EVENING
+        ));
+    }
+
+    #[test]
+    fn enabled_schedule_inside_window_claims_even_when_eco() {
+        let config = TimedExportConfig {
+            schedule_enabled: true,
+            slots: vec![configured_slot()],
+            ..Default::default()
+        };
+        assert!(timed_export_claims_discharge(
+            &config,
+            &TimedExportState::Off,
+            &claim_eco(),
+            17 * 60
+        ));
+    }
+
+    #[test]
+    fn slotless_armed_discharge_claims_without_a_schedule() {
+        let config = TimedExportConfig::default();
+        assert!(timed_export_claims_discharge(
+            &config,
+            &TimedExportState::Off,
+            &armed_snapshot(false),
+            EVENING
+        ));
+    }
+
+    #[test]
+    fn machine_mid_transition_always_claims() {
+        let config = TimedExportConfig::default();
+        let state = TimedExportState::Exiting {
+            polls_waiting: 0,
+            retries: 0,
+        };
+        assert!(timed_export_claims_discharge(
+            &config,
+            &state,
+            &claim_eco(),
+            EVENING
+        ));
     }
 
     #[test]
