@@ -648,10 +648,13 @@ fn build_status(
         });
         ("pause_mode", phase, "Battery Pause".into())
     } else if ctx.export_state.owns_discharge_control()
-        || matches!(
-            ctx.export_state,
-            TimedExportState::BlockedByPause | TimedExportState::Error { .. }
-        )
+        || matches!(ctx.export_state, TimedExportState::BlockedByPause)
+        // An errored machine has released the discharge controls, so a Cosy,
+        // Agile or winter run that is actually under way is the real source;
+        // the error still shows as a condition and in the Timed Export
+        // automation block.
+        || (matches!(ctx.export_state, TimedExportState::Error { .. })
+            && !(s.cosy_active || s.agile_active || s.auto_winter_active))
     {
         (
             "timed_export",
@@ -1215,6 +1218,89 @@ mod tests {
                 .find(|c| c["code"] == "timed_export_error")
                 .expect("error condition present");
             assert_eq!(found["label"], label);
+        }
+    }
+
+    #[test]
+    fn an_errored_timed_export_does_not_hide_a_cosy_slot_that_is_charging() {
+        // Once the Timed Export claim is released, Cosy really is the one
+        // driving the inverter; the status must say so while still flagging
+        // the error as a condition.
+        let ctx = Context {
+            export_state: TimedExportState::Error {
+                reason: "exit writes failed after retries".into(),
+                recoverable: true,
+                polls: 0,
+            },
+            ..Default::default()
+        };
+        let s = InverterSnapshot {
+            cosy_enabled: true,
+            cosy_active: true,
+            ..snapshot()
+        };
+        let v = build_status(Some(&s), ConnectionState::Connected, 20, &ctx, NOW);
+        assert_eq!(v["control_source"], "cosy");
+        assert_eq!(v["automation"]["cosy"]["phase"], "active");
+        assert!(v["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "timed_export_error"));
+    }
+
+    #[test]
+    fn an_errored_timed_export_does_not_hide_an_agile_or_winter_run() {
+        // Agile and a Timed Export schedule can both be enabled, and Agile
+        // runs once an errored Timed Export releases the discharge controls.
+        for (agile, winter, source) in [(true, false, "agile"), (false, true, "winter")] {
+            let ctx = Context {
+                export_state: TimedExportState::Error {
+                    reason: "exit writes failed after retries".into(),
+                    recoverable: true,
+                    polls: 0,
+                },
+                ..Default::default()
+            };
+            let s = InverterSnapshot {
+                agile_enabled: agile,
+                agile_active: agile,
+                agile_state: "charging".into(),
+                auto_winter_active: winter,
+                ..snapshot()
+            };
+            let v = build_status(Some(&s), ConnectionState::Connected, 20, &ctx, NOW);
+            assert_eq!(v["control_source"], source);
+            assert!(v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["code"] == "timed_export_error"));
+        }
+    }
+
+    #[test]
+    fn an_errored_timed_export_is_still_the_source_when_cosy_is_idle() {
+        for (cosy_enabled, recoverable) in [(false, true), (true, true), (true, false)] {
+            let ctx = Context {
+                export_state: TimedExportState::Error {
+                    reason: "write failed".into(),
+                    recoverable,
+                    polls: 0,
+                },
+                ..Default::default()
+            };
+            let s = InverterSnapshot {
+                cosy_enabled,
+                cosy_active: false,
+                ..snapshot()
+            };
+            let v = build_status(Some(&s), ConnectionState::Connected, 20, &ctx, NOW);
+            assert_eq!(
+                v["control_source"], "timed_export",
+                "cosy_enabled={cosy_enabled} recoverable={recoverable}"
+            );
+            assert_eq!(v["automation"]["timed_export"]["phase"], "error");
         }
     }
 
