@@ -3384,6 +3384,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // inverter's charge slot registers. Only re-writes when the
                 // "next upcoming slot" changes (e.g. after a slot ends).
                 let mut cosy_last_preloaded_slot: Option<usize> = None;
+                // Which higher-priority owner (if any) last kept Cosy from
+                // running, so the log carries one line per change rather than
+                // one per poll.
+                let mut cosy_deferred_by: Option<DischargeControlOwner> = None;
                 // Require two consecutive confirmed violations before repairing
                 // an externally-created HR59/no-slot state. This avoids
                 // reacting to a single transient read while still healing the
@@ -4652,9 +4656,31 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // Writes Cosy slot schedules into the inverter's own charge
                                 // slot registers so it follows them independently: drive the
                                 // active slot, otherwise preload the next one (see `cosy`).
-                                if discharge_arbiter
+                                let cosy_blocker = if discharge_arbiter
                                     .can_request(DischargeControlOwner::TimedCharge)
                                 {
+                                    None
+                                } else {
+                                    discharge_arbiter.selected_owner()
+                                };
+                                match crate::inverter::cosy::track_deferral(
+                                    &mut cosy_deferred_by,
+                                    cosy_blocker,
+                                    poll_settings.cosy_enabled,
+                                ) {
+                                    Some(crate::inverter::cosy::DeferralEvent::Deferred(owner)) => {
+                                        tracing::warn!(
+                                            ?owner,
+                                            "Cosy: not running — {}",
+                                            crate::inverter::cosy::deferral_reason(owner)
+                                        );
+                                    }
+                                    Some(crate::inverter::cosy::DeferralEvent::Resumed) => {
+                                        tracing::warn!("Cosy: resumed — nothing is blocking it");
+                                    }
+                                    None => {}
+                                }
+                                if cosy_blocker.is_none() {
                                     let cosy_active = *state.cosy_active.lock().await;
                                     let step = crate::inverter::cosy::plan_cosy_step(
                                         &crate::inverter::cosy::CosyInputs {

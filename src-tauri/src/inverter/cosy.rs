@@ -298,8 +298,63 @@ fn request_writes(writes: &[RegisterWrite], arbiter: &mut DischargeControlArbite
     !writes.is_empty() && arbiter.request(DischargeControlOwner::TimedCharge)
 }
 
+/// A change in whether a higher-priority discharge-control owner is keeping
+/// Cosy from running.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DeferralEvent {
+    /// Cosy is enabled but this owner won the poll, so Cosy is skipped.
+    Deferred(DischargeControlOwner),
+    /// The blocking owner has gone and Cosy can run again.
+    Resumed,
+}
+
+/// Track which owner (if any) is blocking Cosy and report only *changes*, so
+/// the log carries one line per transition instead of one per poll.
+/// `blocker` is the winning owner when Cosy cannot request the arbiter this
+/// poll, `None` when it can. With Cosy disabled nothing is blocked from the
+/// user's point of view, so the tracker resets silently.
+pub(crate) fn track_deferral(
+    tracker: &mut Option<DischargeControlOwner>,
+    blocker: Option<DischargeControlOwner>,
+    cosy_enabled: bool,
+) -> Option<DeferralEvent> {
+    if !cosy_enabled {
+        *tracker = None;
+        return None;
+    }
+    if *tracker == blocker {
+        return None;
+    }
+    let previous = std::mem::replace(tracker, blocker);
+    match blocker {
+        Some(owner) => Some(DeferralEvent::Deferred(owner)),
+        None => previous.map(|_| DeferralEvent::Resumed),
+    }
+}
+
+/// What the winning owner means to a user wondering why Cosy did nothing.
+pub(crate) fn deferral_reason(owner: DischargeControlOwner) -> &'static str {
+    match owner {
+        DischargeControlOwner::TimedExport => {
+            "Timed Export holds the discharge controls (an enabled HEM schedule that is in its window or whose export the inverter is still armed for, a transition in progress, or armed discharge with no slot)"
+        }
+        DischargeControlOwner::ManualMode => {
+            "the inverter is in Timed Demand (Eco with discharge enabled), which is treated as a manually chosen mode whether it was selected in HEM or set elsewhere"
+        }
+        DischargeControlOwner::ExplicitPause => "a Pause Discharge / battery-pause is in effect",
+        DischargeControlOwner::ManualForce => "a manual Force Charge / Force Discharge is running",
+        DischargeControlOwner::Safety => {
+            "a safety limiter (load or temperature) is holding discharge"
+        }
+        DischargeControlOwner::TimedCharge | DischargeControlOwner::Agile => {
+            "another automation holds the discharge controls"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::test_util::with_isolated_config_dir_async;
 
@@ -878,5 +933,81 @@ mod tests {
             assert!(matches!(step, CosyStep::Idle));
         })
         .await;
+    }
+
+    #[test]
+    fn deferral_is_reported_once_per_blocking_owner() {
+        let mut tracker = None;
+        let owner = DischargeControlOwner::ManualMode;
+        assert_eq!(
+            track_deferral(&mut tracker, Some(owner), true),
+            Some(DeferralEvent::Deferred(owner))
+        );
+        // Same blocker on the following polls stays quiet.
+        assert_eq!(track_deferral(&mut tracker, Some(owner), true), None);
+        assert_eq!(track_deferral(&mut tracker, Some(owner), true), None);
+    }
+
+    #[test]
+    fn deferral_reports_a_change_of_blocker() {
+        let mut tracker = None;
+        track_deferral(&mut tracker, Some(DischargeControlOwner::ManualMode), true);
+        assert_eq!(
+            track_deferral(&mut tracker, Some(DischargeControlOwner::TimedExport), true),
+            Some(DeferralEvent::Deferred(DischargeControlOwner::TimedExport))
+        );
+    }
+
+    #[test]
+    fn deferral_reports_resume_once_when_blocker_clears() {
+        let mut tracker = None;
+        track_deferral(&mut tracker, Some(DischargeControlOwner::TimedExport), true);
+        assert_eq!(
+            track_deferral(&mut tracker, None, true),
+            Some(DeferralEvent::Resumed)
+        );
+        assert_eq!(track_deferral(&mut tracker, None, true), None);
+    }
+
+    #[test]
+    fn nothing_is_reported_when_cosy_was_never_blocked() {
+        let mut tracker = None;
+        assert_eq!(track_deferral(&mut tracker, None, true), None);
+    }
+
+    #[test]
+    fn disabled_cosy_never_reports_a_deferral() {
+        let mut tracker = None;
+        assert_eq!(
+            track_deferral(&mut tracker, Some(DischargeControlOwner::ManualMode), false),
+            None
+        );
+        assert_eq!(tracker, None);
+    }
+
+    #[test]
+    fn disabling_cosy_while_blocked_clears_silently() {
+        let mut tracker = None;
+        track_deferral(&mut tracker, Some(DischargeControlOwner::ManualMode), true);
+        assert_eq!(
+            track_deferral(&mut tracker, Some(DischargeControlOwner::ManualMode), false),
+            None
+        );
+        assert_eq!(tracker, None);
+    }
+
+    #[test]
+    fn every_owner_has_a_reason() {
+        for owner in [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+            DischargeControlOwner::ManualForce,
+            DischargeControlOwner::Safety,
+        ] {
+            assert!(!deferral_reason(owner).is_empty());
+        }
     }
 }
