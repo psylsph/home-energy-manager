@@ -2473,6 +2473,36 @@ async fn expire_native_pause_if_needed_at(
     .await;
 }
 
+/// Whether Timed Export claims the discharge-control domain before the next
+/// read. With a previous snapshot this is the same decision the poll loop
+/// makes after the read, so queued writes and the live cycle cannot disagree
+/// about who owns the registers. Without one only the machine state and the
+/// schedule window can speak.
+fn pre_read_timed_export_claim(
+    config: &crate::inverter::state_machines::TimedExportConfig,
+    machine_state: &crate::inverter::state_machines::TimedExportState,
+    snapshot: Option<&InverterSnapshot>,
+    minute_of_day: u16,
+) -> bool {
+    match snapshot {
+        Some(snapshot) => crate::inverter::state_machines::timed_export_claims_discharge(
+            config,
+            machine_state,
+            snapshot,
+            minute_of_day,
+        ),
+        None => {
+            machine_state.owns_discharge_control()
+                || (config.schedule_enabled
+                    && config.slots.iter().any(ScheduleSlot::is_configured)
+                    && crate::inverter::state_machines::export_window_contains(
+                        &config.slots,
+                        minute_of_day,
+                    ))
+        }
+    }
+}
+
 /// Select the highest-priority discharge owner represented by the current
 /// runtime state or queued API requests.  The previous snapshot is used here
 /// because this function runs before the next read; it is still the latest
@@ -2500,32 +2530,12 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
         .as_ref()
         .map(|snap| crate::inverter::state_machines::authoritative_minute_of_day(snap, host_minute))
         .unwrap_or(host_minute);
-    let timed_export_active = {
-        let has_slots = timed_export_config
-            .slots
-            .iter()
-            .any(ScheduleSlot::is_configured);
-        let in_window = crate::inverter::state_machines::export_window_contains(
-            &timed_export_config.slots,
-            timed_export_minute,
-        );
-        let export_armed = snapshot
-            .as_ref()
-            .is_some_and(|s| s.battery_power_mode == 0 && s.enable_discharge);
-        let physical_slot_configured = snapshot
-            .as_ref()
-            .is_some_and(|s| s.discharge_slots.iter().any(ScheduleSlot::is_configured));
-        timed_export_state.owns_discharge_control()
-            || (timed_export_config.schedule_enabled
-                && has_slots
-                && (in_window
-                    || (export_armed
-                        && !matches!(
-                            timed_export_state,
-                            crate::inverter::state_machines::TimedExportState::Error { .. }
-                        ))))
-            || (!timed_export_config.schedule_enabled && export_armed && !physical_slot_configured)
-    };
+    let timed_export_active = pre_read_timed_export_claim(
+        &timed_export_config,
+        &timed_export_state,
+        snapshot.as_ref(),
+        timed_export_minute,
+    );
 
     let mut arbiter = DischargeControlArbiter::default();
     if load_paused || temperature_paused {
@@ -10280,6 +10290,204 @@ mod tests {
                     );
                 }
             }
+        })
+        .await;
+    }
+
+    mod pre_read_claim {
+        use super::super::pre_read_timed_export_claim;
+        use crate::inverter::model::{DeviceType, InverterSnapshot, ScheduleSlot};
+        use crate::inverter::state_machines::{TimedExportConfig, TimedExportState};
+
+        const EVENING: u16 = 22 * 60;
+        const IN_WINDOW: u16 = 17 * 60;
+
+        fn export_slot() -> ScheduleSlot {
+            ScheduleSlot {
+                enabled: true,
+                start_hour: 16,
+                start_minute: 0,
+                end_hour: 19,
+                end_minute: 0,
+                target_soc: 4,
+            }
+        }
+
+        fn enabled() -> TimedExportConfig {
+            TimedExportConfig {
+                schedule_enabled: true,
+                slots: vec![export_slot()],
+                ..Default::default()
+            }
+        }
+
+        fn snap(mode: u8, discharge: bool, physical_slot: bool) -> InverterSnapshot {
+            let mut s = InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                battery_power_mode: mode,
+                enable_discharge: discharge,
+                ..Default::default()
+            };
+            if physical_slot {
+                s.discharge_slots[0] = ScheduleSlot {
+                    start_hour: 18,
+                    end_hour: 19,
+                    ..export_slot()
+                };
+            }
+            s
+        }
+
+        #[test]
+        fn a_timed_demand_readback_with_an_enabled_schedule_is_claimed_like_the_poll_loop() {
+            // Eco + discharge enabled is the shape re-arming firmware leaves
+            // behind. The loop treats anything but confirmed Eco as a pending
+            // repair, so the pre-read must too.
+            let snapshot = snap(1, true, true);
+            assert!(pre_read_timed_export_claim(
+                &enabled(),
+                &TimedExportState::Configured,
+                Some(&snapshot),
+                EVENING
+            ));
+        }
+
+        #[test]
+        fn a_slotless_export_paused_readback_is_claimed_like_the_poll_loop() {
+            let snapshot = snap(0, false, false);
+            assert!(pre_read_timed_export_claim(
+                &TimedExportConfig::default(),
+                &TimedExportState::Off,
+                Some(&snapshot),
+                EVENING
+            ));
+        }
+
+        #[test]
+        fn confirmed_eco_outside_the_window_is_not_claimed() {
+            let snapshot = snap(1, false, true);
+            assert!(!pre_read_timed_export_claim(
+                &enabled(),
+                &TimedExportState::Configured,
+                Some(&snapshot),
+                EVENING
+            ));
+        }
+
+        #[test]
+        fn a_recoverable_error_outside_the_window_does_not_pin_the_domain() {
+            let state = TimedExportState::Error {
+                reason: "exit writes failed after retries".into(),
+                recoverable: true,
+                polls: 0,
+            };
+            assert!(!pre_read_timed_export_claim(
+                &enabled(),
+                &state,
+                Some(&snap(0, true, true)),
+                EVENING
+            ));
+        }
+
+        #[test]
+        fn an_externally_armed_export_with_a_physical_slot_is_not_claimed_without_a_schedule() {
+            // The portal-set export the reporter relies on being cleared by
+            // Cosy: HEM has no schedule, so it must not hold the domain.
+            assert!(!pre_read_timed_export_claim(
+                &TimedExportConfig::default(),
+                &TimedExportState::Off,
+                Some(&snap(0, true, true)),
+                EVENING
+            ));
+        }
+
+        #[test]
+        fn an_errored_machine_still_claims_inside_its_window() {
+            let state = TimedExportState::Error {
+                reason: "entry writes failed after retries".into(),
+                recoverable: true,
+                polls: 0,
+            };
+            assert!(pre_read_timed_export_claim(
+                &enabled(),
+                &state,
+                Some(&snap(1, false, true)),
+                IN_WINDOW
+            ));
+            assert!(pre_read_timed_export_claim(
+                &enabled(),
+                &state,
+                None,
+                IN_WINDOW
+            ));
+        }
+
+        #[test]
+        fn without_a_snapshot_only_the_machine_and_the_window_can_claim() {
+            let idle = TimedExportState::Configured;
+            let busy = TimedExportState::Entering {
+                polls_waiting: 0,
+                retries: 0,
+            };
+            assert!(pre_read_timed_export_claim(
+                &enabled(),
+                &busy,
+                None,
+                EVENING
+            ));
+            assert!(pre_read_timed_export_claim(
+                &enabled(),
+                &idle,
+                None,
+                IN_WINDOW
+            ));
+            assert!(!pre_read_timed_export_claim(
+                &enabled(),
+                &idle,
+                None,
+                EVENING
+            ));
+            assert!(!pre_read_timed_export_claim(
+                &TimedExportConfig::default(),
+                &idle,
+                None,
+                IN_WINDOW
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn current_owner_matches_the_poll_loop_for_cosy_over_a_timed_demand_readback() {
+        // With Cosy flagged active, a Timed Demand readback is not a manual
+        // mode. An enabled schedule that is not in Eco is a pending repair,
+        // which the poll loop already treats as Timed Export's, so the
+        // pre-read must report the same owner for queued writes.
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+                battery_mode: BatteryMode::TimedDemand,
+                battery_power_mode: 1,
+                enable_discharge: true,
+                inverter_time: "2026-08-30 22:00:00".into(),
+                ..Default::default()
+            });
+            *state.cosy_active.lock().await = true;
+            {
+                let mut config = state.timed_export_config.lock().await;
+                config.schedule_enabled = true;
+                config.slots = vec![ScheduleSlot {
+                    enabled: true,
+                    start_hour: 16,
+                    start_minute: 0,
+                    end_hour: 19,
+                    end_minute: 0,
+                    target_soc: 4,
+                }];
+            }
+            assert_eq!(
+                super::current_discharge_control_owner(&state).await,
+                Some(DischargeControlOwner::TimedExport)
+            );
         })
         .await;
     }
