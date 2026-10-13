@@ -29,6 +29,7 @@ import {
 } from '../lib/adaptiveCharge';
 import AwaitingConnection from '../components/AwaitingConnection';
 import CosyBlockedNotice from '../components/CosyBlockedNotice';
+import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import {
   LOGARITHMIC_RANGE_MAX,
   logarithmicPositionToValue,
@@ -3765,6 +3766,10 @@ export default function ControlPage() {
         <CosyBlockedNotice
           blockedBy={snapshot?.cosy_blocked_by}
           enabled={snapshot?.cosy_enabled}
+        />
+        <AgileBlockedNotice
+          blockedBy={snapshot?.agile_blocked_by}
+          enabled={snapshot?.agile_enabled}
         />
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           <button

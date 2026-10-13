@@ -8,7 +8,9 @@ import type { LimitScale } from '../lib/powerLimit';
 import { hasGridFault, hasInverterTrip, hasBatteryOverTemp, gridFaultTitle } from '../lib/gridFault';
 import AwaitingConnection from '../components/AwaitingConnection';
 import CosyBlockedNotice from '../components/CosyBlockedNotice';
+import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import { cosyBlockedMessage } from '../lib/cosyBlocked';
+import { agileBlockedMessage } from '../lib/agileBlocked';
 
 export default function InverterPage() {
   const { snapshot, connectionState } = useInverterStore();
@@ -363,6 +365,8 @@ export default function InverterPage() {
                   : s.agile_state === 'discharging'
                     ? 'Discharging'
                     : 'Active')
+              : agileBlockedMessage(s.agile_blocked_by, s.agile_enabled)
+                ? 'On hold'
               : s.agile_scope === 'charge_only'
                 ? 'Enabled (charge only)'
                 : s.agile_scope === 'discharge_only'
@@ -375,8 +379,9 @@ export default function InverterPage() {
           <span className="text-text-secondary">Battery Calibration</span>
           <span className="text-text-primary font-mono text-right">{s.battery_calibration_stage > 0 ? `Stage ${s.battery_calibration_stage}` : 'Off'}</span>
         </div>
-        <div className="mt-4 empty:hidden">
+        <div className="mt-4 space-y-2 empty:hidden">
           <CosyBlockedNotice blockedBy={s.cosy_blocked_by} enabled={s.cosy_enabled} />
+          <AgileBlockedNotice blockedBy={s.agile_blocked_by} enabled={s.agile_enabled} />
         </div>
       </section>
     </div>

@@ -330,11 +330,10 @@ pub(crate) fn hard_blocker(arbiter: DischargeControlArbiter) -> Option<Discharge
 /// Stable code for the hard override holding Cosy, as exposed on the snapshot
 /// (`cosy_blocked_by`) for the UI. Empty for owners that do not stop Cosy.
 pub(crate) fn blocker_code(owner: DischargeControlOwner) -> &'static str {
-    match owner {
-        DischargeControlOwner::ExplicitPause => "pause",
-        DischargeControlOwner::ManualForce => "force",
-        DischargeControlOwner::Safety => "safety",
-        _ => "",
+    if is_hard_override(owner) {
+        owner.code()
+    } else {
+        ""
     }
 }
 
@@ -377,9 +376,9 @@ pub(crate) enum DeferralEvent {
 pub(crate) fn track_deferral(
     tracker: &mut Option<DischargeControlOwner>,
     blocker: Option<DischargeControlOwner>,
-    cosy_enabled: bool,
+    enabled: bool,
 ) -> Option<DeferralEvent> {
-    if !cosy_enabled {
+    if !enabled {
         *tracker = None;
         return None;
     }

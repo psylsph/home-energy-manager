@@ -244,4 +244,15 @@ describe('<ControlPage/> — Cosy on hold notice', () => {
     await screen.findByText('Battery Mode');
     expect(screen.queryByText(/Cosy is on hold/)).toBeNull();
   });
+
+  it('warns when something is holding Agile back', async () => {
+    show({ agile_enabled: true, agile_blocked_by: 'manual_mode' });
+    expect(await screen.findByText(/Agile is on hold: the inverter is in a manually chosen mode/)).toBeInTheDocument();
+  });
+
+  it('shows no Agile warning when Agile is running normally', async () => {
+    show({ agile_enabled: true, agile_blocked_by: '' });
+    await screen.findByText('Battery Mode');
+    expect(screen.queryByText(/Agile is on hold/)).toBeNull();
+  });
 });

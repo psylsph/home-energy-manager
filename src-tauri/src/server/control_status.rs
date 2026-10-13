@@ -586,6 +586,18 @@ fn build_status(
         },
     );
     condition(
+        s.agile_enabled && !s.agile_blocked_by.is_empty(),
+        "agile_blocked",
+        match s.agile_blocked_by.as_str() {
+            "timed_export" => "Agile on hold: a Timed Export schedule has the inverter",
+            "manual_mode" => "Agile on hold: the inverter is in a manually chosen mode",
+            "pause" => "Agile on hold: a battery pause is active",
+            "force" => "Agile on hold: a manual Force action is running",
+            "safety" => "Agile on hold: a safety limit is holding the battery",
+            _ => "Agile on hold",
+        },
+    );
+    condition(
         matches!(ctx.export_state, TimedExportState::Error { .. }),
         "timed_export_error",
         if matches!(
@@ -1366,6 +1378,69 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|c| c["code"] == "cosy_blocked"));
+        }
+    }
+
+    #[test]
+    fn a_blocked_agile_is_reported_as_a_condition_with_the_reason() {
+        for (code, expected) in [
+            (
+                "timed_export",
+                "Agile on hold: a Timed Export schedule has the inverter",
+            ),
+            (
+                "manual_mode",
+                "Agile on hold: the inverter is in a manually chosen mode",
+            ),
+            ("pause", "Agile on hold: a battery pause is active"),
+            ("force", "Agile on hold: a manual Force action is running"),
+            (
+                "safety",
+                "Agile on hold: a safety limit is holding the battery",
+            ),
+        ] {
+            let s = InverterSnapshot {
+                agile_enabled: true,
+                agile_blocked_by: code.into(),
+                ..snapshot()
+            };
+            let v = build_status(
+                Some(&s),
+                ConnectionState::Connected,
+                20,
+                &Context::default(),
+                NOW,
+            );
+            let found = v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["code"] == "agile_blocked")
+                .unwrap_or_else(|| panic!("agile_blocked missing for {code}"));
+            assert_eq!(found["label"], expected);
+        }
+    }
+
+    #[test]
+    fn an_unblocked_or_disabled_agile_reports_no_blocked_condition() {
+        for (enabled, code) in [(true, ""), (false, "pause")] {
+            let s = InverterSnapshot {
+                agile_enabled: enabled,
+                agile_blocked_by: code.into(),
+                ..snapshot()
+            };
+            let v = build_status(
+                Some(&s),
+                ConnectionState::Connected,
+                20,
+                &Context::default(),
+                NOW,
+            );
+            assert!(!v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["code"] == "agile_blocked"));
         }
     }
 

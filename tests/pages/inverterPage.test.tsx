@@ -255,3 +255,33 @@ describe('<InverterPage/> Cosy on hold', () => {
     expect(container.textContent).not.toMatch(/Cosy is on hold/);
   });
 });
+
+describe('<InverterPage/> Agile on hold', () => {
+  function agileValue(container: HTMLElement): string | undefined {
+    const labelEl = Array.from(container.querySelectorAll('span.text-text-secondary'))
+      .find((r) => r.textContent === 'Agile Mode');
+    return labelEl?.nextElementSibling?.textContent ?? undefined;
+  }
+
+  it('shows Agile as on hold with the reason while something blocks it', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        agile_enabled: true,
+        agile_active: false,
+        agile_blocked_by: 'pause',
+      }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(agileValue(container)).toBe('On hold');
+    expect(container.textContent).toMatch(/Agile is on hold: a battery pause is active/);
+  });
+
+  it('keeps the normal wording when nothing blocks Agile', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ agile_enabled: true, agile_blocked_by: '' }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(agileValue(container)).not.toBe('On hold');
+    expect(container.textContent).not.toMatch(/Agile is on hold/);
+  });
+});

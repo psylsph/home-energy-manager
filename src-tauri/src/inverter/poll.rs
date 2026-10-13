@@ -3405,6 +3405,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // running, so the log carries one line per change rather than
                 // one per poll.
                 let mut cosy_deferred_by: Option<DischargeControlOwner> = None;
+                // Same for Agile: the owner that last kept it from acting on a
+                // charge or discharge it wanted.
+                let mut agile_deferred_by: Option<DischargeControlOwner> = None;
                 // Require two consecutive confirmed violations before repairing
                 // an externally-created HR59/no-slot state. This avoids
                 // reacting to a single transient read while still healing the
@@ -4835,10 +4838,36 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // Ownership arbitration (issue #289): while another owner
                                     // (e.g. a scheduled Timed Export window) holds the
                                     // discharge-control domain, Agile defers entirely.
+                                    let agile_blocker = crate::inverter::agile::outranked_by(
+                                        &action,
+                                        discharge_arbiter,
+                                    );
                                     let action = crate::inverter::agile::defer_if_outranked(
                                         action,
                                         discharge_arbiter,
                                     );
+                                    snapshot.agile_blocked_by = if settings.agile_enabled {
+                                        agile_blocker.map(|o| o.code()).unwrap_or_default().to_string()
+                                    } else {
+                                        String::new()
+                                    };
+                                    match crate::inverter::cosy::track_deferral(
+                                        &mut agile_deferred_by,
+                                        agile_blocker,
+                                        settings.agile_enabled,
+                                    ) {
+                                        Some(crate::inverter::cosy::DeferralEvent::Deferred(owner)) => {
+                                            tracing::warn!(
+                                                ?owner,
+                                                "Agile: not acting — {}",
+                                                crate::inverter::cosy::deferral_reason(owner)
+                                            );
+                                        }
+                                        Some(crate::inverter::cosy::DeferralEvent::Resumed) => {
+                                            tracing::info!("Agile: resumed — nothing is blocking it");
+                                        }
+                                        None => {}
+                                    }
 
                                     // Convert the action into register writes.
                                     let agile_enables_discharge =

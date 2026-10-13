@@ -1269,6 +1269,11 @@ pub struct InverterSnapshot {
     /// inverter; empty when nothing is stopping it.
     #[serde(default)]
     pub cosy_blocked_by: String,
+    /// Why Agile did not act on a charge or discharge it wanted this poll: the
+    /// code of the owner that outranks it (`"timed_export"`, `"manual_mode"`,
+    /// `"pause"`, `"force"`, `"safety"`); empty when nothing held it back.
+    #[serde(default)]
+    pub agile_blocked_by: String,
     /// True when the Agile Octopus state machine is actively force-charging or
     /// force-discharging the battery.
     pub agile_active: bool,
@@ -1543,6 +1548,7 @@ impl InverterSnapshot {
             adaptive_charge_desired_rate_percent: None,
             cosy_active: false,
             cosy_blocked_by: String::new(),
+            agile_blocked_by: String::new(),
             cosy_enabled: false,
             agile_active: false,
             agile_state: String::new(),

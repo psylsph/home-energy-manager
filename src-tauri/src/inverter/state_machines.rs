@@ -70,6 +70,22 @@ pub struct DischargeControlArbiter {
     selected: Option<DischargeControlOwner>,
 }
 
+impl DischargeControlOwner {
+    /// Stable code for the owner, exposed to the UI and API (for example as
+    /// the reason an automation is on hold).
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Agile => "agile",
+            Self::TimedCharge => "cosy",
+            Self::TimedExport => "timed_export",
+            Self::ManualMode => "manual_mode",
+            Self::ExplicitPause => "pause",
+            Self::ManualForce => "force",
+            Self::Safety => "safety",
+        }
+    }
+}
+
 impl DischargeControlArbiter {
     /// Offer an owner to this poll cycle and return whether it is allowed to
     /// write the shared control registers.
@@ -3923,6 +3939,32 @@ mod tests {
             false,
         );
         assert_eq!(decision.new_state, TimedExportState::Configured);
+    }
+
+    #[test]
+    fn every_discharge_owner_has_a_distinct_code() {
+        let owners = [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+            DischargeControlOwner::ManualForce,
+            DischargeControlOwner::Safety,
+        ];
+        let codes: Vec<_> = owners.iter().map(|o| o.code()).collect();
+        assert_eq!(
+            codes,
+            [
+                "agile",
+                "cosy",
+                "timed_export",
+                "manual_mode",
+                "pause",
+                "force",
+                "safety"
+            ]
+        );
     }
 
     #[test]

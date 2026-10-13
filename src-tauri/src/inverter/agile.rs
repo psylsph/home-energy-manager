@@ -117,6 +117,23 @@ pub(crate) fn defer_if_outranked(
     }
 }
 
+/// The owner keeping Agile from acting, but only when Agile actually wanted
+/// to write (a charge or a discharge). An idle or already-deferred action has
+/// nothing to hold back, so it reports no blocker and the UI stays quiet.
+pub(crate) fn outranked_by(
+    action: &AgileSlotAction,
+    arbiter: DischargeControlArbiter,
+) -> Option<DischargeControlOwner> {
+    if !matches!(
+        action,
+        AgileSlotAction::Charge { .. } | AgileSlotAction::Discharge { .. }
+    ) || arbiter.can_request(DischargeControlOwner::Agile)
+    {
+        return None;
+    }
+    arbiter.selected_owner()
+}
+
 /// The register command for an action, routed to the three-phase or the
 /// single-phase slot registers. `Defer` maps to a clear command that the
 /// caller must not write (see `should_write_agile_action`).
@@ -386,6 +403,64 @@ mod tests {
             defer_if_outranked(charge(), arbiter),
             AgileSlotAction::Charge { .. }
         ));
+    }
+
+    // ---- outranked_by ------------------------------------------------------
+
+    #[test]
+    fn a_charge_or_discharge_reports_the_owner_that_outranks_it() {
+        let discharge = AgileSlotAction::Discharge {
+            start_hhmm: 1600,
+            end_hhmm: 1900,
+        };
+        for owner in [
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+            DischargeControlOwner::ManualForce,
+            DischargeControlOwner::Safety,
+        ] {
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(owner);
+            assert_eq!(outranked_by(&charge(), arbiter), Some(owner));
+            assert_eq!(outranked_by(&discharge, arbiter), Some(owner));
+        }
+    }
+
+    #[test]
+    fn an_idle_or_deferred_action_has_nothing_held_back() {
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::ManualMode);
+        assert_eq!(outranked_by(&AgileSlotAction::Idle, arbiter), None);
+        assert_eq!(outranked_by(&AgileSlotAction::Defer, arbiter), None);
+    }
+
+    #[test]
+    fn nothing_blocks_agile_when_it_can_take_the_domain() {
+        assert_eq!(
+            outranked_by(&charge(), DischargeControlArbiter::default()),
+            None
+        );
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::Agile);
+        assert_eq!(outranked_by(&charge(), arbiter), None);
+    }
+
+    #[test]
+    fn it_agrees_with_defer_if_outranked() {
+        for owner in [
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::Safety,
+        ] {
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(owner);
+            let deferred = matches!(
+                defer_if_outranked(charge(), arbiter),
+                AgileSlotAction::Defer
+            );
+            assert_eq!(outranked_by(&charge(), arbiter).is_some(), deferred);
+        }
     }
 
     // ---- agile_command ----------------------------------------------------
