@@ -1264,6 +1264,11 @@ pub struct InverterSnapshot {
     /// True when Cosy tariff mode is enabled in settings (may be between slots).
     #[serde(default)]
     pub cosy_enabled: bool,
+    /// Why Cosy is not running this poll: `"pause"`, `"force"` or `"safety"`
+    /// when a pause, a manual Force action or a safety limiter holds the
+    /// inverter; empty when nothing is stopping it.
+    #[serde(default)]
+    pub cosy_blocked_by: String,
     /// True when the Agile Octopus state machine is actively force-charging or
     /// force-discharging the battery.
     pub agile_active: bool,
@@ -1537,6 +1542,7 @@ impl InverterSnapshot {
             adaptive_charge_period: None,
             adaptive_charge_desired_rate_percent: None,
             cosy_active: false,
+            cosy_blocked_by: String::new(),
             cosy_enabled: false,
             agile_active: false,
             agile_state: String::new(),

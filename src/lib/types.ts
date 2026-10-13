@@ -99,6 +99,8 @@ export interface InverterSnapshot {
   temperature_limiter_active?: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
+  /** Why Cosy is not running: 'pause', 'force' or 'safety'; empty or absent when nothing blocks it. */
+  cosy_blocked_by?: string;
   agile_active: boolean;
   agile_state: 'idle' | 'charging' | 'discharging';
   agile_enabled: boolean;

@@ -231,3 +231,27 @@ describe('<InverterPage/> charge/discharge rate scale', () => {
     expect(rowValue(container, 'Charge Rate')).toBe('100%');
   });
 });
+
+describe('<InverterPage/> Cosy on hold', () => {
+  it('shows Cosy as on hold with the reason while something blocks it', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ cosy_enabled: true, cosy_blocked_by: 'force' }),
+    });
+    const { container } = render(<InverterPage />);
+    const labelEl = Array.from(container.querySelectorAll('span.text-text-secondary'))
+      .find((r) => r.textContent === 'Cosy Mode');
+    expect(labelEl?.nextElementSibling?.textContent).toBe('On hold');
+    expect(container.textContent).toMatch(/Cosy is on hold: a manual Force Charge or Force Discharge/);
+  });
+
+  it('keeps showing Enabled when nothing blocks Cosy', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ cosy_enabled: true, cosy_blocked_by: '' }),
+    });
+    const { container } = render(<InverterPage />);
+    const labelEl = Array.from(container.querySelectorAll('span.text-text-secondary'))
+      .find((r) => r.textContent === 'Cosy Mode');
+    expect(labelEl?.nextElementSibling?.textContent).toBe('Enabled');
+    expect(container.textContent).not.toMatch(/Cosy is on hold/);
+  });
+});

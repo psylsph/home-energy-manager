@@ -576,6 +576,16 @@ fn build_status(
         "Adaptive Charge error",
     );
     condition(
+        s.cosy_enabled && !s.cosy_blocked_by.is_empty(),
+        "cosy_blocked",
+        match s.cosy_blocked_by.as_str() {
+            "pause" => "Cosy on hold: a battery pause is active",
+            "force" => "Cosy on hold: a manual Force action is running",
+            "safety" => "Cosy on hold: a safety limit is holding the battery",
+            _ => "Cosy on hold",
+        },
+    );
+    condition(
         matches!(ctx.export_state, TimedExportState::Error { .. }),
         "timed_export_error",
         if matches!(
@@ -1301,6 +1311,61 @@ mod tests {
                 "cosy_enabled={cosy_enabled} recoverable={recoverable}"
             );
             assert_eq!(v["automation"]["timed_export"]["phase"], "error");
+        }
+    }
+
+    #[test]
+    fn a_blocked_cosy_is_reported_as_a_condition_with_the_reason() {
+        for (code, expected) in [
+            ("pause", "Cosy on hold: a battery pause is active"),
+            ("force", "Cosy on hold: a manual Force action is running"),
+            (
+                "safety",
+                "Cosy on hold: a safety limit is holding the battery",
+            ),
+        ] {
+            let s = InverterSnapshot {
+                cosy_enabled: true,
+                cosy_blocked_by: code.into(),
+                ..snapshot()
+            };
+            let v = build_status(
+                Some(&s),
+                ConnectionState::Connected,
+                20,
+                &Context::default(),
+                NOW,
+            );
+            let found = v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["code"] == "cosy_blocked")
+                .unwrap_or_else(|| panic!("cosy_blocked missing for {code}"));
+            assert_eq!(found["label"], expected);
+        }
+    }
+
+    #[test]
+    fn an_unblocked_or_disabled_cosy_reports_no_blocked_condition() {
+        for (enabled, code) in [(true, ""), (false, "pause")] {
+            let s = InverterSnapshot {
+                cosy_enabled: enabled,
+                cosy_blocked_by: code.into(),
+                ..snapshot()
+            };
+            let v = build_status(
+                Some(&s),
+                ConnectionState::Connected,
+                20,
+                &Context::default(),
+                NOW,
+            );
+            assert!(!v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["code"] == "cosy_blocked"));
         }
     }
 

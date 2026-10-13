@@ -7,6 +7,8 @@ import { rawLimitToPercent } from '../lib/powerLimit';
 import type { LimitScale } from '../lib/powerLimit';
 import { hasGridFault, hasInverterTrip, hasBatteryOverTemp, gridFaultTitle } from '../lib/gridFault';
 import AwaitingConnection from '../components/AwaitingConnection';
+import CosyBlockedNotice from '../components/CosyBlockedNotice';
+import { cosyBlockedMessage } from '../lib/cosyBlocked';
 
 export default function InverterPage() {
   const { snapshot, connectionState } = useInverterStore();
@@ -347,7 +349,11 @@ export default function InverterPage() {
           <span className={`font-mono text-right ${s.auto_winter_active ? 'text-blue-400' : 'text-text-secondary'}`}>{s.auto_winter_active ? 'Active' : 'Inactive'}</span>
           <span className="text-text-secondary">Cosy Mode</span>
           <span className={`font-mono text-right ${s.cosy_active ? 'text-accent' : s.cosy_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
-            {s.cosy_active ? 'Active' : s.cosy_enabled ? 'Enabled' : 'Disabled'}
+            {s.cosy_active
+              ? 'Active'
+              : cosyBlockedMessage(s.cosy_blocked_by, s.cosy_enabled)
+                ? 'On hold'
+                : s.cosy_enabled ? 'Enabled' : 'Disabled'}
           </span>
           <span className="text-text-secondary">Agile Mode</span>
           <span className={`font-mono text-right ${s.agile_active ? 'text-accent' : s.agile_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
@@ -368,6 +374,9 @@ export default function InverterPage() {
 
           <span className="text-text-secondary">Battery Calibration</span>
           <span className="text-text-primary font-mono text-right">{s.battery_calibration_stage > 0 ? `Stage ${s.battery_calibration_stage}` : 'Off'}</span>
+        </div>
+        <div className="mt-4 empty:hidden">
+          <CosyBlockedNotice blockedBy={s.cosy_blocked_by} enabled={s.cosy_enabled} />
         </div>
       </section>
     </div>

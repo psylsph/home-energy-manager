@@ -327,6 +327,17 @@ pub(crate) fn hard_blocker(arbiter: DischargeControlArbiter) -> Option<Discharge
     arbiter.selected_owner().filter(|o| is_hard_override(*o))
 }
 
+/// Stable code for the hard override holding Cosy, as exposed on the snapshot
+/// (`cosy_blocked_by`) for the UI. Empty for owners that do not stop Cosy.
+pub(crate) fn blocker_code(owner: DischargeControlOwner) -> &'static str {
+    match owner {
+        DischargeControlOwner::ExplicitPause => "pause",
+        DischargeControlOwner::ManualForce => "force",
+        DischargeControlOwner::Safety => "safety",
+        _ => "",
+    }
+}
+
 /// Whether a write is part of the shared discharge-control domain (the work
 /// mode and the discharge-enable flags) rather than the charge side.
 fn is_discharge_domain_write(write: &RegisterWrite) -> bool {
@@ -1205,5 +1216,21 @@ mod tests {
             assert_eq!(rig.preloaded, None);
         })
         .await;
+    }
+
+    #[test]
+    fn each_hard_override_has_a_distinct_ui_code_and_the_rest_have_none() {
+        assert_eq!(blocker_code(DischargeControlOwner::ExplicitPause), "pause");
+        assert_eq!(blocker_code(DischargeControlOwner::ManualForce), "force");
+        assert_eq!(blocker_code(DischargeControlOwner::Safety), "safety");
+        for owner in [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+        ] {
+            assert_eq!(blocker_code(owner), "", "{owner:?}");
+            assert!(!is_hard_override(owner));
+        }
     }
 }

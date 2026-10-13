@@ -4667,6 +4667,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // the Eco restore at the end of a slot still waits
                                 // for the domain (see `run_cosy_step`).
                                 let cosy_blocker = crate::inverter::cosy::hard_blocker(discharge_arbiter);
+                                snapshot.cosy_blocked_by = if poll_settings.cosy_enabled {
+                                    cosy_blocker
+                                        .map(crate::inverter::cosy::blocker_code)
+                                        .unwrap_or_default()
+                                        .to_string()
+                                } else {
+                                    String::new()
+                                };
                                 match crate::inverter::cosy::track_deferral(
                                     &mut cosy_deferred_by,
                                     cosy_blocker,
