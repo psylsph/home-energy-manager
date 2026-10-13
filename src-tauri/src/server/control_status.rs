@@ -578,7 +578,17 @@ fn build_status(
     condition(
         matches!(ctx.export_state, TimedExportState::Error { .. }),
         "timed_export_error",
-        "Timed Export error",
+        if matches!(
+            ctx.export_state,
+            TimedExportState::Error {
+                recoverable: true,
+                ..
+            }
+        ) {
+            "Timed Export error (will retry)"
+        } else {
+            "Timed Export error"
+        },
     );
 
     let (mut source, mut phase, mut title) = if !known_device {
@@ -1180,6 +1190,31 @@ mod tests {
             if owns {
                 assert_eq!(v["control_source"], "timed_export");
             }
+        }
+    }
+
+    #[test]
+    fn a_timed_export_error_says_whether_it_will_retry() {
+        for (recoverable, label) in [
+            (true, "Timed Export error (will retry)"),
+            (false, "Timed Export error"),
+        ] {
+            let ctx = Context {
+                export_state: TimedExportState::Error {
+                    reason: "write failed".into(),
+                    recoverable,
+                    polls: 0,
+                },
+                ..Default::default()
+            };
+            let v = build_status(Some(&snapshot()), ConnectionState::Connected, 20, &ctx, NOW);
+            let found = v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["code"] == "timed_export_error")
+                .expect("error condition present");
+            assert_eq!(found["label"], label);
         }
     }
 

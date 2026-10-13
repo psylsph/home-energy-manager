@@ -2028,6 +2028,11 @@ pub const TIMED_EXPORT_CONFIRM_GRACE_POLLS: u32 = 2;
 /// surfaces [`TimedExportState::Error`].
 pub const TIMED_EXPORT_MAX_WRITE_RETRIES: u32 = 3;
 
+/// Polls a recoverable `Error` waits before it tries the failed transition
+/// again (about half an hour at the default poll interval). Keeps the write
+/// rate low when something outside HEM keeps the inverter from settling.
+pub const TIMED_EXPORT_ERROR_RETRY_POLLS: u32 = 30;
+
 /// Clamp helper for the per-state retry bookkeeping.
 fn bump(polls_waiting: &mut u32, retries: &mut u32) -> bool {
     if *polls_waiting >= TIMED_EXPORT_CONFIRM_GRACE_POLLS {
@@ -2054,7 +2059,10 @@ pub fn export_window_contains(slots: &[ScheduleSlot], minute_of_day: u16) -> boo
 /// - The machine mid-transition always claims it.
 /// - A HEM-managed schedule claims it inside a window, or whenever the
 ///   inverter is not confirmed in Eco (armed outside a window, or a pending
-///   repair) — unless the machine has errored out and will not repair it.
+///   repair) — unless the machine is in `Error`. A recoverable `Error`
+///   only retries after a long cooldown and an unrecoverable one never
+///   does, so holding the claim in between would lock Cosy/Agile out; the
+///   retry itself claims the domain again through `Exiting`/`Entering`.
 /// - With no managed schedule, a non-Eco inverter claims it only when no
 ///   physical slot is configured: that is the slotless invalid state, whereas
 ///   an export set up elsewhere (e.g. the GivEnergy portal) has a slot and is
@@ -2660,6 +2668,47 @@ pub fn check_timed_export(
                 writes: Vec::new(),
                 log_message: Some("Timed Export recovered, export confirmed".to_string()),
                 is_exit_transition: false,
+            }
+        }
+
+        TimedExportState::Error {
+            reason,
+            recoverable: true,
+            polls,
+        } => {
+            // The ladder gave up, but the cause may be outside HEM (firmware
+            // re-arming, a slow readback). Rather than staying dead until the
+            // user re-saves, wait out a cooldown and run the failed transition
+            // again — one ladder per cooldown keeps the write rate low.
+            let reason = reason.clone();
+            let polls = polls.saturating_add(1);
+            if polls < TIMED_EXPORT_ERROR_RETRY_POLLS || rearm_observation_in_progress {
+                *state = TimedExportState::Error {
+                    reason,
+                    recoverable: true,
+                    polls,
+                };
+                quiet(state)
+            } else if in_window && hr318_blocking {
+                *state = TimedExportState::BlockedByPause;
+                TimedExportDecision {
+                    new_state: state.clone(),
+                    writes: Vec::new(),
+                    log_message: Some("Timed Export blocked by Pause Discharge".to_string()),
+                    is_exit_transition: false,
+                }
+            } else if in_window {
+                entering_decision(
+                    state,
+                    "Timed Export: retrying entry after an earlier error",
+                    build_timed_export_entry_writes(device_type, config),
+                )
+            } else {
+                exiting_decision(
+                    state,
+                    "Timed Export: retrying exit after an earlier error",
+                    build_timed_export_exit_writes(device_type, config),
+                )
             }
         }
 
@@ -3657,6 +3706,19 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_error_inside_window_keeps_counting_while_the_inverter_is_in_eco() {
+        // Eco is confirmed but the window is open: the failed entry is not
+        // retried until the cooldown, and Error is not cleared early.
+        let mut state = error_state(true, 3);
+        let decision = step(&claim_eco(), &enabled_config(), &mut state, 17 * 60);
+        assert!(matches!(
+            decision.new_state,
+            TimedExportState::Error { polls: 4, .. }
+        ));
+        assert!(decision.writes.is_empty());
+    }
+
+    #[test]
     fn recoverable_error_inside_window_becomes_active_once_export_is_confirmed() {
         // The entry the ladder gave up on did land (slow readback): go
         // straight to Active, with no cooldown and no repeat entry writes.
@@ -3672,8 +3734,20 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_error_inside_a_pause_window_retries_into_blocked_by_pause() {
+        // HR318=2 (pause discharge) always blocks an AC-coupled inverter.
+        let mut snap = claim_eco();
+        snap.device_type = DeviceType::ACCoupled;
+        snap.battery_pause_mode = 2;
+        let mut state = error_state(true, TIMED_EXPORT_ERROR_RETRY_POLLS - 1);
+        let decision = step(&snap, &enabled_config(), &mut state, 17 * 60);
+        assert_eq!(decision.new_state, TimedExportState::BlockedByPause);
+        assert!(decision.writes.is_empty());
+    }
+
+    #[test]
     fn unrecoverable_error_never_clears_by_itself() {
-        let mut state = error_state(false, 60);
+        let mut state = error_state(false, TIMED_EXPORT_ERROR_RETRY_POLLS * 2);
         let decision = step(&claim_eco(), &enabled_config(), &mut state, EVENING);
         assert!(matches!(
             decision.new_state,
@@ -3690,6 +3764,74 @@ mod tests {
             EVENING,
         );
         assert!(decision.writes.is_empty());
+    }
+
+    #[test]
+    fn recoverable_error_counts_polls_without_writing_during_cooldown() {
+        let mut state = error_state(true, 0);
+        for expected in 1..TIMED_EXPORT_ERROR_RETRY_POLLS {
+            let decision = step(
+                &armed_snapshot(true),
+                &enabled_config(),
+                &mut state,
+                EVENING,
+            );
+            assert!(decision.writes.is_empty(), "poll {expected}");
+            assert!(matches!(
+                state,
+                TimedExportState::Error { polls, .. } if polls == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn recoverable_error_retries_the_exit_after_the_cooldown() {
+        let mut state = error_state(true, TIMED_EXPORT_ERROR_RETRY_POLLS - 1);
+        let decision = step(
+            &armed_snapshot(true),
+            &enabled_config(),
+            &mut state,
+            EVENING,
+        );
+        assert_eq!(
+            decision.new_state,
+            TimedExportState::Exiting {
+                polls_waiting: 0,
+                retries: 0
+            }
+        );
+        assert!(!decision.writes.is_empty());
+        assert!(decision.is_exit_transition);
+    }
+
+    #[test]
+    fn recoverable_error_holds_its_retry_while_rearm_is_being_observed() {
+        let mut state = error_state(true, TIMED_EXPORT_ERROR_RETRY_POLLS - 1);
+        let decision = check_timed_export(
+            &armed_snapshot(true),
+            &enabled_config(),
+            &mut state,
+            EVENING,
+            DeviceType::Gen3Hybrid,
+            TimedExportWriteOutcome::NoneIssued,
+            true,
+        );
+        assert!(decision.writes.is_empty());
+        assert!(matches!(decision.new_state, TimedExportState::Error { .. }));
+    }
+
+    #[test]
+    fn recoverable_error_retries_entry_after_the_cooldown_inside_the_window() {
+        let mut state = error_state(true, TIMED_EXPORT_ERROR_RETRY_POLLS - 1);
+        let decision = step(&claim_eco(), &enabled_config(), &mut state, 17 * 60);
+        assert_eq!(
+            decision.new_state,
+            TimedExportState::Entering {
+                polls_waiting: 0,
+                retries: 0
+            }
+        );
+        assert!(!decision.writes.is_empty());
     }
 
     #[test]
@@ -3729,6 +3871,58 @@ mod tests {
                 polls: 0
             }
         );
+    }
+
+    #[test]
+    fn an_inverter_that_never_settles_is_retried_at_a_bounded_rate_then_recovers() {
+        // End-to-end over the reconciler: exit writes land but the readback
+        // stays export-armed (e.g. firmware re-arming). The machine must keep
+        // trying, but only a few write batches per cooldown, never go
+        // permanently silent, and return to Configured once Eco shows up.
+        let config = enabled_config();
+        let armed = armed_snapshot(true);
+        let mut state = TimedExportState::Configured;
+        let mut outcome = TimedExportWriteOutcome::NoneIssued;
+        let mut batches = 0u32;
+        let mut reached_error = false;
+        let polls = TIMED_EXPORT_ERROR_RETRY_POLLS * 3;
+        for _ in 0..polls {
+            let decision = check_timed_export(
+                &armed,
+                &config,
+                &mut state,
+                EVENING,
+                DeviceType::Gen3Hybrid,
+                outcome,
+                false,
+            );
+            outcome = if decision.writes.is_empty() {
+                TimedExportWriteOutcome::NoneIssued
+            } else {
+                batches += 1;
+                TimedExportWriteOutcome::Succeeded
+            };
+            reached_error |= matches!(state, TimedExportState::Error { .. });
+        }
+        assert!(reached_error, "the ladder should still give up first");
+        assert!(batches >= 3, "retries must continue after the first error");
+        assert!(
+            batches <= 3 * (TIMED_EXPORT_MAX_WRITE_RETRIES + 2),
+            "write rate must stay bounded, got {batches} batches in {polls} polls"
+        );
+
+        // Force the machine into Error, then let the inverter settle.
+        state = error_state(true, 5);
+        let decision = check_timed_export(
+            &claim_eco(),
+            &config,
+            &mut state,
+            EVENING,
+            DeviceType::Gen3Hybrid,
+            TimedExportWriteOutcome::NoneIssued,
+            false,
+        );
+        assert_eq!(decision.new_state, TimedExportState::Configured);
     }
 
     #[test]
