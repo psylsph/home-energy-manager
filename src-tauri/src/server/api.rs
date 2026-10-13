@@ -3478,7 +3478,11 @@ async fn compensate_discharge_slots(
          the schedule to recover."
     );
     *state.timed_export_state.lock().await =
-        crate::inverter::state_machines::TimedExportState::Error { reason };
+        crate::inverter::state_machines::TimedExportState::Error {
+            reason,
+            recoverable: false,
+            polls: 0,
+        };
     Err("the inverter also rejected the compensation writes".to_string())
 }
 
@@ -12316,6 +12320,8 @@ pub(crate) mod tests {
             *state.timed_export_state.lock().await =
                 crate::inverter::state_machines::TimedExportState::Error {
                     reason: "old schedule failed".to_string(),
+                    recoverable: false,
+                    polls: 0,
                 };
             // The physical registers are intentionally zeroed by the fallback.
             {
@@ -12816,6 +12822,8 @@ pub(crate) mod tests {
             *state.timed_export_state.lock().await =
                 crate::inverter::state_machines::TimedExportState::Error {
                     reason: "previous boundary failure".to_string(),
+                    recoverable: false,
+                    polls: 0,
                 };
 
             let (status, _) = drive_set_discharge_slot_completion_with(

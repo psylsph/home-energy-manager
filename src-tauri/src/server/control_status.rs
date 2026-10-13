@@ -1159,6 +1159,8 @@ mod tests {
             (
                 TimedExportState::Error {
                     reason: "write failed".into(),
+                    recoverable: true,
+                    polls: 0,
                 },
                 "error",
             ),

@@ -1935,6 +1935,16 @@ pub enum TimedExportState {
     Error {
         /// Human-readable error description.
         reason: String,
+        /// Whether the machine may retry on its own. True only for an
+        /// exhausted entry/exit write ladder, where the cause (firmware
+        /// re-arming, a slow readback, a busy dongle) can clear by itself.
+        /// An error that leaves the inverter's physical schedule in doubt
+        /// (a failed compensation) stays put until the user re-saves.
+        #[serde(default)]
+        recoverable: bool,
+        /// Polls spent in `Error`, for the retry cooldown.
+        #[serde(default)]
+        polls: u32,
     },
 }
 
@@ -2622,9 +2632,41 @@ pub fn check_timed_export(
             }
         }
 
+        TimedExportState::Error {
+            recoverable: true, ..
+        } if !in_window && eco_confirmed => {
+            // The cause cleared by itself (the firmware stopped re-arming, the
+            // readback caught up): the exit the ladder gave up on is in fact
+            // done, so go back to waiting for the next window instead of
+            // leaving every future export dead.
+            *state = TimedExportState::Configured;
+            TimedExportDecision {
+                new_state: state.clone(),
+                writes: Vec::new(),
+                log_message: Some("Timed Export recovered, Eco confirmed".to_string()),
+                is_exit_transition: false,
+            }
+        }
+
+        TimedExportState::Error {
+            recoverable: true, ..
+        } if in_window && export_confirmed && !hr318_blocking => {
+            // The entry the ladder gave up on did land (the readback was
+            // slow): the export is running, so adopt it rather than waiting
+            // out the cooldown and writing the entry registers again.
+            *state = TimedExportState::Active;
+            TimedExportDecision {
+                new_state: state.clone(),
+                writes: Vec::new(),
+                log_message: Some("Timed Export recovered, export confirmed".to_string()),
+                is_exit_transition: false,
+            }
+        }
+
         TimedExportState::Error { .. } => {
-            // Error state requires intervention to clear: a schedule change
-            // (enable/disable or slot edit) resets the machine via the API.
+            // An Error that leaves the physical schedule in doubt requires
+            // intervention to clear: a schedule change (enable/disable or
+            // slot edit) resets the machine via the API.
             quiet(state)
         }
     };
@@ -2725,6 +2767,8 @@ fn error_decision(state: &mut TimedExportState, reason: &str) -> TimedExportDeci
     tracing::error!("Timed Export: {reason}");
     *state = TimedExportState::Error {
         reason: reason.to_string(),
+        recoverable: true,
+        polls: 0,
     };
     TimedExportDecision {
         new_state: state.clone(),
@@ -3539,6 +3583,8 @@ mod tests {
         };
         let mut state = TimedExportState::Error {
             reason: "exit writes failed after retries".to_string(),
+            recoverable: true,
+            polls: 0,
         };
         let snap = armed_snapshot(true);
         // Premise: the machine really is stuck (no repair writes).
@@ -3564,6 +3610,8 @@ mod tests {
         };
         let state = TimedExportState::Error {
             reason: "entry writes failed after retries".to_string(),
+            recoverable: true,
+            polls: 0,
         };
         assert!(timed_export_claims_discharge(
             &config,
@@ -3571,6 +3619,116 @@ mod tests {
             &armed_snapshot(true),
             17 * 60
         ));
+    }
+
+    // ---- Error recovery (issue #366) --------------------------------------
+
+    fn enabled_config() -> TimedExportConfig {
+        TimedExportConfig {
+            schedule_enabled: true,
+            slots: vec![configured_slot()],
+            ..Default::default()
+        }
+    }
+
+    fn error_state(recoverable: bool, polls: u32) -> TimedExportState {
+        TimedExportState::Error {
+            reason: "exit writes failed after retries".to_string(),
+            recoverable,
+            polls,
+        }
+    }
+
+    fn step(
+        snap: &InverterSnapshot,
+        config: &TimedExportConfig,
+        state: &mut TimedExportState,
+        minute: u16,
+    ) -> TimedExportDecision {
+        check_timed_export_with_defaults(snap, config, state, minute, DeviceType::Gen3Hybrid)
+    }
+
+    #[test]
+    fn recoverable_error_returns_to_configured_once_eco_is_confirmed_outside_window() {
+        let mut state = error_state(true, 3);
+        let decision = step(&claim_eco(), &enabled_config(), &mut state, EVENING);
+        assert_eq!(decision.new_state, TimedExportState::Configured);
+        assert!(decision.writes.is_empty());
+    }
+
+    #[test]
+    fn recoverable_error_inside_window_becomes_active_once_export_is_confirmed() {
+        // The entry the ladder gave up on did land (slow readback): go
+        // straight to Active, with no cooldown and no repeat entry writes.
+        let mut state = error_state(true, 3);
+        let decision = step(
+            &armed_snapshot(true),
+            &enabled_config(),
+            &mut state,
+            17 * 60,
+        );
+        assert_eq!(decision.new_state, TimedExportState::Active);
+        assert!(decision.writes.is_empty());
+    }
+
+    #[test]
+    fn unrecoverable_error_never_clears_by_itself() {
+        let mut state = error_state(false, 60);
+        let decision = step(&claim_eco(), &enabled_config(), &mut state, EVENING);
+        assert!(matches!(
+            decision.new_state,
+            TimedExportState::Error {
+                recoverable: false,
+                ..
+            }
+        ));
+        assert!(decision.writes.is_empty());
+        let decision = step(
+            &armed_snapshot(true),
+            &enabled_config(),
+            &mut state,
+            EVENING,
+        );
+        assert!(decision.writes.is_empty());
+    }
+
+    #[test]
+    fn exhausted_exit_ladder_produces_a_recoverable_error() {
+        let mut state = TimedExportState::Exiting {
+            polls_waiting: 0,
+            retries: TIMED_EXPORT_MAX_WRITE_RETRIES,
+        };
+        let decision = check_timed_export(
+            &armed_snapshot(true),
+            &enabled_config(),
+            &mut state,
+            EVENING,
+            DeviceType::Gen3Hybrid,
+            TimedExportWriteOutcome::Failed,
+            false,
+        );
+        assert!(matches!(
+            decision.new_state,
+            TimedExportState::Error {
+                recoverable: true,
+                polls: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn error_from_an_older_release_deserialises_as_unrecoverable() {
+        let state: TimedExportState =
+            serde_json::from_str(r#"{"Error":{"reason":"old"}}"#).unwrap();
+        assert_eq!(
+            state,
+            TimedExportState::Error {
+                reason: "old".to_string(),
+                recoverable: false,
+                polls: 0
+            }
+        );
     }
 
     #[test]
