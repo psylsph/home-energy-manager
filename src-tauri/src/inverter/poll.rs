@@ -4659,13 +4659,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // Writes Cosy slot schedules into the inverter's own charge
                                 // slot registers so it follows them independently: drive the
                                 // active slot, otherwise preload the next one (see `cosy`).
-                                let cosy_blocker = if discharge_arbiter
-                                    .can_request(DischargeControlOwner::TimedCharge)
-                                {
-                                    None
-                                } else {
-                                    discharge_arbiter.selected_owner()
-                                };
+                                // Only a pause, a manual Force action or a safety
+                                // limiter stops Cosy outright. Its charge-slot
+                                // registers sit outside the discharge-control
+                                // domain, so a manual mode or a Timed Export claim
+                                // that is not mid-window no longer holds them back;
+                                // the Eco restore at the end of a slot still waits
+                                // for the domain (see `run_cosy_step`).
+                                let cosy_blocker = crate::inverter::cosy::hard_blocker(discharge_arbiter);
                                 match crate::inverter::cosy::track_deferral(
                                     &mut cosy_deferred_by,
                                     cosy_blocker,

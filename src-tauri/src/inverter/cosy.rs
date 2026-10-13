@@ -96,6 +96,12 @@ pub(crate) fn plan_cosy_step(i: &CosyInputs<'_>) -> CosyStep {
     let in_slot = current.is_some();
 
     if let (Some((slot_idx, slot)), false) = (current, i.cosy_active) {
+        if i.timed_export_owns_discharge {
+            // A scheduled Timed Export window outranks Timed Charge (issue
+            // #289): do not start charging until it has released the inverter.
+            tracing::debug!("Cosy: not entering slot {slot_idx} — Timed Export owns the window");
+            return CosyStep::Idle;
+        }
         tracing::info!(
             "Cosy: entering slot {} ({}), target SOC {}%",
             slot_idx,
@@ -264,8 +270,23 @@ pub(crate) async fn run_cosy_step<W: RegisterWriteExecutor>(
             writes,
             next_preloaded,
         } => {
-            if !arbiter.request(DischargeControlOwner::TimedCharge) {
+            if hard_blocker(*arbiter).is_some() {
                 return;
+            }
+            // Charging always switches off; the work-mode and discharge flags
+            // are only restored when nothing else holds the domain.
+            let mut writes = writes;
+            if arbiter.can_request(DischargeControlOwner::TimedCharge) {
+                arbiter.request(DischargeControlOwner::TimedCharge);
+            } else if writes.iter().any(is_discharge_domain_write) {
+                writes.retain(|w| !is_discharge_domain_write(w));
+                if let Some(owner) = arbiter.selected_owner() {
+                    tracing::info!(
+                        ?owner,
+                        "Cosy: slot over, charging off — left the discharge controls alone because {}",
+                        deferral_reason(owner)
+                    );
+                }
             }
             if execute_register_writes(writer, &writes, "Cosy exit", write_gap).await {
                 *state.cosy_active.lock().await = false;
@@ -283,7 +304,7 @@ pub(crate) async fn run_cosy_step<W: RegisterWriteExecutor>(
             }
         }
         CosyStep::ClearPreload { writes } => {
-            if arbiter.request(DischargeControlOwner::TimedCharge)
+            if request_writes(&writes, arbiter)
                 && execute_register_writes(writer, &writes, "Cosy clear", write_gap).await
             {
                 *last_preloaded = None;
@@ -292,14 +313,44 @@ pub(crate) async fn run_cosy_step<W: RegisterWriteExecutor>(
     }
 }
 
-/// Request the discharge-control domain for a batch. An empty batch (a slot
-/// whose times could not be encoded) never claims it.
-fn request_writes(writes: &[RegisterWrite], arbiter: &mut DischargeControlArbiter) -> bool {
-    !writes.is_empty() && arbiter.request(DischargeControlOwner::TimedCharge)
+/// Owners that genuinely conflict with Cosy charging: an explicit pause, a
+/// manual Force action and the safety limiters. Anything below them (a manual
+/// mode, a Timed Export claim that is not mid-window) leaves charge-slot
+/// writes alone, because those registers sit outside the discharge-control
+/// domain.
+pub(crate) fn is_hard_override(owner: DischargeControlOwner) -> bool {
+    owner > DischargeControlOwner::ManualMode
 }
 
-/// A change in whether a higher-priority discharge-control owner is keeping
-/// Cosy from running.
+/// The owner, if any, that stops Cosy running at all this poll.
+pub(crate) fn hard_blocker(arbiter: DischargeControlArbiter) -> Option<DischargeControlOwner> {
+    arbiter.selected_owner().filter(|o| is_hard_override(*o))
+}
+
+/// Whether a write is part of the shared discharge-control domain (the work
+/// mode and the discharge-enable flags) rather than the charge side.
+fn is_discharge_domain_write(write: &RegisterWrite) -> bool {
+    matches!(
+        write.address,
+        HR_BATTERY_POWER_MODE | HR_ENABLE_DISCHARGE | HR_3PH_FORCE_DISCHARGE_ENABLE
+    )
+}
+
+/// Claim the poll for a charge-side batch. These registers are not in the
+/// discharge-control domain, so only a hard override stops them; a lower owner
+/// keeps the domain and Cosy simply writes alongside it. An empty batch (a
+/// slot whose times could not be encoded) never claims anything.
+fn request_writes(writes: &[RegisterWrite], arbiter: &mut DischargeControlArbiter) -> bool {
+    if writes.is_empty() || hard_blocker(*arbiter).is_some() {
+        return false;
+    }
+    // Takes the domain when it is free; a soft owner simply keeps it.
+    arbiter.request(DischargeControlOwner::TimedCharge);
+    true
+}
+
+/// A change in whether a hard override (an explicit pause, a manual Force
+/// action or a safety limiter) is keeping Cosy from running.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DeferralEvent {
     /// Cosy is enabled but this owner won the poll, so Cosy is skipped.
@@ -310,8 +361,7 @@ pub(crate) enum DeferralEvent {
 
 /// Track which owner (if any) is blocking Cosy and report only *changes*, so
 /// the log carries one line per transition instead of one per poll.
-/// `blocker` is the winning owner when Cosy cannot request the arbiter this
-/// poll, `None` when it can. With Cosy disabled nothing is blocked from the
+/// `blocker` is the hard override holding the poll, `None` when Cosy can run. With Cosy disabled nothing is blocked from the
 /// user's point of view, so the tracker resets silently.
 pub(crate) fn track_deferral(
     tracker: &mut Option<DischargeControlOwner>,
@@ -1009,5 +1059,151 @@ mod tests {
         ] {
             assert!(!deferral_reason(owner).is_empty());
         }
+    }
+
+    // ---- ownership: charge side vs discharge-control domain --------------------
+
+    #[test]
+    fn only_pause_force_and_safety_are_hard_overrides() {
+        for (owner, hard) in [
+            (DischargeControlOwner::Agile, false),
+            (DischargeControlOwner::TimedCharge, false),
+            (DischargeControlOwner::TimedExport, false),
+            (DischargeControlOwner::ManualMode, false),
+            (DischargeControlOwner::ExplicitPause, true),
+            (DischargeControlOwner::ManualForce, true),
+            (DischargeControlOwner::Safety, true),
+        ] {
+            assert_eq!(is_hard_override(owner), hard, "{owner:?}");
+        }
+    }
+
+    #[test]
+    fn hard_blocker_reports_only_hard_winners() {
+        let mut arbiter = DischargeControlArbiter::default();
+        assert_eq!(hard_blocker(arbiter), None);
+        arbiter.request(DischargeControlOwner::ManualMode);
+        assert_eq!(hard_blocker(arbiter), None);
+        arbiter.request(DischargeControlOwner::ExplicitPause);
+        assert_eq!(
+            hard_blocker(arbiter),
+            Some(DischargeControlOwner::ExplicitPause)
+        );
+    }
+
+    #[test]
+    fn enter_waits_while_timed_export_owns_an_export_window() {
+        let mut s = Scenario::new(at(4, 30));
+        s.te_owns = true;
+        assert!(matches!(s.plan(), CosyStep::Idle));
+    }
+
+    #[tokio::test]
+    async fn enter_proceeds_when_only_a_manual_mode_or_a_timed_export_claim_holds_the_domain() {
+        // The reporter's night: an export set up in the portal. The charge
+        // slot does not touch the discharge controls, so it must still be set.
+        with_isolated_config_dir_async(|| async {
+            for owner in [
+                DischargeControlOwner::ManualMode,
+                DischargeControlOwner::TimedExport,
+            ] {
+                let mut rig = Rig::new();
+                rig.arbiter.request(owner);
+                rig.run(enter_step()).await;
+                assert!(rig.active().await, "{owner:?}");
+                assert!(rig.writer.sent.contains(&(96, 1)), "{owner:?}");
+                assert_eq!(rig.arbiter.selected_owner(), Some(owner), "winner kept");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn every_hard_override_still_blocks_enter_exit_and_preload() {
+        with_isolated_config_dir_async(|| async {
+            for owner in [
+                DischargeControlOwner::ExplicitPause,
+                DischargeControlOwner::ManualForce,
+                DischargeControlOwner::Safety,
+            ] {
+                for step in [
+                    enter_step(),
+                    exit_step(),
+                    Scenario::new(at(8, 0)).plan(), // Preload
+                ] {
+                    let mut rig = Rig::new();
+                    rig.arbiter.request(owner);
+                    rig.run(step).await;
+                    assert!(rig.writer.sent.is_empty(), "{owner:?}");
+                    assert!(!rig.active().await, "{owner:?}");
+                    assert_eq!(rig.preloaded, None, "{owner:?}");
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exit_under_a_soft_owner_turns_charging_off_but_leaves_the_discharge_controls() {
+        with_isolated_config_dir_async(|| async {
+            for owner in [
+                DischargeControlOwner::ManualMode,
+                DischargeControlOwner::TimedExport,
+            ] {
+                let mut rig = Rig::new();
+                *rig.state.cosy_active.lock().await = true;
+                crate::inverter::state_machines::persist_cosy_active(true);
+                rig.arbiter.request(owner);
+                rig.run(exit_step()).await;
+                let sent = &rig.writer.sent;
+                assert!(sent.contains(&(96, 0)), "charging off: {sent:?}");
+                assert!(sent.contains(&(20, 0)), "charge target off: {sent:?}");
+                assert!(
+                    !sent.iter().any(|(a, _)| *a == 27 || *a == 59),
+                    "must not touch HR27/HR59 under {owner:?}: {sent:?}"
+                );
+                assert!(!rig.active().await, "the slot is over: {owner:?}");
+                assert!(rig.preloaded.is_some(), "next slot preloaded: {owner:?}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exit_with_a_free_domain_still_restores_eco() {
+        with_isolated_config_dir_async(|| async {
+            let mut rig = Rig::new();
+            *rig.state.cosy_active.lock().await = true;
+            rig.run(exit_step()).await;
+            assert!(rig.writer.sent.contains(&(27, 1)), "{:?}", rig.writer.sent);
+            assert!(rig.writer.sent.contains(&(59, 0)), "{:?}", rig.writer.sent);
+            assert_eq!(
+                rig.arbiter.selected_owner(),
+                Some(DischargeControlOwner::TimedCharge)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn preload_and_clear_proceed_under_a_soft_owner() {
+        with_isolated_config_dir_async(|| async {
+            let mut rig = Rig::new();
+            rig.arbiter.request(DischargeControlOwner::ManualMode);
+            rig.run(Scenario::new(at(8, 0)).plan()).await; // Preload
+            assert!(!rig.writer.sent.is_empty());
+            assert!(rig.preloaded.is_some());
+
+            let mut rig = Rig::new();
+            rig.arbiter.request(DischargeControlOwner::TimedExport);
+            rig.preloaded = Some(0);
+            let mut s = Scenario::new(at(8, 0));
+            s.slots = Vec::new();
+            s.preloaded = Some(0);
+            rig.run(s.plan()).await; // ClearPreload
+            assert!(!rig.writer.sent.is_empty());
+            assert_eq!(rig.preloaded, None);
+        })
+        .await;
     }
 }
