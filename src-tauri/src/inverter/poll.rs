@@ -583,6 +583,12 @@ pub struct AppState {
     pub timed_export_rearm_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Whether cosy charging is currently active (force-charging in a slot).
     pub cosy_active: Arc<Mutex<bool>>,
+    /// The Cosy slot already notified about as blocked, so a slot raises one
+    /// notification however long the block lasts. Kept here, not in the poll
+    /// loop's connection scope, so a dongle reconnect does not repeat it.
+    pub cosy_alerted_slot: Arc<Mutex<Option<usize>>>,
+    /// Spaces out retries of a failed blocked-slot notification.
+    pub(crate) cosy_alert_retry: Arc<Mutex<crate::inverter::cosy::AlertRetryGate>>,
     /// Cached Octopus Agile prices for the current region.
     pub cached_agile_prices: Arc<Mutex<Vec<PriceSlot>>>,
     /// Most recently decoded EV charger snapshot.
@@ -791,6 +797,10 @@ impl AppState {
             timed_export_stop_pending: Arc::new(std::sync::atomic::AtomicBool::new(
                 crate::settings::Settings::load().timed_export_stop_pending,
             )),
+            cosy_alerted_slot: Arc::new(Mutex::new(None)),
+            cosy_alert_retry: Arc::new(
+                Mutex::new(crate::inverter::cosy::AlertRetryGate::default()),
+            ),
             cosy_active: Arc::new(Mutex::new(
                 crate::settings::Settings::load().cosy_active_persisted,
             )),
@@ -4678,6 +4688,73 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 } else {
                                     String::new()
                                 };
+                                let battery_soc = f32::from(snapshot.soc);
+                                snapshot.cosy_slot_at_risk = crate::inverter::cosy::slot_at_risk(
+                                    cosy_blocker,
+                                    poll_settings.cosy_enabled,
+                                    &poll_settings.cosy_slots,
+                                    inverter_minute,
+                                    battery_soc,
+                                );
+                                // The tracker and the retry backoff live in AppState so a
+                                // reconnect does not repeat a notification already sent.
+                                let may_notify = state
+                                    .cosy_alert_retry
+                                    .lock()
+                                    .await
+                                    .ready(std::time::Instant::now());
+                                let blocked_alert = if may_notify {
+                                    crate::inverter::cosy::blocked_slot_alert(
+                                        &mut *state.cosy_alerted_slot.lock().await,
+                                        cosy_blocker,
+                                        poll_settings.cosy_enabled,
+                                        &poll_settings.cosy_slots,
+                                        inverter_minute,
+                                        battery_soc,
+                                    )
+                                } else {
+                                    None
+                                };
+                                if let Some(alert) = blocked_alert {
+                                    let text = crate::alerts::build_cosy_blocked_message(
+                                        &poll_settings.cosy_slots[alert.slot_index],
+                                        alert.started,
+                                        crate::inverter::cosy::deferral_reason(alert.owner),
+                                    );
+                                    match crate::alerts::send_cosy_blocked_notification(&state, &text)
+                                        .await
+                                    {
+                                        crate::alerts::AlertDelivery::Delivered => {
+                                            state.cosy_alert_retry.lock().await.reset();
+                                            tracing::warn!(
+                                                slot = alert.slot_index,
+                                                started = alert.started,
+                                                owner = ?alert.owner,
+                                                "Cosy: slot at risk — notification sent"
+                                            );
+                                        }
+                                        crate::alerts::AlertDelivery::Skipped => {
+                                            // Alerts are off or have no channel: forget the
+                                            // slot so enabling a channel mid-slot still
+                                            // tells the user.
+                                            *state.cosy_alerted_slot.lock().await = None;
+                                        }
+                                        crate::alerts::AlertDelivery::Failed => {
+                                            // Try again later, not every poll: each attempt
+                                            // can wait out the channel's HTTP timeout.
+                                            *state.cosy_alerted_slot.lock().await = None;
+                                            state
+                                                .cosy_alert_retry
+                                                .lock()
+                                                .await
+                                                .failed(std::time::Instant::now());
+                                            tracing::warn!(
+                                                slot = alert.slot_index,
+                                                "Cosy: slot at risk — notification failed, will retry"
+                                            );
+                                        }
+                                    }
+                                }
                                 match crate::inverter::cosy::track_deferral(
                                     &mut cosy_deferred_by,
                                     cosy_blocker,
@@ -10492,6 +10569,27 @@ mod tests {
                 IN_WINDOW
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn the_blocked_slot_alert_state_is_shared_and_starts_clear() {
+        // The tracker lives in AppState, not the connection scope, so a dongle
+        // reconnect (which rebuilds the poll loop's locals) cannot repeat a
+        // notification: every handle sees the same value.
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            assert_eq!(*state.cosy_alerted_slot.lock().await, None);
+            assert!(state
+                .cosy_alert_retry
+                .lock()
+                .await
+                .ready(std::time::Instant::now()));
+
+            *state.cosy_alerted_slot.lock().await = Some(2);
+            let handle = Arc::clone(&state);
+            assert_eq!(*handle.cosy_alerted_slot.lock().await, Some(2));
+        })
+        .await;
     }
 
     #[tokio::test]

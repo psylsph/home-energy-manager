@@ -1,4 +1,4 @@
-const REASONS: Record<string, string> = {
+export const COSY_BLOCK_REASONS: Record<string, string> = {
   pause: 'a battery pause is active',
   force: 'a manual Force Charge or Force Discharge is running',
   safety: 'a safety limit (high load or temperature) is holding the battery',
@@ -14,6 +14,6 @@ export function cosyBlockedMessage(
   cosyEnabled: boolean | undefined,
 ): string | null {
   if (!cosyEnabled || !blockedBy) return null;
-  const reason = REASONS[blockedBy];
+  const reason = COSY_BLOCK_REASONS[blockedBy];
   return `Cosy is on hold${reason ? `: ${reason}` : ''}. Its charge times won't be set until this clears, and it will resume by itself.`;
 }

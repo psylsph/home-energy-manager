@@ -287,6 +287,32 @@ describe('<App/> system alert banners', () => {
     expect(screen.getByText('Inverter temperature high')).toBeDefined();
   });
 
+  it('shows the Cosy-held-back banner on every page while a slot is at risk', async () => {
+    for (const page of ['/battery', '/control']) {
+      await navigate(page);
+      useInverterStore.setState({
+        snapshot: {
+          cosy_enabled: true,
+          cosy_slot_at_risk: true,
+          cosy_blocked_by: 'force',
+          soc: 50,
+        } as never,
+      });
+      const { unmount } = render(<App />);
+      expect(screen.getByText(/Cosy charging is being held back/)).toBeDefined();
+      unmount();
+    }
+  });
+
+  it('shows no Cosy banner when the slot is not at risk', async () => {
+    await navigate('/battery');
+    useInverterStore.setState({
+      snapshot: { cosy_enabled: true, cosy_slot_at_risk: false, cosy_blocked_by: 'force', soc: 50 } as never,
+    });
+    render(<App />);
+    expect(screen.queryByText(/Cosy charging is being held back/)).toBeNull();
+  });
+
   it('re-evaluates the inverter-temperature banner when the threshold changes in the store (issue #183)', async () => {
     // Regression guard for the stale-config bug: SystemAlertBanners used to
     // fetch /api/alerts once on mount into local state and never refresh, so

@@ -84,10 +84,17 @@ fn current_slot<'a>(i: &CosyInputs<'a>) -> Option<(usize, &'a CosySlot)> {
     if !i.enabled {
         return None;
     }
-    i.slots
+    running_slot(i.slots, i.now_minutes)
+}
+
+/// The enabled slot that contains `now_minutes`, if any. The one definition of
+/// "a slot is running", shared by the planner and the blocked-slot alert so
+/// the two cannot disagree.
+fn running_slot(slots: &[CosySlot], now_minutes: u16) -> Option<(usize, &CosySlot)> {
+    slots
         .iter()
         .enumerate()
-        .find(|(_, s)| s.enabled && s.contains_minutes(i.now_minutes))
+        .find(|(_, s)| s.enabled && s.contains_minutes(now_minutes))
 }
 
 /// Decide this cycle's step. Pure apart from logging.
@@ -344,6 +351,127 @@ fn is_discharge_domain_write(write: &RegisterWrite) -> bool {
         write.address,
         HR_BATTERY_POWER_MODE | HR_ENABLE_DISCHARGE | HR_3PH_FORCE_DISCHARGE_ENABLE
     )
+}
+
+/// How long before a Cosy slot starts a blocked Cosy already counts as a slot
+/// at risk, so the user can act before the cheap window opens.
+pub(crate) const BLOCKED_SLOT_LEAD_MINUTES: u16 = 10;
+
+/// A Cosy slot that is running, or about to start, and so needs charging set.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SlotAtRisk {
+    pub index: usize,
+    /// True once the slot has begun; false while it is still in the lead-in.
+    pub started: bool,
+}
+
+/// The slot, if any, that is running now or starts within
+/// [`BLOCKED_SLOT_LEAD_MINUTES`] and whose target the battery has not reached.
+pub(crate) fn slot_needing_charge(
+    slots: &[CosySlot],
+    now_minutes: u16,
+    soc: f32,
+) -> Option<SlotAtRisk> {
+    let risk = if let Some((index, _)) = running_slot(slots, now_minutes) {
+        SlotAtRisk {
+            index,
+            started: true,
+        }
+    } else {
+        find_next_cosy_slot(now_minutes, slots)
+            .filter(|(_, _, minutes_until)| *minutes_until <= BLOCKED_SLOT_LEAD_MINUTES)
+            .map(|(index, _, _)| SlotAtRisk {
+                index,
+                started: false,
+            })?
+    };
+    // A battery already at the slot's target needs no charge, so nothing is
+    // lost if Cosy cannot set it.
+    if soc >= f32::from(slots[risk.index].target_soc) {
+        return None;
+    }
+    Some(risk)
+}
+
+/// Whether a blocked Cosy has a slot at risk right now (drives the banner).
+pub(crate) fn slot_at_risk(
+    blocker: Option<DischargeControlOwner>,
+    enabled: bool,
+    slots: &[CosySlot],
+    now_minutes: u16,
+    soc: f32,
+) -> bool {
+    enabled && blocker.is_some() && slot_needing_charge(slots, now_minutes, soc).is_some()
+}
+
+/// How long to wait after a failed notification before trying again, so an
+/// unreachable channel is not hammered (and the poll loop not stalled on its
+/// timeout) every cycle.
+pub(crate) const ALERT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Spaces out retries of a failed notification.
+#[derive(Debug, Default)]
+pub(crate) struct AlertRetryGate {
+    retry_at: Option<std::time::Instant>,
+}
+
+impl AlertRetryGate {
+    /// Whether a notification may be attempted at `now`.
+    pub(crate) fn ready(&self, now: std::time::Instant) -> bool {
+        self.retry_at.is_none_or(|at| now >= at)
+    }
+
+    /// Record a failed attempt at `now`.
+    pub(crate) fn failed(&mut self, now: std::time::Instant) {
+        self.retry_at = Some(now + ALERT_RETRY_BACKOFF);
+    }
+
+    /// Forget any pending backoff (an attempt succeeded or was not needed).
+    pub(crate) fn reset(&mut self) {
+        self.retry_at = None;
+    }
+}
+
+/// One alert, raised the first time a blocked Cosy has a slot at risk.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BlockedSlotAlert {
+    pub slot_index: usize,
+    pub started: bool,
+    pub owner: DischargeControlOwner,
+}
+
+/// Decide whether this poll should raise a "Cosy can't start" alert.
+/// `notified` remembers the slot already alerted so each slot alerts once,
+/// however long the block lasts or how often it clears and returns. It
+/// re-arms once no slot is at risk any more (the slot is over).
+pub(crate) fn blocked_slot_alert(
+    notified: &mut Option<usize>,
+    blocker: Option<DischargeControlOwner>,
+    enabled: bool,
+    slots: &[CosySlot],
+    now_minutes: u16,
+    soc: f32,
+) -> Option<BlockedSlotAlert> {
+    let risk = if enabled {
+        slot_needing_charge(slots, now_minutes, soc)
+    } else {
+        None
+    };
+    let Some(risk) = risk else {
+        // No slot at risk (it is over, or Cosy is off): re-arm.
+        *notified = None;
+        return None;
+    };
+    let owner = blocker?;
+    if *notified == Some(risk.index) {
+        return None;
+    }
+    *notified = Some(risk.index);
+    Some(BlockedSlotAlert {
+        slot_index: risk.index,
+        started: risk.started,
+        owner,
+    })
 }
 
 /// Claim the poll for a charge-side batch. These registers are not in the
@@ -1231,5 +1359,228 @@ mod tests {
             assert_eq!(blocker_code(owner), "", "{owner:?}");
             assert!(!is_hard_override(owner));
         }
+    }
+
+    // ---- blocked-slot alert ------------------------------------------------
+
+    const PAUSE: DischargeControlOwner = DischargeControlOwner::ExplicitPause;
+
+    #[test]
+    fn a_running_slot_needs_charge_and_is_marked_started() {
+        let slots = cosy_slots();
+        assert_eq!(
+            slot_needing_charge(&slots, at(5, 0), 50.0),
+            Some(SlotAtRisk {
+                index: 0,
+                started: true
+            })
+        );
+        // The 22:00-00:00 slot runs to the last minute before midnight and
+        // is over at 00:00.
+        assert_eq!(
+            slot_needing_charge(&slots, at(23, 59), 50.0),
+            Some(SlotAtRisk {
+                index: 2,
+                started: true
+            })
+        );
+        assert_eq!(slot_needing_charge(&slots, at(0, 0), 50.0), None);
+    }
+
+    #[test]
+    fn a_slot_starting_within_the_lead_time_is_at_risk_but_not_started() {
+        let slots = cosy_slots();
+        assert_eq!(
+            slot_needing_charge(&slots, at(3, 50), 50.0),
+            Some(SlotAtRisk {
+                index: 0,
+                started: false
+            })
+        );
+        assert_eq!(slot_needing_charge(&slots, at(3, 49), 50.0), None);
+    }
+
+    #[test]
+    fn between_slots_and_for_disabled_slots_nothing_is_at_risk() {
+        let slots = cosy_slots();
+        assert_eq!(slot_needing_charge(&slots, at(10, 0), 50.0), None);
+        let mut off = cosy_slots();
+        for slot in &mut off {
+            slot.enabled = false;
+        }
+        assert_eq!(slot_needing_charge(&off, at(5, 0), 50.0), None);
+        assert_eq!(slot_needing_charge(&[], at(5, 0), 50.0), None);
+    }
+
+    #[test]
+    fn the_banner_flag_needs_a_blocker_an_enabled_cosy_and_a_slot_at_risk() {
+        let slots = cosy_slots();
+        assert!(slot_at_risk(Some(PAUSE), true, &slots, at(5, 0), 50.0));
+        assert!(slot_at_risk(Some(PAUSE), true, &slots, at(3, 55), 50.0));
+        assert!(!slot_at_risk(None, true, &slots, at(5, 0), 50.0));
+        assert!(!slot_at_risk(Some(PAUSE), false, &slots, at(5, 0), 50.0));
+        assert!(!slot_at_risk(Some(PAUSE), true, &slots, at(10, 0), 50.0));
+    }
+
+    #[test]
+    fn a_blocked_running_slot_alerts_once() {
+        let slots = cosy_slots();
+        let mut notified = None;
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 0), 50.0),
+            Some(BlockedSlotAlert {
+                slot_index: 0,
+                started: true,
+                owner: PAUSE
+            })
+        );
+        for minute in [at(5, 1), at(5, 2), at(6, 59)] {
+            assert_eq!(
+                blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, minute, 50.0),
+                None,
+                "no repeat at {minute}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_noticed_in_the_lead_in_alerts_once_across_the_slot_start() {
+        let slots = cosy_slots();
+        let mut notified = None;
+        let first = blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(3, 55), 50.0);
+        assert_eq!(first.map(|a| a.started), Some(false));
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(4, 0), 50.0),
+            None
+        );
+    }
+
+    #[test]
+    fn a_block_that_clears_and_returns_in_the_same_slot_does_not_alert_again() {
+        let slots = cosy_slots();
+        let mut notified = None;
+        blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 0), 50.0);
+        assert_eq!(
+            blocked_slot_alert(&mut notified, None, true, &slots, at(5, 10), 50.0),
+            None
+        );
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 20), 50.0),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_alerts_without_a_blocker_or_far_from_a_slot_or_with_cosy_off() {
+        let slots = cosy_slots();
+        let mut notified = None;
+        assert_eq!(
+            blocked_slot_alert(&mut notified, None, true, &slots, at(5, 0), 50.0),
+            None
+        );
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(10, 0), 50.0),
+            None
+        );
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), false, &slots, at(5, 0), 50.0),
+            None
+        );
+    }
+
+    #[test]
+    fn the_alert_rearms_for_the_next_slot_and_the_next_day() {
+        let slots = cosy_slots();
+        let mut notified = None;
+        assert!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 0), 50.0).is_some()
+        );
+        // The slot ends, so the tracker re-arms.
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(10, 0), 50.0),
+            None
+        );
+        assert!(notified.is_none());
+        // A different slot alerts on its own.
+        let second = blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(14, 0), 50.0);
+        assert_eq!(second.map(|a| a.slot_index), Some(1));
+        // And the first slot alerts again the next day.
+        blocked_slot_alert(&mut notified, None, true, &slots, at(18, 0), 50.0);
+        assert!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 0), 50.0).is_some()
+        );
+    }
+
+    #[test]
+    fn a_failed_delivery_can_be_retried_by_clearing_the_tracker() {
+        let slots = cosy_slots();
+        let mut notified = None;
+        assert!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 0), 50.0).is_some()
+        );
+        notified = None; // what the poll loop does when delivery fails
+        assert!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 1), 50.0).is_some()
+        );
+    }
+
+    // ---- battery already full / retry backoff ------------------------------
+
+    #[test]
+    fn a_battery_already_at_or_above_the_slot_target_needs_no_charge() {
+        let slots = cosy_slots(); // every slot targets 90%
+        assert!(slot_needing_charge(&slots, at(5, 0), 89.9).is_some());
+        assert_eq!(slot_needing_charge(&slots, at(5, 0), 90.0), None);
+        assert_eq!(slot_needing_charge(&slots, at(5, 0), 100.0), None);
+        // The lead-in follows the same rule.
+        assert_eq!(slot_needing_charge(&slots, at(3, 55), 95.0), None);
+    }
+
+    #[test]
+    fn a_full_battery_raises_neither_the_banner_flag_nor_an_alert() {
+        let slots = cosy_slots();
+        assert!(!slot_at_risk(Some(PAUSE), true, &slots, at(5, 0), 100.0));
+        let mut notified = None;
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 0), 100.0),
+            None
+        );
+    }
+
+    #[test]
+    fn a_battery_that_falls_below_the_target_mid_slot_does_alert() {
+        let slots = cosy_slots();
+        let mut notified = None;
+        assert_eq!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 0), 95.0),
+            None
+        );
+        assert!(
+            blocked_slot_alert(&mut notified, Some(PAUSE), true, &slots, at(5, 30), 60.0).is_some()
+        );
+    }
+
+    #[test]
+    fn a_failed_notification_waits_out_the_backoff_before_retrying() {
+        let mut gate = AlertRetryGate::default();
+        let start = std::time::Instant::now();
+        assert!(gate.ready(start), "ready before any failure");
+        gate.failed(start);
+        assert!(!gate.ready(start));
+        assert!(!gate.ready(start + ALERT_RETRY_BACKOFF - std::time::Duration::from_secs(1)));
+        assert!(gate.ready(start + ALERT_RETRY_BACKOFF));
+    }
+
+    #[test]
+    fn a_repeated_failure_restarts_the_backoff_and_a_reset_clears_it() {
+        let mut gate = AlertRetryGate::default();
+        let start = std::time::Instant::now();
+        gate.failed(start);
+        let later = start + ALERT_RETRY_BACKOFF;
+        assert!(gate.ready(later));
+        gate.failed(later);
+        assert!(!gate.ready(later + std::time::Duration::from_secs(60)));
+        gate.reset();
+        assert!(gate.ready(later));
     }
 }

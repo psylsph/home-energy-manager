@@ -101,6 +101,8 @@ export interface InverterSnapshot {
   cosy_enabled: boolean;
   /** Why Cosy is not running: 'pause', 'force' or 'safety'; empty or absent when nothing blocks it. */
   cosy_blocked_by?: string;
+  /** True while a Cosy slot is running or about to start and Cosy is blocked. */
+  cosy_slot_at_risk?: boolean;
   /** Why Agile did not act: 'timed_export', 'manual_mode', 'pause', 'force' or 'safety'; empty or absent when nothing blocks it. */
   agile_blocked_by?: string;
   agile_active: boolean;

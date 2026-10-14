@@ -26,6 +26,7 @@ import InverterPage from './pages/InverterPage';
 import PowerPage from './pages/PowerPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import UpdateBanner from './components/UpdateBanner';
+import CosySlotBlockedBanner from './components/CosySlotBlockedBanner';
 
 function ThemeToggle() {
   const { themeMode, setThemeMode } = useInverterStore();
@@ -484,6 +485,7 @@ function Layout() {
       </header>
 
       <SystemAlertBanners />
+      <CosySlotBlockedBanner />
       <UpdateBanner />
 
       {/* Content */}

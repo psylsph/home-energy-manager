@@ -1269,6 +1269,11 @@ pub struct InverterSnapshot {
     /// inverter; empty when nothing is stopping it.
     #[serde(default)]
     pub cosy_blocked_by: String,
+    /// True when Cosy is blocked while one of its slots is running or about
+    /// to start, so a charge the user is relying on is not being set. Drives
+    /// the app-wide banner; `cosy_blocked_by` says why.
+    #[serde(default)]
+    pub cosy_slot_at_risk: bool,
     /// Why Agile did not act on a charge or discharge it wanted this poll: the
     /// code of the owner that outranks it (`"timed_export"`, `"manual_mode"`,
     /// `"pause"`, `"force"`, `"safety"`); empty when nothing held it back.
@@ -1548,6 +1553,7 @@ impl InverterSnapshot {
             adaptive_charge_desired_rate_percent: None,
             cosy_active: false,
             cosy_blocked_by: String::new(),
+            cosy_slot_at_risk: false,
             agile_blocked_by: String::new(),
             cosy_enabled: false,
             agile_active: false,
@@ -1614,6 +1620,7 @@ impl Default for InverterSnapshot {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -3100,5 +3107,41 @@ mod tests {
                 "{dt:?} should NOT need gateway input blocks"
             );
         }
+    }
+
+    #[test]
+    fn automation_block_fields_serialise_under_the_names_the_ui_reads() {
+        let snapshot = InverterSnapshot {
+            cosy_blocked_by: "force".into(),
+            cosy_slot_at_risk: true,
+            agile_blocked_by: "timed_export".into(),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["cosy_blocked_by"], "force");
+        assert_eq!(value["cosy_slot_at_risk"], true);
+        assert_eq!(value["agile_blocked_by"], "timed_export");
+    }
+
+    #[test]
+    fn a_snapshot_without_the_block_fields_loads_as_not_blocked() {
+        // Older backends, cached payloads and fixtures predate these fields.
+        let mut value = serde_json::to_value(InverterSnapshot::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for key in ["cosy_blocked_by", "cosy_slot_at_risk", "agile_blocked_by"] {
+            assert!(object.remove(key).is_some(), "{key} is serialised");
+        }
+        let loaded: InverterSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.cosy_blocked_by, "");
+        assert!(!loaded.cosy_slot_at_risk);
+        assert_eq!(loaded.agile_blocked_by, "");
+    }
+
+    #[test]
+    fn a_default_snapshot_is_not_blocked() {
+        let snapshot = InverterSnapshot::default();
+        assert!(snapshot.cosy_blocked_by.is_empty());
+        assert!(!snapshot.cosy_slot_at_risk);
+        assert!(snapshot.agile_blocked_by.is_empty());
     }
 }

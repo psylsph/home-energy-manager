@@ -1010,6 +1010,83 @@ pub async fn send_battery_voltage_mismatch_restored_notification(
     dispatch_alert_text(&config, &text, "battery-voltage-mismatch-restored").await;
 }
 
+/// Build the notification for a Cosy slot that is running, or about to start,
+/// while something is stopping HEM from setting its charge times (issue #366).
+pub fn build_cosy_blocked_message(
+    slot: &crate::settings::CosySlot,
+    started: bool,
+    reason: &str,
+) -> String {
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let reason = crate::alerts::report::escape_html(reason);
+    let window = format!(
+        "<b>{:02}:{:02}–{:02}:{:02}</b> (target {}%)",
+        slot.start_hour, slot.start_minute, slot.end_hour, slot.end_minute, slot.target_soc
+    );
+    let mut msg = format!("⚠️ HEM Cosy Charging Held Back — {time}\n");
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    if started {
+        msg.push_str(&format!(
+            "The Cosy slot {window} is under way, but HEM is not setting its charge times: {reason}.\n"
+        ));
+    } else {
+        msg.push_str(&format!(
+            "The Cosy slot {window} is about to start, but HEM cannot set its charge times: {reason}.\n"
+        ));
+    }
+    msg.push_str("Cosy will resume by itself once this clears.");
+    msg
+}
+
+/// What happened to a notification that was attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertDelivery {
+    /// Alerts are off or no channel is configured, so nothing was attempted.
+    Skipped,
+    /// At least one channel accepted it.
+    Delivered,
+    /// Every configured channel failed; worth retrying.
+    Failed,
+}
+
+fn telegram_configured(config: &crate::settings::AlertsConfig) -> bool {
+    !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty()
+}
+
+fn ntfy_configured(config: &crate::settings::AlertsConfig) -> bool {
+    !config.ntfy_topic.is_empty()
+}
+
+fn pushover_configured(config: &crate::settings::AlertsConfig) -> bool {
+    !config.pushover_app_token.is_empty() && !config.pushover_user_key.is_empty()
+}
+
+/// Whether any delivery channel (Telegram, ntfy, Pushover) is configured.
+/// The per-channel predicates are shared with [`dispatch_alert_text`], so a
+/// channel cannot count as configured here yet be skipped there, or the
+/// reverse.
+pub(crate) fn has_delivery_channel(config: &crate::settings::AlertsConfig) -> bool {
+    telegram_configured(config) || ntfy_configured(config) || pushover_configured(config)
+}
+
+/// Send the Cosy-blocked notification to every configured channel. There is
+/// no per-type toggle: it follows the master alerts switch and whichever
+/// channels the user has set up.
+pub async fn send_cosy_blocked_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    text: &str,
+) -> AlertDelivery {
+    let config = state.alert_config.lock().await.clone();
+    if !config.enabled || !has_delivery_channel(&config) {
+        return AlertDelivery::Skipped;
+    }
+    if dispatch_alert_text(&config, text, "cosy-blocked").await {
+        AlertDelivery::Delivered
+    } else {
+        AlertDelivery::Failed
+    }
+}
+
 /// Fan a pre-built alert message out to every configured channel.
 /// Shared by the battery connection-lost/restored senders above.
 pub(crate) async fn dispatch_alert_text(
@@ -1024,21 +1101,26 @@ pub(crate) async fn dispatch_alert_text(
     let pushover_token = config.pushover_app_token.clone();
     let pushover_key = config.pushover_user_key.clone();
     let text_clone = text.to_string();
+    let (use_telegram, use_ntfy, use_pushover) = (
+        telegram_configured(config),
+        ntfy_configured(config),
+        pushover_configured(config),
+    );
     tokio::task::spawn_blocking(move || {
         let mut delivered = false;
-        if !token.is_empty() && !chat_id.is_empty() {
+        if use_telegram {
             match send_telegram_message(&token, &chat_id, &text_clone) {
                 Ok(()) => delivered = true,
                 Err(e) => tracing::warn!("Telegram {kind} notification failed: {e}"),
             }
         }
-        if !ntfy_topic.is_empty() {
+        if use_ntfy {
             match send_ntfy_message(&ntfy_topic, &ntfy_server, &text_clone) {
                 Ok(()) => delivered = true,
                 Err(e) => tracing::warn!("ntfy {kind} notification failed: {e}"),
             }
         }
-        if !pushover_token.is_empty() && !pushover_key.is_empty() {
+        if use_pushover {
             match send_pushover_message(&pushover_token, &pushover_key, &text_clone) {
                 Ok(()) => delivered = true,
                 Err(e) => tracing::warn!("Pushover {kind} notification failed: {e}"),
@@ -2121,6 +2203,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::inverter::model::InverterSnapshot;
 
@@ -4390,5 +4473,147 @@ mod tests {
     fn notifying_an_empty_cleared_list_does_nothing() {
         // No runtime needed: it returns before spawning anything.
         notify_cleared_alerts(&alerts_config(), &make_snapshot(), &[]);
+    }
+
+    // ---- Cosy blocked notification (issue #366) ---------------------------
+
+    fn cosy_slot() -> crate::settings::CosySlot {
+        crate::settings::CosySlot {
+            enabled: true,
+            start_hour: 4,
+            start_minute: 0,
+            end_hour: 7,
+            end_minute: 0,
+            target_soc: 90,
+        }
+    }
+
+    #[test]
+    fn a_running_slot_message_says_charging_is_not_being_set() {
+        let text = build_cosy_blocked_message(&cosy_slot(), true, "a battery pause is in effect");
+        assert!(text.contains("Cosy"), "{text}");
+        assert!(text.contains("04:00"), "{text}");
+        assert!(text.contains("07:00"), "{text}");
+        assert!(text.contains("90%"), "{text}");
+        assert!(text.contains("a battery pause is in effect"), "{text}");
+        assert!(
+            text.contains("under way") || text.contains("running"),
+            "{text}"
+        );
+        assert!(text.contains("resume"), "{text}");
+    }
+
+    #[test]
+    fn a_lead_in_message_says_the_slot_is_about_to_start() {
+        let text = build_cosy_blocked_message(
+            &cosy_slot(),
+            false,
+            "a safety limiter is holding discharge",
+        );
+        assert!(
+            text.contains("about to start") || text.contains("starts soon"),
+            "{text}"
+        );
+        assert!(!text.contains("under way"), "{text}");
+    }
+
+    #[test]
+    fn the_message_pads_times_and_survives_html_in_the_reason() {
+        let slot = crate::settings::CosySlot {
+            start_hour: 0,
+            start_minute: 5,
+            end_hour: 6,
+            end_minute: 30,
+            ..cosy_slot()
+        };
+        let text = build_cosy_blocked_message(&slot, true, "a <b>pause</b> & more");
+        assert!(text.contains("00:05"), "{text}");
+        assert!(text.contains("06:30"), "{text}");
+        assert!(
+            text.contains("&lt;b&gt;pause&lt;/b&gt; &amp; more"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_channel_counts_only_when_fully_configured() {
+        use crate::settings::AlertsConfig;
+        let none = AlertsConfig {
+            ntfy_topic: String::new(),
+            ..Default::default()
+        };
+        assert!(!has_delivery_channel(&none));
+        assert!(!has_delivery_channel(&AlertsConfig {
+            telegram_bot_token: "t".into(),
+            telegram_chat_id: String::new(),
+            ..none.clone()
+        }));
+        assert!(has_delivery_channel(&AlertsConfig {
+            telegram_bot_token: "t".into(),
+            telegram_chat_id: "c".into(),
+            ..none.clone()
+        }));
+        assert!(has_delivery_channel(&AlertsConfig {
+            ntfy_topic: "hem".into(),
+            ..none.clone()
+        }));
+        assert!(!has_delivery_channel(&AlertsConfig {
+            pushover_app_token: "a".into(),
+            pushover_user_key: String::new(),
+            ..none.clone()
+        }));
+        assert!(has_delivery_channel(&AlertsConfig {
+            pushover_app_token: "a".into(),
+            pushover_user_key: "u".into(),
+            ..none
+        }));
+    }
+
+    #[tokio::test]
+    async fn the_sender_skips_when_alerts_are_off_or_no_channel_is_set() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = std::sync::Arc::new(crate::inverter::poll::AppState::new());
+            // Alerts off, channel set.
+            *state.alert_config.lock().await = crate::settings::AlertsConfig {
+                enabled: false,
+                ntfy_topic: "hem".into(),
+                ntfy_server: "http://127.0.0.1:1".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                send_cosy_blocked_notification(&state, "x").await,
+                AlertDelivery::Skipped
+            );
+            // Alerts on, no channel.
+            *state.alert_config.lock().await = crate::settings::AlertsConfig {
+                enabled: true,
+                ntfy_topic: String::new(),
+                ..Default::default()
+            };
+            assert_eq!(
+                send_cosy_blocked_notification(&state, "x").await,
+                AlertDelivery::Skipped
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_sender_reports_failure_when_every_channel_fails() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = std::sync::Arc::new(crate::inverter::poll::AppState::new());
+            // Port 1 refuses connections, so the single channel fails fast.
+            *state.alert_config.lock().await = crate::settings::AlertsConfig {
+                enabled: true,
+                ntfy_topic: "hem".into(),
+                ntfy_server: "http://127.0.0.1:1".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                send_cosy_blocked_notification(&state, "x").await,
+                AlertDelivery::Failed
+            );
+        })
+        .await;
     }
 }
