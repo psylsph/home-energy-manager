@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.90.0] - 2026-10-14
+
+### Added
+
+- **Cosy and Agile now tell you when something is stopping them.** A battery pause, a manual Force action or a safety limit can stop a tariff schedule setting its times. The Control and Inverter pages now say so, with the reason, and the Cosy or Agile row reads "On hold" until it clears. The log says it too.
+- **A warning and an alert when a Cosy slot can't start.** If Cosy is held back while one of its slots is running or about to start, and the battery hasn't reached the slot's target, a banner appears on every page and one notification goes to whichever of Telegram, ntfy or Pushover you have set up. You get one per slot, and it follows the main alerts switch (#366).
+
+### Fixed
+
+- **Cosy now sets its charge times even when an export or Timed Demand was set up elsewhere.** An export or discharge schedule created in the GivEnergy portal used to make Cosy skip the whole night without a word. Only a pause, a manual Force action or a safety limit holds it back now (#366).
+- **A Timed Export schedule that gave up now recovers on its own.** After repeated failed attempts it used to stay stuck until you saved the schedule again, skipping every later export and keeping Cosy and Agile off the inverter. It now picks up again once the inverter settles, and retries about every half hour if it doesn't.
+- **The status page names the automation that is really running.** With Timed Export in an error state it kept showing Timed Export even while Cosy, Agile or Auto Winter was charging.
+
 ## [0.89.3] - 2026-10-12
 
 ### Fixed
