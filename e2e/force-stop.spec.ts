@@ -196,7 +196,12 @@ test.describe('Force Charge → Stop (mock Modbus)', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
-    test.setTimeout(60_000);
+    // The settle-and-wait stages here (clear any deferred batch, then wait up to
+    // 30 s for the 7 start writes) floor at ~45 s on a quiet run - the same
+    // shape as the next test, which already budgets for its stage bounds (see
+    // 5cc805f). A deferred batch left by the previous test costs another
+    // settle window, so a 60 s cap timed out a correct run in the full suite.
+    test.setTimeout(120_000);
     await clearWrites(drainModbusWrites);
 
     await fetch(`${baseUrl}/api/control/force-charge`, {

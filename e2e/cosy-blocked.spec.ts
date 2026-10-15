@@ -196,6 +196,11 @@ async function startForceCharge(baseUrl: string) {
   expect(result.ok).toBe(true);
 }
 
+async function startForceDischarge(baseUrl: string) {
+  const result = await postJson(baseUrl, '/api/control/force-discharge', { minutes: 60 });
+  expect(result.ok).toBe(true);
+}
+
 async function configureAlerts(baseUrl: string, ntfy: NtfyCapture, enabled = true) {
   const result = await postJson(baseUrl, '/api/alerts', {
     enabled,
@@ -250,6 +255,7 @@ test.describe.serial('Cosy held back by another owner', () => {
     // Leave nothing armed for the next test: stop the Force action, switch
     // Cosy and Agile off, silence alerts, and let the clear writes drain.
     await fetch(`${baseUrl}/api/control/force-charge/stop`, { method: 'POST' }).catch(() => {});
+    await fetch(`${baseUrl}/api/control/force-discharge/stop`, { method: 'POST' }).catch(() => {});
     await postJson(baseUrl, '/api/cosy', { enabled: false, slots: [idleSlot, idleSlot, idleSlot] });
     await postJson(baseUrl, '/api/agile', { scope: 'off', api_base_url: '' });
     await postJson(baseUrl, '/api/alerts', { enabled: false });
@@ -382,16 +388,28 @@ test.describe.serial('Cosy held back by another owner', () => {
     setInputReg,
   }) => {
     // Nothing is lost if Cosy cannot charge a battery that is already full.
+    //
+    // Deterministic order: the full battery must be what the backend reports
+    // BEFORE Cosy, alerts and the blocker exist, or the first poll after
+    // Cosy is enabled could still see the old 75% and (correctly) alert. A
+    // Force DISCHARGE is the blocker: the sanitizer rejects SOC=100 while the
+    // battery is fast-charging, which would keep the old reading alive.
     await setInputReg(IR_BATTERY_PERCENT, 100);
+    await waitForSnapshot(baseUrl, (s) => s.soc === 100, 'backend reports a full battery');
+
     await configureAlerts(baseUrl, ntfy);
-    await startForceCharge(baseUrl);
+    await startForceDischarge(baseUrl);
     await enableCosy(baseUrl, cosySlot(-90, 90));
 
     await waitForSnapshot(
       baseUrl,
-      (s) => s.soc === 100 && s.cosy_blocked_by === 'force' && s.cosy_slot_at_risk === false,
-      'blocked, but a full battery means the slot is not at risk',
+      (s) => s.cosy_blocked_by === 'force' && s.soc === 100,
+      'Cosy is blocked while the battery stays full',
     );
+    await waitForPolls(baseUrl, 3);
+    const state = await snapshot(baseUrl);
+    expect(state.cosy_slot_at_risk).toBe(false);
+
     await page.goto('/#/control');
     await expect(
       page.getByRole('status').filter({ hasText: 'Cosy is on hold' }),
@@ -399,7 +417,6 @@ test.describe.serial('Cosy held back by another owner', () => {
     await expect(
       page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' }),
     ).toHaveCount(0);
-    await waitForPolls(baseUrl, 3);
     expect(cosyAlerts(ntfy)).toHaveLength(0);
   });
 
