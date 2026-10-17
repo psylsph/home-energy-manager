@@ -82,7 +82,7 @@ describe('UpdateBanner', () => {
     expect(container.children).toHaveLength(0);
   });
 
-  it('opens the release URL when "View release" is clicked', () => {
+  it('opens the release URL when "View Release" is clicked', () => {
     useInverterStore.setState({ latestVersionInfo: { ...baseInfo } });
     render(<UpdateBanner />);
     fireEvent.click(screen.getByRole('button', { name: /view release/i }));

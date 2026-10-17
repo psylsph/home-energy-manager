@@ -265,11 +265,11 @@ describe('<ControlPage/> — connection-state gate', () => {
     expect(screen.queryByRole('heading', { name: 'Battery Mode', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Charge Schedule', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Timed Export', exact: true })).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Battery and Power Controls', exact: true })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Battery And Power Controls', exact: true })).toBeNull();
 
     // The Retry button is there so the user can poke the backend instead
     // of waiting for the poll loop's own back-off.
-    expect(screen.getByRole('button', { name: /Retry now/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /Retry Now/i })).toBeDefined();
   });
 
   it('shows the disconnected wording and hides controls when the loop has given up', () => {
@@ -627,13 +627,13 @@ describe('<ControlPage/> — connection-state gate', () => {
     });
     render(<ControlPage />);
 
-    const heading = await screen.findByRole('heading', { name: 'Battery and Power Controls' });
+    const heading = await screen.findByRole('heading', { name: 'Battery And Power Controls' });
     const section = heading.closest('section');
     expect(section).not.toBeNull();
     const slider = within(section!).getByRole('slider', { name: 'Minimum SOC' });
     fireEvent.click(within(slider.parentElement!).getByRole('button', { name: 'Save' }));
 
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
   });
 
   it('POSTs to /api/reconnect when the Retry button is clicked', async () => {
@@ -648,7 +648,7 @@ describe('<ControlPage/> — connection-state gate', () => {
     });
     render(<ControlPage />);
 
-    const retryButton = screen.getByRole('button', { name: /Retry now/i });
+    const retryButton = screen.getByRole('button', { name: /Retry Now/i });
     fireEvent.click(retryButton);
 
     // The button drives `POST /api/reconnect` via the shared apiPost helper
@@ -679,7 +679,7 @@ describe('<ControlPage/> — connection-state gate', () => {
 
     // The click must not throw and the gate must remain visible (so the
     // user can keep retrying or wait for the backend's automatic back-off).
-    const retryButton = screen.getByRole('button', { name: /Retry now/i });
+    const retryButton = screen.getByRole('button', { name: /Retry Now/i });
     expect(() => fireEvent.click(retryButton)).not.toThrow();
     expect(screen.getByText(/Connection lost/i)).toBeDefined();
     expect(apiPostMock).toHaveBeenCalled();

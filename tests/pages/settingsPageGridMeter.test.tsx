@@ -99,7 +99,7 @@ describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
     // Built-in (address 0) is the default selection.
     expect(select.value).toBe('0');
     const labels = Array.from(select.options).map((o) => o.textContent);
-    expect(labels).toContain('Auto (recommended)');
+    expect(labels).toContain('Auto (Recommended)');
     expect(labels).toContain('Meter 0x01');
     expect(labels).toContain('Meter 0x02');
   });

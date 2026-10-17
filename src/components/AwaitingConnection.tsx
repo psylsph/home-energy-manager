@@ -9,7 +9,7 @@ type AwaitingConnectionProps = {
   connectionState: ConnectionState;
   /** Host the backend is trying to reach; shown stripped of its port. */
   connectedHost?: string | null;
-  /** Render a "Retry now" button that POSTs `/api/reconnect`. */
+  /** Render a "Retry Now" button that POSTs `/api/reconnect`. */
   showRetry?: boolean;
   /** Label for the standard retry button. */
   retryLabel?: string;
@@ -34,7 +34,7 @@ export default function AwaitingConnection({
   connectionState,
   connectedHost,
   showRetry = false,
-  retryLabel = 'Retry now',
+  retryLabel = 'Retry Now',
   connectFailures = 0,
   extraNote,
   showFaq = false,
@@ -75,7 +75,7 @@ export default function AwaitingConnection({
                 disabled={reconnecting}
                 className="self-start mt-1 px-4 py-1.5 text-xs font-semibold rounded-lg bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/30 transition-colors disabled:opacity-50"
               >
-                {reconnecting ? 'Reconnecting…' : 'Retry now'}
+                {reconnecting ? 'Reconnecting…' : 'Retry Now'}
               </button>
             </div>
           </div>

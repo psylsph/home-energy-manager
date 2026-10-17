@@ -265,11 +265,11 @@ describe('<PowerPage/> — spike removal, cost overlay, PDF export', () => {
       expect(screen.getByText(new Date(ts * 1000).toLocaleTimeString())).toBeDefined();
     });
 
-    it('shows "Waiting for data" in the header when no snapshot', async () => {
+    it('shows "Waiting for Data" in the header when no snapshot', async () => {
       render(<PowerPage />);
-      // "Waiting for data" also appears in the stat tiles, so there are
+      // "Waiting for Data" also appears in the stat tiles, so there are
       // multiple matches — the header is the right-aligned one.
-      expect(screen.getAllByText('Waiting for data').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Waiting for Data').length).toBeGreaterThan(0);
     });
 
     it('uses a placeholder instead of rendering an invalid snapshot timestamp', async () => {

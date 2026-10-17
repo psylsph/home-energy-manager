@@ -529,7 +529,7 @@ export function formatEcoState(state: EcoPresentationState): string {
         case 'active':
             return 'Eco — Active';
         case 'temporarily_overridden':
-            return 'Eco — Temporarily overridden';
+            return 'Eco — Temporarily Overridden';
         case 'off':
             return 'Eco — Off';
     }
@@ -551,9 +551,9 @@ export function formatTimedExportState(state: TimedExportPresentationState): str
         case 'exiting':
             return 'Timed Export — Exiting…';
         case 'active_now':
-            return 'Timed Export — Exporting now';
+            return 'Timed Export — Exporting Now';
         case 'blocked_by_pause':
-            return 'Timed Export — Blocked by Pause Discharge';
+            return 'Timed Export — Blocked By Pause Discharge';
         case 'error':
             return 'Timed Export — Error';
     }

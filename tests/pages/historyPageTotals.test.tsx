@@ -56,7 +56,7 @@ describe('<HistoryPage/> — period totals (issue #237)', () => {
 
   it('shows the additive totals belonging to each energy tab', async () => {
     render(<HistoryPage />);
-    expect(await screen.findByRole('region', { name: 'Period totals' })).toBeDefined();
+    expect(await screen.findByRole('region', { name: 'Period Totals' })).toBeDefined();
     expect(screen.getByText('1.2kWh')).toBeDefined();
     expect(screen.getByText('2.4kWh')).toBeDefined();
 
@@ -82,11 +82,11 @@ describe('<HistoryPage/> — period totals (issue #237)', () => {
 
   it('does not mislabel temperature readings as an additive total', async () => {
     render(<HistoryPage />);
-    await screen.findByRole('region', { name: 'Period totals' });
+    await screen.findByRole('region', { name: 'Period Totals' });
     fireEvent.click(screen.getByRole('button', { name: 'Temperature', exact: true }));
 
     await waitFor(() => {
-      expect(screen.queryByRole('region', { name: 'Period totals' })).toBeNull();
+      expect(screen.queryByRole('region', { name: 'Period Totals' })).toBeNull();
     });
   });
 

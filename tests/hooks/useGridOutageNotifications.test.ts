@@ -92,7 +92,7 @@ describe('useGridOutageNotifications', () => {
       renderHook(() => useGridOutageNotifications());
     setSnapshot(makeSnapshot({ grid_loss: true, grid_online: false, soc: 40 }));
     expect(notificationInstances).toHaveLength(1);
-    expect(notificationInstances[0].title).toBe('Grid power lost');
+    expect(notificationInstances[0].title).toBe('Grid Power Lost');
     expect(notificationInstances[0].body).toContain('No Utility');
     expect(notificationInstances[0].body).toContain('40%');
   });
@@ -115,7 +115,7 @@ describe('useGridOutageNotifications', () => {
     // Recovery
     setSnapshot(makeSnapshot({ grid_loss: false, grid_online: true, grid_voltage: 241.3 }));
     expect(notificationInstances).toHaveLength(2);
-    expect(notificationInstances[1].title).toBe('Grid power restored');
+    expect(notificationInstances[1].title).toBe('Grid Power Restored');
     expect(notificationInstances[1].body).toContain('241.3V');
   });
 
@@ -155,29 +155,29 @@ describe('useGridOutageNotifications', () => {
     // Second outage
     setSnapshot(makeSnapshot({ grid_loss: true, grid_online: false }));
     expect(notificationInstances).toHaveLength(3);
-    expect(notificationInstances[2].title).toBe('Grid power lost');
+    expect(notificationInstances[2].title).toBe('Grid Power Lost');
   });
 
   it('fires a battery over-temp notification and recovery', () => {
     renderHook(() => useGridOutageNotifications());
     setSnapshot(makeSnapshot({ battery_over_temp: true }));
     expect(notificationInstances).toHaveLength(1);
-    expect(notificationInstances[0].title).toBe('Battery over temperature');
+    expect(notificationInstances[0].title).toBe('Battery Over Temperature');
     // Recover — battery temp path has its own recovery message.
     setSnapshot(makeSnapshot({ battery_over_temp: false }));
     expect(notificationInstances).toHaveLength(2);
-    expect(notificationInstances[1].title).toBe('Battery temperature normal');
+    expect(notificationInstances[1].title).toBe('Battery Temperature Normal');
   });
 
   it('fires an inverter-trip notification and recovery', () => {
     renderHook(() => useGridOutageNotifications());
     setSnapshot(makeSnapshot({ inverter_trip: true }));
     expect(notificationInstances).toHaveLength(1);
-    expect(notificationInstances[0].title).toBe('Inverter trip detected');
+    expect(notificationInstances[0].title).toBe('Inverter Trip Detected');
     // Recover — inverter trip reuses the grid/inverter recovery branch.
     setSnapshot(makeSnapshot({ inverter_trip: false }));
     expect(notificationInstances).toHaveLength(2);
-    expect(notificationInstances[1].title).toBe('Grid power restored');
+    expect(notificationInstances[1].title).toBe('Grid Power Restored');
   });
 
   it('does not fire when permission is not granted', () => {

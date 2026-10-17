@@ -272,9 +272,9 @@ describe('ForecastPage', () => {
     // 72-hour forecast horizon.
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Expected solar generation · next 72 hours')).toBeTruthy();
-      expect(screen.getByText('Expected home use · next 72 hours')).toBeTruthy();
-      expect(screen.getByText('Battery projection · next 72 hours')).toBeTruthy();
+      expect(screen.getByText('Expected Solar Generation · Next 72 Hours')).toBeTruthy();
+      expect(screen.getByText('Expected Home Use · Next 72 Hours')).toBeTruthy();
+      expect(screen.getByText('Battery Projection · Next 72 Hours')).toBeTruthy();
     });
     expect(screen.queryByText('Consumption profile (typical day)')).toBeNull();
   });
@@ -291,7 +291,7 @@ describe('ForecastPage', () => {
     expect(solarTab.getAttribute('aria-selected')).toBe('true');
     expect(batteryTab.getAttribute('aria-selected')).toBe('false');
     expect(
-      screen.getByText('Expected solar generation · next 72 hours').closest('[aria-hidden]')
+      screen.getByText('Expected Solar Generation · Next 72 Hours').closest('[aria-hidden]')
         ?.getAttribute('aria-hidden'),
     ).toBe('false');
   });
@@ -366,12 +366,12 @@ describe('ForecastPage', () => {
   it('labels consumption bands as low and high estimates', async () => {
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Weekday low estimate')).toBeTruthy();
-      expect(screen.getByText('Weekday high estimate')).toBeTruthy();
-      expect(screen.getByText('Weekend low estimate')).toBeTruthy();
-      expect(screen.getByText('Weekend high estimate')).toBeTruthy();
-      expect(screen.getByText('Weekday median')).toBeTruthy();
-      expect(screen.getByText('Weekend median')).toBeTruthy();
+      expect(screen.getByText('Weekday Low Estimate')).toBeTruthy();
+      expect(screen.getByText('Weekday High Estimate')).toBeTruthy();
+      expect(screen.getByText('Weekend Low Estimate')).toBeTruthy();
+      expect(screen.getByText('Weekend High Estimate')).toBeTruthy();
+      expect(screen.getByText('Weekday Median')).toBeTruthy();
+      expect(screen.getByText('Weekend Median')).toBeTruthy();
       expect(screen.queryByText('Median consumption')).toBeNull();
     });
   });
@@ -379,10 +379,10 @@ describe('ForecastPage', () => {
   it('draws distinct weekday and weekend medians without a duplicate composite line', async () => {
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Weekday median')).toBeTruthy();
+      expect(screen.getByText('Weekday Median')).toBeTruthy();
     });
-    const weekday = screen.getByText('Weekday median');
-    const weekend = screen.getByText('Weekend median');
+    const weekday = screen.getByText('Weekday Median');
+    const weekend = screen.getByText('Weekend Median');
     expect(weekday.compareDocumentPosition(weekend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByText('Median consumption')).toBeNull();
   });
@@ -391,11 +391,11 @@ describe('ForecastPage', () => {
     render(<ForecastPage />);
     // The solar chart is composed too (it draws the past lines), so scope
     // to the consumption panel.
-    await screen.findByText('Weekday median');
+    await screen.findByText('Weekday Median');
     const panel = document.getElementById('forecast-chart-panel-consumption')!;
     expect(within(panel).getByTestId('forecast-composed-chart')).toBeTruthy();
-    expect(screen.getByText('Weekday median')).toBeTruthy();
-    expect(screen.getByText('Weekend median')).toBeTruthy();
+    expect(screen.getByText('Weekday Median')).toBeTruthy();
+    expect(screen.getByText('Weekend Median')).toBeTruthy();
   });
 
   it('aligns horizontal grid lines with the displayed y-axis ticks', async () => {
@@ -456,7 +456,7 @@ describe('ForecastPage', () => {
     });
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByText('Expected home use · next 72 hours')).toBeTruthy();
+      expect(screen.getByText('Expected Home Use · Next 72 Hours')).toBeTruthy();
     });
     expect(screen.queryByText('Not enough history yet.')).toBeNull();
   });
@@ -502,7 +502,7 @@ describe('ForecastPage', () => {
     expect(screen.getByTestId('forecast-import-tomorrow').textContent).not.toMatch(/1\.1/);
     expect(screen.getByText(/incl\. 3\.2 kWh charge/)).toBeTruthy();
     expect(screen.getByTestId('forecast-surplus-tomorrow').textContent).toMatch(/0\.2/);
-    expect(screen.getByText(/with charge plan/)).toBeTruthy();
+    expect(screen.getByText(/With Charge Plan/)).toBeTruthy();
   });
 
   it('renders degradation explanations instead of hiding the page', async () => {
@@ -557,7 +557,7 @@ describe('ForecastPage plan card', () => {
     await waitFor(() => {
       expect(screen.getByTestId('forecast-plan').textContent).toMatch(/3\.2/);
     });
-    expect(screen.getByText('Today’s recommendation')).toBeTruthy();
+    expect(screen.getByText('Today’s Recommendation')).toBeTruthy();
     expect(screen.getByTestId('forecast-plan').textContent).toMatch(/02:00/);
     expect(screen.getByTestId('forecast-plan').textContent).toMatch(/03:36/);
     const apply = screen.getByTestId('forecast-plan-apply');
@@ -590,7 +590,7 @@ describe('ForecastPage plan card', () => {
     render(<ForecastPage />);
     const apply = await screen.findByTestId('forecast-plan-apply');
     fireEvent.click(apply);
-    expect(await screen.findByRole('status')).toHaveTextContent('Applying changes to inverter');
+    expect(await screen.findByRole('status')).toHaveTextContent('Applying Changes to Inverter');
     expect(apply).toBeDisabled();
     resolveSlot?.({ ok: true });
   });
@@ -666,7 +666,7 @@ describe('ForecastPage plan card', () => {
     useInverterStore.setState({ snapshot: { soc: 50, max_battery_power_w: 5000 } } as never);
     await waitFor(() => expect(screen.getByTestId('forecast-plan').textContent).toMatch(/04:00/));
     expect(apply).not.toBeDisabled();
-    expect(apply).toHaveTextContent('Apply — schedule charge slot');
+    expect(apply).toHaveTextContent('Apply — Schedule Charge Slot');
 
     // When the original recommendation comes back unchanged, its successful
     // application is still remembered and duplicate writes stay blocked.
@@ -698,12 +698,12 @@ describe('ForecastPage plan card', () => {
     // child of the h-56 chart div where it would overflow the card and
     // render outside the background.
     const card = screen
-      .getByText('Battery projection · next 72 hours')
+      .getByText('Battery Projection · Next 72 Hours')
       .closest('section');
     expect(card).not.toBeNull();
     const caption = container.textContent?.match(/SOC if overnight charge enacted/);
     expect(caption).toBeTruthy();
-    const chartDiv = screen.getByText('Battery projection · next 72 hours').parentElement
+    const chartDiv = screen.getByText('Battery Projection · Next 72 Hours').parentElement
       ?.querySelector('div.h-56');
     expect(chartDiv).not.toBeNull();
     // Caption paragraph lives after the chart div, still inside section.
@@ -761,14 +761,14 @@ describe('ForecastPage plan card', () => {
     await waitFor(() => {
       // The legend gains the toggleable description…
       expect(
-        screen.getByRole('button', { name: 'With current schedule' }),
+        screen.getByRole('button', { name: 'With Current Schedule' }),
       ).toBeTruthy();
     });
     // …and the pink line itself renders on the chart.
     expect(container.querySelector('[data-stroke="#f472b6"]')).not.toBeNull();
     // A caption inside the card explains what the line represents.
     const card = screen
-      .getByText('Battery projection · next 72 hours')
+      .getByText('Battery Projection · Next 72 Hours')
       .closest('section');
     expect(card?.textContent).toMatch(/current inverter schedule/i);
   });
@@ -784,7 +784,7 @@ describe('ForecastPage plan card', () => {
     const { container } = render(<ForecastPage />);
     await screen.findByText('Tomorrow');
     expect(
-      screen.queryByRole('button', { name: 'With current schedule' }),
+      screen.queryByRole('button', { name: 'With Current Schedule' }),
     ).toBeNull();
     expect(container.querySelector('[data-stroke="#f472b6"]')).toBeNull();
   });
@@ -811,9 +811,9 @@ describe('ForecastPage plan card', () => {
     });
     render(<ForecastPage />);
     const legend = await screen.findByTestId('forecast-line-legend');
-    expect(legend.textContent).toMatch('If solar only');
-    expect(legend.textContent).toMatch('If charge enacted');
-    expect(legend.textContent).toMatch('With current schedule');
+    expect(legend.textContent).toMatch('If Solar Only');
+    expect(legend.textContent).toMatch('If Charge Enacted');
+    expect(legend.textContent).toMatch('With Current Schedule');
     expect(legend.textContent).not.toMatch('Charge start');
     expect(legend.textContent).not.toMatch('Charge end');
   });
@@ -826,7 +826,7 @@ describe('ForecastPage plan card', () => {
     });
     render(<ForecastPage />);
     const legend = await screen.findByTestId('forecast-line-legend');
-    expect(legend.textContent).toBe('If solar only');
+    expect(legend.textContent).toBe('If Solar Only');
     // The baseline has a footer description like the other lines —
     // "do nothing" must be spelled out, not just named (issue #297
     // feedback).
@@ -837,7 +837,7 @@ describe('ForecastPage plan card', () => {
 
   it('toggles a projection line off and on from the legend', async () => {
     const { container } = render(<ForecastPage />);
-    const soc = await screen.findByRole('button', { name: 'If solar only' });
+    const soc = await screen.findByRole('button', { name: 'If Solar Only' });
     const socLine = () => container.querySelector('[data-stroke="#34d399"]');
     expect(soc.getAttribute('aria-pressed')).toBe('true');
     expect(socLine()).not.toBeNull();
@@ -865,7 +865,7 @@ describe('ForecastPage plan card', () => {
     expect(await screen.findByTestId('forecast-charge-legend')).toBeTruthy();
     expect(screen.getAllByTestId('forecast-charge-marker')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: 'If charge enacted' }));
+    fireEvent.click(screen.getByRole('button', { name: 'If Charge Enacted' }));
     expect(container.querySelector('[data-stroke="#60a5fa"]')).toBeNull();
     expect(
       container.querySelectorAll('[data-testid="forecast-charge-marker"]'),
@@ -874,7 +874,7 @@ describe('ForecastPage plan card', () => {
     expect(screen.queryByText(/SOC if overnight charge enacted/)).toBeNull();
 
     // Toggling back restores everything.
-    fireEvent.click(screen.getByRole('button', { name: 'If charge enacted' }));
+    fireEvent.click(screen.getByRole('button', { name: 'If Charge Enacted' }));
     expect(screen.getAllByTestId('forecast-charge-marker')).toHaveLength(2);
     expect(screen.getByTestId('forecast-charge-legend')).toBeTruthy();
   });
@@ -898,7 +898,7 @@ describe('ForecastPage plan card', () => {
     });
     const { container } = render(<ForecastPage />);
     const button = await screen.findByRole('button', {
-      name: 'With current schedule',
+      name: 'With Current Schedule',
     });
     expect(container.querySelector('[data-stroke="#f472b6"]')).not.toBeNull();
     expect(screen.getByTestId('forecast-caption-schedule')).toBeTruthy();
@@ -1005,7 +1005,7 @@ describe('ForecastPage export advice', () => {
     });
     render(<ForecastPage />);
     const card = await screen.findByTestId('forecast-export-card');
-    expect(card.textContent).toMatch(/Export opportunity/);
+    expect(card.textContent).toMatch(/Export Opportunity/);
     expect(screen.getByTestId('forecast-export-kwh').textContent).toMatch(/5\.7/);
     expect(screen.getByTestId('forecast-export-window').textContent).toMatch(/16:00/);
     expect(screen.getByTestId('forecast-export-window').textContent).toMatch(/18:16/);

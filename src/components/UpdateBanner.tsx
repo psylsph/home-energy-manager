@@ -51,13 +51,13 @@ export default function UpdateBanner() {
           onClick={() => void openExternal(info.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases/latest')}
           className="ml-auto shrink-0 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-3 py-1 text-xs font-semibold transition-colors"
         >
-          View release
+          View Release
         </button>
         <button
           type="button"
           onClick={() => dismiss(normaliseVersionKey(latest))}
-          aria-label="Dismiss update notice"
-          title="Dismiss — I'll check the Settings page later"
+          aria-label="Dismiss Update Notice"
+          title="Dismiss — I'll Check the Settings Page Later"
           className="shrink-0 rounded-full hover:bg-amber-500/30 px-2 py-1 text-amber-100/80 transition-colors"
         >
           ✕

@@ -78,7 +78,7 @@ describe('<SolarPowerChart/>', () => {
     fetchHistoryMock.mockResolvedValue({ pv1_power: [], pv2_power: [] });
     const { container } = render(<SolarPowerChart />);
     await waitFor(() => {
-      expect(container.textContent).toContain('No solar history in the last 24h');
+      expect(container.textContent).toContain('No Solar History in the Last 24h');
     });
   });
 
@@ -87,7 +87,7 @@ describe('<SolarPowerChart/>', () => {
     fetchHistoryMock.mockResolvedValue({ pv1_power: [], pv2_power: [] });
     const { container } = render(<SolarPowerChart />);
     await waitFor(() => {
-      expect(container.textContent).toContain('No solar history yet today');
+      expect(container.textContent).toContain('No Solar History Yet Today');
     });
   });
 
@@ -125,7 +125,7 @@ describe('<SolarPowerChart/>', () => {
     const { container } = render(<SolarPowerChart />);
     await waitFor(() => {
       expect(container.querySelector('.animate-spin')).toBeNull();
-      expect(container.textContent).not.toContain('No solar history yet today');
+      expect(container.textContent).not.toContain('No Solar History Yet Today');
       expect(container.textContent).not.toContain('Failed to load solar history');
     });
   });
@@ -140,7 +140,7 @@ describe('<SolarPowerChart/>', () => {
     // no empty/error state renders.
     await waitFor(() => {
       expect(container.querySelector('.animate-spin')).toBeNull();
-      expect(container.textContent).not.toContain('No solar history yet today');
+      expect(container.textContent).not.toContain('No Solar History Yet Today');
     });
   });
 
@@ -152,7 +152,7 @@ describe('<SolarPowerChart/>', () => {
     const { container } = render(<SolarPowerChart />);
     await waitFor(() => {
       expect(container.querySelector('.animate-spin')).toBeNull();
-      expect(container.textContent).not.toContain('No solar history yet today');
+      expect(container.textContent).not.toContain('No Solar History Yet Today');
     });
   });
 
@@ -228,7 +228,7 @@ describe('<SolarPowerChart/>', () => {
     await waitFor(() => {
       // The chart branch is taken (data resolved), not a spinner/empty/error.
       expect(container.querySelector('.animate-spin')).toBeNull();
-      expect(container.textContent).not.toContain('No solar history yet today');
+      expect(container.textContent).not.toContain('No Solar History Yet Today');
     });
     // Nameplate branch ran → the Y-Lock store sharing never happened.
     expect(useInverterStore.getState().panelGraphsYLockMax).toBe(0);

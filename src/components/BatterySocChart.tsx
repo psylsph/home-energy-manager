@@ -37,7 +37,7 @@ function chartTitle(scale: 'today' | '24h'): string {
 }
 
 function emptyStateMessage(scale: 'today' | '24h'): string {
-  return scale === '24h' ? 'No SOC history in the last 24h' : 'No SOC history yet today';
+  return scale === '24h' ? 'No SOC History in the Last 24h' : 'No SOC History Yet Today';
 }
 
 export default function BatterySocChart() {

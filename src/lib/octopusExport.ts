@@ -67,6 +67,8 @@ export interface OctopusExportData {
   rangeLabel: string;
   generatedAt: Date;
   gasUnit: 'unknown' | 'kwh' | 'm3';
+  /** Leave every gas figure, column and chart out. Defaults to on. */
+  includeGas?: boolean;
   costPeriods: OctopusExportBillingPeriod[];
   historySeries: Record<string, OctopusExportHistoryPoint[]>;
   billing: {
@@ -102,13 +104,16 @@ function csvRows(rows: Array<Array<string | number | boolean | null>>): string {
 export function buildOctopusSummaryCsv(data: OctopusExportData): string {
   const totals = data.billing.totals;
   const comparison = data.comparison.totals;
+  const withGas = data.includeGas !== false;
+  /** Cells that only exist for a household with gas. */
+  const gas = <T,>(...cells: T[]): T[] => (withGas ? cells : []);
   const rows: Array<Array<string | number | boolean | null>> = [
     ['Report', 'Octopus Energy Summary'],
     ['Period', data.rangeLabel],
     ['Generated', data.generatedAt.toISOString()],
     ['Estimated', true],
     ['Pricing complete', totals.pricing_complete],
-    ['Gas unit', data.gasUnit],
+    ...(withGas ? [['Gas unit', data.gasUnit]] : []),
     [],
     ['Selected Period Totals'],
     ['Metric', 'Value'],
@@ -118,14 +123,18 @@ export function buildOctopusSummaryCsv(data: OctopusExportData): string {
     ['Electricity total cost GBP', fixed(totals.electricity_total_cost_gbp, 2)],
     ['Electricity export kWh', fixed(totals.electricity_export_kwh, 3)],
     ['Export income GBP', fixed(totals.export_income_gbp, 2)],
-    ['Gas usage', fixed(totals.gas_usage, 3)],
-    ['Gas energy cost GBP', fixed(totals.gas_energy_cost_gbp, 2)],
-    ['Gas standing cost GBP', fixed(totals.gas_standing_cost_gbp, 2)],
-    ['Gas total cost GBP', fixed(totals.gas_total_cost_gbp, 2)],
+    ...(withGas
+      ? [
+          ['Gas usage', fixed(totals.gas_usage, 3)],
+          ['Gas energy cost GBP', fixed(totals.gas_energy_cost_gbp, 2)],
+          ['Gas standing cost GBP', fixed(totals.gas_standing_cost_gbp, 2)],
+          ['Gas total cost GBP', fixed(totals.gas_total_cost_gbp, 2)],
+        ]
+      : []),
     ['Net cost GBP', fixed(totals.net_cost_gbp, 2)],
     [],
     ['Monthly Summary'],
-    ['Month', 'Import kWh', 'Energy cost GBP', 'Electricity standing GBP', 'Import total GBP', 'Export kWh', 'Export income GBP', 'Gas usage', 'Gas energy GBP', 'Gas standing GBP', 'Gas total GBP', 'Net GBP', 'Pricing complete'],
+    ['Month', 'Import kWh', 'Energy cost GBP', 'Electricity standing GBP', 'Import total GBP', 'Export kWh', 'Export income GBP', ...gas('Gas usage', 'Gas energy GBP', 'Gas standing GBP', 'Gas total GBP'), 'Net GBP', 'Pricing complete'],
   ];
 
   for (const period of data.billing.monthly) {
@@ -137,10 +146,12 @@ export function buildOctopusSummaryCsv(data: OctopusExportData): string {
       fixed(period.electricity_total_cost_gbp, 2),
       fixed(period.electricity_export_kwh, 3),
       fixed(period.export_income_gbp, 2),
-      fixed(period.gas_usage, 3),
-      fixed(period.gas_energy_cost_gbp, 2),
-      fixed(period.gas_standing_cost_gbp, 2),
-      fixed(period.gas_total_cost_gbp, 2),
+      ...gas(
+        fixed(period.gas_usage, 3),
+        fixed(period.gas_energy_cost_gbp, 2),
+        fixed(period.gas_standing_cost_gbp, 2),
+        fixed(period.gas_total_cost_gbp, 2),
+      ),
       fixed(period.net_cost_gbp, 2),
       period.pricing_complete,
     ]);
@@ -149,7 +160,7 @@ export function buildOctopusSummaryCsv(data: OctopusExportData): string {
   rows.push(
     [],
     ['Yearly Summary'],
-    ['Year', 'Import kWh', 'Import total GBP', 'Export kWh', 'Export income GBP', 'Gas usage', 'Gas total GBP', 'Net GBP', 'Pricing complete'],
+    ['Year', 'Import kWh', 'Import total GBP', 'Export kWh', 'Export income GBP', ...gas('Gas usage', 'Gas total GBP'), 'Net GBP', 'Pricing complete'],
   );
   for (const period of data.billing.yearly) {
     rows.push([
@@ -158,8 +169,7 @@ export function buildOctopusSummaryCsv(data: OctopusExportData): string {
       fixed(period.electricity_total_cost_gbp, 2),
       fixed(period.electricity_export_kwh, 3),
       fixed(period.export_income_gbp, 2),
-      fixed(period.gas_usage, 3),
-      fixed(period.gas_total_cost_gbp, 2),
+      ...gas(fixed(period.gas_usage, 3), fixed(period.gas_total_cost_gbp, 2)),
       fixed(period.net_cost_gbp, 2),
       period.pricing_complete,
     ]);
@@ -173,7 +183,7 @@ export function buildOctopusSummaryCsv(data: OctopusExportData): string {
     ['Export', fixed(comparison.octopus_export_kwh, 3), fixed(comparison.hem_export_kwh, 3), fixed(comparison.export_difference_kwh, 3)],
     [],
     ['Daily Comparison and Missing Data'],
-    ['Date', 'Octopus import kWh', 'HEM import kWh', 'Import difference kWh', 'Import difference %', 'Octopus export kWh', 'HEM export kWh', 'Export difference kWh', 'Export difference %', 'Import intervals', 'Expected import', 'Missing import', 'Export intervals', 'Expected export', 'Missing export', 'Gas intervals', 'Expected gas', 'Missing gas'],
+    ['Date', 'Octopus import kWh', 'HEM import kWh', 'Import difference kWh', 'Import difference %', 'Octopus export kWh', 'HEM export kWh', 'Export difference kWh', 'Export difference %', 'Import intervals', 'Expected import', 'Missing import', 'Export intervals', 'Expected export', 'Missing export', ...gas('Gas intervals', 'Expected gas', 'Missing gas')],
   );
   for (const day of data.comparison.days) {
     rows.push([
@@ -192,9 +202,7 @@ export function buildOctopusSummaryCsv(data: OctopusExportData): string {
       day.export_intervals,
       day.expected_export_intervals,
       day.missing_export_intervals,
-      day.gas_intervals,
-      day.expected_gas_intervals,
-      day.missing_gas_intervals,
+      ...gas(day.gas_intervals, day.expected_gas_intervals, day.missing_gas_intervals),
     ]);
   }
 
@@ -436,11 +444,14 @@ export async function buildOctopusSummaryPdf(data: OctopusExportData): Promise<j
   doc.text('Supplier costs are estimates and may differ from the final Octopus bill.', 14, 29);
   doc.setTextColor(0, 0, 0);
 
+  const withGas = data.includeGas !== false;
   const cards = [
-    ['Electricity import', kwh(totals.electricity_import_kwh), money(totals.electricity_total_cost_gbp)],
-    ['Electricity export', kwh(totals.electricity_export_kwh), `${money(totals.export_income_gbp)} income`],
-    ['Gas', `${totals.gas_usage.toFixed(3)} ${data.gasUnit}`, money(totals.gas_total_cost_gbp)],
-    ['Net cost', money(totals.net_cost_gbp ?? totals.electricity_total_cost_gbp - totals.export_income_gbp), ''],
+    ['Electricity Import', kwh(totals.electricity_import_kwh), money(totals.electricity_total_cost_gbp)],
+    ['Electricity Export', kwh(totals.electricity_export_kwh), `${money(totals.export_income_gbp)} income`],
+    ...(withGas
+      ? [['Gas', `${totals.gas_usage.toFixed(3)} ${data.gasUnit}`, money(totals.gas_total_cost_gbp)]]
+      : []),
+    ['Net Cost', money(totals.net_cost_gbp ?? totals.electricity_total_cost_gbp - totals.export_income_gbp), ''],
   ];
   cards.forEach((card, index) => {
     const x = 14 + index * 46;
@@ -466,20 +477,20 @@ export async function buildOctopusSummaryPdf(data: OctopusExportData): Promise<j
   }
 
   const costPoints = costGraphPoints(buildOctopusCostSeries(data.costPeriods));
-  let y = drawLineGraph(doc, 'Supplier costs', costPoints, [
-    { key: 'electricity_import_cost', label: 'Electricity import', color: [239, 68, 68] },
-    { key: 'gas_cost', label: 'Gas', color: [245, 158, 11] },
-    { key: 'net_cost', label: 'Net cost', color: [59, 130, 246] },
+  let y = drawLineGraph(doc, 'Supplier Costs', costPoints, [
+    { key: 'electricity_import_cost', label: 'Electricity Import', color: [239, 68, 68] },
+    ...(withGas ? [{ key: 'gas_cost', label: 'Gas', color: [245, 158, 11] as [number, number, number] }] : []),
+    { key: 'net_cost', label: 'Net Cost', color: [59, 130, 246] },
   ], 67, 'GBP');
-  drawLineGraph(doc, 'Export income', costPoints, [
-    { key: 'export_income', label: 'Export income', color: [34, 197, 94] },
+  drawLineGraph(doc, 'Export Income', costPoints, [
+    { key: 'export_income', label: 'Export Income', color: [34, 197, 94] },
   ], y + 3, 'GBP');
 
   const electricityKeys = ['electricity_import', 'electricity_export'];
   doc.addPage();
   y = drawLineGraph(
     doc,
-    'Electricity consumption',
+    'Electricity Consumption',
     buildOctopusHistoryGraphSeries(data.historySeries, electricityKeys, false),
     [
       { key: 'electricity_import', label: 'Import', color: [239, 68, 68] },
@@ -490,33 +501,35 @@ export async function buildOctopusSummaryPdf(data: OctopusExportData): Promise<j
   );
   drawLineGraph(
     doc,
-    'Cumulative electricity',
+    'Cumulative Electricity',
     buildOctopusHistoryGraphSeries(data.historySeries, electricityKeys, true),
     [
-      { key: 'electricity_import', label: 'Cumulative import', color: [239, 68, 68] },
-      { key: 'electricity_export', label: 'Cumulative export', color: [34, 197, 94] },
+      { key: 'electricity_import', label: 'Cumulative Import', color: [239, 68, 68] },
+      { key: 'electricity_export', label: 'Cumulative Export', color: [34, 197, 94] },
     ],
     y + 3,
     'kWh',
   );
 
-  doc.addPage();
-  y = drawLineGraph(
-    doc,
-    'Gas consumption',
-    buildOctopusHistoryGraphSeries(data.historySeries, ['gas'], false),
-    [{ key: 'gas', label: 'Gas', color: [245, 158, 11] }],
-    14,
-    'units',
-  );
-  drawLineGraph(
-    doc,
-    'Cumulative gas',
-    buildOctopusHistoryGraphSeries(data.historySeries, ['gas'], true),
-    [{ key: 'gas', label: 'Cumulative gas', color: [245, 158, 11] }],
-    y + 3,
-    'units',
-  );
+  if (withGas) {
+    doc.addPage();
+    y = drawLineGraph(
+      doc,
+      'Gas Consumption',
+      buildOctopusHistoryGraphSeries(data.historySeries, ['gas'], false),
+      [{ key: 'gas', label: 'Gas', color: [245, 158, 11] }],
+      14,
+      'units',
+    );
+    drawLineGraph(
+      doc,
+      'Cumulative Gas',
+      buildOctopusHistoryGraphSeries(data.historySeries, ['gas'], true),
+      [{ key: 'gas', label: 'Cumulative Gas', color: [245, 158, 11] }],
+      y + 3,
+      'units',
+    );
+  }
 
   doc.addPage();
   y = 14;
@@ -526,20 +539,20 @@ export async function buildOctopusSummaryPdf(data: OctopusExportData): Promise<j
     money(period.electricity_total_cost_gbp),
     kwh(period.electricity_export_kwh),
     money(period.export_income_gbp),
-    money(period.gas_total_cost_gbp),
+    ...(withGas ? [money(period.gas_total_cost_gbp)] : []),
     money(period.net_cost_gbp),
   ]);
-  y = drawTable(doc, 'Monthly summary', ['Month', 'Import', 'Import cost', 'Export', 'Income', 'Gas cost', 'Net'], monthlyRows, y + 3);
+  y = drawTable(doc, 'Monthly Summary', ['Month', 'Import', 'Import Cost', 'Export', 'Income', ...(withGas ? ['Gas Cost'] : []), 'Net'], monthlyRows, y + 3);
   const yearlyRows = [...data.billing.yearly].reverse().map((period) => [
     period.period,
     kwh(period.electricity_import_kwh),
     money(period.electricity_total_cost_gbp),
     kwh(period.electricity_export_kwh),
     money(period.export_income_gbp),
-    money(period.gas_total_cost_gbp),
+    ...(withGas ? [money(period.gas_total_cost_gbp)] : []),
     money(period.net_cost_gbp),
   ]);
-  y = drawTable(doc, 'Yearly summary', ['Year', 'Import', 'Import cost', 'Export', 'Income', 'Gas cost', 'Net'], yearlyRows, y);
+  y = drawTable(doc, 'Yearly Summary', ['Year', 'Import', 'Import Cost', 'Export', 'Income', ...(withGas ? ['Gas Cost'] : []), 'Net'], yearlyRows, y);
   const comparisonRows = [...data.comparison.days].reverse().map((day) => [
     day.date,
     kwh(day.octopus_import_kwh),
@@ -548,8 +561,10 @@ export async function buildOctopusSummaryPdf(data: OctopusExportData): Promise<j
     kwh(day.octopus_export_kwh),
     kwh(day.hem_export_kwh),
     kwh(day.export_difference_kwh),
-    `${day.missing_import_intervals}/${day.missing_export_intervals}/${day.missing_gas_intervals}`,
+    withGas
+      ? `${day.missing_import_intervals}/${day.missing_export_intervals}/${day.missing_gas_intervals}`
+      : `${day.missing_import_intervals}/${day.missing_export_intervals}`,
   ]);
-  drawTable(doc, 'Octopus versus HEM and missing data', ['Date', 'Oct imp.', 'HEM imp.', 'Diff.', 'Oct exp.', 'HEM exp.', 'Diff.', 'Missing I/E/G'], comparisonRows, y);
+  drawTable(doc, 'Octopus Versus HEM And Missing Data', ['Date', 'Oct Imp.', 'HEM Imp.', 'Diff.', 'Oct Exp.', 'HEM Exp.', 'Diff.', withGas ? 'Missing I/E/G' : 'Missing I/E'], comparisonRows, y);
   return doc;
 }

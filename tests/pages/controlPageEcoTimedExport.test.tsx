@@ -194,7 +194,7 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             ).toBeInTheDocument();
         });
 
-        it('shows "Eco — Temporarily overridden" during active Timed Export', async () => {
+        it('shows "Eco — Temporarily Overridden" during active Timed Export', async () => {
             vi.useFakeTimers({ shouldAdvanceTime: true });
             vi.setSystemTime(new Date('2026-06-28T17:00:00'));
             enableManagedTimedExportForLiveSlots();
@@ -210,11 +210,11 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             const batteryModeSection = section.closest('section')!;
 
             expect(
-                within(batteryModeSection).getByText(/Eco — Temporarily overridden/)
+                within(batteryModeSection).getByText(/Eco — Temporarily Overridden/)
             ).toBeInTheDocument();
         });
 
-        it('shows "Eco — Temporarily overridden" when paused by HR318', async () => {
+        it('shows "Eco — Temporarily Overridden" when paused by HR318', async () => {
             vi.useFakeTimers({ shouldAdvanceTime: true });
             vi.setSystemTime(new Date('2026-06-28T17:00:00'));
             await renderWithSnapshot(
@@ -229,7 +229,7 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             const batteryModeSection = section.closest('section')!;
 
             expect(
-                within(batteryModeSection).getByText(/Eco — Temporarily overridden/)
+                within(batteryModeSection).getByText(/Eco — Temporarily Overridden/)
             ).toBeInTheDocument();
         });
 
@@ -329,8 +329,8 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             const batteryModeSection = section.closest('section')!;
 
             // Should show "Exporting now" (may appear in both Current behaviour and Schedule)
-            await screen.findAllByText('Timed Export — Exporting now');
-            const activeElements = within(batteryModeSection).queryAllByText(/Exporting now/);
+            await screen.findAllByText('Timed Export — Exporting Now');
+            const activeElements = within(batteryModeSection).queryAllByText(/Exporting Now/);
             expect(activeElements.length).toBeGreaterThan(0);
 
             vi.useRealTimers();
@@ -394,8 +394,8 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             const batteryModeSection = section.closest('section')!;
 
             // Should show "Blocked by Pause Discharge" (may appear multiple times)
-            await screen.findAllByText('Timed Export — Blocked by Pause Discharge');
-            const blockedElements = within(batteryModeSection).queryAllByText(/Blocked by Pause Discharge/);
+            await screen.findAllByText('Timed Export — Blocked By Pause Discharge');
+            const blockedElements = within(batteryModeSection).queryAllByText(/Blocked By Pause Discharge/);
             expect(blockedElements.length).toBeGreaterThan(0);
 
             vi.useRealTimers();
@@ -687,7 +687,7 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             const button = timedExportControl();
             expect(button.textContent).toContain('Stop Timed Export');
             expect(button.dataset.variant).toBe('active');
-            expect(button.getAttribute('aria-label')).toContain('Exporting now');
+            expect(button.getAttribute('aria-label')).toContain('Exporting Now');
 
             vi.useRealTimers();
         });
@@ -877,7 +877,7 @@ describe('ControlPage Eco / Timed Export presentation', () => {
                 });
             });
 
-            await screen.findByRole('button', { name: /Exporting now/ });
+            await screen.findByRole('button', { name: /Exporting Now/ });
             const button = timedExportControl();
             expect(button.textContent).toContain('Stop Timed Export');
             expect(button.dataset.variant).toBe('active');

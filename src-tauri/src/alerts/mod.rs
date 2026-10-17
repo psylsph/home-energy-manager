@@ -1076,11 +1076,22 @@ pub async fn send_cosy_blocked_notification(
     state: &std::sync::Arc<crate::inverter::poll::AppState>,
     text: &str,
 ) -> AlertDelivery {
+    send_text_notification(state, text, "cosy-blocked").await
+}
+
+/// Send a pre-built message to every configured channel, reporting what
+/// happened so the caller can retry only genuine failures. Follows the
+/// master alerts switch; there is no per-type toggle.
+pub(crate) async fn send_text_notification(
+    state: &std::sync::Arc<crate::inverter::poll::AppState>,
+    text: &str,
+    kind: &'static str,
+) -> AlertDelivery {
     let config = state.alert_config.lock().await.clone();
     if !config.enabled || !has_delivery_channel(&config) {
         return AlertDelivery::Skipped;
     }
-    if dispatch_alert_text(&config, text, "cosy-blocked").await {
+    if dispatch_alert_text(&config, text, kind).await {
         AlertDelivery::Delivered
     } else {
         AlertDelivery::Failed

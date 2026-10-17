@@ -164,9 +164,11 @@ fn encode(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
-fn configured(settings: &Settings) -> bool {
-    settings.octopus_enabled
-        && !settings.octopus_api_key.trim().is_empty()
+/// The Octopus integration is on whenever both the account number and the API
+/// key are saved. There is no separate switch: clearing the account number
+/// turns it off.
+pub(crate) fn configured(settings: &Settings) -> bool {
+    !settings.octopus_api_key.trim().is_empty()
         && !settings.octopus_account_number.trim().is_empty()
 }
 
@@ -183,6 +185,21 @@ fn parse_timestamp(value: &str) -> Result<i64, String> {
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.timestamp())
         .map_err(|e| format!("invalid Octopus timestamp '{value}': {e}"))
+}
+
+/// The streams to sync for this household: an electricity-only home never
+/// fetches (or stores) gas.
+fn streams_for(settings: &Settings, account: AccountResponse, now: i64) -> Vec<Stream> {
+    let mut streams = discover_streams(account, now);
+    if !settings.octopus_gas_enabled {
+        streams.retain(|stream| stream.kind != "gas");
+    }
+    streams
+}
+
+/// Gas cost needs gas switched on and readings known to be in kWh.
+fn gas_costs_calculated(settings: &Settings) -> bool {
+    settings.octopus_gas_enabled && settings.octopus_gas_unit == "kwh"
 }
 
 fn discover_streams(account: AccountResponse, now: i64) -> Vec<Stream> {
@@ -821,7 +838,7 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
             .clone()
             .ok_or("history database is unavailable")?;
         let now = Utc::now().timestamp();
-        let streams = discover_streams(fetch_account(&settings).await?, now);
+        let streams = streams_for(&settings, fetch_account(&settings).await?, now);
         if streams.is_empty() {
             return Err("Octopus account has no active electricity or gas meters".to_string());
         }
@@ -914,6 +931,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json
         Json(json!({
             "ok": true,
             "configured": configured(&settings),
+            "gas_enabled": settings.octopus_gas_enabled,
             "data": status,
             "bounds": bounds.map(|(start, end)| [start * 1000, end * 1000]),
             "gas_unit_note": "Gas values are shown in the units reported by Octopus (kWh for many SMETS1 meters; m³ may be returned for SMETS2)."
@@ -1096,7 +1114,7 @@ pub async fn get_summary(
     };
     let end = now - offset * span;
     let start = end - span;
-    let gas_is_kwh = settings.octopus_gas_unit == "kwh";
+    let gas_is_kwh = gas_costs_calculated(&settings);
     let economy7_start = hhmm_minutes(&settings.octopus_economy7_start).unwrap_or(30);
     let economy7_end = hhmm_minutes(&settings.octopus_economy7_end).unwrap_or(450);
     let db = state.history.lock().await.clone();
@@ -1136,9 +1154,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_requires_opt_in_and_both_credentials() {
+    fn configured_requires_both_credentials() {
         let mut settings = Settings {
-            octopus_enabled: true,
             octopus_api_key: "sk_live".into(),
             ..Settings::default()
         };
@@ -1230,7 +1247,6 @@ mod tests {
     async fn comparison_endpoint_returns_report_when_configured() {
         crate::test_util::with_isolated_config_dir_async(|| async {
             let settings = Settings {
-                octopus_enabled: true,
                 octopus_api_key: "sk_test".to_string(),
                 octopus_account_number: "A-TEST".to_string(),
                 ..Settings::default()
@@ -1755,9 +1771,84 @@ mod tests {
         }
     }
 
+    fn account_with_gas() -> AccountResponse {
+        serde_json::from_value(json!({
+            "properties": [{
+                "moved_in_at": "2024-01-01T00:00:00Z",
+                "moved_out_at": null,
+                "electricity_meter_points": [
+                    {"mpan":"111", "is_export":false, "meters":[{"serial_number":"IMP"}], "agreements":[]}
+                ],
+                "gas_meter_points": [
+                    {"mprn":"333", "meters":[{"serial_number":"GAS"}], "agreements":[]}
+                ]
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_electricity_only_household_never_syncs_gas() {
+        let mut settings = octopus_settings("http://example.invalid");
+        assert!(settings.octopus_gas_enabled, "on by default");
+        let with_gas = streams_for(&settings, account_with_gas(), 1_700_000_000);
+        assert!(with_gas.iter().any(|s| s.kind == "gas"));
+
+        settings.octopus_gas_enabled = false;
+        let without = streams_for(&settings, account_with_gas(), 1_700_000_000);
+        assert!(without.iter().all(|s| s.kind != "gas"));
+        assert!(
+            without.iter().any(|s| s.kind == "electricity_import"),
+            "electricity must be unaffected"
+        );
+    }
+
+    #[test]
+    fn gas_cost_is_only_calculated_when_gas_is_on_and_in_kwh() {
+        let mut settings = octopus_settings("http://example.invalid");
+        settings.octopus_gas_unit = "kwh".to_string();
+        assert!(gas_costs_calculated(&settings));
+        settings.octopus_gas_enabled = false;
+        assert!(!gas_costs_calculated(&settings), "no gas, no gas cost");
+        settings.octopus_gas_enabled = true;
+        settings.octopus_gas_unit = "m3".to_string();
+        assert!(!gas_costs_calculated(&settings));
+        settings.octopus_gas_unit = "unknown".to_string();
+        assert!(!gas_costs_calculated(&settings));
+    }
+
+    #[tokio::test]
+    async fn status_reports_whether_gas_is_shown() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (_, body) = get_status(State(state.clone())).await;
+            assert_eq!(body["gas_enabled"], true);
+
+            Settings::update(|s| s.octopus_gas_enabled = false).unwrap();
+            let (_, body) = get_status(State(state)).await;
+            assert_eq!(body["gas_enabled"], false);
+        })
+        .await;
+    }
+
+    #[test]
+    fn saved_credentials_are_all_it_takes_to_be_configured() {
+        // No separate opt-in: the key and account number alone switch the
+        // integration on, and clearing either (or leaving it blank) turns it off.
+        assert!(configured(&octopus_settings("http://example.invalid")));
+        for blank in ["", "   "] {
+            let mut missing_key = octopus_settings("http://example.invalid");
+            missing_key.octopus_api_key = blank.to_string();
+            assert!(!configured(&missing_key));
+
+            let mut missing_account = octopus_settings("http://example.invalid");
+            missing_account.octopus_account_number = blank.to_string();
+            assert!(!configured(&missing_account));
+        }
+    }
+
     fn octopus_settings(base_url: &str) -> Settings {
         Settings {
-            octopus_enabled: true,
             octopus_api_key: "sk_live_test".to_string(),
             octopus_account_number: "A-TEST1".to_string(),
             octopus_api_base_url: base_url.to_string(),
@@ -2245,9 +2336,7 @@ mod tests {
     #[test]
     fn test_configured_requires_all_fields() {
         let mut s = Settings::default();
-        assert!(!configured(&s), "disabled by default");
-        s.octopus_enabled = true;
-        assert!(!configured(&s), "still missing key and account");
+        assert!(!configured(&s), "off by default: no credentials");
         s.octopus_api_key = " sk_live ".to_string();
         s.octopus_account_number = "A-12345".to_string();
         assert!(configured(&s));

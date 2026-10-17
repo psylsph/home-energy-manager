@@ -160,7 +160,7 @@ const cases: SectionCase[] = [
   {
     name: 'Adaptive Charge',
     path: '/api/adaptive-charge',
-    save: () => screen.getByRole('button', { name: /Save Adaptive Charge|Saving|Saved|Check settings/ }),
+    save: () => screen.getByRole('button', { name: /Save Adaptive Charge|Saving|Saved|Check Settings/ }),
     posts: '/api/adaptive-charge',
     loaded: { config: expect.objectContaining({ periods: [expect.objectContaining({ low_soc: 25, recovery_soc: 35 })] }) },
   },

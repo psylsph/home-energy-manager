@@ -103,13 +103,13 @@ describe('ControlPage battery-mode banners survive tab navigation', () => {
 
         const first = await renderControl();
         fireEvent.click(screen.getByRole('button', { name: /Timed Charge/ }));
-        expect(await screen.findByText('Applying changes to inverter…')).toBeInTheDocument();
+        expect(await screen.findByText('Applying Changes to Inverter…')).toBeInTheDocument();
 
         // Navigate away (unmount) and back (fresh ControlPage, same store).
         first.unmount();
         await renderControl();
 
-        expect(screen.getByText('Applying changes to inverter…')).toBeInTheDocument();
+        expect(screen.getByText('Applying Changes to Inverter…')).toBeInTheDocument();
         expect(screen.getByText('Applying…')).toBeInTheDocument();
     });
 
@@ -128,13 +128,13 @@ describe('ControlPage battery-mode banners survive tab navigation', () => {
 
         await renderControl();
         fireEvent.click(screen.getByRole('button', { name: /Timed Charge/ }));
-        expect(await screen.findByText('Applying changes to inverter…')).toBeInTheDocument();
+        expect(await screen.findByText('Applying Changes to Inverter…')).toBeInTheDocument();
 
         cleanup();
 
         await renderControl();
         // The banner survived the navigation — the action is still in flight.
-        expect(screen.getByText('Applying changes to inverter…')).toBeInTheDocument();
+        expect(screen.getByText('Applying Changes to Inverter…')).toBeInTheDocument();
 
         // The poll loop confirms HR96 while the remounted page is visible.
         act(() => {
@@ -144,7 +144,7 @@ describe('ControlPage battery-mode banners survive tab navigation', () => {
         });
 
         expect(await screen.findByText('Timed Charge')).toBeInTheDocument();
-        expect(screen.queryByText('Applying changes to inverter…')).not.toBeInTheDocument();
+        expect(screen.queryByText('Applying Changes to Inverter…')).not.toBeInTheDocument();
     });
 
     it('fires the confirmation-timeout error based on elapsed time, not time on page', async () => {
@@ -163,7 +163,7 @@ describe('ControlPage battery-mode banners survive tab navigation', () => {
 
         await renderControl();
         fireEvent.click(screen.getByRole('button', { name: /Timed Charge/ }));
-        expect(await screen.findByText('Applying changes to inverter…')).toBeInTheDocument();
+        expect(await screen.findByText('Applying Changes to Inverter…')).toBeInTheDocument();
 
         // 60 s in: navigate away, advance another 40 s (past the 90 s
         // confirmation deadline), then come back. The watchdog must account
@@ -176,7 +176,7 @@ describe('ControlPage battery-mode banners survive tab navigation', () => {
         expect(
             await screen.findByText('Timed Charge did not confirm the change. Please try again.'),
         ).toBeInTheDocument();
-        expect(screen.queryByText('Applying changes to inverter…')).not.toBeInTheDocument();
+        expect(screen.queryByText('Applying Changes to Inverter…')).not.toBeInTheDocument();
     });
 
     it('keeps the Timed Export arm-failure state across navigation', async () => {

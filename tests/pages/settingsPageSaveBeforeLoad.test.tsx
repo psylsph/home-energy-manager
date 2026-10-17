@@ -33,7 +33,7 @@ const settingsBody = () => ({
   evc_host: '192.168.1.60', evc_port: 502, disable_auto_discovery: true, autostart_enabled: false,
   minimise_to_tray: false, start_minimised: false, check_for_updates: true, api_key: '', api_port: 7338,
   hidden_panels: [], solar_arrays: [], import_tariff_config: tariff(), export_tariff_config: tariff(),
-  octopus_enabled: false, octopus_account_number: '', octopus_api_key_configured: false,
+  octopus_account_number: '', octopus_api_key_configured: false,
   octopus_gas_unit: 'unknown', octopus_economy7_start: '00:30', octopus_economy7_end: '07:30',
 });
 
@@ -106,7 +106,7 @@ describe('<SettingsPage/> — the settings-backed saves cannot be reached before
     mount(['/api/settings']);
     render(<SettingsPage />);
 
-    await screen.findByText('Loading settings…');
+    await screen.findByText('Loading Settings…');
     expect(screen.queryByRole('button', { name: /^Save/ })).toBeNull();
     expect(apiPostMock).not.toHaveBeenCalled();
 
@@ -117,7 +117,7 @@ describe('<SettingsPage/> — the settings-backed saves cannot be reached before
   it('does not stay on the spinner when the settings load fails', async () => {
     mount(['/api/settings']);
     render(<SettingsPage />);
-    await screen.findByText('Loading settings…');
+    await screen.findByText('Loading Settings…');
 
     await fail('/api/settings');
 

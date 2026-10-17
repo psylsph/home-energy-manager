@@ -129,7 +129,7 @@ async function servePlannerFixtures(page: Page) {
   });
 }
 
-const RANGES = ['24 hours', '3 days', '7 days', '30 days', '90 days'];
+const RANGES = ['24 Hours', '3 Days', '7 Days', '30 Days', '90 Days'];
 const TABS = ['battery', 'solar', 'consumption'];
 
 test.describe('Planner past view', () => {
@@ -149,7 +149,7 @@ test.describe('Planner past view', () => {
       for (const tab of TABS) {
         await page.getByTestId(`forecast-chart-tab-${tab}`).click();
         await expect(page.locator(`#forecast-chart-panel-${tab} .recharts-surface`).first()).toBeVisible();
-        await expect(page.getByText('Something went wrong'), `${range} / ${tab}`).toHaveCount(0);
+        await expect(page.getByText('Something Went Wrong'), `${range} / ${tab}`).toHaveCount(0);
       }
     }
     expect(pageErrors).toEqual([]);

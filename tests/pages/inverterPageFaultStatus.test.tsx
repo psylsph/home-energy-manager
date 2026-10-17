@@ -97,20 +97,20 @@ describe('<InverterPage/> Fault Status section', () => {
     expect(screen.getByText('Fault Status')).toBeTruthy();
   });
 
-  it('shows "✓ No faults" when all fault booleans are clear (non-Gateway)', () => {
+  it('shows "✓ No Faults" when all fault booleans are clear (non-Gateway)', () => {
     useInverterStore.setState({ snapshot: makeSnapshot() });
     render(<InverterPage />);
-    expect(screen.getByText('✓ No faults')).toBeTruthy();
-    expect(screen.queryByText('Grid power lost')).toBeNull();
-    expect(screen.queryByText('Inverter trip detected')).toBeNull();
-    expect(screen.queryByText('Battery over temperature')).toBeNull();
+    expect(screen.getByText('✓ No Faults')).toBeTruthy();
+    expect(screen.queryByText('Grid Power Lost')).toBeNull();
+    expect(screen.queryByText('Inverter Trip Detected')).toBeNull();
+    expect(screen.queryByText('Battery Over Temperature')).toBeNull();
   });
 
   it('shows the grid fault when grid_loss is true', () => {
     useInverterStore.setState({ snapshot: makeSnapshot({ grid_loss: true }) });
     render(<InverterPage />);
-    expect(screen.getByText('Grid power lost')).toBeTruthy();
-    expect(screen.queryByText('✓ No faults')).toBeNull();
+    expect(screen.getByText('Grid Power Lost')).toBeTruthy();
+    expect(screen.queryByText('✓ No Faults')).toBeNull();
   });
 
   it('shows the grid fault via !grid_online even when grid_loss is false', () => {
@@ -120,19 +120,19 @@ describe('<InverterPage/> Fault Status section', () => {
     // helper rather than reading grid_loss directly.
     useInverterStore.setState({ snapshot: makeSnapshot({ grid_online: false }) });
     render(<InverterPage />);
-    expect(screen.getByText('Grid power lost')).toBeTruthy();
+    expect(screen.getByText('Grid Power Lost')).toBeTruthy();
   });
 
   it('shows an inverter trip when inverter_trip is true', () => {
     useInverterStore.setState({ snapshot: makeSnapshot({ inverter_trip: true }) });
     render(<InverterPage />);
-    expect(screen.getByText('Inverter trip detected')).toBeTruthy();
+    expect(screen.getByText('Inverter Trip Detected')).toBeTruthy();
   });
 
   it('shows battery over-temperature when battery_over_temp is true', () => {
     useInverterStore.setState({ snapshot: makeSnapshot({ battery_over_temp: true }) });
     render(<InverterPage />);
-    expect(screen.getByText('Battery over temperature')).toBeTruthy();
+    expect(screen.getByText('Battery Over Temperature')).toBeTruthy();
   });
 
   it('lists every active fault when multiple are set', () => {
@@ -144,16 +144,16 @@ describe('<InverterPage/> Fault Status section', () => {
       }),
     });
     render(<InverterPage />);
-    expect(screen.getByText('Grid power lost')).toBeTruthy();
-    expect(screen.getByText('Inverter trip detected')).toBeTruthy();
-    expect(screen.getByText('Battery over temperature')).toBeTruthy();
-    expect(screen.queryByText('✓ No faults')).toBeNull();
+    expect(screen.getByText('Grid Power Lost')).toBeTruthy();
+    expect(screen.getByText('Inverter Trip Detected')).toBeTruthy();
+    expect(screen.getByText('Battery Over Temperature')).toBeTruthy();
+    expect(screen.queryByText('✓ No Faults')).toBeNull();
   });
 
   it('renders the section for a Gateway device and shows its grid fault', () => {
     // Regression for the issue #174 finding: a Gateway grid outage flips
     // grid_online while leaving the gateway bitmask (gateway_fault_codes)
-    // empty, so the Gateway section's own "✓ No faults" previously hid the
+    // empty, so the Gateway section's own "✓ No Faults" previously hid the
     // fault entirely from this page. The Fault Status section must surface it
     // regardless of device type.
     useInverterStore.setState({
@@ -161,6 +161,6 @@ describe('<InverterPage/> Fault Status section', () => {
     });
     render(<InverterPage />);
     expect(screen.getByText('Fault Status')).toBeTruthy();
-    expect(screen.getByText('Grid power lost')).toBeTruthy();
+    expect(screen.getByText('Grid Power Lost')).toBeTruthy();
   });
 });

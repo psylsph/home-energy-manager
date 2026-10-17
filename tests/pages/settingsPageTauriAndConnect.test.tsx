@@ -65,7 +65,6 @@ function settings(overrides: Json = {}): Json {
     solar_arrays: [],
     import_tariff_config: tariff(),
     export_tariff_config: tariff(),
-    octopus_enabled: false,
     octopus_account_number: '',
     octopus_api_key_configured: false,
     octopus_gas_unit: 'unknown',
@@ -334,7 +333,7 @@ describe('<SettingsPage/> — authenticated API key and network', () => {
   beforeEach(() => {
     useInverterStore.setState({ developerMode: true });
   });
-  const generate = () => screen.findByRole('button', { name: /Generate (new )?API key/ });
+  const generate = () => screen.findByRole('button', { name: /Generate (New )?API Key/ });
 
   it('shows the new secret once and marks a key as configured', async () => {
     mount();
@@ -346,7 +345,7 @@ describe('<SettingsPage/> — authenticated API key and network', () => {
     await screen.findByText('secret-abcdef-1234');
     expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key_generate: true, api_port: 7338 });
     expect(screen.getByText(/ends 1234/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Clear saved key' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clear Saved Key' })).toBeInTheDocument();
   });
 
   it('refuses a response that carries no secret rather than showing a blank key', async () => {
@@ -357,7 +356,7 @@ describe('<SettingsPage/> — authenticated API key and network', () => {
     fireEvent.click(await generate());
 
     await screen.findByText('Key generation did not return a secret');
-    expect(screen.queryByRole('button', { name: 'Clear saved key' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Clear Saved Key' })).toBeNull();
   });
 
   it('reports a failed generation', async () => {
@@ -379,7 +378,7 @@ describe('<SettingsPage/> — authenticated API key and network', () => {
   it('reports a failed network apply, and a generic message when none is given', async () => {
     mount({ api_port: 7338, api_bind_address: '127.0.0.1' });
     render(<SettingsPage />);
-    const apply = await screen.findByRole('button', { name: 'Apply network settings' });
+    const apply = await screen.findByRole('button', { name: 'Apply Network Settings' });
 
     failPost('/api/settings', new Error('address already in use'));
     fireEvent.click(apply);
@@ -393,7 +392,7 @@ describe('<SettingsPage/> — authenticated API key and network', () => {
   it('refuses a blank port when applying network settings', async () => {
     mount();
     render(<SettingsPage />);
-    const apply = await screen.findByRole('button', { name: 'Apply network settings' });
+    const apply = await screen.findByRole('button', { name: 'Apply Network Settings' });
     fireEvent.change(screen.getByLabelText('Port'), { target: { value: '' } });
     fireEvent.click(apply);
     await screen.findByText('API port cannot be blank');
@@ -465,7 +464,7 @@ describe('<SettingsPage/> — smaller controls', () => {
     });
     render(<SettingsPage />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'View release' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'View Release' }));
 
     expect(openExternalMock).toHaveBeenCalledWith('https://example.test/release/9.9.9');
   });
@@ -476,7 +475,7 @@ describe('<SettingsPage/> — smaller controls', () => {
       latestVersionInfo: { current_version: '0.85.4', latest_version: '9.9.9', update_available: true } as never,
     });
     render(<SettingsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'View release' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'View Release' }));
     expect(openExternalMock).toHaveBeenCalledWith('https://github.com/psylsph/home-energy-manager/releases/latest');
   });
 
@@ -488,7 +487,7 @@ describe('<SettingsPage/> — smaller controls', () => {
     render(<SettingsPage />);
     // Current and latest are both shown, so the release line is present…
     await screen.findByText(/Latest release:/);
-    expect(screen.queryByRole('button', { name: 'View release' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'View Release' })).toBeNull();
   });
 
   it('opens the project site from About', async () => {

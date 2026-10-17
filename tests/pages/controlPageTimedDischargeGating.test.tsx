@@ -439,7 +439,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     render(<ControlPage />);
 
     expect(
-      screen.getByText('Waiting for data…'),
+      screen.getByText('Waiting for Data…'),
     ).toBeDefined();
     expect(screen.queryByRole('heading', { name: 'Battery Mode' })).toBeNull();
     expect(screen.queryByText('Timed Discharge')).toBeNull();

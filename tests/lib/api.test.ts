@@ -80,9 +80,9 @@ describe('api', () => {
     it('throws with error message when response has ok=false', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ ok: false, error: 'Something went wrong' }),
+        json: async () => ({ ok: false, error: 'Something Went Wrong' }),
       });
-      await expect(apiGet('/test')).rejects.toThrow('Something went wrong');
+      await expect(apiGet('/test')).rejects.toThrow('Something Went Wrong');
     });
 
     it('throws generic message when response has ok=false without error field', async () => {

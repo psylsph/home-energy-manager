@@ -49,7 +49,6 @@ function settings(overrides: Json = {}): Json {
     solar_arrays: [],
     import_tariff_config: tariff(),
     export_tariff_config: tariff(),
-    octopus_enabled: false,
     octopus_account_number: '',
     octopus_api_key_configured: false,
     octopus_gas_unit: 'unknown',
@@ -171,7 +170,7 @@ describe('<SettingsPage/> — clearing the API key', () => {
     mount({ settings: { api_key_configured: true, api_key_last4: 'a1b2', api_port: 7338, ...overrides } });
     useInverterStore.setState({ developerMode: true });
     render(<SettingsPage />);
-    return screen.findByRole('button', { name: 'Clear saved key' });
+    return screen.findByRole('button', { name: 'Clear Saved Key' });
   }
 
   it('clears the key and reports it', async () => {
@@ -181,8 +180,8 @@ describe('<SettingsPage/> — clearing the API key', () => {
     await screen.findByText(/API key cleared/);
     expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key: '', api_port: 7338 });
     // No key is configured any more: the clear button is gone.
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear saved key' })).toBeNull());
-    expect(screen.getByRole('button', { name: 'Generate API key' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear Saved Key' })).toBeNull());
+    expect(screen.getByRole('button', { name: 'Generate API Key' })).toBeInTheDocument();
   });
 
   it('refuses a blank port rather than posting one', async () => {
@@ -200,7 +199,7 @@ describe('<SettingsPage/> — clearing the API key', () => {
     fireEvent.click(clear);
 
     await screen.findByText('disk full');
-    expect(screen.getByRole('button', { name: 'Clear saved key' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clear Saved Key' })).toBeInTheDocument();
   });
 
   it('falls back to a generic message when the failure carries none', async () => {
@@ -351,7 +350,7 @@ describe('<SettingsPage/> — inverter scan', () => {
     render(<SettingsPage />);
     const section = await sectionOf('Inverter Connection');
     fireEvent.click(scan(section));
-    await within(section).findByText('Unknown serial');
+    await within(section).findByText('Unknown Serial');
   });
 
   it('reports what was scanned when nothing is found', async () => {

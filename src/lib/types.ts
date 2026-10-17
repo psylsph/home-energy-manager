@@ -285,10 +285,10 @@ export interface PollSettings {
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
   /** Authenticated Octopus customer-consumption integration (issue #212). */
-  octopus_enabled?: boolean;
   octopus_account_number?: string;
   /** The secret itself is never returned by GET /api/settings. */
   octopus_api_key_configured?: boolean;
+  octopus_gas_enabled?: boolean;
   octopus_gas_unit?: 'unknown' | 'kwh' | 'm3';
   octopus_economy7_start?: string;
   octopus_economy7_end?: string;
@@ -455,4 +455,69 @@ export interface LatestVersionInfo {
   last_checked_at?: string | null;
   /** Present when the user has opted out of update checking entirely. */
   disabled?: boolean;
+}
+
+/** Lifecycle of a one-off Timed Export booking (`/api/export-once`). */
+export type ExportOnceState = 'pending' | 'active' | 'done' | 'cancelled' | 'failed';
+
+/**
+ * A booked one-off export. `start`/`end` are `YYYY-MM-DD HH:MM` on the
+ * inverter's clock. While `active`, `original` holds the slot content that
+ * returns when the export ends.
+ */
+export interface ExportOnceEvent {
+  id: string;
+  slot: number;
+  start: string;
+  end: string;
+  target_soc: number;
+  source: string;
+  state: ExportOnceState;
+  original?: { slot: ScheduleSlot; schedule_enabled: boolean } | null;
+  applied?: boolean;
+  note?: string | null;
+}
+
+/** Response of `GET /api/export-once`. */
+export interface ExportOnceListResponse {
+  ok: boolean;
+  /** Inverter-local `YYYY-MM-DD HH:MM`. */
+  now: string;
+  events: ExportOnceEvent[];
+}
+
+/** Saving Sessions behaviour set on the Octopus page. */
+export type SavingSessionsMode = 'off' | 'alert' | 'export';
+
+/** A joined Octopus Saving Session that has not finished yet (UTC instants). */
+export interface SavingSession {
+  id: number;
+  start: string;
+  end: string;
+  reward_octopoints_per_kwh: number | null;
+  announced: boolean;
+  /** The user chose not to export for this session. */
+  skipped: boolean;
+  /** How the export for this session stands. Null outside Activate Export. */
+  export: {
+    state: 'booked' | 'running' | 'done' | 'cancelled' | 'failed' | 'skipped' | 'error';
+    detail?: string | null;
+  } | null;
+}
+
+/** Response of `GET /api/octopus/sessions`. */
+export interface SavingSessionsResponse {
+  ok: boolean;
+  mode: SavingSessionsMode;
+  configured: boolean;
+  alerts_ready: boolean;
+  /** Discharge slot borrowed for exports, and the battery level they stop at. */
+  export_slot: number;
+  export_floor_soc: number;
+  /** How many discharge slots the inverter has. */
+  max_discharge_slots: number;
+  checked_at: string | null;
+  error: string | null;
+  enrolled: boolean | null;
+  sessions: SavingSession[];
 }

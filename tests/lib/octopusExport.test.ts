@@ -105,6 +105,42 @@ describe('Octopus summary exports', () => {
     expect(csv).toContain('Gas total cost GBP,\n');
   });
 
+  it('keeps gas in the CSV by default and when switched on', () => {
+    for (const includeGas of [undefined, true]) {
+      const csv = buildOctopusSummaryCsv({ ...fixture(), includeGas });
+      expect(csv).toContain('Gas unit,kwh');
+      expect(csv).toContain('Gas usage,8.250');
+      expect(csv).toContain('Missing gas');
+    }
+  });
+
+  it('leaves every gas row and column out of the CSV for an electricity-only home', () => {
+    const csv = buildOctopusSummaryCsv({ ...fixture(), includeGas: false });
+    expect(csv).not.toMatch(/gas/i);
+    // The electricity and net figures are untouched.
+    expect(csv).toContain('Electricity import kWh,12.345');
+    expect(csv).toContain('Net cost GBP,3.52');
+    // Every data row still lines up with its header once the columns are gone.
+    const lines = csv.split('\n');
+    for (const prefix of ['Month,', 'Year,', 'Date,']) {
+      const header = lines.findIndex((line) => line.startsWith(prefix));
+      expect(header, prefix).toBeGreaterThan(-1);
+      expect(lines[header + 1].split(',').length, prefix).toBe(lines[header].split(',').length);
+    }
+  });
+
+  it('draws gas pages in the PDF by default and leaves them out for an electricity-only home', async () => {
+    const asText = (pdf: Awaited<ReturnType<typeof buildOctopusSummaryPdf>>) =>
+      Buffer.from(pdf.output('arraybuffer')).toString('latin1');
+    const withGas = await buildOctopusSummaryPdf(fixture());
+    expect(asText(withGas)).toContain('Gas Consumption');
+    expect(asText(withGas)).toContain('Cumulative Gas');
+
+    const without = await buildOctopusSummaryPdf({ ...fixture(), includeGas: false });
+    expect(asText(without)).not.toMatch(/Gas/);
+    expect(without.getNumberOfPages()).toBe(withGas.getNumberOfPages() - 1);
+  });
+
   it('builds a real PDF document without needing a popup', async () => {
     const pdf = await buildOctopusSummaryPdf(fixture());
     // Summary/cost charts, electricity charts, gas charts, then tables.

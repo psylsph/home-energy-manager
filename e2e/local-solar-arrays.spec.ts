@@ -251,12 +251,12 @@ test.describe('History → Solar — PV % of Rated chart (issue #110)', () => {
     await patchSettings(baseUrl, { pv1_rated_kw: 0, pv2_rated_kw: 0 });
   });
 
-  test('Solar tab shows a "PV % of Rated (kWp)" chart tab', async ({ page }) => {
+  test('Solar tab shows a "PV % Of Rated (kWp)" chart tab', async ({ page }) => {
     await page.goto('/#/history');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
     await expect(page.getByRole('button', { name: 'Solar' })).toBeVisible();
     await page.getByRole('button', { name: 'Solar' }).click();
-    await expect(page.getByText('PV % of Rated (kWp)')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('PV % Of Rated (kWp)')).toBeVisible({ timeout: 5_000 });
   });
 
   test('PV % chart is available on the Solar history tab', async ({ page }) => {
@@ -266,7 +266,7 @@ test.describe('History → Solar — PV % of Rated chart (issue #110)', () => {
     // in the current UI) — verify the PV % chart card is present.
     await page.getByRole('button', { name: 'Solar' }).click();
     await expect(
-      page.getByRole('heading', { name: 'PV % of Rated (kWp)' }),
+      page.getByRole('heading', { name: 'PV % Of Rated (kWp)' }),
     ).toBeVisible();
   });
 });

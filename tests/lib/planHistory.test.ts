@@ -435,10 +435,10 @@ describe('decisionRows', () => {
       ),
     ]);
     expect(rows.map((r) => r.recordedAt)).toEqual([T0 + 5 * H, T0]);
-    expect(rows[0].kindLabel).toBe('Auto-applied');
+    expect(rows[0].kindLabel).toBe('Auto-Applied');
     expect(rows[0].title).toBe('No overnight charge needed — solar covers the day');
     expect(rows[0].rationale).toBe('Sunny day.');
-    expect(rows[1].kindLabel).toBe('Before the cheap window');
+    expect(rows[1].kindLabel).toBe('Before the Cheap Window');
     expect(rows[1].title).toContain('Overnight charge');
     expect(rows[1].rationale).toBe('Charging lifts the battery to 60%.');
   });
@@ -446,7 +446,7 @@ describe('decisionRows', () => {
   it('copes with a decision whose plan could not be read', () => {
     const rows = decisionRows([snap(T0, null, null, 'refresh')]);
     expect(rows).toHaveLength(1);
-    expect(rows[0].title).toBe('Plan unavailable');
+    expect(rows[0].title).toBe('Plan Unavailable');
     expect(rows[0].rationale).toBeNull();
     expect(rows[0].kindLabel).toBe('Refreshed');
   });

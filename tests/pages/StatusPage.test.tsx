@@ -102,13 +102,13 @@ describe('StatusPage', () => {
   it('shows waiting message when connected but no snapshot yet', () => {
     useInverterStore.setState({ connectionState: 'connected' });
     const { container } = render(<StatusPage />);
-    expect(container.textContent).toContain('Waiting for data');
+    expect(container.textContent).toContain('Waiting for Data');
   });
 
   it('uses the shared awaiting-connection message for the no-snapshot state', () => {
     useInverterStore.setState({ connectionState: 'connected' });
     render(<StatusPage />);
-    expect(screen.getByText('Waiting for data…')).toBeDefined();
+    expect(screen.getByText('Waiting for Data…')).toBeDefined();
   });
 
   it('shows failure advice banner after 5+ connect failures', () => {

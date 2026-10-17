@@ -637,6 +637,13 @@ pub struct AppState {
     pub weather_backfill_lock: Arc<Mutex<()>>,
     /// Octopus customer-consumption synchronization status.
     pub octopus: Arc<Mutex<crate::octopus::OctopusState>>,
+    /// Joined Octopus Saving Sessions found by the last check.
+    pub octopus_sessions: Arc<Mutex<crate::octopus_sessions::SessionsState>>,
+    /// Wakes the Saving Sessions loop early (the mode was just changed).
+    pub octopus_sessions_wake: Arc<tokio::sync::Notify>,
+    /// When a booked export last failed to apply or revert (inverter clock),
+    /// so the next try waits a minute instead of hammering the dongle.
+    pub export_once_backoff: Arc<Mutex<std::collections::HashMap<String, chrono::NaiveDateTime>>>,
     /// "New version available" cache. Populated by the background
     /// [`crate::update::run_update_loop`]; read (never written) by the
     /// [`crate::update::get_latest_version`] HTTP handler.
@@ -826,6 +833,11 @@ impl AppState {
             })),
             weather_backfill_lock: Arc::new(Mutex::new(())),
             octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
+            octopus_sessions: Arc::new(Mutex::new(
+                crate::octopus_sessions::SessionsState::default(),
+            )),
+            octopus_sessions_wake: Arc::new(tokio::sync::Notify::new()),
+            export_once_backoff: Arc::new(Mutex::new(std::collections::HashMap::new())),
             update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
         }
     }
@@ -2952,6 +2964,38 @@ pub(crate) fn persist_solar_meter_baselines(
     crate::settings::Settings::update(|s| {
         s.solar_meter_baselines = baselines;
     })
+}
+
+/// Run the discharge floor guard for one poll cycle: evaluate it against the
+/// sanitized snapshot and persist the reserve it saved, so a restart inside a
+/// discharge window restores the original value rather than the raised floor.
+/// Returns the register writes to apply, if any. A persistence failure is
+/// logged but never withholds the writes.
+pub(crate) async fn evaluate_discharge_floor(
+    state: &AppState,
+    snapshot: &InverterSnapshot,
+    inverter_minute: u16,
+) -> Option<Vec<RegisterWrite>> {
+    let df_config = state.discharge_floor_config.lock().await;
+    let mut df_state = state.discharge_floor_state.lock().await;
+    let writes = check_discharge_floor(snapshot, &df_config, &mut df_state, inverter_minute)?;
+    let persisted = match &*df_state {
+        DischargeFloorState::FloorHeld { saved_reserve }
+        | DischargeFloorState::HeldFromRestart { saved_reserve } => Some(*saved_reserve),
+        DischargeFloorState::Idle => None,
+    };
+    drop(df_config);
+    drop(df_state);
+
+    let persistence =
+        tokio::task::spawn_blocking(move || persist_discharge_floor_saved_reserve(persisted))
+            .await
+            .map_err(|error| format!("settings worker failed: {error}"))
+            .and_then(|result| result);
+    if let Err(e) = persistence {
+        tracing::warn!("Failed to persist discharge floor state: {e}");
+    }
+    Some(writes)
 }
 
 /// Persist the discharge-floor guard's saved-reserve value (issue
@@ -5120,58 +5164,27 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // Runs after the limiters so their pause
                                 // writes land first; the guard never touches
                                 // mode registers so it cannot fight them.
-                                {
-                                    let df_config = state.discharge_floor_config.lock().await;
-                                    let mut df_state = state.discharge_floor_state.lock().await;
-                                    if let Some(writes) = check_discharge_floor(
-                                        &snapshot,
-                                        &df_config,
-                                        &mut df_state,
-                                        inverter_minute,
-                                    ) {
-                                        let persisted = match &*df_state {
-                                            DischargeFloorState::FloorHeld { saved_reserve }
-                                            | DischargeFloorState::HeldFromRestart {
-                                                saved_reserve,
-                                            } => Some(*saved_reserve),
-                                            DischargeFloorState::Idle => None,
-                                        };
-                                        drop(df_config);
-                                        drop(df_state);
-
-                                        let persistence = tokio::task::spawn_blocking(move || {
-                                            persist_discharge_floor_saved_reserve(persisted)
-                                        })
+                                if let Some(writes) =
+                                    evaluate_discharge_floor(&state, &snapshot, inverter_minute)
                                         .await
-                                        .map_err(|error| format!("settings worker failed: {error}"))
-                                        .and_then(|result| result);
-                                        if let Err(e) = persistence {
-                                            tracing::warn!(
-                                                "Failed to persist discharge floor state: {e}"
-                                            );
-                                        }
-
-                                        if discharge_arbiter
-                                            .request(DischargeControlOwner::Safety)
-                                        {
-                                            for write in &writes {
-                                                match client
-                                                    .write_register(write.address, write.value)
-                                                    .await
-                                                {
-                                                    Ok(()) => tracing::info!(
-                                                        "Discharge floor guard: wrote reg {} = {}",
-                                                        write.address,
-                                                        write.value
-                                                    ),
-                                                    Err(e) => tracing::error!(
-                                                        "Discharge floor guard: write reg {} failed: {e}",
-                                                        write.address
-                                                    ),
-                                                }
-                                                tokio::time::sleep(write_gap)
-                                                    .await;
+                                {
+                                    if discharge_arbiter.request(DischargeControlOwner::Safety) {
+                                        for write in &writes {
+                                            match client
+                                                .write_register(write.address, write.value)
+                                                .await
+                                            {
+                                                Ok(()) => tracing::info!(
+                                                    "Discharge floor guard: wrote reg {} = {}",
+                                                    write.address,
+                                                    write.value
+                                                ),
+                                                Err(e) => tracing::error!(
+                                                    "Discharge floor guard: write reg {} failed: {e}",
+                                                    write.address
+                                                ),
                                             }
+                                            tokio::time::sleep(write_gap).await;
                                         }
                                     }
                                 }
@@ -13243,6 +13256,171 @@ mod tests {
                 "tariff must survive concurrent baseline persist, got {}",
                 saved_rate
             );
+        })
+        .await;
+    }
+
+    // ---- Discharge floor guard wiring (plan 2026-10-17-002, gap 1) ----
+
+    fn floor_slot(start: (u8, u8), end: (u8, u8)) -> crate::inverter::model::ScheduleSlot {
+        crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: start.0,
+            start_minute: start.1,
+            end_hour: end.0,
+            end_minute: end.1,
+            target_soc: 4,
+        }
+    }
+
+    /// A snapshot with a 19:00-22:00 discharge window and the given reserve.
+    fn floor_snapshot(reserve: u8) -> InverterSnapshot {
+        let mut snapshot = InverterSnapshot {
+            battery_reserve: reserve,
+            ..Default::default()
+        };
+        snapshot.discharge_slots[0] = floor_slot((19, 0), (22, 0));
+        snapshot
+    }
+
+    async fn state_with_floor(enabled: bool, floor_soc: u8) -> Arc<AppState> {
+        let state = Arc::new(AppState::new());
+        *state.discharge_floor_config.lock().await = DischargeFloorConfig { enabled, floor_soc };
+        state
+    }
+
+    #[tokio::test]
+    async fn floor_guard_raises_the_reserve_and_persists_the_saved_one() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(true, 50).await;
+            let writes = evaluate_discharge_floor(&state, &floor_snapshot(4), 20 * 60)
+                .await
+                .expect("floor raise");
+            assert_eq!(writes.len(), 1);
+            assert_eq!(
+                writes[0].address,
+                crate::modbus::registers::HR_BATTERY_SOC_RESERVE
+            );
+            assert_eq!(writes[0].value, 50);
+            assert_eq!(
+                *state.discharge_floor_state.lock().await,
+                DischargeFloorState::FloorHeld { saved_reserve: 4 }
+            );
+            // Persisted, so a restart inside the window restores the original.
+            assert_eq!(Settings::load().discharge_floor_saved_reserve, Some(4));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn floor_guard_restores_and_clears_the_persisted_reserve_after_the_window() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(true, 50).await;
+            evaluate_discharge_floor(&state, &floor_snapshot(4), 20 * 60)
+                .await
+                .expect("floor raise");
+
+            let writes = evaluate_discharge_floor(&state, &floor_snapshot(50), 22 * 60 + 30)
+                .await
+                .expect("restore");
+            assert_eq!(writes[0].value, 4, "the pre-guard reserve goes back");
+            assert_eq!(
+                *state.discharge_floor_state.lock().await,
+                DischargeFloorState::Idle
+            );
+            assert_eq!(Settings::load().discharge_floor_saved_reserve, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn floor_guard_does_nothing_when_disabled() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(false, 50).await;
+            assert!(
+                evaluate_discharge_floor(&state, &floor_snapshot(4), 20 * 60)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                *state.discharge_floor_state.lock().await,
+                DischargeFloorState::Idle
+            );
+            assert_eq!(Settings::load().discharge_floor_saved_reserve, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn floor_guard_writes_nothing_and_persists_nothing_outside_a_window() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(true, 50).await;
+            assert!(
+                evaluate_discharge_floor(&state, &floor_snapshot(4), 12 * 60)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(Settings::load().discharge_floor_saved_reserve, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn floor_guard_still_returns_its_writes_when_persisting_fails() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(true, 50).await;
+            let _inject = crate::settings::InjectUpdateFailures::arm(1);
+            let writes = evaluate_discharge_floor(&state, &floor_snapshot(4), 20 * 60).await;
+            assert_eq!(
+                crate::settings::InjectUpdateFailures::remaining(),
+                0,
+                "the injected failure must actually have fired"
+            );
+            // Losing the saved reserve is logged, but the raise must still land.
+            assert_eq!(writes.expect("writes despite the failure")[0].value, 50);
+        })
+        .await;
+    }
+
+    /// The real poll loop calls the guard: with a floor configured and the
+    /// inverter's clock inside a discharge window, the reserve it saved
+    /// reaches disk. Removing the call from the loop fails this test.
+    #[tokio::test]
+    async fn poll_loop_runs_the_discharge_floor_guard() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let script: RegisterScript = Arc::new(|req: &ReadRequest| {
+                let mut data = healthy_registers(req, 0x2001, 352);
+                if req.function == 3 && req.base == 0 && data.len() > 57 {
+                    // Inverter clock 2026-10-17 20:00:00, inside 19:00-22:00.
+                    for (idx, value) in [(35, 2026), (36, 10), (37, 17), (38, 20), (39, 0), (40, 0)]
+                    {
+                        data[idx] = value;
+                    }
+                    data[56] = 1900; // discharge slot 1 start
+                    data[57] = 2200; // discharge slot 1 end
+                }
+                data
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = state_with_floor(true, 50).await;
+            point_at_mock(&state, port).await;
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+
+            let saved = tokio::time::timeout(Duration::from_secs(40), async {
+                loop {
+                    if let Some(saved) = Settings::load().discharge_floor_saved_reserve {
+                        break saved;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            poll_task.abort();
+            server.abort();
+            assert_eq!(saved.expect("the guard never ran"), 4);
         })
         .await;
     }

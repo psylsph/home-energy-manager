@@ -132,13 +132,13 @@ describe('StatusPage — loading-state reconnect button (no snapshot)', () => {
 });
 
 describe('StatusPage — failure advice retry button', () => {
-  it('renders a "Retry now" button inside the failure-advice banner', () => {
+  it('renders a "Retry Now" button inside the failure-advice banner', () => {
     useInverterStore.setState({
       connectionState: 'disconnected',
       connectFailures: 10,
     });
     const { getByRole } = render(<StatusPage />);
-    expect(getByRole('button', { name: 'Retry now' })).toBeDefined();
+    expect(getByRole('button', { name: 'Retry Now' })).toBeDefined();
   });
 });
 
@@ -169,7 +169,7 @@ describe('StatusPage — grid fault detail text', () => {
     });
     const { container } = render(<StatusPage />);
     expect(container.textContent).toContain('discharging');
-    expect(container.textContent).toContain('Grid power lost');
+    expect(container.textContent).toContain('Grid Power Lost');
   });
 
   it('omits the discharging detail when battery_power is 0 during a grid fault', () => {
@@ -183,11 +183,11 @@ describe('StatusPage — grid fault detail text', () => {
       connectionState: 'connected',
     });
     const { container } = render(<StatusPage />);
-    expect(container.textContent).toContain('Grid power lost');
+    expect(container.textContent).toContain('Grid Power Lost');
     expect(container.textContent).not.toContain('discharging');
   });
 
-  it('renders "no live grid AC reference" reason when grid_online is false but grid_loss is false', () => {
+  it('renders "No Live Grid AC Reference" reason when grid_online is false but grid_loss is false', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({
         grid_online: false,
@@ -196,7 +196,7 @@ describe('StatusPage — grid fault detail text', () => {
       connectionState: 'connected',
     });
     const { container } = render(<StatusPage />);
-    expect(container.textContent).toContain('no live grid AC reference');
+    expect(container.textContent).toContain('No Live Grid AC Reference');
   });
 });
 

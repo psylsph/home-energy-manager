@@ -168,7 +168,7 @@ function TariffSlotEditor({
                 <button
                   onClick={() => onChange(removeTariffSlot(config, i))}
                   className="text-text-secondary hover:text-red-400 text-sm font-sans pb-2 transition-colors"
-                  title="Remove window"
+                  title="Remove Window"
                 >
                   ✕
                 </button>
@@ -338,11 +338,11 @@ export default function SettingsPage() {
   const [importStandingCharge, setImportStandingCharge] = useState<string>('');
   // Authenticated Octopus consumption integration (issue #212). The secret
   // is write-only: GET /api/settings returns only whether a key exists.
-  const [octopusEnabled, setOctopusEnabled] = useState(false);
   const [octopusAccount, setOctopusAccount] = useState('');
   const [octopusApiKey, setOctopusApiKey] = useState('');
   const [octopusKeyConfigured, setOctopusKeyConfigured] = useState(false);
   const [octopusGasUnit, setOctopusGasUnit] = useState<'unknown' | 'kwh' | 'm3'>('unknown');
+  const [octopusGasEnabled, setOctopusGasEnabled] = useState(true);
   const [octopusEconomy7Start, setOctopusEconomy7Start] = useState('00:30');
   const [octopusEconomy7End, setOctopusEconomy7End] = useState('07:30');
   const [octopusSaving, setOctopusSaving] = useState(false);
@@ -469,10 +469,10 @@ export default function SettingsPage() {
             ? String(s.import_standing_charge_p_per_day)
             : '',
         );
-        setOctopusEnabled(Boolean(s.octopus_enabled));
         setOctopusAccount(s.octopus_account_number ?? '');
         setOctopusKeyConfigured(Boolean(s.octopus_api_key_configured));
         setOctopusGasUnit(s.octopus_gas_unit ?? 'unknown');
+        setOctopusGasEnabled(s.octopus_gas_enabled ?? true);
         setOctopusEconomy7Start(s.octopus_economy7_start ?? '00:30');
         setOctopusEconomy7End(s.octopus_economy7_end ?? '07:30');
         // Issue #110: hydrate the solar-array inputs.
@@ -808,17 +808,15 @@ export default function SettingsPage() {
   // Save tariffs
   const handleOctopusSave = async () => {
     const account = octopusAccount.trim();
-    const keyAvailable = octopusApiKey.trim().length > 0 || octopusKeyConfigured;
-    if (octopusEnabled && (!account || !keyAvailable)) {
-      flash('Enter both the Octopus account number and API key before enabling', false);
-      return;
-    }
+    // Saved credentials are the only switch: with both present the
+    // integration is on, and clearing the account number turns it off.
+    const configured = account.length > 0 && (octopusApiKey.trim().length > 0 || octopusKeyConfigured);
     setOctopusSaving(true);
     try {
       const body: Record<string, unknown> = {
-        octopus_enabled: octopusEnabled,
         octopus_account_number: account,
         octopus_gas_unit: octopusGasUnit,
+        octopus_gas_enabled: octopusGasEnabled,
         octopus_economy7_start: octopusEconomy7Start,
         octopus_economy7_end: octopusEconomy7End,
       };
@@ -827,11 +825,11 @@ export default function SettingsPage() {
       if (octopusApiKey.trim()) setOctopusKeyConfigured(true);
       setOctopusApiKey('');
       window.dispatchEvent(new Event('octopus-settings-changed'));
-      if (octopusEnabled) {
+      if (configured) {
         await apiPost('/api/octopus/sync');
-        flash('Octopus integration saved — consumption sync started', true);
+        flash('Octopus settings saved — consumption sync started', true);
       } else {
-        flash('Octopus integration disabled', true);
+        flash('Octopus settings saved. Add both the account number and API key to switch the integration on.', true);
       }
     } catch (e) {
       flash(e instanceof Error ? e.message : 'Failed to save Octopus settings', false);
@@ -1220,7 +1218,7 @@ export default function SettingsPage() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
         <div className="w-10 h-10 border-4 border-accent border-t-transparent rounded-full animate-spin" />
-        <p className="text-text-secondary text-sm font-sans">Loading settings…</p>
+        <p className="text-text-secondary text-sm font-sans">Loading Settings…</p>
       </div>
     );
   }
@@ -1356,7 +1354,7 @@ export default function SettingsPage() {
                 <div className="flex flex-col gap-0.5">
                   <span className="text-text-primary text-sm font-mono">{inv.host}:{inv.port}</span>
                   <span className="text-text-secondary text-xs font-sans">
-                    {inv.serial ?? 'Unknown serial'}
+                    {inv.serial ?? 'Unknown Serial'}
                     {inv.generation ? ` · ${inv.generation}` : ''}
                   </span>
                 </div>
@@ -1497,7 +1495,7 @@ export default function SettingsPage() {
             </p>
           )}
           <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">Listen address</span>
+            <span className="text-text-secondary text-xs font-sans">Listen Address</span>
             <input
               type="text"
               value={apiBindAddress}
@@ -1521,12 +1519,12 @@ export default function SettingsPage() {
             disabled={apiNetworkSaving}
             className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
           >
-            {apiNetworkSaving ? 'Applying…' : 'Apply network settings'}
+            {apiNetworkSaving ? 'Applying…' : 'Apply Network Settings'}
           </button>
           <div className="flex items-center justify-between gap-3">
-            <span className="text-text-primary text-sm font-sans">Allow battery control through the authenticated API</span>
+            <span className="text-text-primary text-sm font-sans">Allow Battery Control Through the Authenticated API</span>
             <Toggle checked={apiControlEnabled} onChange={(v) => { void handleApiControlToggle(v); }}
-              ariaLabel="Allow battery control through the authenticated API" />
+              ariaLabel="Allow Battery Control Through the Authenticated API" />
           </div>
           <p className="text-text-secondary text-xs font-sans">
             Off by default and applied immediately when toggled. When enabled, anyone with this API key can use Force Charge,
@@ -1538,14 +1536,14 @@ export default function SettingsPage() {
               disabled={apiKeySaving}
               className="self-start bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
             >
-              {apiKeySaving ? 'Generating…' : apiKeyConfigured ? 'Generate new key' : 'Generate API key'}
+              {apiKeySaving ? 'Generating…' : apiKeyConfigured ? 'Generate New Key' : 'Generate API Key'}
             </button>
             {apiKeyConfigured && (
               <button
                 onClick={() => { void handleApiKeyClear(); }}
                 disabled={apiKeySaving}
                 className="self-start text-red-300 text-sm px-2 py-2 hover:text-red-200 transition-colors disabled:opacity-50"
-              >Clear saved key</button>
+              >Clear Saved Key</button>
             )}
           </div>
         </div>
@@ -1562,7 +1560,7 @@ export default function SettingsPage() {
                 <div key={i} className="bg-bg-elevated rounded-lg px-3 py-2 flex items-center justify-between">
                   <span className="text-text-primary text-sm font-mono">{addr}</span>
                   {isLocal && (
-                    <span className="text-text-secondary text-xs font-sans">This device</span>
+                    <span className="text-text-secondary text-xs font-sans">This Device</span>
                   )}
                 </div>
               );
@@ -1687,23 +1685,16 @@ export default function SettingsPage() {
         <div>
           <h2 className="text-text-primary text-lg font-semibold font-sans">Octopus Energy Data</h2>
           <p className="text-text-secondary text-sm mt-1">
-            Import Octopus smart-meter electricity and gas readings. Once fully configured, a separate Octopus tab appears in the navigation.
+            Save your Octopus account number and API key to add an Octopus tab with your smart-meter readings, costs and Saving Sessions alerts. Clear the account number and save to switch it off.
           </p>
         </div>
-        <label className="flex items-center justify-between gap-4 rounded-lg bg-bg-elevated px-4 py-3">
-          <span>
-            <span className="block text-sm font-medium text-text-primary">Enable Octopus data</span>
-            <span className="block text-xs text-text-secondary">Recent readings load first; older history continues in the background.</span>
-          </span>
-          <input type="checkbox" checked={octopusEnabled} onChange={(e) => setOctopusEnabled(e.target.checked)} className="h-5 w-5 accent-accent" />
-        </label>
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-text-secondary">Account number</span>
+            <span className="mb-1 block text-xs font-medium text-text-secondary">Account Number</span>
             <input value={octopusAccount} onChange={(e) => setOctopusAccount(e.target.value)} placeholder="A-1234ABCD" autoComplete="off" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
           </label>
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-text-secondary">API key</span>
+            <span className="mb-1 block text-xs font-medium text-text-secondary">API Key</span>
             <input type="password" value={octopusApiKey} onChange={(e) => setOctopusApiKey(e.target.value)} placeholder={octopusKeyConfigured ? 'Saved — enter a new key to replace' : 'sk_live_…'} autoComplete="new-password" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
           </label>
         </div>
@@ -1714,31 +1705,40 @@ export default function SettingsPage() {
         >
           Get your Octopus API key
         </button>
+        <label className="flex items-center justify-between gap-4 rounded-lg bg-bg-elevated px-4 py-3">
+          <span>
+            <span className="block text-sm font-medium text-text-primary">My Home Has Gas</span>
+            <span className="block text-xs text-text-secondary">Switch off if you are electricity only. Gas readings are not fetched and gas is hidden from the Octopus page and its exports.</span>
+          </span>
+          <input type="checkbox" checked={octopusGasEnabled} onChange={(e) => setOctopusGasEnabled(e.target.checked)} className="h-5 w-5 accent-accent" />
+        </label>
+        {octopusGasEnabled && (
         <label className="block max-w-sm">
-          <span className="mb-1 block text-xs font-medium text-text-secondary">Gas API unit</span>
+          <span className="mb-1 block text-xs font-medium text-text-secondary">Gas API Unit</span>
           <select
             value={octopusGasUnit}
             onChange={(e) => setOctopusGasUnit(e.target.value as 'unknown' | 'kwh' | 'm3')}
             className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
           >
-            <option value="unknown">Unknown — do not calculate gas cost</option>
-            <option value="kwh">kWh — calculate gas cost</option>
-            <option value="m3">m³ — usage only</option>
+            <option value="unknown">Unknown — Do Not Calculate Gas Cost</option>
+            <option value="kwh">kWh — Calculate Gas Cost</option>
+            <option value="m3">m³ — Usage Only</option>
           </select>
           <span className="mt-1 block text-xs text-text-secondary">
             Octopus does not label gas units in this API. Only choose kWh if your downloaded readings are already converted; m³ needs billing conversion data that the API does not provide.
           </span>
         </label>
+        )}
         <div className="max-w-sm">
-          <span className="mb-1 block text-xs font-medium text-text-secondary">Economy 7 night-rate window</span>
+          <span className="mb-1 block text-xs font-medium text-text-secondary">Economy 7 Night-Rate Window</span>
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
-              <span className="sr-only">Economy 7 night rate starts</span>
-              <input type="time" value={octopusEconomy7Start} onChange={(e) => setOctopusEconomy7Start(e.target.value)} aria-label="Economy 7 night rate starts" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
+              <span className="sr-only">Economy 7 Night Rate Starts</span>
+              <input type="time" value={octopusEconomy7Start} onChange={(e) => setOctopusEconomy7Start(e.target.value)} aria-label="Economy 7 Night Rate Starts" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
             </label>
             <label className="block">
-              <span className="sr-only">Economy 7 night rate ends</span>
-              <input type="time" value={octopusEconomy7End} onChange={(e) => setOctopusEconomy7End(e.target.value)} aria-label="Economy 7 night rate ends" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
+              <span className="sr-only">Economy 7 Night Rate Ends</span>
+              <input type="time" value={octopusEconomy7End} onChange={(e) => setOctopusEconomy7End(e.target.value)} aria-label="Economy 7 Night Rate Ends" className="w-full rounded-lg border border-white/10 bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
             </label>
           </div>
           <span className="mt-1 block text-xs text-text-secondary">
@@ -1791,7 +1791,7 @@ export default function SettingsPage() {
               value={importStandingCharge}
               placeholder="e.g. 54.86"
               onChange={(e) => setImportStandingCharge(e.target.value)}
-              aria-label="Import Standing Charge in pence per day"
+              aria-label="Import Standing Charge in Pence Per Day"
               className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
             />
             <span className="text-text-secondary text-xs font-sans">
@@ -1874,7 +1874,7 @@ export default function SettingsPage() {
         {/* External CT meter arrays (AC-coupled / separate inverters). */}
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
-            <span className="text-text-primary text-sm font-sans font-medium">External CT meter arrays</span>
+            <span className="text-text-primary text-sm font-sans font-medium">External CT Meter Arrays</span>
             <button
               type="button"
               onClick={() => {
@@ -1963,7 +1963,7 @@ export default function SettingsPage() {
                       setSolarCtArrays((rows) => rows.filter((_, i) => i !== idx));
                     }}
                     className="text-text-secondary hover:text-red-400 text-xs font-sans px-2 py-2 rounded-lg hover:bg-bg-base transition-colors"
-                    aria-label="Remove array"
+                    aria-label="Remove Array"
                     data-testid="solar-array-remove"
                   >
                     ✕
@@ -2034,7 +2034,7 @@ export default function SettingsPage() {
 
               <div className="flex items-center gap-3 my-1">
                 <div className="flex-1 h-px bg-white/5" />
-                <span className="text-text-secondary/60 text-[10px] font-sans uppercase tracking-wide">or manual coordinates</span>
+                <span className="text-text-secondary/60 text-[10px] font-sans uppercase tracking-wide">Or Manual Coordinates</span>
                 <div className="flex-1 h-px bg-white/5" />
               </div>
 
@@ -2216,7 +2216,7 @@ export default function SettingsPage() {
                 A topic is auto-generated from your inverter serial (unique to you) — edit it only if you want a custom one.
               </p>
               <label className="flex flex-col gap-1">
-                <span className="text-text-secondary text-xs font-sans">Topic (subscribe to this in the ntfy app)</span>
+                <span className="text-text-secondary text-xs font-sans">Topic (Subscribe to This in the ntfy App)</span>
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
@@ -2303,7 +2303,7 @@ export default function SettingsPage() {
                 {!isGateway && (
                   <>
                     <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">Battery temp below °C</span>
+                      <span className="text-text-secondary text-xs font-sans">Battery Temp Below °C</span>
                       <input
                         type="number" step="0.5" min="-40" max="50"
                         value={alertsConfig.batt_temp_min}
@@ -2312,7 +2312,7 @@ export default function SettingsPage() {
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">Battery temp above °C</span>
+                      <span className="text-text-secondary text-xs font-sans">Battery Temp Above °C</span>
                       <input
                         type="number" step="0.5" min="0" max="80"
                         value={alertsConfig.batt_temp_max}
@@ -2321,7 +2321,7 @@ export default function SettingsPage() {
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">Inverter temp below °C</span>
+                      <span className="text-text-secondary text-xs font-sans">Inverter Temp Below °C</span>
                       <input
                         type="number" step="0.5" min="-40" max="100"
                         value={alertsConfig.inverter_temp_min}
@@ -2330,7 +2330,7 @@ export default function SettingsPage() {
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-text-secondary text-xs font-sans">Inverter temp above °C</span>
+                      <span className="text-text-secondary text-xs font-sans">Inverter Temp Above °C</span>
                       <input
                         type="number" step="0.5" min="0" max="120"
                         value={alertsConfig.inverter_temp_max}
@@ -2341,7 +2341,7 @@ export default function SettingsPage() {
                   </>
                 )}
                 <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">SOC below %</span>
+                  <span className="text-text-secondary text-xs font-sans">SOC Below %</span>
                   <input
                     type="number" min="0" max="100"
                     value={alertsConfig.soc_min}
@@ -2350,7 +2350,7 @@ export default function SettingsPage() {
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-text-secondary text-xs font-sans">SOC above %</span>
+                  <span className="text-text-secondary text-xs font-sans">SOC Above %</span>
                   <input
                     type="number" min="0" max="100"
                     value={alertsConfig.soc_max}
@@ -2443,7 +2443,7 @@ export default function SettingsPage() {
               <div className="flex flex-col gap-1">
                 <span className="text-text-primary text-sm font-sans font-medium">Cooldown Timer</span>
                 <label className="flex items-center justify-between gap-2">
-                  <span className="text-text-secondary text-xs font-sans">minutes between all alerts</span>
+                  <span className="text-text-secondary text-xs font-sans">Minutes Between All Alerts</span>
                   <input
                     type="number" min={1} max={1440}
                     value={alertsConfig.cooldown_minutes}
@@ -2498,7 +2498,7 @@ export default function SettingsPage() {
               ['meters', 'Meters'],
               ['history', 'History'],
               ['forecast', 'Planner'],
-              ...(octopusKeyConfigured ? [['octopus', 'Octopus'] as const] : []),
+              ...(octopusKeyConfigured && octopusAccount.trim() ? [['octopus', 'Octopus'] as const] : []),
               ['control', 'Control'],
             ] as const).map(([key, label]) => (
               <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-bg-elevated rounded-xl px-4 py-3 border border-white/5 hover:border-white/10 transition-colors">
@@ -2569,10 +2569,10 @@ export default function SettingsPage() {
 
           {/* Y-axis lock toggle */}
           <div className="flex items-center justify-between">
-            <span className="text-text-primary text-sm font-sans">Lock Y-axis scale</span>
+            <span className="text-text-primary text-sm font-sans">Lock Y-Axis Scale</span>
             <Toggle
               checked={panelGraphsYLock}
-              ariaLabel="Lock Y-axis scale"
+              ariaLabel="Lock Y-Axis Scale"
               onChange={setPanelGraphsYLock}
             />
           </div>
@@ -2661,11 +2661,11 @@ export default function SettingsPage() {
             Draw a horizontal line on each History graph showing the average of that series over the selected period. Daily energy and cost graphs are left out, because the average of a running total doesn't tell you much.
           </p>
           <div className="flex items-center justify-between">
-            <span className="text-text-primary text-sm font-sans">Show average lines</span>
+            <span className="text-text-primary text-sm font-sans">Show Average Lines</span>
             <Toggle
               checked={showHistoryAverages}
               onChange={setShowHistoryAverages}
-              ariaLabel="Show average lines on History charts"
+              ariaLabel="Show Average Lines on History Charts"
             />
           </div>
         </div>
@@ -2697,7 +2697,7 @@ export default function SettingsPage() {
           {externalMeters.length > 0 && (
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
               <div className="flex flex-col gap-0.5 sm:max-w-[60%]">
-                <span className="text-text-primary text-sm font-sans">Grid CT meter</span>
+                <span className="text-text-primary text-sm font-sans">Grid CT Meter</span>
                 <span className="text-text-secondary text-xs font-sans">
                   Which CT clamp measures your grid point. “Auto” uses the built-in grid CT when present, otherwise meter 0x01. Used to show grid amps instead of frequency on the energy wheel.
                 </span>
@@ -2705,11 +2705,11 @@ export default function SettingsPage() {
               <select
                 value={gridMeterAddress}
                 onChange={(e) => setGridMeterAddress(Number(e.target.value))}
-                aria-label="Grid CT meter"
+                aria-label="Grid CT Meter"
                 data-testid="grid-ct-meter-select"
                 className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors w-full sm:w-auto"
               >
-                <option value={0}>Auto (recommended)</option>
+                <option value={0}>Auto (Recommended)</option>
                 {externalMeters.map((m) => (
                   <option key={m.address} value={m.address}>
                     Meter 0x{m.address.toString(16).padStart(2, '0')}
@@ -2746,7 +2746,7 @@ export default function SettingsPage() {
               }}
               className="w-20 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors text-center"
             />
-            <span className="text-text-secondary text-sm font-sans">watts</span>
+            <span className="text-text-secondary text-sm font-sans">Watts</span>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -2886,7 +2886,7 @@ export default function SettingsPage() {
                     onClick={() => void openExternal(latestVersionInfo.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases/latest')}
                     className="ml-2 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-2.5 py-0.5 text-xs font-semibold text-amber-100 transition-colors"
                   >
-                    View release
+                    View Release
                   </button>
                 )}
               </span>
@@ -2904,7 +2904,7 @@ export default function SettingsPage() {
             <Toggle
               checked={checkForUpdates}
               onChange={handleCheckForUpdatesToggle}
-              ariaLabel="Check for new releases"
+              ariaLabel="Check for New Releases"
             />
           </div>
         </div>

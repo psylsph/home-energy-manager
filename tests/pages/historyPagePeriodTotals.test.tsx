@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // HistoryPage already has HistoryPage.test.tsx covering tabs, ranges,
@@ -144,16 +144,19 @@ describe('<HistoryPage/> — period totals, cost breakdown, window labels', () =
       expect(screen.getByText('8.3kWh')).toBeDefined();
     });
 
-    it('shows Import cost / Export income / Net cost on the Cost tab', async () => {
+    it('shows Import Cost / Export Income / Net Cost on the Cost tab', async () => {
       render(<HistoryPage />);
       await clickTab('Cost');
+      // "Import Cost" now also appears elsewhere on the page, so look inside
+      // the Period totals section.
+      const totals = await screen.findByRole('region', { name: 'Period Totals' });
       await waitFor(() => {
-        expect(screen.getByText('Import cost')).toBeDefined();
+        expect(within(totals).getByText('Import Cost')).toBeDefined();
       });
-      expect(screen.getByText('Export income')).toBeDefined();
-      expect(screen.getByText('Net cost')).toBeDefined();
+      expect(within(totals).getByText('Export Income')).toBeDefined();
+      expect(within(totals).getByText('Net Cost')).toBeDefined();
       // Net cost is negative (-0.09) → formatted as GBP with minus.
-      expect(screen.getByText(/-£0.09|-£0\.09/)).toBeDefined();
+      expect(within(totals).getByText(/-£0.09|-£0\.09/)).toBeDefined();
     });
 
     it('hides the period totals section entirely on the Temperature tab', async () => {
@@ -162,7 +165,7 @@ describe('<HistoryPage/> — period totals, cost breakdown, window labels', () =
       await waitFor(() => {
         // Temperature tab returns [] from getPeriodTotalItems, so the
         // PeriodTotals component renders null.
-        expect(screen.queryByText('Period totals')).toBeNull();
+        expect(screen.queryByText('Period Totals')).toBeNull();
       });
     });
   });

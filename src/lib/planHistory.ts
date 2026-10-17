@@ -43,11 +43,11 @@ export type PastRange = 'off' | '24h' | '3d' | '7d' | '30d' | '90d';
 /** The choices offered by the Planner's "Show past" control. */
 export const PAST_RANGES: { key: PastRange; label: string }[] = [
   { key: 'off', label: 'Off' },
-  { key: '24h', label: '24 hours' },
-  { key: '3d', label: '3 days' },
-  { key: '7d', label: '7 days' },
-  { key: '30d', label: '30 days' },
-  { key: '90d', label: '90 days' },
+  { key: '24h', label: '24 Hours' },
+  { key: '3d', label: '3 Days' },
+  { key: '7d', label: '7 Days' },
+  { key: '30d', label: '30 Days' },
+  { key: '90d', label: '90 Days' },
 ];
 
 /** How far back a range reaches, in seconds (0 for Off). */
@@ -296,8 +296,8 @@ export function mergeSeries<Row extends { timestamp: number }>(
 }
 
 const KIND_LABELS: Record<string, string> = {
-  before_window: 'Before the cheap window',
-  auto_apply: 'Auto-applied',
+  before_window: 'Before the Cheap Window',
+  auto_apply: 'Auto-Applied',
   refresh: 'Refreshed',
 };
 
@@ -324,7 +324,7 @@ export function decisionRows(snapshots: PlanHistorySnapshot[]): DecisionRow[] {
       recordedAt: snapshot.recorded_at,
       kind: snapshot.kind,
       kindLabel: KIND_LABELS[snapshot.kind] ?? snapshot.kind,
-      title: recommendation ? forecastPlanTitle(recommendation) : 'Plan unavailable',
+      title: recommendation ? forecastPlanTitle(recommendation) : 'Plan Unavailable',
       rationale,
     };
   });

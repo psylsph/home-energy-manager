@@ -89,11 +89,11 @@ export function adaptiveSocFieldCaption(field: 'low_soc' | 'recovery_soc'): stri
 
 export function adaptiveStateLabel(state: string | undefined): string {
   switch (state) {
-    case 'outside_window': return 'Outside configured period';
-    case 'preferred': return 'Preferred rate active';
-    case 'recovery': return 'Low-SOC recovery active';
-    case 'suspended_auto_winter': return 'Suspended by Auto Winter';
-    case 'restoring': return 'Restoring manual rate';
+    case 'outside_window': return 'Outside Configured Period';
+    case 'preferred': return 'Preferred Rate Active';
+    case 'recovery': return 'Low-SOC Recovery Active';
+    case 'suspended_auto_winter': return 'Suspended By Auto Winter';
+    case 'restoring': return 'Restoring Manual Rate';
     case 'error': return 'Error';
     default: return 'Inactive';
   }

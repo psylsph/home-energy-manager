@@ -152,7 +152,7 @@ export function ConnectionIndicator() {
           onClick={reconnect}
           disabled={reconnecting}
           className="shrink-0 rounded-full bg-bg-elevated px-2 py-1 text-xs transition hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/60 disabled:opacity-50"
-          title="Force a fresh connection to the inverter now"
+          title="Force a Fresh Connection to the Inverter Now"
         >
           {reconnecting ? '…' : 'Reconnect'}
         </button>
@@ -164,7 +164,7 @@ export function ConnectionIndicator() {
       {recentReconnect && reconnectRequestedAt != null && (
         <span
           className="font-mono text-text-secondary/60"
-          title="Reconnect requested"
+          title="Reconnect Requested"
         >
           ↻ {formatTimestamp(reconnectRequestedAt)}
         </span>
@@ -319,7 +319,9 @@ function Layout() {
   const [octopusConfigured, setOctopusConfigured] = useState(false);
 
   // Load navigation-affecting settings on mount. The Octopus page is opt-in:
-  // no tab or route is exposed until enabled with both credentials present.
+  // no tab or route is exposed until the account number and API key are both
+  // saved. The meter-reading import has its own switch (it only pauses the
+  // import); Saving Sessions on the same page needs nothing but credentials.
   useEffect(() => {
     const load = async () => {
       try {
@@ -332,7 +334,6 @@ function Layout() {
         }
         setOctopusConfigured(Boolean(
           res.ok
-          && res.data.octopus_enabled
           && res.data.octopus_account_number
           && res.data.octopus_api_key_configured,
         ));

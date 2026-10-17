@@ -271,7 +271,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
       useInverterStore.setState({ chartRange: 'today' });
       render(<HistoryPage />);
 
-      const picker = screen.getByLabelText('Select period date') as HTMLInputElement;
+      const picker = screen.getByLabelText('Select Period Date') as HTMLInputElement;
       const blurSpy = vi.spyOn(picker, 'blur');
       fireEvent.click(screen.getByRole('button', { name: /Older/i }));
       expect(picker.value).toBe('2026-01-14');
@@ -345,7 +345,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
       const exportButtons = exportGroup.querySelectorAll('button');
       expect(exportButtons.length).toBe(2);
       expect(exportButtons[0]!.textContent).toContain('CSV');
-      expect(exportButtons[1]!.textContent).toContain('Export all');
+      expect(exportButtons[1]!.textContent).toContain('Export All');
     });
   });
 
@@ -355,7 +355,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
       await waitFor(() => {
         expect(fetchHistoryCalls.length).toBeGreaterThan(0);
       });
-      expect(container.textContent).toContain('No data available for this period');
+      expect(container.textContent).toContain('No Data Available for This Period');
     });
 
     it('shows the empty-state subtitle about recording while running', async () => {
@@ -409,7 +409,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
     });
   });
 
-  // Issue #199: combined export — "Export all" button pulls every tab's
+  // Issue #199: combined export — "Export All" button pulls every tab's
   // series into a single CSV rather than per-tab files. The per-tab CSV
   // button above remains for users who only need one section.
   describe('combined export (Export all)', () => {
@@ -419,7 +419,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
         expect(fetchHistoryCalls.length).toBeGreaterThan(0);
       });
       const exportAllBtn = screen.getByRole('button', {
-        name: 'Export all tabs as a single combined CSV',
+        name: 'Export All Tabs as a Single Combined CSV',
       });
       expect(exportAllBtn).toBeDefined();
     });
@@ -430,7 +430,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
         expect(fetchHistoryCalls.length).toBeGreaterThan(0);
       });
       const exportAllBtn = screen.getByRole('button', {
-        name: 'Export all tabs as a single combined CSV',
+        name: 'Export All Tabs as a Single Combined CSV',
       });
       expect(exportAllBtn.hasAttribute('disabled')).toBe(true);
     });
@@ -441,7 +441,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
         expect(fetchHistoryCalls.length).toBeGreaterThan(0);
       });
       const exportAllBtn = screen.getByRole('button', {
-        name: 'Export all tabs as a single combined CSV',
+        name: 'Export All Tabs as a Single Combined CSV',
       });
       const csvBtn = screen.getByText('CSV').closest('button');
       // Both share the same data gate. If the per-tab one is disabled, so is
@@ -474,7 +474,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
         const perTabFieldCount = fetchHistoryCalls[0]!.fields.length;
 
         const exportAllBtn = screen.getByRole('button', {
-          name: 'Export all tabs as a single combined CSV',
+          name: 'Export All Tabs as a Single Combined CSV',
         });
         fireEvent.click(exportAllBtn);
 
@@ -522,7 +522,7 @@ describe('<HistoryPage/> — tabs, ranges, navigation, empty state', () => {
         });
 
         const exportAllBtn = screen.getByRole('button', {
-          name: 'Export all tabs as a single combined CSV',
+          name: 'Export All Tabs as a Single Combined CSV',
         });
         fireEvent.click(exportAllBtn);
 

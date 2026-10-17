@@ -43,7 +43,7 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>,
     );
     expect(screen.getByTestId('healthy')).toBeDefined();
-    expect(screen.queryByText('Something went wrong')).toBeNull();
+    expect(screen.queryByText('Something Went Wrong')).toBeNull();
   });
 
   it('catches a render error and shows the fallback UI with the message', () => {
@@ -53,12 +53,12 @@ describe('ErrorBoundary', () => {
         <Boom message="the inverter exploded" />
       </ErrorBoundary>,
     );
-    expect(screen.getByText('Something went wrong')).toBeDefined();
+    expect(screen.getByText('Something Went Wrong')).toBeDefined();
     expect(screen.getByText('the inverter exploded')).toBeDefined();
-    expect(screen.getByRole('button', { name: 'Retry now' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Retry Now' })).toBeDefined();
   });
 
-  it('re-renders the children when "Retry now" is clicked after recovery', () => {
+  it('re-renders the children when "Retry Now" is clicked after recovery', () => {
     silenceConsoleError();
     shouldThrow = true;
     render(
@@ -73,10 +73,10 @@ describe('ErrorBoundary', () => {
     // and the child renders successfully.
     shouldThrow = false;
     act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Retry now' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Now' }));
     });
     expect(screen.getByTestId('child')).toBeDefined();
-    expect(screen.queryByText('Something went wrong')).toBeNull();
+    expect(screen.queryByText('Something Went Wrong')).toBeNull();
   });
 
   it('auto-retries by clearing the error once the countdown elapses', () => {
@@ -119,7 +119,7 @@ describe('ErrorBoundary', () => {
         vi.advanceTimersByTime(30_000);
       });
     }).not.toThrow();
-    expect(screen.getByText('Something went wrong')).toBeDefined();
+    expect(screen.getByText('Something Went Wrong')).toBeDefined();
     expect(screen.getByText('flaky render')).toBeDefined();
   });
 
@@ -200,7 +200,7 @@ describe('ErrorBoundary', () => {
     );
     // The throwing boundary shows its fallback…
     expect(screen.getByText('left page broke')).toBeDefined();
-    expect(screen.getByText('Something went wrong')).toBeDefined();
+    expect(screen.getByText('Something Went Wrong')).toBeDefined();
     // …while the sibling boundary is completely unaffected.
     expect(screen.getByTestId('healthy-sibling')).toBeDefined();
   });

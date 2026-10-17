@@ -27,7 +27,7 @@ export default class ErrorBoundary extends Component<Props, State> {
     // straight into its error state and `componentDidUpdate` never fires — so
     // the countdown must also be started here. Without this, a page that
     // throws on load would show "Will retry in 30s" but the timer would never
-    // tick and the auto-retry would never happen (only the manual "Retry now"
+    // tick and the auto-retry would never happen (only the manual "Retry Now"
     // button worked). `startCountdown` clears any prior timer first, so this
     // is safe even if React also runs `componentDidUpdate` for the same error
     // (CODE_REVIEW issue 3.4).
@@ -80,7 +80,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
             </svg>
           </div>
-          <p className="text-text-primary text-sm font-sans font-semibold">Something went wrong</p>
+          <p className="text-text-primary text-sm font-sans font-semibold">Something Went Wrong</p>
           <p className="text-text-secondary text-xs font-sans text-center max-w-sm">
             {this.state.error.message}
           </p>
@@ -91,7 +91,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             onClick={this.handleRetry}
             className="mt-1 px-4 py-2 rounded-lg bg-accent text-on-accent text-sm font-sans font-medium hover:opacity-90 transition-opacity"
           >
-            Retry now
+            Retry Now
           </button>
         </div>
       );

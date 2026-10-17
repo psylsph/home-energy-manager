@@ -144,29 +144,29 @@ describe('OctopusPage', () => {
 
   it('renders supplier electricity and gas on their own page with the unit warning', async () => {
     render(<OctopusPage />);
-    expect(await screen.findByText('Electricity consumption')).toBeDefined();
-    expect(screen.getByText('Gas consumption')).toBeDefined();
-    expect(screen.getByText('Cumulative electricity')).toBeDefined();
-    expect(screen.getByText('Cumulative gas')).toBeDefined();
+    expect(await screen.findByText('Electricity Consumption')).toBeDefined();
+    expect(screen.getByText('Gas Consumption')).toBeDefined();
+    expect(screen.getByText('Cumulative Electricity')).toBeDefined();
+    expect(screen.getByText('Cumulative Gas')).toBeDefined();
     expect(screen.getAllByText('1.250 kWh').length).toBeGreaterThan(0);
     expect(screen.getAllByText('0.500 kWh').length).toBeGreaterThan(0);
     expect(screen.getAllByText('3.500').length).toBeGreaterThan(0);
     expect(screen.getByText('Gas values are supplier-reported units.')).toBeDefined();
     expect(screen.getByText('3 meter stream(s)')).toBeDefined();
-    expect(screen.getByText('Older history backfilling')).toBeDefined();
-    expect(screen.getByText('Estimated supplier costs')).toBeDefined();
-    expect(screen.getByText('Monthly summary')).toBeDefined();
-    expect(screen.getByText('Octopus versus HEM')).toBeDefined();
-    expect(screen.getByText('Supplier data completeness')).toBeDefined();
-    expect(screen.getByText('Supplier costs')).toBeDefined();
-    expect(screen.getByText('Export income')).toBeDefined();
+    expect(screen.getByText('Older History Backfilling')).toBeDefined();
+    expect(screen.getByText('Estimated Supplier Costs')).toBeDefined();
+    expect(screen.getByText('Monthly Summary')).toBeDefined();
+    expect(screen.getByText('Octopus Versus HEM')).toBeDefined();
+    expect(screen.getByText('Supplier Data Completeness')).toBeDefined();
+    expect(screen.getByText('Supplier Costs')).toBeDefined();
+    expect(screen.getByText('Export Income')).toBeDefined();
     expect(screen.getByText('47 of 48 intervals · 1 missing')).toBeDefined();
     expect(screen.getByText('46 of 48 intervals · 2 missing')).toBeDefined();
     expect(screen.getAllByText('£1.17').length).toBeGreaterThan(0);
     const headings = screen.getAllByRole('heading').map((heading) => heading.textContent ?? '');
-    expect(headings.indexOf('Supplier data completeness')).toBeLessThan(headings.indexOf('Supplier costs'));
-    expect(headings.indexOf('Cumulative gas')).toBeLessThan(headings.indexOf('Billing summary tables'));
-    expect(headings.indexOf('Billing summary tables')).toBeLessThan(headings.indexOf('Daily HEM comparison'));
+    expect(headings.indexOf('Supplier Data Completeness')).toBeLessThan(headings.indexOf('Supplier Costs'));
+    expect(headings.indexOf('Cumulative Gas')).toBeLessThan(headings.indexOf('Billing Summary Tables'));
+    expect(headings.indexOf('Billing Summary Tables')).toBeLessThan(headings.indexOf('Daily HEM Comparison'));
   });
 
   it('downloads CSV and PDF summaries without opening a popup', async () => {
@@ -180,7 +180,7 @@ describe('OctopusPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'PDF report' }));
     await waitFor(() => expect(pdfDownloadMock).toHaveBeenCalledWith(
-      expect.objectContaining({ rangeLabel: '30 days' }),
+      expect.objectContaining({ rangeLabel: '30 Days' }),
       expect.stringMatching(/givenergy_octopus_summary_30d_.*\.pdf/),
     ));
     expect(screen.getByRole('status').textContent).toContain('PDF downloaded');
@@ -195,15 +195,81 @@ describe('OctopusPage', () => {
 
   it('starts a manual sync and reflects its in-progress state', async () => {
     render(<OctopusPage />);
-    const button = await screen.findByRole('button', { name: 'Sync now' });
+    const button = await screen.findByRole('button', { name: 'Sync Now' });
     fireEvent.click(button);
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/octopus/sync'));
     expect(screen.getByRole('button', { name: 'Syncing…' }).hasAttribute('disabled')).toBe(true);
   });
 
+  describe('households without gas', () => {
+    /** Serve the normal fixtures, but report whether the household has gas. */
+    function serveWithGas(gasEnabled: boolean | undefined) {
+      const normal = vi.mocked(apiGet).getMockImplementation()!;
+      vi.mocked(apiGet).mockImplementation(async (path: string, ...rest: unknown[]) => {
+        if (path === '/api/octopus/status') {
+          const { gas_enabled: _ignored, ...rest2 } = { ...status, gas_enabled: undefined } as Record<string, unknown>;
+          void _ignored;
+          return gasEnabled === undefined ? rest2 : { ...status, gas_enabled: gasEnabled };
+        }
+        return (normal as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest);
+      });
+    }
+
+    it('shows gas everywhere when gas is on', async () => {
+      serveWithGas(true);
+      render(<OctopusPage />);
+      expect(await screen.findByText('Gas Consumption')).toBeDefined();
+      expect(screen.getByText('Cumulative Gas')).toBeDefined();
+      expect(screen.getByText('Gas Cost')).toBeDefined();
+      expect(screen.getByText('Gas Missing')).toBeDefined();
+      expect(screen.getByRole('region', { name: 'Selected Period Totals' }).children).toHaveLength(3);
+    });
+
+    it('still shows gas when an older backend does not say', async () => {
+      serveWithGas(undefined);
+      render(<OctopusPage />);
+      expect(await screen.findByText('Gas Consumption')).toBeDefined();
+    });
+
+    it('hides every trace of gas when the household has none', async () => {
+      serveWithGas(false);
+      const { container } = render(<OctopusPage />);
+      await screen.findByText('Electricity Consumption');
+      expect(container.textContent).not.toMatch(/gas/i);
+      // Two totals tiles, not a gap where the third was.
+      expect(screen.getByRole('region', { name: 'Selected Period Totals' }).children).toHaveLength(2);
+      // The net cost is the electricity figure, labelled as such.
+      expect(screen.getByText('Net Electricity Cost')).toBeDefined();
+    });
+
+    it('keeps gas out of the CSV and PDF exports too', async () => {
+      serveWithGas(false);
+      render(<OctopusPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'CSV' }));
+      const blob = createObjectUrlMock.mock.calls[0][0] as unknown as Blob;
+      expect(await blob.text()).not.toMatch(/gas/i);
+
+      fireEvent.click(screen.getByRole('button', { name: 'PDF report' }));
+      await waitFor(() => expect(pdfDownloadMock).toHaveBeenCalledWith(
+        expect.objectContaining({ includeGas: false }),
+        expect.any(String),
+      ));
+    });
+
+    it('passes includeGas through as true for a household with gas', async () => {
+      serveWithGas(true);
+      render(<OctopusPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'PDF report' }));
+      await waitFor(() => expect(pdfDownloadMock).toHaveBeenCalledWith(
+        expect.objectContaining({ includeGas: true }),
+        expect.any(String),
+      ));
+    });
+  });
+
   it('renders chart axes with a readable, bold tick style (issue #232)', async () => {
     render(<OctopusPage />);
-    await screen.findByText('Electricity consumption');
+    await screen.findByText('Electricity Consumption');
     // Recharts otherwise derives tick fill from its muted default axis
     // stroke. Use the primary theme colour explicitly so ticks are near-white
     // in dark mode and dark in light mode, while retaining a bold weight.
@@ -233,7 +299,7 @@ describe('OctopusPage', () => {
 
   it('renders cost chart tooltip labels with readable themed text', async () => {
     render(<OctopusPage />);
-    await screen.findByText('Supplier costs');
+    await screen.findByText('Supplier Costs');
 
     const styledCostTooltips = tooltipProps.filter((props) => 'labelStyle' in props);
     expect(styledCostTooltips.length).toBeGreaterThanOrEqual(2);

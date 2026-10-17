@@ -30,6 +30,7 @@ import {
 import AwaitingConnection from '../components/AwaitingConnection';
 import CosyBlockedNotice from '../components/CosyBlockedNotice';
 import AgileBlockedNotice from '../components/AgileBlockedNotice';
+import ExportOnceCard from '../components/ExportOnceCard';
 import {
   LOGARITHMIC_RANGE_MAX,
   logarithmicPositionToValue,
@@ -264,7 +265,7 @@ function InverterWriteProgress({ detail = 'This can take several seconds. Please
         className="h-7 w-7 shrink-0 animate-spin rounded-full border-4 border-current border-t-transparent"
       />
       <div>
-        <div className="text-base font-bold">Applying changes to inverter…</div>
+        <div className="text-base font-bold">Applying Changes to Inverter…</div>
         <div className="mt-0.5 text-sm font-medium text-slate-800">{detail}</div>
       </div>
     </div>,
@@ -753,7 +754,7 @@ function AutoWinterSection() {
             {/* Debounce */}
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-text-secondary text-sm">Debounce readings</span>
+                <span className="text-text-secondary text-sm">Debounce Readings</span>
                 <span className="font-mono text-text-primary text-sm">{debounce}</span>
               </div>
               <input
@@ -885,7 +886,7 @@ function AdaptiveChargeSection() {
           <div className="text-text-secondary text-xs">
             {snapshot?.adaptive_charge_period != null
               ? `Period ${snapshot.adaptive_charge_period}`
-              : 'No active period'}
+              : 'No Active Period'}
           </div>
         </div>
         {snapshot?.adaptive_charge_desired_rate_percent != null && (
@@ -961,8 +962,8 @@ function AdaptiveChargeSection() {
               )}
 
               {([
-                ['Preferred charge rate', 'preferred_rate_percent'],
-                ['Recovery charge rate', 'recovery_rate_percent'],
+                ['Preferred Charge Rate', 'preferred_rate_percent'],
+                ['Recovery Charge Rate', 'recovery_rate_percent'],
               ] as const).map(([label, field]) => (
                 <div key={field} className="space-y-1">
                   <div className="flex items-center justify-between text-xs">
@@ -1034,7 +1035,7 @@ function AdaptiveChargeSection() {
         disabled={saving || !loaded}
         className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 disabled:opacity-50"
       >
-        {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? 'Check settings' : 'Save Adaptive Charge'}
+        {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? 'Check Settings' : 'Save Adaptive Charge'}
       </button>
     </div>
   );
@@ -1151,9 +1152,9 @@ function CosyChargingSection({
           <option value="cosy">Cosy</option>
           <option value="adaptive">Adaptive Charge</option>
           <optgroup label="Agile">
-            <option value="agile">Agile (full)</option>
-            <option value="agile_charge">Agile — Charge only</option>
-            <option value="agile_discharge">Agile — Discharge only</option>
+            <option value="agile">Agile (Full)</option>
+            <option value="agile_charge">Agile — Charge Only</option>
+            <option value="agile_discharge">Agile — Discharge Only</option>
           </optgroup>
         </select>
           <button
@@ -1186,7 +1187,7 @@ function CosyChargingSection({
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 space-y-1">
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Beta</span>
-            <span className="text-[11px] text-text-primary font-medium">App must be kept running</span>
+            <span className="text-[11px] text-text-primary font-medium">App Must Be Kept Running</span>
           </div>
           <p className="text-[11px] text-text-secondary leading-relaxed">
             {mode === 'cosy'
@@ -1302,7 +1303,7 @@ function CosyChargingSection({
             disabled={saving}
             className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
           >
-            {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save slots'}
+            {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save Slots'}
           </button>
         </div>
       )}
@@ -1429,7 +1430,7 @@ function PriceSummary({ prices, decisionForPrice }: {
         <div className="text-xs text-text-secondary">
           Avg charge price: <span className="font-mono text-battery">{avgChargePrice.toFixed(3)}p</span>
           {avgChargePrice < importTariff * 100 && (
-            <> — saves <span className="font-mono text-battery">{(importTariff * 100 - avgChargePrice).toFixed(3)}p</span>/kWh vs standard rate</>
+            <> — Saves <span className="font-mono text-battery">{(importTariff * 100 - avgChargePrice).toFixed(3)}p</span>/kWh vs Standard Rate</>
           )}
         </div>
       )}
@@ -1437,7 +1438,7 @@ function PriceSummary({ prices, decisionForPrice }: {
         <div className="text-xs text-text-secondary">
           Avg discharge price: <span className="font-mono text-orange-400">{avgDischargePrice.toFixed(3)}p</span>
           {avgDischargePrice > exportTariff * 100 && (
-            <> — earns <span className="font-mono text-orange-400">{(avgDischargePrice - exportTariff * 100).toFixed(3)}p</span>/kWh vs standard export</>
+            <> — Earns <span className="font-mono text-orange-400">{(avgDischargePrice - exportTariff * 100).toFixed(3)}p</span>/kWh vs Standard Export</>
           )}
         </div>
       )}
@@ -1715,10 +1716,10 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
             </span>
           )}
           {postcodeLookup === 'not_found' && (
-            <span className="text-xs text-amber-400">Could not determine region</span>
+            <span className="text-xs text-amber-400">Could Not Determine Region</span>
           )}
           {postcodeLookup === 'error' && (
-            <span className="text-xs text-red-400">Lookup failed</span>
+            <span className="text-xs text-red-400">Lookup Failed</span>
           )}
         </div>
         <div className="flex gap-2">
@@ -1759,7 +1760,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
       {scope !== 'discharge_only' && (
       <div className="space-y-1">
         <div className="flex items-center justify-between">
-          <span className="text-text-secondary text-sm">Charge when below</span>
+          <span className="text-text-secondary text-sm">Charge When Below</span>
           <span className="font-mono text-text-primary text-sm">{chargeThreshold}p/kWh</span>
         </div>
         <input
@@ -1791,7 +1792,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
       {scope !== 'charge_only' && (
       <div className="space-y-1">
         <div className="flex items-center justify-between">
-          <span className="text-text-secondary text-sm">Discharge when above</span>
+          <span className="text-text-secondary text-sm">Discharge When Above</span>
           <span className="font-mono text-text-primary text-sm">{dischargeThreshold}p/kWh</span>
         </div>
         <input
@@ -1937,11 +1938,11 @@ function BatteryCalibrationSection() {
   const stageLabels: Record<number, string> = {
     0: 'Off',
     1: 'Discharging…',
-    2: 'Setting lower limit…',
+    2: 'Setting Lower Limit…',
     3: 'Charging…',
-    4: 'Setting upper limit…',
+    4: 'Setting Upper Limit…',
     5: 'Balancing…',
-    6: 'Setting full capacity…',
+    6: 'Setting Full Capacity…',
     7: 'Finished',
   };
 
@@ -2460,7 +2461,7 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
           </div>
           <button
             type="button"
-            aria-label="Enable inverter temperature limiter"
+            aria-label="Enable Inverter Temperature Limiter"
             aria-pressed={enabled}
             onClick={() => setEnabled(!enabled)}
             className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
@@ -3588,7 +3589,7 @@ export default function ControlPage() {
   const handleChargeRateSave = async () => {
     if (chargeRate == null) return;
     await savePowerLimit(
-      'Charge power limit',
+      'Charge Power Limit',
       '/api/control/charge-rate',
       'charge_rate',
       percentToRawLimit(chargeRate, limitScale),
@@ -3600,7 +3601,7 @@ export default function ControlPage() {
   const handleDischargeRateSave = async () => {
     if (dischargeRate == null) return;
     await savePowerLimit(
-      'Discharge power limit',
+      'Discharge Power Limit',
       '/api/control/discharge-rate',
       'discharge_rate',
       percentToRawLimit(dischargeRate, limitScale),
@@ -3880,7 +3881,7 @@ export default function ControlPage() {
 
           {/* Current behaviour */}
           <div className="rounded-lg border border-bg-surface bg-bg-surface/50 p-3">
-            <div className="text-text-secondary/70 text-[10px] uppercase tracking-wide mb-1">Current behaviour</div>
+            <div className="text-text-secondary/70 text-[10px] uppercase tracking-wide mb-1">Current Behaviour</div>
             <div className="font-medium text-text-primary">
               {timedExportState === 'active_now' ? formatTimedExportState(timedExportState) :
                timedExportState === 'armed' ? formatTimedExportState(timedExportState) :
@@ -3961,7 +3962,7 @@ export default function ControlPage() {
       {/* Section 4: Charge Schedule */}
       {!cosyEnabled && !agileOwnsCharge && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
-        <p className="text-text-secondary/60 text-xs">Please Allow upto 10 Seconds for Changes to Save</p>
+        <p className="text-text-secondary/60 text-xs">Please Allow Up To 10 Seconds for Changes to Save</p>
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
             <Fragment key={`charge-${i}`}>
@@ -4116,6 +4117,10 @@ export default function ControlPage() {
               </Fragment>
             ))}
           </div>
+          <ExportOnceCard
+            maxDischargeSlots={maxDischargeSlots}
+            dischargeSlots={dischargeSlots}
+          />
         </section>
       )}
           </>
@@ -4124,7 +4129,7 @@ export default function ControlPage() {
 
       {/* Section 6: Battery and Power Controls */}
       <section className="space-y-3">
-        <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
+        <h2 className="text-text-primary font-semibold text-lg">Battery And Power Controls</h2>
         {powerControlSaving && <InverterWriteProgress />}
         {powerControlSaveError && (
           <div
@@ -4274,7 +4279,7 @@ export default function ControlPage() {
           {/* Charge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
+              <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-Phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
               <span className="font-mono text-text-primary text-sm">{chargeLimitLabel}</span>
             </div>
             <div className="flex items-center gap-3">
@@ -4314,7 +4319,7 @@ export default function ControlPage() {
           {/* Discharge Power Limit */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
+              <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-Phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
               <span className="font-mono text-text-primary text-sm">{dischargeLimitLabel}</span>
             </div>
             <div className="flex items-center gap-3">

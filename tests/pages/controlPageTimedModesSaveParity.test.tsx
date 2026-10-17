@@ -289,9 +289,9 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
     const section = await sectionByHeading('Timed Export');
     fireEvent.click(within(section).getAllByRole('button', { name: 'Save' })[0]);
 
-    const progress = screen.getByText('Applying changes to inverter…').closest('[role="status"]');
+    const progress = screen.getByText('Applying Changes to Inverter…').closest('[role="status"]');
     expect(progress).not.toBeNull();
-    expect(progress).toHaveTextContent('Applying changes to inverter');
+    expect(progress).toHaveTextContent('Applying Changes to Inverter');
     expect(progress).toHaveClass('fixed', 'z-[100]');
     expect(section.contains(progress)).toBe(false);
     expect(within(section).getByRole('button', { name: 'Applying…' })).toBeDisabled();
@@ -300,7 +300,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       finishSave?.({ ok: true, data: {} });
     });
     await waitFor(() => {
-      expect(within(section).queryByText(/Applying changes to inverter/)).toBeNull();
+      expect(within(section).queryByText(/Applying Changes to Inverter/)).toBeNull();
     });
   });
 
@@ -329,7 +329,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       '/api/control/timed-discharge',
       { enabled: true, start_hour: 3, start_minute: 0, end_hour: 4, end_minute: 0 },
     ));
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
 
     // HR318 can read back before both inverse-window registers. Do not clear
     // progress on this partial state.
@@ -347,7 +347,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
         }),
       });
     });
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
 
     act(() => {
       useInverterStore.setState({
@@ -364,7 +364,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       });
     });
     await waitFor(() => {
-      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+      expect(screen.queryByText('Applying Changes to Inverter…')).toBeNull();
     });
   });
 
@@ -391,7 +391,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       '/api/control/timed-discharge',
       expect.objectContaining({ enabled: false }),
     );
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
 
     act(() => {
       useInverterStore.setState({
@@ -402,7 +402,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       });
     });
     await waitFor(() => {
-      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+      expect(screen.queryByText('Applying Changes to Inverter…')).toBeNull();
     });
   });
 
@@ -491,7 +491,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
 
     const section = await sectionByHeading('Timed Export');
     fireEvent.click(within(section).getAllByRole('button', { name: 'Save' })[0]);
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
 
     await act(async () => {
       failSave?.(new Error(
@@ -499,7 +499,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
       ));
     });
 
-    expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+    expect(screen.queryByText('Applying Changes to Inverter…')).toBeNull();
     expect(within(section).getByRole('alert')).toHaveTextContent(
       'Timed Export slot 1 could not be saved because inverter writes did not complete. Export was not armed.',
     );

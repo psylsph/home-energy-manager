@@ -7,6 +7,7 @@ pub mod api;
 pub mod audit;
 pub mod authenticated_lifecycle;
 pub(crate) mod control_status;
+pub mod export_once;
 pub mod external_commands;
 mod external_control;
 pub mod external_snapshot;
@@ -125,6 +126,16 @@ fn create_router_at(
         // show Configured slots even when the physical inverter slots
         // are temporarily cleared (HR59 re-arm fallback).
         .route("/api/timed-export", get(api::get_timed_export))
+        // One-off Timed Export: dated windows applied to a user-picked slot
+        // shortly before they start and reverted when they end.
+        .route(
+            "/api/export-once",
+            get(export_once::get_export_once).post(export_once::create_export_once),
+        )
+        .route(
+            "/api/export-once/cancel",
+            post(export_once::cancel_export_once),
+        )
         // Mini display — tokenless, read-only glance summary for an Apple
         // Watch or any small-screen browser (INSTALL.md → “Glance from
         // your Apple Watch”). Deliberately a separate, minimal-field surface
@@ -204,6 +215,18 @@ fn create_router_at(
         // Authenticated Octopus customer consumption (issue #212)
         .route("/api/octopus/status", get(crate::octopus::get_status))
         .route("/api/octopus/sync", post(crate::octopus::start_sync))
+        .route(
+            "/api/octopus/sessions",
+            get(crate::octopus_sessions::get_sessions),
+        )
+        .route(
+            "/api/octopus/sessions/mode",
+            post(crate::octopus_sessions::set_sessions_mode),
+        )
+        .route(
+            "/api/octopus/sessions/skip",
+            post(crate::octopus_sessions::skip_session),
+        )
         .route("/api/octopus/history", get(crate::octopus::get_history))
         .route("/api/octopus/summary", get(crate::octopus::get_summary))
         .route(

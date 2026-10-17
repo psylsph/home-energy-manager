@@ -1795,10 +1795,10 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
-            "octopus_enabled": settings.octopus_enabled,
             "octopus_account_number": settings.octopus_account_number,
             "octopus_api_key_configured": !settings.octopus_api_key.is_empty(),
             "octopus_gas_unit": settings.octopus_gas_unit,
+            "octopus_gas_enabled": settings.octopus_gas_enabled,
             "octopus_economy7_start": settings.octopus_economy7_start,
             "octopus_economy7_end": settings.octopus_economy7_end,
             // The Octopus API key is intentionally never returned.
@@ -1967,9 +1967,6 @@ pub async fn update_settings(
         if let Some(value) = body.get("http_port") {
             persist.http_port = parse_u16_json(value, "http_port")?;
         }
-        if let Some(enabled) = body.get("octopus_enabled").and_then(|v| v.as_bool()) {
-            persist.octopus_enabled = enabled;
-        }
         if let Some(account) = body.get("octopus_account_number").and_then(|v| v.as_str()) {
             persist.octopus_account_number = account.trim().to_string();
         }
@@ -1981,6 +1978,9 @@ pub async fn update_settings(
                 return Err("octopus_gas_unit must be unknown, kwh, or m3".to_string());
             }
             persist.octopus_gas_unit = unit.to_string();
+        }
+        if let Some(enabled) = body.get("octopus_gas_enabled").and_then(|v| v.as_bool()) {
+            persist.octopus_gas_enabled = enabled;
         }
         let valid_hhmm = |value: &str| {
             value.split_once(':').is_some_and(|(hour, minute)| {
@@ -2519,9 +2519,6 @@ fn settings_log_fields(
     if is_present("http_port") {
         out.push(format!("http_port={}", persist.http_port));
     }
-    if is_present("octopus_enabled") {
-        out.push(format!("octopus_enabled={}", persist.octopus_enabled));
-    }
     if is_present("octopus_account_number") {
         out.push(format!(
             "octopus_account={}",
@@ -2540,6 +2537,12 @@ fn settings_log_fields(
     }
     if is_present("octopus_gas_unit") {
         out.push(format!("octopus_gas_unit={}", persist.octopus_gas_unit));
+    }
+    if is_present("octopus_gas_enabled") {
+        out.push(format!(
+            "octopus_gas_enabled={}",
+            persist.octopus_gas_enabled
+        ));
     }
     if is_present("octopus_economy7_start") || is_present("octopus_economy7_end") {
         out.push(format!(
@@ -3575,7 +3578,16 @@ pub async fn set_timed_export(
     // response is built — this is a request-scoped lock, not a global
     // one, so a long-running poll cycle is never blocked.
     let _timed_export_action = state.timed_export_action_lock.lock().await;
+    set_timed_export_locked(state.clone(), enabled, requested_soc_reserve).await
+}
 
+/// The body of [`set_timed_export`] for callers that already hold
+/// `timed_export_action_lock` (see [`set_discharge_slot_locked`]).
+pub(crate) async fn set_timed_export_locked(
+    state: Arc<AppState>,
+    enabled: bool,
+    requested_soc_reserve: Option<u16>,
+) -> (StatusCode, Json<Value>) {
     if enabled {
         // An explicit Arm supersedes any pending stop/exit — but the marker
         // is retired at COMMIT time (the same settings transaction that
@@ -4474,16 +4486,29 @@ pub async fn set_discharge_slot(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let slot_raw = match body["slot"].as_u64() {
-        Some(s) => s,
-        None => return error_response("Missing 'slot' field (1-2)"),
-    };
+    if body["slot"].as_u64().is_none() {
+        return error_response("Missing 'slot' field (1-2)");
+    }
     // Serialise against every other Timed Export mutation so two concurrent
     // slot saves cannot both load the desired vector, race through the
     // Modbus write queue, and have the second persistence overwrite the
     // first edit (the lost-update class the in-process concurrent-update
     // settings tests guard against).
     let _timed_export_action = state.timed_export_action_lock.lock().await;
+    set_discharge_slot_locked(state.clone(), body).await
+}
+
+/// The body of [`set_discharge_slot`] for callers that already hold
+/// `timed_export_action_lock` (the one-off export override applies and
+/// reverts a slot inside a single hold of the lock, so the poll loop's
+/// Timed Export machine never observes a half-applied state).
+pub(crate) async fn set_discharge_slot_locked(
+    state: Arc<AppState>,
+    body: serde_json::Value,
+) -> (StatusCode, Json<Value>) {
+    let Some(slot_raw) = body["slot"].as_u64() else {
+        return error_response("Missing 'slot' field (1-2)");
+    };
     let device_type = latest_device_type(&state).await;
     // Check model support — AC Coupled/Gen1 only have 1 discharge slot.
     let max_slots = device_type.max_discharge_slots();
@@ -20893,6 +20918,8 @@ pub(crate) mod tests {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
             let body = serde_json::json!({
+                // The old on/off switch no longer exists; an older page that
+                // still sends it must not be rejected or echoed back.
                 "octopus_enabled": true,
                 "octopus_account_number": " A-1234ABCD ",
                 "octopus_api_key": " sk_secret_value ",
@@ -20904,7 +20931,6 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::OK);
 
             let saved = crate::settings::Settings::load();
-            assert!(saved.octopus_enabled);
             assert_eq!(saved.octopus_account_number, "A-1234ABCD");
             assert_eq!(saved.octopus_api_key, "sk_secret_value");
             assert_eq!(saved.octopus_gas_unit, "kwh");
@@ -20912,12 +20938,51 @@ pub(crate) mod tests {
             assert_eq!(saved.octopus_economy7_end, "08:00");
 
             let (_, response) = get_settings(State(state)).await;
-            assert_eq!(response["data"]["octopus_enabled"], true);
+            assert!(response["data"].get("octopus_enabled").is_none());
             assert_eq!(response["data"]["octopus_api_key_configured"], true);
             assert_eq!(response["data"]["octopus_gas_unit"], "kwh");
             assert_eq!(response["data"]["octopus_economy7_start"], "01:00");
             assert_eq!(response["data"]["octopus_economy7_end"], "08:00");
             assert!(response["data"].get("octopus_api_key").is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn octopus_gas_toggle_persists_and_is_reported() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+
+            // On by default, so an existing household sees no change.
+            let (_, response) = get_settings(State(state.clone())).await;
+            assert_eq!(response["data"]["octopus_gas_enabled"], true);
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(serde_json::json!({"octopus_gas_enabled": false})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!crate::settings::Settings::load().octopus_gas_enabled);
+            let (_, response) = get_settings(State(state.clone())).await;
+            assert_eq!(response["data"]["octopus_gas_enabled"], false);
+
+            // A save that does not mention it leaves it alone.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(serde_json::json!({"octopus_gas_unit": "kwh"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!crate::settings::Settings::load().octopus_gas_enabled);
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(serde_json::json!({"octopus_gas_enabled": true})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(crate::settings::Settings::load().octopus_gas_enabled);
         })
         .await;
     }

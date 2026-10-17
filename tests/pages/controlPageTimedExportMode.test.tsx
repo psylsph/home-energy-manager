@@ -377,7 +377,7 @@ describe('<ControlPage/> — independent battery mechanisms', () => {
     fireEvent.click(timedExportControl(section));
 
     expect(await within(section).findByText('Applying…')).toBeDefined();
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
   });
 
   it('clears Applying once the WebSocket snapshot confirms the mode change', async () => {

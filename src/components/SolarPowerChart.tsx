@@ -40,7 +40,7 @@ function chartTitle(scale: 'today' | '24h'): string {
 }
 
 function emptyStateMessage(scale: 'today' | '24h'): string {
-  return scale === '24h' ? 'No solar history in the last 24h' : 'No solar history yet today';
+  return scale === '24h' ? 'No Solar History in the Last 24h' : 'No Solar History Yet Today';
 }
 
 interface PvRow {

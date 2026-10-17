@@ -41,7 +41,7 @@ function mount() {
           evc_host: '', evc_port: 502, disable_auto_discovery: true, autostart_enabled: false,
           minimise_to_tray: false, start_minimised: false, check_for_updates: true, api_key: '', api_port: 7338,
           hidden_panels: [], solar_arrays: [], import_tariff_config: tariff(), export_tariff_config: tariff(),
-          octopus_enabled: false, octopus_account_number: '', octopus_api_key_configured: false,
+          octopus_account_number: '', octopus_api_key_configured: false,
           octopus_gas_unit: 'unknown', octopus_economy7_start: '00:30', octopus_economy7_end: '07:30',
         },
       };
@@ -70,7 +70,7 @@ const tauriWindow = window as unknown as { __TAURI_INTERNALS__?: unknown };
 /** Every toggle on the page, by the name a screen reader should announce. */
 const TOGGLES = [
   'Enable Auto-Discovery',
-  'Allow battery control through the authenticated API',
+  'Allow Battery Control Through the Authenticated API',
   'Start on Login',
   'Minimise to Tray',
   'Start Hidden in Tray',
@@ -83,11 +83,11 @@ const TOGGLES = [
   'Battery Connection Lost',
   'Connection Lost',
   'Show Graphs',
-  'Lock Y-axis scale',
-  'Show average lines on History charts',
+  'Lock Y-Axis Scale',
+  'Show Average Lines on History Charts',
   'Show Node Status Words',
   'Developer Mode',
-  'Check for new releases',
+  'Check for New Releases',
 ];
 
 beforeEach(() => {

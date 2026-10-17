@@ -55,7 +55,7 @@ export function deriveBatteryModeRows(
     key: 'eco',
     label: 'Eco',
     state: ecoOn ? 'active' : 'off',
-    description: ecoOn ? 'on' : 'off',
+    description: ecoOn ? 'On' : 'Off',
   });
 
   // Timed Charge: HR96 + charge slots + battery actually charging.
@@ -67,10 +67,10 @@ export function deriveBatteryModeRows(
     label: 'Timed Charge',
     state: chargeActive ? 'active' : chargeArmed ? 'armed' : 'off',
     description: chargeActive
-      ? 'armed · charging now'
+      ? 'Armed · Charging Now'
       : chargeArmed
-        ? 'armed'
-        : 'off',
+        ? 'Armed'
+        : 'Off',
   });
 
   // Timed Export: HR59 + discharge slots + battery actually discharging.
@@ -82,10 +82,10 @@ export function deriveBatteryModeRows(
     label: 'Timed Export',
     state: exportActive ? 'active' : exportArmed ? 'armed' : 'off',
     description: exportActive
-      ? 'armed · exporting now'
+      ? 'Armed · Exporting Now'
       : exportArmed
-        ? 'armed'
-        : 'off',
+        ? 'Armed'
+        : 'Off',
   });
 
   // Timed Discharge: HR318=2 + visible pause-slot window + discharging.
@@ -102,10 +102,10 @@ export function deriveBatteryModeRows(
     label: 'Timed Discharge',
     state: tdActive ? 'active' : tdArmed ? 'armed' : 'off',
     description: tdActive
-      ? 'armed · covering demand now'
+      ? 'Armed · Covering Demand Now'
       : tdArmed
-        ? 'armed'
-        : 'off',
+        ? 'Armed'
+        : 'Off',
   });
 
   return rows;

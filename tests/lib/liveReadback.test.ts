@@ -192,7 +192,7 @@ describe('describeLiveReadout', () => {
   });
 
   it('says unknown when the value cannot be read', () => {
-    expect(describeLiveReadout({ kind: 'unknown' })).toBe('Inverter Charge Rate: unknown');
+    expect(describeLiveReadout({ kind: 'unknown' })).toBe('Inverter Charge Rate: Unknown');
   });
 
   it('gives a stale value its age in seconds under two minutes', () => {

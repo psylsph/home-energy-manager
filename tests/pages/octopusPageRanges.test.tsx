@@ -142,9 +142,9 @@ describe('OctopusPage — range, loading, error, derived values', () => {
     it('switches the active range to 7 days and re-fetches with the new range param', async () => {
       render(<OctopusPage />);
       // Wait for initial load.
-      await screen.findByText('Electricity consumption');
+      await screen.findByText('Electricity Consumption');
       // Click the 7 days range button.
-      const sevenDayBtn = screen.getByRole('button', { name: '7 days' });
+      const sevenDayBtn = screen.getByRole('button', { name: '7 Days' });
       fireEvent.click(sevenDayBtn);
       // The aria-pressed state flips.
       await waitFor(() => {
@@ -161,8 +161,8 @@ describe('OctopusPage — range, loading, error, derived values', () => {
 
     it('switches to 1 year range', async () => {
       render(<OctopusPage />);
-      await screen.findByText('Electricity consumption');
-      fireEvent.click(screen.getByRole('button', { name: '1 year' }));
+      await screen.findByText('Electricity Consumption');
+      fireEvent.click(screen.getByRole('button', { name: '1 Year' }));
       await waitFor(() => {
         const summaryCalls = vi.mocked(apiGet).mock.calls
           .map((c) => c[0])
@@ -176,8 +176,8 @@ describe('OctopusPage — range, loading, error, derived values', () => {
       // resolution (daily vs monthly) is internal to the component, but we
       // can assert the range was sent to the backend.
       render(<OctopusPage />);
-      await screen.findByText('Electricity consumption');
-      const sixMonthBtn = screen.getByRole('button', { name: '6 months' });
+      await screen.findByText('Electricity Consumption');
+      const sixMonthBtn = screen.getByRole('button', { name: '6 Months' });
       fireEvent.click(sixMonthBtn);
       await waitFor(() => {
         const summaryCalls = vi.mocked(apiGet).mock.calls
@@ -246,7 +246,7 @@ describe('OctopusPage — range, loading, error, derived values', () => {
 
     it('shows 0.000 when no history data is returned', async () => {
       render(<OctopusPage />);
-      await screen.findByText('Electricity consumption');
+      await screen.findByText('Electricity Consumption');
       // The totals tiles show 0.000 for each series.
       expect(screen.getAllByText('0.000 kWh').length).toBeGreaterThanOrEqual(2);
     });
@@ -267,15 +267,15 @@ describe('OctopusPage — range, loading, error, derived values', () => {
         return historyResponse();
       });
       render(<OctopusPage />);
-      expect(await screen.findByText('Billing summary tables')).toBeDefined();
-      expect(screen.getByText('Monthly summary')).toBeDefined();
-      expect(screen.getByText('Yearly summary')).toBeDefined();
+      expect(await screen.findByText('Billing Summary Tables')).toBeDefined();
+      expect(screen.getByText('Monthly Summary')).toBeDefined();
+      expect(screen.getByText('Yearly Summary')).toBeDefined();
     });
 
     it('hides the billing tables when there is no monthly or yearly data', async () => {
       render(<OctopusPage />);
-      await screen.findByText('Electricity consumption');
-      expect(screen.queryByText('Billing summary tables')).toBeNull();
+      await screen.findByText('Electricity Consumption');
+      expect(screen.queryByText('Billing Summary Tables')).toBeNull();
     });
   });
 
@@ -325,10 +325,10 @@ describe('OctopusPage — range, loading, error, derived values', () => {
       // Initial 30d load: import total 4.000 kWh.
       await screen.findAllByText('4.000 kWh');
 
-      // Click "1 year" — its fetch hangs (deferred).
-      fireEvent.click(screen.getByRole('button', { name: '1 year' }));
-      // Click "6 months" — resolves fast: import total 7.000 kWh.
-      fireEvent.click(screen.getByRole('button', { name: '6 months' }));
+      // Click "1 Year" — its fetch hangs (deferred).
+      fireEvent.click(screen.getByRole('button', { name: '1 Year' }));
+      // Click "6 Months" — resolves fast: import total 7.000 kWh.
+      fireEvent.click(screen.getByRole('button', { name: '6 Months' }));
       await screen.findAllByText('7.000 kWh');
 
       // The slow 1-year response finally lands — it must NOT clobber the

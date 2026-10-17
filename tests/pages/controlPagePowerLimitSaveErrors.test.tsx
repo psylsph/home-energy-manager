@@ -276,7 +276,7 @@ describe('<ControlPage/> — power-control save failures surface and reconcile',
     fireEvent.click(saveButtonFor(chargeSlider));
 
     await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toMatch(/Charge power limit save failed/);
+      expect(screen.getByRole('alert').textContent).toMatch(/Charge Power Limit save failed/);
     });
     await waitFor(() => {
       expect(chargeSlider.value).toBe('100');

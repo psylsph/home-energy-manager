@@ -220,7 +220,7 @@ function PowerStat({ label, value, color, direction, waiting }: {
       <div className="mt-2 min-h-7 flex items-end">
         {waiting ? (
           <span className="text-text-secondary text-xs font-sans font-medium">
-            Waiting for data
+            Waiting for Data
           </span>
         ) : (
           <span className="text-text-primary text-xl font-mono font-bold">
@@ -493,7 +493,7 @@ function renderCombinedPowerChart(rows: PowerRow[]): string {
     { key: 'solarPower' as const, label: 'Solar', color: '#F59E0B', dash: '' },
     { key: 'batteryPower' as const, label: 'Battery', color: '#22C55E', dash: '' },
     { key: 'gridPower' as const, label: 'Grid', color: '#EF4444', dash: '' },
-    { key: 'homePower' as const, label: 'Home/load', color: '#14B8A6', dash: '' },
+    { key: 'homePower' as const, label: 'Home/Load', color: '#14B8A6', dash: '' },
   ];
   const polylines = series.map((item) => {
     const points = filteredRows
@@ -623,22 +623,22 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
       <div class="muted">Home Energy Manager · ${escapeHtml(s.periodLabel)} · Generated ${escapeHtml(s.generatedAt.toLocaleString())}</div>
       <div class="muted">Energy totals are estimated from the currently displayed Power samples.</div>
     </div>
-    <div class="actions"><button onclick="window.print()">Print / save as PDF</button></div>
+    <div class="actions"><button onclick="window.print()">Print / Save As PDF</button></div>
   </header>
 
   <section class="grid-cards">
-    <div class="card"><span>Solar generated</span><strong style="color:#d97706">${formatKwh(s.solarKwh)}</strong></div>
-    <div class="card"><span>Home consumed</span><strong style="color:#0f766e">${formatKwh(s.homeKwh)}</strong></div>
-    <div class="card"><span>Grid import</span><strong style="color:#dc2626">${formatKwh(s.importKwh)}</strong></div>
-    <div class="card"><span>Grid export</span><strong style="color:#0284c7">${formatKwh(s.exportKwh)}</strong></div>
-    <div class="card"><span>Net grid</span><strong>${formatKwh(s.netGridKwh)}</strong></div>
-    <div class="card"><span>Battery charged</span><strong style="color:#7c3aed">${formatKwh(s.batteryChargeKwh)}</strong></div>
-    <div class="card"><span>Battery discharged</span><strong style="color:#16a34a">${formatKwh(s.batteryDischargeKwh)}</strong></div>
+    <div class="card"><span>Solar Generated</span><strong style="color:#d97706">${formatKwh(s.solarKwh)}</strong></div>
+    <div class="card"><span>Home Consumed</span><strong style="color:#0f766e">${formatKwh(s.homeKwh)}</strong></div>
+    <div class="card"><span>Grid Import</span><strong style="color:#dc2626">${formatKwh(s.importKwh)}</strong></div>
+    <div class="card"><span>Grid Export</span><strong style="color:#0284c7">${formatKwh(s.exportKwh)}</strong></div>
+    <div class="card"><span>Net Grid</span><strong>${formatKwh(s.netGridKwh)}</strong></div>
+    <div class="card"><span>Battery Charged</span><strong style="color:#7c3aed">${formatKwh(s.batteryChargeKwh)}</strong></div>
+    <div class="card"><span>Battery Discharged</span><strong style="color:#16a34a">${formatKwh(s.batteryDischargeKwh)}</strong></div>
     <div class="card"><span>SOC range</span><strong>${formatPercentValue(s.socMin)} – ${formatPercentValue(s.socMax)}</strong></div>
-    <div class="card"><span>Solar coverage</span><strong>${formatPercentValue(s.solarCoveragePct)}</strong></div>
-    <div class="card"><span>Grid dependency</span><strong>${formatPercentValue(s.gridDependencyPct)}</strong></div>
-    <div class="card"><span>Peak home load</span><strong>${formatWatts(s.peakHomeW)}</strong></div>
-    <div class="card"><span>Peak import/export</span><strong>${formatWatts(s.peakGridImportW)} / ${formatWatts(s.peakGridExportW)}</strong></div>
+    <div class="card"><span>Solar Coverage</span><strong>${formatPercentValue(s.solarCoveragePct)}</strong></div>
+    <div class="card"><span>Grid Dependency</span><strong>${formatPercentValue(s.gridDependencyPct)}</strong></div>
+    <div class="card"><span>Peak Home Load</span><strong>${formatWatts(s.peakHomeW)}</strong></div>
+    <div class="card"><span>Peak Import/Export</span><strong>${formatWatts(s.peakGridImportW)} / ${formatWatts(s.peakGridExportW)}</strong></div>
   </section>
 
   <!-- Issue #131: cost tiles matching the selected range/offset. Sourced
@@ -647,59 +647,59 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
        component and the standing-charge component are shown separately
        so the user can see where the fixed daily cost comes from. -->
   <section class="grid-cards">
-    <div class="card"><span>Import cost</span><strong style="color:#dc2626">${formatGbp(s.importCostGbp)}</strong></div>
-    <div class="card"><span>Export income</span><strong style="color:#0284c7">${formatGbp(s.exportIncomeGbp)}</strong></div>
-    <div class="card"><span>Net cost</span><strong>${formatGbp(s.netCostGbp)}</strong></div>
+    <div class="card"><span>Import Cost</span><strong style="color:#dc2626">${formatGbp(s.importCostGbp)}</strong></div>
+    <div class="card"><span>Export Income</span><strong style="color:#0284c7">${formatGbp(s.exportIncomeGbp)}</strong></div>
+    <div class="card"><span>Net Cost</span><strong>${formatGbp(s.netCostGbp)}</strong></div>
     <div class="card"><span>Standing Charge</span><strong>${formatGbp(s.standingChargeGbp)}${standingChargeSubtitle(s)}</strong></div>
   </section>
 
   ${renderCombinedPowerChart(rows)}
-  ${renderBarChart('Solar generation vs home load', report.buckets, [
+  ${renderBarChart('Solar Generation Vs Home Load', report.buckets, [
     { key: 'solarKwh', label: 'Solar', color: '#F59E0B' },
-    { key: 'homeKwh', label: 'Home/load', color: '#14B8A6' },
+    { key: 'homeKwh', label: 'Home/Load', color: '#14B8A6' },
   ])}
-  ${renderBarChart('Grid import vs export', report.buckets, [
+  ${renderBarChart('Grid Import Vs Export', report.buckets, [
     { key: 'importKwh', label: 'Import', color: '#EF4444' },
     { key: 'exportKwh', label: 'Export', color: '#38BDF8' },
   ])}
-  ${renderBarChart('Battery charge vs discharge', report.buckets, [
+  ${renderBarChart('Battery Charge Vs Discharge', report.buckets, [
     { key: 'batteryChargeKwh', label: 'Charge', color: '#8B5CF6' },
     { key: 'batteryDischargeKwh', label: 'Discharge', color: '#22C55E' },
   ])}
 
   <section class="charts-2">
-    ${renderDonut('Grid balance', [
+    ${renderDonut('Grid Balance', [
       { label: 'Import', value: s.importKwh, color: '#EF4444' },
       { label: 'Export', value: s.exportKwh, color: '#38BDF8' },
     ])}
-    ${renderDonut('Battery activity', [
+    ${renderDonut('Battery Activity', [
       { label: 'Charge', value: s.batteryChargeKwh, color: '#8B5CF6' },
       { label: 'Discharge', value: s.batteryDischargeKwh, color: '#22C55E' },
     ])}
   </section>
   <section class="charts-2">
-    ${renderDonut('Estimated solar destination', [
-      { label: 'Used locally', value: solarToHomeEstimate, color: '#14B8A6' },
-      { label: 'Charged battery', value: s.batteryChargeKwh, color: '#8B5CF6' },
+    ${renderDonut('Estimated Solar Destination', [
+      { label: 'Used Locally', value: solarToHomeEstimate, color: '#14B8A6' },
+      { label: 'Charged Battery', value: s.batteryChargeKwh, color: '#8B5CF6' },
       { label: 'Exported', value: s.exportKwh, color: '#38BDF8' },
     ])}
-    ${renderDonut('Estimated home source', [
-      { label: 'Grid import', value: s.importKwh, color: '#EF4444' },
-      { label: 'Battery discharge', value: batteryToHomeEstimate, color: '#22C55E' },
-      { label: 'Direct solar / other', value: Math.max(0, s.homeKwh - s.importKwh - batteryToHomeEstimate), color: '#F59E0B' },
+    ${renderDonut('Estimated Home Source', [
+      { label: 'Grid Import', value: s.importKwh, color: '#EF4444' },
+      { label: 'Battery Discharge', value: batteryToHomeEstimate, color: '#22C55E' },
+      { label: 'Direct Solar / Other', value: Math.max(0, s.homeKwh - s.importKwh - batteryToHomeEstimate), color: '#F59E0B' },
     ])}
   </section>
 
   <section class="highlights">
-    ${bucketHighlight(report.buckets, 'solarKwh', 'Best solar')}
-    ${bucketHighlight(report.buckets, 'homeKwh', 'Highest load')}
-    ${bucketHighlight(report.buckets, 'importKwh', 'Highest import')}
-    ${bucketHighlight(report.buckets, 'exportKwh', 'Highest export')}
+    ${bucketHighlight(report.buckets, 'solarKwh', 'Best Solar')}
+    ${bucketHighlight(report.buckets, 'homeKwh', 'Highest Load')}
+    ${bucketHighlight(report.buckets, 'importKwh', 'Highest Import')}
+    ${bucketHighlight(report.buckets, 'exportKwh', 'Highest Export')}
     ${socLowHighlight(report.buckets)}
   </section>
 
   <section class="table-card">
-    <h2>Bucket breakdown</h2>
+    <h2>Bucket Breakdown</h2>
     <table>
       <thead><tr><th>Bucket</th><th>Solar</th><th>Home</th><th>Import</th><th>Export</th><th>Charge</th><th>Discharge</th><th>Avg SOC</th></tr></thead>
       <tbody>
@@ -953,7 +953,7 @@ export default function PowerPage() {
           </p>
         </div>
         <div className="text-text-secondary text-xs font-sans text-right">
-          {snapshot ? formatTimestamp(snapshot.timestamp * 1000) : 'Waiting for data'}
+          {snapshot ? formatTimestamp(snapshot.timestamp * 1000) : 'Waiting for Data'}
         </div>
       </div>
 
@@ -994,7 +994,7 @@ export default function PowerPage() {
             value={range}
             onChange={(e) => handleRangeChange(e.target.value as HistoryRange)}
             className="sm:hidden w-full bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans font-medium outline-none border border-white/10"
-            aria-label="Select time range"
+            aria-label="Select Time Range"
           >
             {HISTORY_RANGES.map((r) => (
               <option key={r.key} value={r.key}>{r.label}</option>
@@ -1045,7 +1045,7 @@ export default function PowerPage() {
                   e.target.blur();
                 }
               }}
-              aria-label="Select period date"
+              aria-label="Select Period Date"
               className="bg-transparent text-text-primary text-sm font-sans text-center px-1 py-0.5 rounded-md outline-none cursor-pointer hover:bg-bg-elevated transition-colors"
             />
           ) : (
@@ -1109,7 +1109,7 @@ export default function PowerPage() {
         {loading ? (
           <div className="flex flex-col items-center justify-center h-[320px] gap-4">
             <div className="w-8 h-8 border-4 border-accent border-t-transparent rounded-full animate-spin" />
-            <p className="text-text-secondary text-sm font-sans">Loading power history…</p>
+            <p className="text-text-secondary text-sm font-sans">Loading Power History…</p>
           </div>
         ) : error ? (
           <div className="flex items-center justify-center h-[320px] text-red-400 text-sm font-sans">
@@ -1117,7 +1117,7 @@ export default function PowerPage() {
           </div>
         ) : !hasData ? (
           <div className="flex flex-col items-center justify-center h-[320px] gap-2">
-            <p className="text-text-secondary text-sm font-sans">No power history for this range</p>
+            <p className="text-text-secondary text-sm font-sans">No Power History for This Range</p>
             <p className="text-text-secondary/50 text-xs font-sans">
               History is recorded while the app is running and connected
             </p>

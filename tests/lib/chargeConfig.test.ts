@@ -307,15 +307,15 @@ describe('adaptiveSocFieldCaption', () => {
 
 describe('adaptiveStateLabel', () => {
   it('labels outside_window', () => {
-    expect(adaptiveStateLabel('outside_window')).toBe('Outside configured period');
+    expect(adaptiveStateLabel('outside_window')).toBe('Outside Configured Period');
   });
 
   it('labels preferred', () => {
-    expect(adaptiveStateLabel('preferred')).toBe('Preferred rate active');
+    expect(adaptiveStateLabel('preferred')).toBe('Preferred Rate Active');
   });
 
   it('labels restoring', () => {
-    expect(adaptiveStateLabel('restoring')).toBe('Restoring manual rate');
+    expect(adaptiveStateLabel('restoring')).toBe('Restoring Manual Rate');
   });
 
   it('labels error', () => {

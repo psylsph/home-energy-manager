@@ -14,5 +14,5 @@ import type { ConnectionState } from './types';
 export function awaitingConnectionMessage(state: ConnectionState): string {
   if (state === 'reconnecting') return 'Connection lost — reconnecting…';
   if (state === 'disconnected') return 'Disconnected — will retry automatically';
-  return 'Waiting for data…';
+  return 'Waiting for Data…';
 }

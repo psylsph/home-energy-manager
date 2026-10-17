@@ -403,7 +403,7 @@ describe('<ControlPage/> — power limit saves', () => {
     fireEvent.click(saveFor(discharge));
 
     await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toMatch(/Discharge power limit save failed/);
+      expect(screen.getByRole('alert').textContent).toMatch(/Discharge Power Limit save failed/);
     });
     await waitFor(() => expect(discharge.value).toBe('100'));
   });

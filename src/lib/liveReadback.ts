@@ -86,7 +86,7 @@ function formatAge(ageSeconds: number): string {
 
 /** The sentence shown beside a charge setting for a given readout. */
 export function describeLiveReadout(readout: LiveReadout): string {
-  if (readout.kind === 'unknown') return 'Inverter Charge Rate: unknown';
+  if (readout.kind === 'unknown') return 'Inverter Charge Rate: Unknown';
   if (readout.kind === 'live') return `Inverter Charge Rate: ${readout.label}`;
   return `Inverter Charge Rate: ${readout.label} · as last read ${formatAge(readout.ageSeconds)}`;
 }

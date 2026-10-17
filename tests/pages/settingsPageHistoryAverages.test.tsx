@@ -102,7 +102,7 @@ describe('<SettingsPage/> — History Chart Averages (issue #345)', () => {
   it('defaults the toggle to off', async () => {
     render(<SettingsPage />);
     const toggle = await screen.findByRole('switch', {
-      name: 'Show average lines on History charts',
+      name: 'Show Average Lines on History Charts',
     });
     expect(toggle.getAttribute('aria-checked')).toBe('false');
   });
@@ -110,7 +110,7 @@ describe('<SettingsPage/> — History Chart Averages (issue #345)', () => {
   it('clicking the toggle enables averages and persists to localStorage', async () => {
     render(<SettingsPage />);
     const toggle = await screen.findByRole('switch', {
-      name: 'Show average lines on History charts',
+      name: 'Show Average Lines on History Charts',
     });
     fireEvent.click(toggle);
 

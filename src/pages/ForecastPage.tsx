@@ -137,7 +137,7 @@ function LineToggleLegend({
     <div
       data-testid="forecast-line-legend"
       role="group"
-      aria-label="Projection lines — activate to show or hide a line"
+      aria-label="Projection Lines — Activate to Show or Hide a Line"
       className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1"
     >
       {lines.map((line) => {
@@ -204,7 +204,7 @@ function ForecastApplyProgress() {
         className="h-7 w-7 shrink-0 animate-spin rounded-full border-4 border-current border-t-transparent"
       />
       <div>
-        <div className="text-base font-bold">Applying changes to inverter…</div>
+        <div className="text-base font-bold">Applying Changes to Inverter…</div>
         <div className="mt-0.5 text-sm font-medium text-slate-800">
           Scheduling the charge slot. This can take several seconds; please keep this page open.
         </div>
@@ -227,7 +227,7 @@ function forecastPlanIdentity(plan: PlanResponse): string {
 const CHART_TABS = [
   ['battery', 'Battery'],
   ['solar', 'Solar'],
-  ['consumption', 'Home use'],
+  ['consumption', 'Home Use'],
 ] as const;
 type ForecastChart = (typeof CHART_TABS)[number][0];
 
@@ -379,7 +379,7 @@ export default function ForecastPage() {
   const [effSaving, setEffSaving] = useState(false);
   const [effError, setEffError] = useState<string | null>(null);
   const [activeChart, setActiveChart] = useState<ForecastChart>('battery');
-  // "Show past" (issue #361): earlier planner decisions and what the
+  // "Show Past" (issue #361): earlier planner decisions and what the
   // battery and the sun actually did, drawn behind the forward charts.
   const [pastRange, setPastRange] = useState<PastRange>('off');
   const [pastResult, setPastResult] = useState<PastResult | null>(null);
@@ -753,7 +753,7 @@ export default function ForecastPage() {
   }
 
   if (!loaded || !data) {
-    return <div className="text-text-secondary text-sm animate-pulse">Loading forecast…</div>;
+    return <div className="text-text-secondary text-sm animate-pulse">Loading Forecast…</div>;
   }
 
   const statusMessages = forecastStatusMessages(data.status);
@@ -886,12 +886,12 @@ export default function ForecastPage() {
   // Legend descriptions: SOC always (the no-grid-charging baseline); the
   // what-if lines only when data exists for them.
   const batteryLegendLines = [
-    { key: 'soc', label: 'If solar only', colour: '#34d399', style: 'solid' as const },
+    { key: 'soc', label: 'If Solar Only', colour: '#34d399', style: 'solid' as const },
     ...(hasWithCharge
       ? [
           {
             key: 'withCharge',
-            label: 'If charge enacted',
+            label: 'If Charge Enacted',
             colour: '#60a5fa',
             style: 'dashed' as const,
           },
@@ -901,7 +901,7 @@ export default function ForecastPage() {
       ? [
           {
             key: 'withCurrent',
-            label: 'With current schedule',
+            label: 'With Current Schedule',
             colour: '#f472b6',
             style: 'dotted' as const,
           },
@@ -911,7 +911,7 @@ export default function ForecastPage() {
       ? [
           {
             key: 'pastPlanned',
-            label: 'Planned (past)',
+            label: 'Planned (Past)',
             colour: PAST_PLANNED_COLOUR,
             style: 'dashed' as const,
           },
@@ -1018,33 +1018,33 @@ export default function ForecastPage() {
         </div>
 
         <SummaryTile
-          label="Solar prediction"
+          label="Solar Prediction"
           value={formatEnergy(summary.solarKwh)}
           testId="forecast-solar-tomorrow"
           hint={
             data.performance_ratio != null
               ? `calibrated against ${data.performance_ratio_days ?? '?'} days of your history (last 2 weeks)`
-              : 'preliminary — still calibrating'
+              : 'Preliminary — Still Calibrating'
           }
         />
         <SummaryTile
-          label="House consumption"
+          label="House Consumption"
           value={formatEnergy(summary.consumptionKwh)}
           testId="forecast-consumption-tomorrow"
           hint={`${data.consumption_days_observed} days observed`}
         />
         <SummaryTile
-          label="Expected export"
+          label="Expected Export"
           value={formatEnergy(
             plan?.recommendation?.kind === 'charge'
               ? plan.recommendation.export_tomorrow_with_charge_kwh
               : summary.surplusKwh,
           )}
           testId="forecast-surplus-tomorrow"
-          hint={plan?.recommendation?.kind === 'charge' ? 'with charge plan' : undefined}
+          hint={plan?.recommendation?.kind === 'charge' ? 'With Charge Plan' : undefined}
         />
         <SummaryTile
-          label="Expected import"
+          label="Expected Import"
           value={formatEnergy(
             plan?.recommendation?.kind === 'charge'
               ? plan.recommendation.import_tomorrow_with_charge_kwh
@@ -1067,7 +1067,7 @@ export default function ForecastPage() {
         >
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-accent">Today’s recommendation</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-accent">Today’s Recommendation</p>
               <h2 className="mt-1 text-base sm:text-lg font-semibold text-text-primary">
               {forecastPlanTitle(plan.recommendation)}
               </h2>
@@ -1076,7 +1076,7 @@ export default function ForecastPage() {
               <span
                 data-testid="forecast-plan-current-soc"
                 className="shrink-0 rounded-full bg-bg-elevated px-3 py-1.5 text-xs text-text-secondary"
-                title="Current battery state of charge"
+                title="Current Battery State of Charge"
               >
                 Battery now{' '}
                 {Math.round(
@@ -1103,11 +1103,11 @@ export default function ForecastPage() {
                 <div className="mt-0.5 text-sm font-semibold text-text-primary">{plan.recommendation.window.start}–{plan.recommendation.window.end}</div>
               </div>
               <div className="rounded-lg bg-bg-elevated p-3">
-                <div className="text-[11px] text-text-secondary">Lowest battery</div>
+                <div className="text-[11px] text-text-secondary">Lowest Battery</div>
                 <div className="mt-0.5 text-sm font-semibold text-text-primary"><span data-testid="forecast-plan-trough">{Math.round(plan.recommendation.observed_min_soc_pct)}%</span> → <span data-testid="forecast-plan-after-min">{plan.recommendation.after_min_soc_pct.toFixed(0)}%</span></div>
               </div>
               <div className="rounded-lg bg-bg-elevated p-3">
-                <div className="text-[11px] text-text-secondary">Estimated cost</div>
+                <div className="text-[11px] text-text-secondary">Estimated Cost</div>
                 <div className="mt-0.5 text-sm font-semibold text-text-primary">£{(plan.recommendation.kwh * plan.recommendation.window.rate).toFixed(2)}</div>
               </div>
             </div>
@@ -1135,10 +1135,10 @@ export default function ForecastPage() {
                 onClick={() => void handleApply()}
                 className="px-3 py-1.5 rounded-md bg-accent text-accent-on text-sm font-medium hover:opacity-90 disabled:opacity-50"
               >
-                {applyState === 'idle' && 'Apply — schedule charge slot'}
+                {applyState === 'idle' && 'Apply — Schedule Charge Slot'}
                 {applyState === 'sending' && 'Applying…'}
                 {applyState === 'done' && currentPlanWasApplied && 'Applied ✓'}
-                {applyState === 'done' && !currentPlanWasApplied && 'Apply — schedule charge slot'}
+                {applyState === 'done' && !currentPlanWasApplied && 'Apply — Schedule Charge Slot'}
                 {applyState === 'error' && 'Retry Apply'}
               </button>
               {applyError && (
@@ -1150,7 +1150,7 @@ export default function ForecastPage() {
           )}
           <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-3">
             <div>
-              <div className="text-xs font-medium text-text-primary">Automatic planning</div>
+              <div className="text-xs font-medium text-text-primary">Automatic Planning</div>
               <div className="mt-0.5 text-[11px] text-text-secondary" data-testid="forecast-auto-apply-summary">
                 {planAutoHandling
                   ? planAutoApply && plan.recommendation.kind === 'charge'
@@ -1171,7 +1171,7 @@ export default function ForecastPage() {
           </div>
           <details className="group rounded-lg bg-bg-elevated/50">
             <summary className="cursor-pointer list-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs font-medium text-text-primary">
-              <span>Plan settings</span>
+              <span>Plan Settings</span>
               <span aria-hidden className="text-text-secondary transition-transform group-open:rotate-180">⌄</span>
             </summary>
             <div className="border-t border-white/10 px-3 pb-3">
@@ -1193,9 +1193,9 @@ export default function ForecastPage() {
                 className="bg-bg-surface text-text-primary rounded-lg px-3 py-1.5 text-sm border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
                 data-testid="forecast-plan-strategy"
               >
-                <option value="min_soc">Keep a minimum</option>
-                <option value="hold_window">Hold through the cheap window</option>
-                <option value="cheapest">Cheapest overall</option>
+                <option value="min_soc">Keep a Minimum</option>
+                <option value="hold_window">Hold Through the Cheap Window</option>
+                <option value="cheapest">Cheapest Overall</option>
               </select>
               {planStrategyError && (
                 <span data-testid="forecast-plan-strategy-error" className="text-xs text-red-400">
@@ -1280,7 +1280,7 @@ export default function ForecastPage() {
                 className="h-5 w-5 accent-accent"
                 data-testid="forecast-auto-apply-toggle"
               />
-              <span className="text-text-secondary text-xs font-sans">every day</span>
+              <span className="text-text-secondary text-xs font-sans">Every Day</span>
               <input
                 id="forecast-auto-apply-lead"
                 type="number"
@@ -1448,10 +1448,10 @@ export default function ForecastPage() {
         <section
           data-testid="forecast-export-card"
           className="order-2 bg-bg-surface rounded-xl border border-accent/20 p-4 sm:p-5 flex flex-col gap-3 shadow-sm"
-          aria-label="Export opportunity"
+          aria-label="Export Opportunity"
         >
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-accent">Export opportunity</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-accent">Export Opportunity</p>
             <h3 className="mt-1 text-base sm:text-lg font-semibold text-text-primary">
               {forecastExportTitle(plan.export)}
             </h3>
@@ -1466,11 +1466,11 @@ export default function ForecastPage() {
               <div data-testid="forecast-export-window" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.export.window.start}–{plan.export.window.end}</div>
             </div>
             <div className="rounded-lg bg-bg-elevated p-3">
-              <div className="text-[11px] text-text-secondary">Est. earnings</div>
+              <div className="text-[11px] text-text-secondary">Est. Earnings</div>
               <div data-testid="forecast-export-earning" className="mt-0.5 text-sm font-semibold text-text-primary">£{plan.export.earning.toFixed(2)}</div>
             </div>
             <div className="rounded-lg bg-bg-elevated p-3">
-              <div className="text-[11px] text-text-secondary">Battery floor held</div>
+              <div className="text-[11px] text-text-secondary">Battery Floor Held</div>
               <div data-testid="forecast-export-floor" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.export.after_min_soc_pct.toFixed(0)}%</div>
             </div>
           </div>
@@ -1481,7 +1481,7 @@ export default function ForecastPage() {
       <div className="order-3 flex flex-col gap-3 sm:gap-4">
         <div
           role="tablist"
-          aria-label="Forecast chart"
+          aria-label="Forecast Chart"
           className="grid grid-cols-3 rounded-lg bg-bg-surface p-1"
           onKeyDown={(e) => {
             // WAI-ARIA tabs keyboard pattern: Arrow keys select and focus
@@ -1525,11 +1525,11 @@ export default function ForecastPage() {
         {activeChart !== 'consumption' && (
           <div
             role="group"
-            aria-label="Show past"
+            aria-label="Show Past"
             data-testid="forecast-past-range"
             className="flex flex-wrap items-center gap-2"
           >
-            <span className="text-xs font-medium text-text-secondary">Show past</span>
+            <span className="text-xs font-medium text-text-secondary">Show Past</span>
             <div className="inline-flex rounded-lg bg-bg-surface p-1">
               {PAST_RANGES.map(({ key, label }) => (
                 <button
@@ -1568,7 +1568,7 @@ export default function ForecastPage() {
         aria-hidden={activeChart !== 'solar'}
       >
       <ChartCard
-        title="Expected solar generation · next 72 hours"
+        title="Expected Solar Generation · Next 72 Hours"
         footer={
           hasPastSolar || hasPastActualSolar ? (
             <>
@@ -1671,7 +1671,7 @@ export default function ForecastPage() {
                   strokeWidth={2}
                   strokeDasharray="6 4"
                   dot={false}
-                  name="Forecast (past)"
+                  name="Forecast (Past)"
                   connectNulls
                   isAnimationActive={false}
                 />
@@ -1726,7 +1726,7 @@ export default function ForecastPage() {
         className={activeChart === 'consumption' ? '' : 'hidden'}
         aria-hidden={activeChart !== 'consumption'}
       >
-      <ChartCard title="Expected home use · next 72 hours">
+      <ChartCard title="Expected Home Use · Next 72 Hours">
         {consumptionEmpty || consumptionChart.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-text-secondary">
             Not enough history yet.
@@ -1778,7 +1778,7 @@ export default function ForecastPage() {
                 stroke="none"
                 fill="#38bdf8"
                 fillOpacity={0.15}
-                name="Weekday low estimate"
+                name="Weekday Low Estimate"
                 legendType="none"
               />
               <Area
@@ -1787,7 +1787,7 @@ export default function ForecastPage() {
                 stroke="none"
                 fill="#38bdf8"
                 fillOpacity={0.15}
-                name="Weekday high estimate"
+                name="Weekday High Estimate"
                 legendType="none"
               />
               <Area
@@ -1796,7 +1796,7 @@ export default function ForecastPage() {
                 stroke="none"
                 fill="#a78bfa"
                 fillOpacity={0.15}
-                name="Weekend low estimate"
+                name="Weekend Low Estimate"
                 legendType="none"
               />
               <Area
@@ -1805,7 +1805,7 @@ export default function ForecastPage() {
                 stroke="none"
                 fill="#a78bfa"
                 fillOpacity={0.15}
-                name="Weekend high estimate"
+                name="Weekend High Estimate"
                 legendType="none"
               />
               <Line
@@ -1814,7 +1814,7 @@ export default function ForecastPage() {
                 stroke="#38bdf8"
                 strokeWidth={2}
                 dot={false}
-                name="Weekday median"
+                name="Weekday Median"
               />
               <Line
                 type="monotone"
@@ -1822,7 +1822,7 @@ export default function ForecastPage() {
                 stroke="#a78bfa"
                 strokeWidth={2}
                 dot={false}
-                name="Weekend median"
+                name="Weekend Median"
               />
               <Legend />
             </ComposedChart>
@@ -1839,7 +1839,7 @@ export default function ForecastPage() {
         aria-hidden={activeChart !== 'battery'}
       >
       <ChartCard
-        title="Battery projection · next 72 hours"
+        title="Battery Projection · Next 72 Hours"
         legend={
           batteryRows.length > 0 ? (
             <LineToggleLegend
@@ -2028,7 +2028,7 @@ export default function ForecastPage() {
                   strokeWidth={2}
                   strokeDasharray="6 4"
                   dot={false}
-                  name="Planned (past)"
+                  name="Planned (Past)"
                   isAnimationActive={false}
                 />
               )}
@@ -2051,7 +2051,7 @@ export default function ForecastPage() {
                   stroke="#34d399"
                   strokeWidth={2}
                   dot={false}
-                  name="If solar only"
+                  name="If Solar Only"
                   isAnimationActive={false}
                 />
               )}
@@ -2063,7 +2063,7 @@ export default function ForecastPage() {
                   strokeWidth={2}
                   strokeDasharray="6 4"
                   dot={false}
-                  name="If charge enacted"
+                  name="If Charge Enacted"
                   connectNulls
                   isAnimationActive={false}
                 />
@@ -2076,7 +2076,7 @@ export default function ForecastPage() {
                   strokeWidth={2}
                   strokeDasharray="2 4"
                   dot={false}
-                  name="With current schedule"
+                  name="With Current Schedule"
                   connectNulls
                   isAnimationActive={false}
                 />
@@ -2089,10 +2089,10 @@ export default function ForecastPage() {
 
       {past && activeChart !== 'consumption' && (
         <section
-          aria-label="Past planner decisions"
+          aria-label="Past Planner Decisions"
           className="bg-bg-surface rounded-lg p-3 sm:p-4 flex flex-col gap-2"
         >
-          <h2 className="text-sm font-semibold text-text-primary">Past planner decisions</h2>
+          <h2 className="text-sm font-semibold text-text-primary">Past Planner Decisions</h2>
           {past.errors.length > 0 && (
             <p
               data-testid="forecast-past-error"

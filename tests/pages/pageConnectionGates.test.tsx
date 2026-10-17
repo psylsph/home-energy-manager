@@ -179,7 +179,7 @@ describe.each([
       // No placeholder copy when the session is healthy.
       expect(screen.queryByText(/Connection lost/i)).toBeNull();
       expect(screen.queryByText(/Disconnected/i)).toBeNull();
-      expect(screen.queryByText(/Waiting for data/i)).toBeNull();
+      expect(screen.queryByText(/Waiting for Data/i)).toBeNull();
 
       // And the page's own body is present.
       expect(

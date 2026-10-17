@@ -109,7 +109,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
       render(<SettingsPage />);
 
       const input = await screen.findByLabelText(
-        /Import Standing Charge in pence per day/i,
+        /Import Standing Charge in Pence Per Day/i,
       );
       expect(input).toBeDefined();
       // It should be a number input with sensible step / min attrs.
@@ -122,7 +122,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
       // exact value once settings load.
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import Standing Charge in pence per day/i,
+        /Import Standing Charge in Pence Per Day/i,
       );
       await waitFor(() => {
         expect((input as HTMLInputElement).value).toBe('54.86');
@@ -174,7 +174,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
     it('Save Tariffs posts the Standing Charge in pence/day', async () => {
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import Standing Charge in pence per day/i,
+        /Import Standing Charge in Pence Per Day/i,
       );
 
       // Edit to a fresh value and click Save Tariffs.
@@ -199,7 +199,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
       // documented "no Standing Charge" sentinel.
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import Standing Charge in pence per day/i,
+        /Import Standing Charge in Pence Per Day/i,
       );
       fireEvent.change(input, { target: { value: '' } });
       const saveButton = await screen.findByRole('button', { name: /Save Tariffs/i });
@@ -219,7 +219,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
       // serialise into settings.json as the literal string "NaN").
       render(<SettingsPage />);
       const input = await screen.findByLabelText(
-        /Import Standing Charge in pence per day/i,
+        /Import Standing Charge in Pence Per Day/i,
       );
       fireEvent.change(input, { target: { value: 'abc' } });
       const saveButton = await screen.findByRole('button', { name: /Save Tariffs/i });

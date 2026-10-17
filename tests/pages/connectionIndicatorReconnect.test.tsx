@@ -107,13 +107,13 @@ describe('<ConnectionIndicator/> — reconnect control', () => {
     expect(screen.getByRole('button', RECONNECT_BTN)).toBeDefined();
   });
 
-  it('hides the "Reconnect requested" notice until a reconnect is triggered', () => {
+  it('hides the "Reconnect Requested" notice until a reconnect is triggered', () => {
     seedConnectedStale('192.168.1.42:8899');
     render(<ConnectionIndicator />);
-    expect(screen.queryByTitle('Reconnect requested')).toBeNull();
+    expect(screen.queryByTitle('Reconnect Requested')).toBeNull();
   });
 
-  it('shows the "Reconnect requested" notice with a timestamp after a click', async () => {
+  it('shows the "Reconnect Requested" notice with a timestamp after a click', async () => {
     useInverterStore.setState({
       connectionState: 'reconnecting',
       connectedHost: '192.168.1.42:8899',
@@ -128,7 +128,7 @@ describe('<ConnectionIndicator/> — reconnect control', () => {
     // The notice reads the shared store timestamp stamped by the hook. It
     // carries the ↻ glyph and a HH:MM:SS clock so the user can see the click
     // registered even though the connection state itself doesn't change.
-    const notice = screen.getByTitle('Reconnect requested');
+    const notice = screen.getByTitle('Reconnect Requested');
     expect(notice.textContent ?? '').toMatch(/↻\s*\d{1,2}:\d{2}:\d{2}/);
   });
 

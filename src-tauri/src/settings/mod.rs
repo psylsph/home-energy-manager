@@ -1486,9 +1486,6 @@ pub struct Settings {
     pub check_for_updates: bool,
 
     // -- Octopus Energy customer consumption (issue #212) --
-    /// Opt-in gate for authenticated Octopus account consumption sync.
-    #[serde(default)]
-    pub octopus_enabled: bool,
     /// Octopus customer API key. Never returned by the settings API or logged.
     #[serde(default)]
     pub octopus_api_key: String,
@@ -1503,6 +1500,10 @@ pub struct Settings {
     /// costs are only calculated when the user explicitly selects kWh.
     #[serde(default = "default_octopus_gas_unit")]
     pub octopus_gas_unit: String,
+    /// Whether the household has gas. Switched off, HEM stops fetching gas
+    /// readings and every gas figure, chart and export column is hidden.
+    #[serde(default = "default_true")]
+    pub octopus_gas_enabled: bool,
     /// Economy 7 night-rate window used to allocate aggregate half-hourly
     /// consumption between E-2R day and night prices. Europe/London clock.
     #[serde(default = "default_octopus_economy7_start")]
@@ -1621,6 +1622,34 @@ pub struct Settings {
     /// maximum-power export would never be repaired.
     #[serde(default)]
     pub timed_export_stop_pending: bool,
+    /// Booked one-off exports ("Export Once"): dated windows applied to a
+    /// user-picked Timed Export slot shortly before they start and
+    /// reverted when they end. See `inverter::export_once`.
+    #[serde(default)]
+    pub export_once_events: Vec<crate::inverter::export_once::ExportOnceEvent>,
+    /// Octopus Saving Sessions: off, or check for joined sessions and alert.
+    #[serde(default)]
+    pub octopus_sessions_mode: crate::octopus_sessions::SessionsMode,
+    /// Saving Session ids already announced / reminded about, so a restart
+    /// or a retry never repeats an alert.
+    #[serde(default)]
+    pub octopus_sessions_announced: Vec<i64>,
+    #[serde(default)]
+    pub octopus_sessions_reminded: Vec<i64>,
+    /// Discharge slot used for Saving Session exports in "Activate export"
+    /// mode. It is borrowed for the session and put back afterwards.
+    #[serde(default = "default_sessions_export_slot")]
+    pub octopus_sessions_export_slot: u8,
+    /// Battery level (%) the export stops at.
+    #[serde(default = "default_sessions_export_floor_soc")]
+    pub octopus_sessions_export_floor_soc: u8,
+    /// Sessions the user chose not to export for.
+    #[serde(default)]
+    pub octopus_sessions_skipped: Vec<i64>,
+    /// Sessions already turned into a one-off export (so one is never booked
+    /// twice, and one the user cancelled by hand stays cancelled).
+    #[serde(default)]
+    pub octopus_sessions_booked: Vec<i64>,
 
     // -- Solar array capacities (issue #110) --
     /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
@@ -1720,6 +1749,14 @@ fn default_check_for_updates() -> bool {
 /// inter-write gap.
 fn default_write_pacing_ms() -> u64 {
     1500
+}
+
+fn default_sessions_export_slot() -> u8 {
+    1
+}
+
+fn default_sessions_export_floor_soc() -> u8 {
+    20
 }
 
 fn default_octopus_gas_unit() -> String {
@@ -2002,11 +2039,11 @@ impl Default for Settings {
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
             check_for_updates: default_check_for_updates(),
-            octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
             octopus_api_base_url: String::new(),
             octopus_gas_unit: default_octopus_gas_unit(),
+            octopus_gas_enabled: true,
             octopus_economy7_start: default_octopus_economy7_start(),
             octopus_economy7_end: default_octopus_economy7_end(),
             disable_auto_discovery: true,
@@ -2025,6 +2062,14 @@ impl Default for Settings {
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,
             timed_export_stop_pending: false,
+            export_once_events: Vec::new(),
+            octopus_sessions_mode: crate::octopus_sessions::SessionsMode::Off,
+            octopus_sessions_announced: Vec::new(),
+            octopus_sessions_reminded: Vec::new(),
+            octopus_sessions_export_slot: default_sessions_export_slot(),
+            octopus_sessions_export_floor_soc: default_sessions_export_floor_soc(),
+            octopus_sessions_skipped: Vec::new(),
+            octopus_sessions_booked: Vec::new(),
             // Issue #110: solar array capacities default to unset so a
             // fresh install (and every existing install on upgrade) sees
             // no behaviour change until the user opts in via Settings.
@@ -2524,8 +2569,7 @@ mod tests {
         assert_eq!(s.pv1_rated_kw, 0.0);
         assert_eq!(s.pv2_rated_kw, 0.0);
         assert!(s.solar_arrays.is_empty());
-        // Issue #212 is strictly opt-in and starts with no supplier credentials.
-        assert!(!s.octopus_enabled);
+        // Issue #212 starts with no supplier credentials (which is also "off").
         assert!(s.octopus_api_key.is_empty());
         assert!(s.octopus_account_number.is_empty());
         assert_eq!(s.octopus_gas_unit, "unknown");
@@ -2656,11 +2700,11 @@ mod tests {
             },
             forecast_charge_efficiency: 0.88,
             forecast_discharge_efficiency: 0.93,
-            octopus_enabled: true,
             octopus_api_key: "sk_test".to_string(),
             octopus_account_number: "A-1234ABCD".to_string(),
             octopus_api_base_url: String::new(),
             octopus_gas_unit: "kwh".to_string(),
+            octopus_gas_enabled: true,
             octopus_economy7_start: "00:30".to_string(),
             octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
@@ -2696,6 +2740,14 @@ mod tests {
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,
             timed_export_stop_pending: false,
+            export_once_events: Vec::new(),
+            octopus_sessions_mode: crate::octopus_sessions::SessionsMode::Off,
+            octopus_sessions_announced: Vec::new(),
+            octopus_sessions_reminded: Vec::new(),
+            octopus_sessions_export_slot: default_sessions_export_slot(),
+            octopus_sessions_export_floor_soc: default_sessions_export_floor_soc(),
+            octopus_sessions_skipped: Vec::new(),
+            octopus_sessions_booked: Vec::new(),
             // Issue #110: solar array capacities must round-trip exactly.
             pv1_rated_kw: 6.0,
             pv2_rated_kw: 4.2,
@@ -2927,6 +2979,44 @@ mod tests {
             Settings::default().forecast_plan_strategy,
             PlanStrategy::MinSoc
         );
+    }
+
+    /// The Octopus on/off switch was removed: saved credentials alone switch
+    /// the integration on. A settings file written while the switch existed
+    /// (on or off) must still load, keep its credentials, and drop the flag.
+    #[test]
+    fn legacy_octopus_enabled_flag_is_ignored_and_credentials_survive() {
+        for flag in ["true", "false"] {
+            let legacy = format!(
+                r#"{{"host": "192.168.1.50", "port": 8899, "serial": "",
+                "poll_interval": 60, "auto_connect": true, "octopus_enabled": {flag},
+                "octopus_account_number": "A-1234ABCD", "octopus_api_key": "sk_live_x"}}"#
+            );
+            let decoded: Settings = serde_json::from_str(&legacy).unwrap();
+            assert_eq!(decoded.octopus_account_number, "A-1234ABCD");
+            assert_eq!(decoded.octopus_api_key, "sk_live_x");
+            let rewritten = serde_json::to_value(&decoded).unwrap();
+            assert!(rewritten.get("octopus_enabled").is_none(), "flag {flag}");
+        }
+    }
+
+    /// Hiding gas is opt-in per household: files written before the setting
+    /// existed keep showing gas, and an explicit "no gas" survives a save.
+    #[test]
+    fn octopus_gas_defaults_on_and_round_trips() {
+        let legacy = r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
+            "poll_interval": 60, "auto_connect": true}"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.octopus_gas_enabled);
+        assert!(Settings::default().octopus_gas_enabled);
+
+        let electricity_only = Settings {
+            octopus_gas_enabled: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&electricity_only).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(!back.octopus_gas_enabled);
     }
 
     #[test]
@@ -3362,11 +3452,11 @@ mod tests {
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
-            octopus_enabled: false,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
             octopus_api_base_url: String::new(),
             octopus_gas_unit: "unknown".to_string(),
+            octopus_gas_enabled: true,
             octopus_economy7_start: "00:30".to_string(),
             octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
@@ -3385,6 +3475,14 @@ mod tests {
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,
             timed_export_stop_pending: false,
+            export_once_events: Vec::new(),
+            octopus_sessions_mode: crate::octopus_sessions::SessionsMode::Off,
+            octopus_sessions_announced: Vec::new(),
+            octopus_sessions_reminded: Vec::new(),
+            octopus_sessions_export_slot: default_sessions_export_slot(),
+            octopus_sessions_export_floor_soc: default_sessions_export_floor_soc(),
+            octopus_sessions_skipped: Vec::new(),
+            octopus_sessions_booked: Vec::new(),
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),

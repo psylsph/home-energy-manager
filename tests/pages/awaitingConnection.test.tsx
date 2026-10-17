@@ -34,7 +34,7 @@ describe('awaitingConnectionMessage() — word by connection state', () => {
   it.each([
     ['reconnecting', 'Connection lost — reconnecting…'],
     ['disconnected', 'Disconnected — will retry automatically'],
-    ['connected', 'Waiting for data…'],
+    ['connected', 'Waiting for Data…'],
   ] as const)('returns the canonical string for %s', (state, expected) => {
     expect(awaitingConnectionMessage(state as ConnectionState)).toBe(expected);
   });
@@ -74,15 +74,15 @@ describe('<AwaitingConnection/>', () => {
 
   it('renders the Retry button only when showRetry is set', () => {
     const { rerender } = render(<AwaitingConnection connectionState="reconnecting" />);
-    expect(screen.queryByRole('button', { name: /Retry now/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Retry Now/i })).toBeNull();
 
     rerender(<AwaitingConnection connectionState="reconnecting" showRetry />);
-    expect(screen.getByRole('button', { name: /Retry now/i })).toBeDefined();
+    expect(screen.getByRole('button', { name: /Retry Now/i })).toBeDefined();
   });
 
   it('POSTs to /api/reconnect and flips to the Reconnecting… label on click', async () => {
     render(<AwaitingConnection connectionState="reconnecting" showRetry />);
-    fireEvent.click(screen.getByRole('button', { name: /Retry now/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Retry Now/i }));
 
     expect(apiMocks.apiPost).toHaveBeenCalledWith('/api/reconnect');
     expect(screen.getByText(/Reconnecting…/)).toBeDefined();
@@ -93,7 +93,7 @@ describe('<AwaitingConnection/>', () => {
     render(<AwaitingConnection connectionState="reconnecting" showRetry />);
 
     expect(() =>
-      fireEvent.click(screen.getByRole('button', { name: /Retry now/i })),
+      fireEvent.click(screen.getByRole('button', { name: /Retry Now/i })),
     ).not.toThrow();
   });
 

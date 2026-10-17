@@ -173,7 +173,7 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
 
     it('shows Waiting for data when no snapshot', async () => {
       render(<PowerPage />);
-      const waiting = await screen.findAllByText('Waiting for data');
+      const waiting = await screen.findAllByText('Waiting for Data');
       expect(waiting.length).toBeGreaterThan(0);
     });
 
@@ -275,7 +275,7 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
       useInverterStore.setState({ chartRange: 'today' });
       render(<PowerPage />);
 
-      const picker = screen.getByLabelText('Select period date') as HTMLInputElement;
+      const picker = screen.getByLabelText('Select Period Date') as HTMLInputElement;
       const blurSpy = vi.spyOn(picker, 'blur');
       fireEvent.click(screen.getByRole('button', { name: /Older/i }));
       expect(picker.value).toBe('2026-01-14');
@@ -291,13 +291,13 @@ describe('<PowerPage/> — stats, ranges, navigation, states', () => {
       // Never-resolving fetchHistory keeps the page in loading state.
       fetchHistoryMock.mockImplementation(() => new Promise(() => {}));
       render(<PowerPage />);
-      expect(await screen.findByText('Loading power history…')).toBeDefined();
+      expect(await screen.findByText('Loading Power History…')).toBeDefined();
     });
 
     it('shows empty state when no data is returned', async () => {
       fetchHistoryMock.mockResolvedValue({});
       render(<PowerPage />);
-      expect(await screen.findByText('No power history for this range')).toBeDefined();
+      expect(await screen.findByText('No Power History for This Range')).toBeDefined();
     });
 
     it('shows error state when fetchHistory rejects', async () => {

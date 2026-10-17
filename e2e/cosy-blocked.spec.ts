@@ -286,7 +286,7 @@ test.describe.serial('Cosy held back by another owner', () => {
     // The app-wide banner is on every page.
     for (const route of ['/#/', '/#/battery', '/#/control']) {
       await page.goto(route);
-      const banner = page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' });
+      const banner = page.getByRole('alert').filter({ hasText: 'Cosy Charging Is Being Held Back' });
       await expect(banner).toBeVisible({ timeout: 15_000 });
       await expect(banner).toContainText('Force Charge or Force Discharge');
     }
@@ -300,7 +300,7 @@ test.describe.serial('Cosy held back by another owner', () => {
     // The Inverter page marks the Cosy row.
     await page.goto('/#/inverter');
     const cosyRow = page.locator('span', { hasText: /^Cosy Mode$/ }).locator('xpath=following-sibling::span[1]');
-    await expect(cosyRow).toHaveText('On hold', { timeout: 15_000 });
+    await expect(cosyRow).toHaveText('On Hold', { timeout: 15_000 });
 
     // Exactly one notification, however many polls the block lasts.
     await expect.poll(() => cosyAlerts(ntfy).length, { timeout: 30_000 }).toBeGreaterThanOrEqual(1);
@@ -329,7 +329,7 @@ test.describe.serial('Cosy held back by another owner', () => {
     );
     await page.goto('/#/control');
     await expect(
-      page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' }),
+      page.getByRole('alert').filter({ hasText: 'Cosy Charging Is Being Held Back' }),
     ).toBeVisible({ timeout: 15_000 });
 
     await drainModbusWrites();
@@ -342,7 +342,7 @@ test.describe.serial('Cosy held back by another owner', () => {
       'block clears once the Force action stops',
     );
     await expect(
-      page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' }),
+      page.getByRole('alert').filter({ hasText: 'Cosy Charging Is Being Held Back' }),
     ).toHaveCount(0, { timeout: 15_000 });
     await expect(page.getByText('Cosy is on hold')).toHaveCount(0);
 
@@ -375,7 +375,7 @@ test.describe.serial('Cosy held back by another owner', () => {
       page.getByRole('status').filter({ hasText: 'Cosy is on hold' }),
     ).toBeVisible({ timeout: 15_000 });
     await expect(
-      page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' }),
+      page.getByRole('alert').filter({ hasText: 'Cosy Charging Is Being Held Back' }),
     ).toHaveCount(0);
 
     await waitForPolls(baseUrl, 3);
@@ -415,7 +415,7 @@ test.describe.serial('Cosy held back by another owner', () => {
       page.getByRole('status').filter({ hasText: 'Cosy is on hold' }),
     ).toBeVisible({ timeout: 15_000 });
     await expect(
-      page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' }),
+      page.getByRole('alert').filter({ hasText: 'Cosy Charging Is Being Held Back' }),
     ).toHaveCount(0);
     expect(cosyAlerts(ntfy)).toHaveLength(0);
   });
@@ -435,7 +435,7 @@ test.describe.serial('Cosy held back by another owner', () => {
     );
     await page.goto('/#/status');
     await expect(
-      page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' }),
+      page.getByRole('alert').filter({ hasText: 'Cosy Charging Is Being Held Back' }),
     ).toBeVisible({ timeout: 15_000 });
     await expect.poll(() => cosyAlerts(ntfy).length, { timeout: 30_000 }).toBe(1);
     expect(cosyAlerts(ntfy)[0]).toMatch(/about to start/);
@@ -452,7 +452,7 @@ test.describe.serial('Cosy held back by another owner', () => {
     await waitForSnapshot(baseUrl, (s) => s.cosy_slot_at_risk === true, 'slot at risk');
     await page.goto('/#/battery');
     await expect(
-      page.getByRole('alert').filter({ hasText: 'Cosy charging is being held back' }),
+      page.getByRole('alert').filter({ hasText: 'Cosy Charging Is Being Held Back' }),
     ).toBeVisible({ timeout: 15_000 });
     await waitForPolls(baseUrl, 3);
     expect(cosyAlerts(ntfy)).toHaveLength(0);
@@ -503,7 +503,7 @@ test.describe.serial('Cosy held back by another owner', () => {
 
       // No warning anywhere.
       await page.goto('/#/control');
-      await expect(page.getByText('Cosy charging is being held back')).toHaveCount(0);
+      await expect(page.getByText('Cosy Charging Is Being Held Back')).toHaveCount(0);
       await expect(page.getByText('Cosy is on hold')).toHaveCount(0);
       expect(cosyAlerts(ntfy)).toHaveLength(0);
     });
@@ -535,6 +535,6 @@ test.describe.serial('Cosy held back by another owner', () => {
     ).toBeVisible({ timeout: 15_000 });
     await page.goto('/#/inverter');
     const agileRow = page.locator('span', { hasText: /^Agile Mode$/ }).locator('xpath=following-sibling::span[1]');
-    await expect(agileRow).toHaveText('On hold', { timeout: 15_000 });
+    await expect(agileRow).toHaveText('On Hold', { timeout: 15_000 });
   });
 });

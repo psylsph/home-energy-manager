@@ -11,6 +11,7 @@ pub mod daily_report;
 pub mod decoder;
 pub mod discovery;
 pub mod encoder;
+pub mod export_once;
 pub(crate) mod forecast_plan;
 pub mod model;
 pub mod poll;

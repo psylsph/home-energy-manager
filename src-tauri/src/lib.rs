@@ -9,6 +9,7 @@ pub mod history;
 pub mod inverter;
 pub mod modbus;
 pub mod octopus;
+pub mod octopus_sessions;
 pub mod pi_render;
 pub mod server;
 pub mod settings;
@@ -631,10 +632,25 @@ pub fn run() {
                 octopus::run_octopus_loop(octopus_state).await;
             });
 
+            // Opt-in Octopus Saving Sessions check (off unless enabled on the
+            // Octopus page).
+            let sessions_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                octopus_sessions::run_sessions_loop(sessions_state).await;
+            });
+
             // Spawn the "new version available" checker (GitHub Releases).
             let update_state = state.clone();
             tauri::async_runtime::spawn(async move {
                 update::run_update_loop(update_state).await;
+            });
+
+            // One-off Timed Export: applies and reverts booked "Export Once"
+            // windows. A separate task, not part of the poll loop, because
+            // it waits on the poll loop to drain its writes.
+            let export_once_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                inverter::export_once::run_export_once_loop(export_once_state).await;
             });
 
             // Reconcile and hydrate durable external-control ownership before
@@ -999,10 +1015,23 @@ pub fn run_headless(args: &[String]) {
             octopus::run_octopus_loop(octopus_state).await;
         });
 
+        // Opt-in Octopus Saving Sessions check.
+        let sessions_state = state.clone();
+        tokio::spawn(async move {
+            octopus_sessions::run_sessions_loop(sessions_state).await;
+        });
+
         // Spawn the "new version available" checker (GitHub Releases).
         let update_state = state.clone();
         tokio::spawn(async move {
             update::run_update_loop(update_state).await;
+        });
+
+        // One-off Timed Export (see the desktop-mode spawn for why this is
+        // its own task).
+        let export_once_state = state.clone();
+        tokio::spawn(async move {
+            inverter::export_once::run_export_once_loop(export_once_state).await;
         });
 
         // Start the HTTP server

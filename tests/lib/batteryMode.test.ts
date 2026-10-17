@@ -102,21 +102,21 @@ describe('deriveBatteryModeRows', () => {
   it('reports every mechanism as off when all registers are clear', () => {
     const rows = deriveBatteryModeRows(makeSnapshot());
     expect(rows.every((r) => r.state === 'off')).toBe(true);
-    expect(rows.every((r) => r.description === 'off')).toBe(true);
+    expect(rows.every((r) => r.description === 'Off')).toBe(true);
   });
 
   it('reports Eco as on when battery_power_mode is 1', () => {
     const rows = deriveBatteryModeRows(makeSnapshot({ battery_power_mode: 1 }));
     const eco = findRow(rows, 'eco');
     expect(eco.state).toBe('active');
-    expect(eco.description).toBe('on');
+    expect(eco.description).toBe('On');
   });
 
   it('reports Eco as off when battery_power_mode is 0', () => {
     const rows = deriveBatteryModeRows(makeSnapshot({ battery_power_mode: 0 }));
     const eco = findRow(rows, 'eco');
     expect(eco.state).toBe('off');
-    expect(eco.description).toBe('off');
+    expect(eco.description).toBe('Off');
   });
 
   it('reports Timed Charge as armed when enable_charge is set but outside the slot', () => {
@@ -129,7 +129,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_charge');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('reports Timed Charge as active when in-window and charging', () => {
@@ -144,7 +144,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_charge');
     expect(r.state).toBe('active');
-    expect(r.description).toBe('armed · charging now');
+    expect(r.description).toBe('Armed · Charging Now');
   });
 
   it('stays armed when in-window but not actually charging', () => {
@@ -158,7 +158,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_charge');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('stays armed when charging but outside the charge slot', () => {
@@ -172,7 +172,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_charge');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('reports Timed Export as armed when enable_discharge is set but outside the slot', () => {
@@ -185,7 +185,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_export');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('reports Timed Export as active when in-window and discharging', () => {
@@ -200,7 +200,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_export');
     expect(r.state).toBe('active');
-    expect(r.description).toBe('armed · exporting now');
+    expect(r.description).toBe('Armed · Exporting Now');
   });
 
   it('stays armed when in export slot but not actually discharging', () => {
@@ -214,7 +214,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_export');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('stays armed when discharging but outside the export slot', () => {
@@ -228,7 +228,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_export');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('reports Timed Discharge as armed when pause mode is set but outside the visible window', () => {
@@ -241,7 +241,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_discharge');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('reports Timed Discharge as active when in the visible window and discharging', () => {
@@ -255,7 +255,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_discharge');
     expect(r.state).toBe('active');
-    expect(r.description).toBe('armed · covering demand now');
+    expect(r.description).toBe('Armed · Covering Demand Now');
   });
 
   it('stays armed when in the visible pause window but not discharging', () => {
@@ -269,7 +269,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_discharge');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('reports Timed Discharge as off for pause-charge or pause-both', () => {
@@ -282,7 +282,7 @@ describe('deriveBatteryModeRows', () => {
       );
       const r = findRow(rows, 'timed_discharge');
       expect(r.state).toBe('off');
-      expect(r.description).toBe('off');
+      expect(r.description).toBe('Off');
     }
   });
 
@@ -295,7 +295,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_discharge');
     expect(r.state).toBe('armed');
-    expect(r.description).toBe('armed');
+    expect(r.description).toBe('Armed');
   });
 
   it('handles the reporter case: Eco on + Timed Export active', () => {
@@ -313,13 +313,13 @@ describe('deriveBatteryModeRows', () => {
       key: 'eco',
       label: 'Eco',
       state: 'active',
-      description: 'on',
+      description: 'On',
     });
     expect(findRow(rows, 'timed_export')).toEqual({
       key: 'timed_export',
       label: 'Timed Export',
       state: 'active',
-      description: 'armed · exporting now',
+      description: 'Armed · Exporting Now',
     });
     expect(findRow(rows, 'timed_charge').state).toBe('off');
     expect(findRow(rows, 'timed_discharge').state).toBe('off');
@@ -356,7 +356,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_export');
     expect(r.state).toBe('active');
-    expect(r.description).toBe('armed · exporting now');
+    expect(r.description).toBe('Armed · Exporting Now');
   });
 
   it('treats an empty zero-length slot as inactive', () => {
@@ -435,7 +435,7 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_charge');
     expect(r.state).toBe('active');
-    expect(r.description).toBe('armed · charging now');
+    expect(r.description).toBe('Armed · Charging Now');
   });
 
   it('shows Timed Export as active during a slot-driven Agile expensive window', () => {
@@ -461,6 +461,6 @@ describe('deriveBatteryModeRows', () => {
     );
     const r = findRow(rows, 'timed_export');
     expect(r.state).toBe('active');
-    expect(r.description).toBe('armed · exporting now');
+    expect(r.description).toBe('Armed · Exporting Now');
   });
 });

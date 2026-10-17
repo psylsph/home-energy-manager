@@ -12,6 +12,7 @@ import {
   YAxis,
 } from 'recharts';
 import { apiGet, apiPost } from '../lib/api';
+import SavingSessionsPanel from '../components/SavingSessionsPanel';
 import {
   cumulativeOctopusSeries,
   mergeOctopusSeries,
@@ -41,6 +42,8 @@ interface OctopusStatus {
 interface StatusResponse {
   ok: boolean;
   configured: boolean;
+  /** False for an electricity-only household. Absent on older backends, which means gas is shown. */
+  gas_enabled?: boolean;
   data: OctopusStatus;
   bounds: [number, number] | null;
   gas_unit_note: string;
@@ -130,10 +133,10 @@ interface ComparisonResponse {
 }
 
 const RANGES: { key: OctopusRange; label: string }[] = [
-  { key: '7d', label: '7 days' },
-  { key: '30d', label: '30 days' },
-  { key: '6m', label: '6 months' },
-  { key: '1y', label: '1 year' },
+  { key: '7d', label: '7 Days' },
+  { key: '30d', label: '30 Days' },
+  { key: '6m', label: '6 Months' },
+  { key: '1y', label: '1 Year' },
   { key: 'all', label: 'All' },
 ];
 
@@ -266,12 +269,18 @@ export default function OctopusPage() {
     [billing, range],
   );
 
+  const gasEnabled = status?.gas_enabled !== false;
+  /** Missing half-hours that matter to this household. */
+  const missingIntervals = (day: ComparisonResponse['data']['days'][number]) =>
+    day.missing_import_intervals + day.missing_export_intervals + (gasEnabled ? day.missing_gas_intervals : 0);
+
   const exportData = (): OctopusExportData | null => {
     if (!billing || !comparison) return null;
     return {
       rangeLabel: RANGES.find((item) => item.key === range)?.label ?? range,
       generatedAt: new Date(),
       gasUnit: billing.gas_unit,
+      includeGas: gasEnabled,
       costPeriods: range === '7d' || range === '30d'
         ? billing.data.daily
         : billing.data.monthly,
@@ -360,7 +369,7 @@ export default function OctopusPage() {
               disabled={status?.data.syncing}
               className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-on-accent disabled:opacity-50"
             >
-              {status?.data.syncing ? 'Syncing…' : 'Sync now'}
+              {status?.data.syncing ? 'Syncing…' : 'Sync Now'}
             </button>
           </div>
         </div>
@@ -368,10 +377,10 @@ export default function OctopusPage() {
           <span>{status?.data.discovered_streams ?? 0} meter stream(s)</span>
           <span>
             {status?.data.last_sync_at
-              ? `Last sync ${new Date(status.data.last_sync_at).toLocaleString()}`
-              : 'Waiting for first sync'}
+              ? `Last Sync ${new Date(status.data.last_sync_at).toLocaleString()}`
+              : 'Waiting for First Sync'}
           </span>
-          <span>{status?.data.backfill_complete ? 'Full history imported' : 'Older history backfilling'}</span>
+          <span>{status?.data.backfill_complete ? 'Full History Imported' : 'Older History Backfilling'}</span>
         </div>
         {(error || status?.data.last_error) && (
           <div role="alert" className="mt-3 rounded-lg border border-red-500/30 bg-red-950/30 px-3 py-2 text-sm text-red-300">
@@ -383,6 +392,7 @@ export default function OctopusPage() {
             {exportMessage}
           </div>
         )}
+        <SavingSessionsPanel />
       </section>
 
       <div className="flex gap-1 overflow-x-auto rounded-xl bg-bg-surface p-2">
@@ -403,52 +413,56 @@ export default function OctopusPage() {
         ))}
       </div>
 
-      <section className="grid gap-3 sm:grid-cols-3" aria-label="Selected period totals">
+      <section className={`grid gap-3 ${gasEnabled ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`} aria-label="Selected Period Totals">
         <div className="rounded-xl bg-bg-surface p-4">
-          <div className="text-xs text-text-secondary">Electricity imported</div>
+          <div className="text-xs text-text-secondary">Electricity Imported</div>
           <div className="mt-1 text-2xl font-semibold text-red-400">{importTotal.toFixed(3)} kWh</div>
         </div>
         <div className="rounded-xl bg-bg-surface p-4">
-          <div className="text-xs text-text-secondary">Electricity exported</div>
+          <div className="text-xs text-text-secondary">Electricity Exported</div>
           <div className="mt-1 text-2xl font-semibold text-green-400">{exportTotal.toFixed(3)} kWh</div>
         </div>
-        <div className="rounded-xl bg-bg-surface p-4">
-          <div className="text-xs text-text-secondary">Gas</div>
-          <div className="mt-1 text-2xl font-semibold text-amber-400">{gasTotal.toFixed(3)}</div>
-          <div className="text-xs text-text-secondary">Octopus-reported units</div>
-        </div>
+        {gasEnabled && (
+          <div className="rounded-xl bg-bg-surface p-4">
+            <div className="text-xs text-text-secondary">Gas</div>
+            <div className="mt-1 text-2xl font-semibold text-amber-400">{gasTotal.toFixed(3)}</div>
+            <div className="text-xs text-text-secondary">Octopus-Reported Units</div>
+          </div>
+        )}
       </section>
 
       {billing && (
         <section className="rounded-xl bg-bg-surface p-4">
           <div>
-            <h3 className="font-medium text-text-primary">Estimated supplier costs</h3>
+            <h3 className="font-medium text-text-primary">Estimated Supplier Costs</h3>
             <p className="mt-1 text-xs text-text-secondary">
               VAT-inclusive historical Octopus rates and standing charges matched to each supplier reading. These are estimates rather than an Octopus bill.
             </p>
           </div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className={`mt-4 grid gap-3 sm:grid-cols-2 ${gasEnabled ? 'lg:grid-cols-4' : 'lg:grid-cols-3'}`}>
             <div className="rounded-lg bg-bg-elevated p-3">
-              <div className="text-xs text-text-secondary">Electricity import</div>
+              <div className="text-xs text-text-secondary">Electricity Import</div>
               <div className="mt-1 text-xl font-semibold text-red-400">{formatMoney(billing.data.totals.electricity_total_cost_gbp)}</div>
               <div className="text-xs text-text-secondary">
                 {formatMoney(billing.data.totals.electricity_energy_cost_gbp)} energy + {formatMoney(billing.data.totals.electricity_standing_cost_gbp)} standing
               </div>
             </div>
             <div className="rounded-lg bg-bg-elevated p-3">
-              <div className="text-xs text-text-secondary">Electricity export income</div>
+              <div className="text-xs text-text-secondary">Electricity Export Income</div>
               <div className="mt-1 text-xl font-semibold text-green-400">{formatMoney(billing.data.totals.export_income_gbp)}</div>
             </div>
-            <div className="rounded-lg bg-bg-elevated p-3">
-              <div className="text-xs text-text-secondary">Gas cost</div>
-              <div className="mt-1 text-xl font-semibold text-amber-400">{formatMoney(billing.data.totals.gas_total_cost_gbp)}</div>
-              {!billing.data.gas_cost_available && (
-                <div className="text-xs text-text-secondary">Choose kWh in Settings to calculate</div>
-              )}
-            </div>
+            {gasEnabled && (
+              <div className="rounded-lg bg-bg-elevated p-3">
+                <div className="text-xs text-text-secondary">Gas Cost</div>
+                <div className="mt-1 text-xl font-semibold text-amber-400">{formatMoney(billing.data.totals.gas_total_cost_gbp)}</div>
+                {!billing.data.gas_cost_available && (
+                  <div className="text-xs text-text-secondary">Choose kWh in Settings to Calculate</div>
+                )}
+              </div>
+            )}
             <div className="rounded-lg bg-bg-elevated p-3">
               <div className="text-xs text-text-secondary">
-                {billing.data.gas_cost_available ? 'Net supplier cost' : 'Net electricity cost'}
+                {gasEnabled && billing.data.gas_cost_available ? 'Net Supplier Cost' : 'Net Electricity Cost'}
               </div>
               <div className="mt-1 text-xl font-semibold text-text-primary">
                 {formatMoney(
@@ -470,13 +484,13 @@ export default function OctopusPage() {
 
       {comparison && (
         <section className="rounded-xl bg-bg-surface p-4">
-          <h3 className="font-medium text-text-primary">Octopus versus HEM</h3>
+          <h3 className="font-medium text-text-primary">Octopus Versus HEM</h3>
           <p className="mt-1 text-xs text-text-secondary">
             Daily supplier totals compared with the inverter’s daily counters. Difference is HEM minus Octopus; only days containing both readings contribute to the totals.
           </p>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <div className="rounded-lg bg-bg-elevated p-3">
-              <div className="text-xs text-text-secondary">Import difference</div>
+              <div className="text-xs text-text-secondary">Import Difference</div>
               <div className="mt-1 text-xl font-semibold text-text-primary">
                 {formatComparison(comparison.data.totals.import_difference_kwh)}
               </div>
@@ -485,7 +499,7 @@ export default function OctopusPage() {
               </div>
             </div>
             <div className="rounded-lg bg-bg-elevated p-3">
-              <div className="text-xs text-text-secondary">Export difference</div>
+              <div className="text-xs text-text-secondary">Export Difference</div>
               <div className="mt-1 text-xl font-semibold text-text-primary">
                 {formatComparison(comparison.data.totals.export_difference_kwh)}
               </div>
@@ -499,16 +513,16 @@ export default function OctopusPage() {
 
       {comparison && (
         <section className="rounded-xl bg-bg-surface p-4">
-          <h3 className="font-medium text-text-primary">Supplier data completeness</h3>
+          <h3 className="font-medium text-text-primary">Supplier Data Completeness</h3>
           <p className="mt-1 text-xs text-text-secondary">
             Expected half-hour slots are adjusted for the selected partial day, imported history, and UK daylight-saving transitions. Recent Octopus readings commonly arrive late.
           </p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <div className={`mt-4 grid gap-3 ${gasEnabled ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
             {([
-              ['Electricity import', comparison.data.import_stream_available, comparison.data.totals.import_intervals, comparison.data.totals.expected_import_intervals, comparison.data.totals.missing_import_intervals],
-              ['Electricity export', comparison.data.export_stream_available, comparison.data.totals.export_intervals, comparison.data.totals.expected_export_intervals, comparison.data.totals.missing_export_intervals],
+              ['Electricity Import', comparison.data.import_stream_available, comparison.data.totals.import_intervals, comparison.data.totals.expected_import_intervals, comparison.data.totals.missing_import_intervals],
+              ['Electricity Export', comparison.data.export_stream_available, comparison.data.totals.export_intervals, comparison.data.totals.expected_export_intervals, comparison.data.totals.missing_export_intervals],
               ['Gas', comparison.data.gas_stream_available, comparison.data.totals.gas_intervals, comparison.data.totals.expected_gas_intervals, comparison.data.totals.missing_gas_intervals],
-            ] as const).map(([label, available, actual, expected, missing]) => (
+            ] as const).filter(([label]) => gasEnabled || label !== 'Gas').map(([label, available, actual, expected, missing]) => (
               <div key={label} className="rounded-lg bg-bg-elevated p-3">
                 <div className="text-xs text-text-secondary">{label}</div>
                 {!available ? (
@@ -530,7 +544,7 @@ export default function OctopusPage() {
       )}
 
       <section className="rounded-xl bg-bg-surface p-4">
-        <h3 className="font-medium text-text-primary">Supplier costs</h3>
+        <h3 className="font-medium text-text-primary">Supplier Costs</h3>
         <p className="mb-3 mt-1 text-xs text-text-secondary">
           {range === '7d' || range === '30d' ? 'Daily' : 'Monthly'} VAT-inclusive estimated costs for the selected period.
         </p>
@@ -545,9 +559,11 @@ export default function OctopusPage() {
                 <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
                 <Tooltip {...costTooltipProps} formatter={(value) => formatMoney(Number(value))} />
                 <Legend />
-                <Line type="monotone" dataKey="electricity_import_cost" name="Electricity import" stroke="#ef4444" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
-                <Line type="monotone" dataKey="gas_cost" name="Gas" stroke="#f59e0b" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
-                <Line type="monotone" dataKey="net_cost" name="Net cost" stroke="#3b82f6" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
+                <Line type="monotone" dataKey="electricity_import_cost" name="Electricity Import" stroke="#ef4444" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
+                {gasEnabled && (
+                  <Line type="monotone" dataKey="gas_cost" name="Gas" stroke="#f59e0b" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
+                )}
+                <Line type="monotone" dataKey="net_cost" name="Net Cost" stroke="#3b82f6" strokeWidth={2} dot={costSeries.length < 40} connectNulls />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -555,7 +571,7 @@ export default function OctopusPage() {
       </section>
 
       <section className="rounded-xl bg-bg-surface p-4">
-        <h3 className="font-medium text-text-primary">Export income</h3>
+        <h3 className="font-medium text-text-primary">Export Income</h3>
         <p className="mb-3 mt-1 text-xs text-text-secondary">
           {range === '7d' || range === '30d' ? 'Daily' : 'Monthly'} estimated electricity export earnings.
         </p>
@@ -569,7 +585,7 @@ export default function OctopusPage() {
                 <XAxis tickLine={false} axisLine={false} dataKey="period" minTickGap={24} tickFormatter={(value) => range === '7d' || range === '30d' ? String(value).slice(5) : String(value)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
                 <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} tickFormatter={(value) => `£${Number(value).toFixed(0)}`} />
                 <Tooltip {...costTooltipProps} formatter={(value) => formatMoney(Number(value))} />
-                <Line type="monotone" dataKey="export_income" name="Export income" stroke="#22c55e" strokeWidth={2} dot={costSeries.length < 40} />
+                <Line type="monotone" dataKey="export_income" name="Export Income" stroke="#22c55e" strokeWidth={2} dot={costSeries.length < 40} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -577,7 +593,7 @@ export default function OctopusPage() {
       </section>
 
       <section className="rounded-xl bg-bg-surface p-4">
-        <h3 className="mb-3 font-medium text-text-primary">Electricity consumption</h3>
+        <h3 className="mb-3 font-medium text-text-primary">Electricity Consumption</h3>
         {electricity.length === 0 ? (
           <div className="py-16 text-center text-sm text-text-secondary">No electricity readings imported yet.</div>
         ) : (
@@ -598,7 +614,7 @@ export default function OctopusPage() {
       </section>
 
       <section className="rounded-xl bg-bg-surface p-4">
-        <h3 className="mb-3 font-medium text-text-primary">Cumulative electricity</h3>
+        <h3 className="mb-3 font-medium text-text-primary">Cumulative Electricity</h3>
         {cumulativeElectricity.length === 0 ? (
           <div className="py-16 text-center text-sm text-text-secondary">No electricity readings imported yet.</div>
         ) : (
@@ -610,16 +626,18 @@ export default function OctopusPage() {
                 <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Cumulative kWh', angle: -90, position: 'insideLeft' }} />
                 <Tooltip content={<ConsumptionTooltip />} />
                 <Legend />
-                <Area type="monotone" dataKey="electricity_import" name="Cumulative import" stroke="#ef4444" fill="#ef4444" fillOpacity={0.12} connectNulls />
-                <Area type="monotone" dataKey="electricity_export" name="Cumulative export" stroke="#22c55e" fill="#22c55e" fillOpacity={0.12} connectNulls />
+                <Area type="monotone" dataKey="electricity_import" name="Cumulative Import" stroke="#ef4444" fill="#ef4444" fillOpacity={0.12} connectNulls />
+                <Area type="monotone" dataKey="electricity_export" name="Cumulative Export" stroke="#22c55e" fill="#22c55e" fillOpacity={0.12} connectNulls />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         )}
       </section>
 
+      {gasEnabled && (
+        <>
       <section className="rounded-xl bg-bg-surface p-4">
-        <h3 className="font-medium text-text-primary">Gas consumption</h3>
+        <h3 className="font-medium text-text-primary">Gas Consumption</h3>
         <p className="mb-3 mt-1 text-xs text-text-secondary">
           {status?.gas_unit_note ?? 'Values are shown in the units reported by Octopus.'}
         </p>
@@ -631,7 +649,7 @@ export default function OctopusPage() {
               <AreaChart data={gas}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
                 <XAxis tickLine={false} axisLine={false} dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
-                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Reported units', angle: -90, position: 'insideLeft' }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Reported Units', angle: -90, position: 'insideLeft' }} />
                 <Tooltip content={<ConsumptionTooltip />} />
                 <Area type="monotone" dataKey="gas" name="Gas" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.2} connectNulls />
               </AreaChart>
@@ -641,7 +659,7 @@ export default function OctopusPage() {
       </section>
 
       <section className="rounded-xl bg-bg-surface p-4">
-        <h3 className="font-medium text-text-primary">Cumulative gas</h3>
+        <h3 className="font-medium text-text-primary">Cumulative Gas</h3>
         <p className="mb-3 mt-1 text-xs text-text-secondary">Running total in the units reported by Octopus.</p>
         {cumulativeGas.length === 0 ? (
           <div className="py-16 text-center text-sm text-text-secondary">No gas readings imported yet.</div>
@@ -651,32 +669,34 @@ export default function OctopusPage() {
               <AreaChart data={cumulativeGas}>
                 <CartesianGrid stroke="var(--color-grid-stroke-subtle)" strokeDasharray="3 4" />
                 <XAxis tickLine={false} axisLine={false} dataKey="t" tickFormatter={(v) => formatTick(Number(v), range)} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} />
-                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Cumulative units', angle: -90, position: 'insideLeft' }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fill: 'var(--app-text-primary)', fontSize: 11, style: { fontWeight: 700 } }} label={{ fill: 'var(--app-text-primary)', style: { fontWeight: 700 }, value: 'Cumulative Units', angle: -90, position: 'insideLeft' }} />
                 <Tooltip content={<ConsumptionTooltip />} />
-                <Area type="monotone" dataKey="gas" name="Cumulative gas" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.14} connectNulls />
+                <Area type="monotone" dataKey="gas" name="Cumulative Gas" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.14} connectNulls />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         )}
       </section>
+        </>
+      )}
 
       {billing && (billing.data.monthly.length > 0 || billing.data.yearly.length > 0) && (
         <section className="rounded-xl bg-bg-surface p-4">
-          <h3 className="font-medium text-text-primary">Billing summary tables</h3>
+          <h3 className="font-medium text-text-primary">Billing Summary Tables</h3>
           <p className="mt-1 text-xs text-text-secondary">Detailed estimated totals are placed after the dashboard graphs for easier review.</p>
           {billing.data.monthly.length > 0 && (
             <div className="mt-4 overflow-x-auto">
-              <h4 className="mb-2 text-sm font-medium text-text-primary">Monthly summary</h4>
+              <h4 className="mb-2 text-sm font-medium text-text-primary">Monthly Summary</h4>
               <table className="w-full min-w-[1080px] text-left text-xs">
                 <thead className="text-text-secondary">
                   <tr className="border-b border-white/10">
-                    <th className="px-2 py-2">Month</th><th className="px-2 py-2">Import</th><th className="px-2 py-2">Energy cost</th><th className="px-2 py-2">Elec. standing</th><th className="px-2 py-2">Import total</th><th className="px-2 py-2">Export</th><th className="px-2 py-2">Income</th><th className="px-2 py-2">Gas</th><th className="px-2 py-2">Gas energy</th><th className="px-2 py-2">Gas standing</th><th className="px-2 py-2">Gas total</th><th className="px-2 py-2">Net</th>
+                    <th className="px-2 py-2">Month</th><th className="px-2 py-2">Import</th><th className="px-2 py-2">Energy Cost</th><th className="px-2 py-2">Elec. Standing</th><th className="px-2 py-2">Import Total</th><th className="px-2 py-2">Export</th><th className="px-2 py-2">Income</th>{gasEnabled && (<><th className="px-2 py-2">Gas</th><th className="px-2 py-2">Gas Energy</th><th className="px-2 py-2">Gas Standing</th><th className="px-2 py-2">Gas Total</th></>)}<th className="px-2 py-2">Net</th>
                   </tr>
                 </thead>
                 <tbody>
                   {[...billing.data.monthly].reverse().map((row) => (
                     <tr key={row.period} className="border-b border-white/5 text-text-primary">
-                      <td className="px-2 py-2 font-medium">{row.period}</td><td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.electricity_energy_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.electricity_standing_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td><td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td><td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td><td className="px-2 py-2">{formatMoney(row.gas_energy_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.gas_standing_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.gas_total_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td>
+                      <td className="px-2 py-2 font-medium">{row.period}</td><td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.electricity_energy_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.electricity_standing_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td><td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td>{gasEnabled && (<><td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td><td className="px-2 py-2">{formatMoney(row.gas_energy_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.gas_standing_cost_gbp)}</td><td className="px-2 py-2">{formatMoney(row.gas_total_cost_gbp)}</td></>)}<td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -685,12 +705,12 @@ export default function OctopusPage() {
           )}
           {billing.data.yearly.length > 0 && (
             <div className="mt-5 overflow-x-auto">
-              <h4 className="mb-2 text-sm font-medium text-text-primary">Yearly summary</h4>
+              <h4 className="mb-2 text-sm font-medium text-text-primary">Yearly Summary</h4>
               <table className="w-full min-w-[620px] text-left text-xs">
-                <thead className="text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Year</th><th className="px-2 py-2">Imported</th><th className="px-2 py-2">Import cost</th><th className="px-2 py-2">Exported</th><th className="px-2 py-2">Export income</th><th className="px-2 py-2">Gas</th><th className="px-2 py-2">Net</th></tr></thead>
+                <thead className="text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Year</th><th className="px-2 py-2">Imported</th><th className="px-2 py-2">Import Cost</th><th className="px-2 py-2">Exported</th><th className="px-2 py-2">Export Income</th>{gasEnabled && <th className="px-2 py-2">Gas</th>}<th className="px-2 py-2">Net</th></tr></thead>
                 <tbody>
                   {[...billing.data.yearly].reverse().map((row) => (
-                    <tr key={row.period} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{row.period}</td><td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td><td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td><td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td><td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td></tr>
+                    <tr key={row.period} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{row.period}</td><td className="px-2 py-2">{row.electricity_import_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.electricity_total_cost_gbp)}</td><td className="px-2 py-2">{row.electricity_export_kwh.toFixed(3)} kWh</td><td className="px-2 py-2">{formatMoney(row.export_income_gbp)}</td>{gasEnabled && <td className="px-2 py-2">{row.gas_usage.toFixed(3)}</td>}<td className="px-2 py-2">{formatMoney(row.net_cost_gbp ?? row.electricity_total_cost_gbp - row.export_income_gbp)}</td></tr>
                   ))}
                 </tbody>
               </table>
@@ -701,7 +721,7 @@ export default function OctopusPage() {
 
       {comparison && (
         <section className="rounded-xl bg-bg-surface p-4">
-          <h3 className="font-medium text-text-primary">Daily HEM comparison</h3>
+          <h3 className="font-medium text-text-primary">Daily HEM Comparison</h3>
           <div className="mt-4 max-h-96 overflow-auto">
             <table className="w-full min-w-[940px] text-left text-xs">
               <thead className="sticky top-0 bg-bg-surface text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Date</th><th className="px-2 py-2">Octopus import</th><th className="px-2 py-2">HEM import</th><th className="px-2 py-2">Difference</th><th className="px-2 py-2">Octopus export</th><th className="px-2 py-2">HEM export</th><th className="px-2 py-2">Difference</th></tr></thead>
@@ -715,15 +735,15 @@ export default function OctopusPage() {
         </section>
       )}
 
-      {comparison && comparison.data.days.some((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0) && (
+      {comparison && comparison.data.days.some((day) => missingIntervals(day) > 0) && (
         <section className="rounded-xl bg-bg-surface p-4">
-          <h3 className="font-medium text-text-primary">Missing supplier intervals</h3>
+          <h3 className="font-medium text-text-primary">Missing Supplier Intervals</h3>
           <div className="mt-4 max-h-64 overflow-auto">
             <table className="w-full min-w-[560px] text-left text-xs">
-              <thead className="sticky top-0 bg-bg-surface text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Date</th><th className="px-2 py-2">Import missing</th><th className="px-2 py-2">Export missing</th><th className="px-2 py-2">Gas missing</th></tr></thead>
+              <thead className="sticky top-0 bg-bg-surface text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Date</th><th className="px-2 py-2">Import Missing</th><th className="px-2 py-2">Export Missing</th>{gasEnabled && <th className="px-2 py-2">Gas Missing</th>}</tr></thead>
               <tbody>
-                {[...comparison.data.days].reverse().filter((day) => day.missing_import_intervals + day.missing_export_intervals + day.missing_gas_intervals > 0).map((day) => (
-                  <tr key={day.date} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{day.date}</td><td className="px-2 py-2">{day.missing_import_intervals} / {day.expected_import_intervals}</td><td className="px-2 py-2">{day.missing_export_intervals} / {day.expected_export_intervals}</td><td className="px-2 py-2">{day.missing_gas_intervals} / {day.expected_gas_intervals}</td></tr>
+                {[...comparison.data.days].reverse().filter((day) => missingIntervals(day) > 0).map((day) => (
+                  <tr key={day.date} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{day.date}</td><td className="px-2 py-2">{day.missing_import_intervals} / {day.expected_import_intervals}</td><td className="px-2 py-2">{day.missing_export_intervals} / {day.expected_export_intervals}</td>{gasEnabled && <td className="px-2 py-2">{day.missing_gas_intervals} / {day.expected_gas_intervals}</td>}</tr>
                 ))}
               </tbody>
             </table>

@@ -82,7 +82,7 @@ describe('<LogsPage/>', () => {
     const { container } = render(<LogsPage />);
     await screen.findByText(/connection refused/);
 
-    const input = screen.getByPlaceholderText('Filter logs…') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Filter Logs…') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'spike' } });
 
     expect(container.textContent).toContain('battery power spike rejected');
@@ -93,17 +93,17 @@ describe('<LogsPage/>', () => {
     const { container } = render(<LogsPage />);
     await screen.findByText(/connection refused/);
 
-    const input = screen.getByPlaceholderText('Filter logs…') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Filter Logs…') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'zzz-nothing-matches' } });
 
-    expect(container.textContent).toContain('No logs match the filter');
+    expect(container.textContent).toContain('No Logs Match the Filter');
   });
 
   it('Clear button resets the filter', async () => {
     const { container } = render(<LogsPage />);
     await screen.findByText(/connection refused/);
 
-    const input = screen.getByPlaceholderText('Filter logs…') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Filter Logs…') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'spike' } });
     expect(container.textContent).not.toContain('connection refused');
 
@@ -172,7 +172,7 @@ describe('<LogsPage/>', () => {
     });
     const { container } = render(<LogsPage />);
     await waitFor(() => {
-      expect(container.textContent).toContain('No logs captured yet');
+      expect(container.textContent).toContain('No Logs Captured Yet');
     });
   });
 

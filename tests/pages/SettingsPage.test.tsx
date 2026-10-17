@@ -54,7 +54,6 @@ function defaultSettings(overrides: SettingsShape = {}): SettingsShape {
     import_tariff: null,
     export_tariff: null,
     import_standing_charge_p_per_day: null,
-    octopus_enabled: false,
     octopus_account_number: '',
     octopus_api_key_configured: false,
     octopus_gas_unit: 'unknown',
@@ -156,7 +155,7 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       apiGetMock.mockImplementation(() => new Promise(() => {}));
       const { container } = render(<SettingsPage />);
       expect(container.querySelector('.animate-spin')).not.toBeNull();
-      expect(container.textContent).toContain('Loading settings');
+      expect(container.textContent).toContain('Loading Settings');
     });
 
     it('replaces the spinner with the form once settings load', async () => {
@@ -371,14 +370,22 @@ describe('<SettingsPage/> — page shell & hydration', () => {
   });
 
   describe('panel visibility', () => {
-    it('offers the Octopus panel only when an API key is configured and saves the choice', async () => {
+    it('offers the Octopus panel only when an account number and API key are saved, and saves the choice', async () => {
       mountApiMocks();
       const firstRender = render(<SettingsPage />);
       await screen.findByText('Panel Visibility');
       expect(screen.queryByRole('checkbox', { name: 'Octopus' })).toBeNull();
       firstRender.unmount();
 
+      // A key without an account number does not make the tab appear, so the
+      // checkbox must not promise one.
       mountApiMocks({ octopus_api_key_configured: true });
+      const keyOnly = render(<SettingsPage />);
+      await screen.findByText('Panel Visibility');
+      expect(screen.queryByRole('checkbox', { name: 'Octopus' })).toBeNull();
+      keyOnly.unmount();
+
+      mountApiMocks({ octopus_api_key_configured: true, octopus_account_number: 'A-1234ABCD' });
       render(<SettingsPage />);
       const octopusCheckbox = await screen.findByRole('checkbox', { name: 'Octopus' });
       expect((octopusCheckbox as HTMLInputElement).checked).toBe(true);
@@ -415,6 +422,51 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     });
   });
 
+  describe('Octopus gas switch', () => {
+    const gasUnit = () => screen.queryByRole('combobox', { name: /Gas API Unit/ });
+
+    it('is on by default and shows the gas unit', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+      const box = await screen.findByRole('checkbox', { name: /My Home Has Gas/ }) as HTMLInputElement;
+      expect(box.checked).toBe(true);
+      expect(gasUnit()).not.toBeNull();
+    });
+
+    it('hides the gas unit for an electricity-only home, and saves the choice', async () => {
+      mountApiMocks({ octopus_gas_enabled: false });
+      render(<SettingsPage />);
+      const box = await screen.findByRole('checkbox', { name: /My Home Has Gas/ }) as HTMLInputElement;
+      expect(box.checked).toBe(false);
+      expect(gasUnit()).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
+          octopus_gas_enabled: false,
+        }));
+      });
+    });
+
+    it('toggling shows and hides the gas unit without losing the chosen unit', async () => {
+      mountApiMocks({ octopus_gas_unit: 'm3' });
+      render(<SettingsPage />);
+      const box = await screen.findByRole('checkbox', { name: /My Home Has Gas/ }) as HTMLInputElement;
+      fireEvent.click(box);
+      expect(gasUnit()).toBeNull();
+      fireEvent.click(box);
+      expect((gasUnit() as HTMLSelectElement).value).toBe('m3');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
+          octopus_gas_enabled: true,
+          octopus_gas_unit: 'm3',
+        }));
+      });
+    });
+  });
+
   describe('Octopus gas unit', () => {
     it('links to the Octopus dashboard API access page', async () => {
       mountApiMocks();
@@ -429,7 +481,6 @@ describe('<SettingsPage/> — page shell & hydration', () => {
 
     it('hydrates and saves the explicit gas unit without requiring the key again', async () => {
       mountApiMocks({
-        octopus_enabled: true,
         octopus_account_number: 'A-1234ABCD',
         octopus_api_key_configured: true,
         octopus_gas_unit: 'm3',
@@ -437,16 +488,15 @@ describe('<SettingsPage/> — page shell & hydration', () => {
         octopus_economy7_end: '08:00',
       });
       render(<SettingsPage />);
-      const select = await screen.findByRole('combobox', { name: /Gas API unit/ }) as HTMLSelectElement;
+      const select = await screen.findByRole('combobox', { name: /Gas API Unit/ }) as HTMLSelectElement;
       expect(select.value).toBe('m3');
-      expect((screen.getByLabelText(/Economy 7 night rate starts/) as HTMLInputElement).value).toBe('01:00');
-      expect((screen.getByLabelText(/Economy 7 night rate ends/) as HTMLInputElement).value).toBe('08:00');
+      expect((screen.getByLabelText(/Economy 7 Night Rate Starts/) as HTMLInputElement).value).toBe('01:00');
+      expect((screen.getByLabelText(/Economy 7 Night Rate Ends/) as HTMLInputElement).value).toBe('08:00');
       fireEvent.change(select, { target: { value: 'kwh' } });
       fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
 
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
-          octopus_enabled: true,
           octopus_account_number: 'A-1234ABCD',
           octopus_gas_unit: 'kwh',
           octopus_economy7_start: '01:00',
@@ -481,31 +531,31 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     it('shows separate battery and inverter temperature bounds for non-Gateway devices', async () => {
       mountWithAlerts({ device_type_code: '2001' });
       expect(await screen.findByText('Temperature & SOC')).toBeDefined();
-      expect(screen.getByText('Battery temp below °C')).toBeDefined();
-      expect(screen.getByText('Battery temp above °C')).toBeDefined();
-      expect(screen.getByText('Inverter temp below °C')).toBeDefined();
-      expect(screen.getByText('Inverter temp above °C')).toBeDefined();
-      expect(inputAfterText('Inverter temp below °C').value).toBe('8');
-      expect(inputAfterText('Inverter temp above °C').value).toBe('60');
+      expect(screen.getByText('Battery Temp Below °C')).toBeDefined();
+      expect(screen.getByText('Battery Temp Above °C')).toBeDefined();
+      expect(screen.getByText('Inverter Temp Below °C')).toBeDefined();
+      expect(screen.getByText('Inverter Temp Above °C')).toBeDefined();
+      expect(inputAfterText('Inverter Temp Below °C').value).toBe('8');
+      expect(inputAfterText('Inverter Temp Above °C').value).toBe('60');
     });
 
     it('shows temperature bounds when no device type is known yet', async () => {
       mountWithAlerts(null);
       expect(await screen.findByText('Temperature & SOC')).toBeDefined();
-      expect(screen.getByText('Battery temp below °C')).toBeDefined();
-      expect(screen.getByText('Inverter temp below °C')).toBeDefined();
+      expect(screen.getByText('Battery Temp Below °C')).toBeDefined();
+      expect(screen.getByText('Inverter Temp Below °C')).toBeDefined();
     });
 
     it('hides battery and inverter temperature bounds for Gateway devices', async () => {
       mountWithAlerts({ device_type_code: '7001' });
       expect(await screen.findByText('SOC')).toBeDefined();
       expect(screen.getByText(/Gateway does not expose battery or inverter temperature telemetry/)).toBeDefined();
-      expect(screen.queryByText('Battery temp below °C')).toBeNull();
-      expect(screen.queryByText('Battery temp above °C')).toBeNull();
-      expect(screen.queryByText('Inverter temp below °C')).toBeNull();
-      expect(screen.queryByText('Inverter temp above °C')).toBeNull();
-      expect(screen.getByText('SOC below %')).toBeDefined();
-      expect(screen.getByText('SOC above %')).toBeDefined();
+      expect(screen.queryByText('Battery Temp Below °C')).toBeNull();
+      expect(screen.queryByText('Battery Temp Above °C')).toBeNull();
+      expect(screen.queryByText('Inverter Temp Below °C')).toBeNull();
+      expect(screen.queryByText('Inverter Temp Above °C')).toBeNull();
+      expect(screen.getByText('SOC Below %')).toBeDefined();
+      expect(screen.getByText('SOC Above %')).toBeDefined();
     });
 
     it('shows a separate inverter trip alert toggle', async () => {
@@ -518,8 +568,8 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       useInverterStore.setState({ inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 60 } });
       mountWithAlerts({ device_type_code: '2001' });
       await screen.findByText('Temperature & SOC');
-      fireEvent.change(inputAfterText('Inverter temp below °C'), { target: { value: '7.5' } });
-      fireEvent.change(inputAfterText('Inverter temp above °C'), { target: { value: '62' } });
+      fireEvent.change(inputAfterText('Inverter Temp Below °C'), { target: { value: '7.5' } });
+      fireEvent.change(inputAfterText('Inverter Temp Above °C'), { target: { value: '62' } });
 
       fireEvent.click(screen.getByRole('button', { name: 'Save Notification Settings' }));
 
@@ -558,10 +608,10 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       const developer = screen.getByText('Developer').closest('section')!;
       // Keys are generated (no free-text input); the section exposes the
       // generate action, the port field and the control-permission toggle.
-      expect(remote.contains(screen.getByRole('button', { name: 'Generate API key' }))).toBe(true);
+      expect(remote.contains(screen.getByRole('button', { name: 'Generate API Key' }))).toBe(true);
       expect(screen.getByLabelText('Port')).toBeTruthy();
       expect(developer.querySelector('input')).toBeNull();
-      expect(screen.getByRole('switch', { name: 'Allow battery control through the authenticated API' })).toHaveAttribute('aria-checked', 'false');
+      expect(screen.getByRole('switch', { name: 'Allow Battery Control Through the Authenticated API' })).toHaveAttribute('aria-checked', 'false');
     });
 
     it('shows authenticated API guidance when developer mode is on', async () => {

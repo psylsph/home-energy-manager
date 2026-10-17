@@ -68,7 +68,6 @@ function defaultSettings(overrides: SettingsShape = {}): SettingsShape {
     import_tariff: null,
     export_tariff: null,
     import_standing_charge_p_per_day: null,
-    octopus_enabled: false,
     octopus_account_number: '',
     octopus_api_key_configured: false,
     octopus_gas_unit: 'unknown',
@@ -282,7 +281,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('persists immediately without touching a saved key or the port', async () => {
       mountApiMocks({ api_key_configured: true, api_key_last4: '-key', api_control_enabled: false });
       render(<SettingsPage />);
-      const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
+      const toggle = await screen.findByRole('switch', { name: 'Allow Battery Control Through the Authenticated API' });
       await waitFor(() => expect(screen.getByText(/ends -key/)).toBeDefined());
       fireEvent.click(toggle);
       await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_control_enabled: true }));
@@ -294,7 +293,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('persists immediately when disabling, starting from hydrated state', async () => {
       mountApiMocks({ api_control_enabled: true, api_key_configured: true });
       render(<SettingsPage />);
-      const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
+      const toggle = await screen.findByRole('switch', { name: 'Allow Battery Control Through the Authenticated API' });
       await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
       fireEvent.click(toggle);
       await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_control_enabled: false }));
@@ -303,7 +302,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('reverts the optimistic toggle and reports the failure when the save fails', async () => {
       mountApiMocks({ api_control_enabled: false });
       render(<SettingsPage />);
-      const toggle = await screen.findByRole('switch', { name: 'Allow battery control through the authenticated API' });
+      const toggle = await screen.findByRole('switch', { name: 'Allow Battery Control Through the Authenticated API' });
       apiPostMock.mockRejectedValueOnce(new Error('settings unavailable'));
       fireEvent.click(toggle);
       await waitFor(() => expect(screen.getByText(/Failed to update battery control permission: settings unavailable/)).toBeDefined());
@@ -313,7 +312,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('clears the saved key without losing the API port or permission', async () => {
       mountApiMocks({ api_key_configured: true, api_port: 8443, api_control_enabled: true });
       render(<SettingsPage />);
-      fireEvent.click(await screen.findByRole('button', { name: 'Clear saved key' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear Saved Key' }));
       // The key save is a partial update: it must not re-send (and race) the
       // separately auto-saved control permission.
       await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { api_key: '', api_port: 8443 }));
@@ -324,7 +323,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       apiPostMock.mockRejectedValueOnce(new Error('authenticated API unavailable'));
       render(<SettingsPage />);
 
-      const generateButton = await screen.findByRole('button', { name: 'Generate API key' });
+      const generateButton = await screen.findByRole('button', { name: 'Generate API Key' });
       fireEvent.click(generateButton);
 
       await waitFor(() => {
@@ -340,7 +339,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       apiPostMock.mockResolvedValueOnce({ ok: true, data: { api_key: 'GENERATED-SECRET-0123456789abcdefghij' } });
       render(<SettingsPage />);
 
-      const generateButton = await screen.findByRole('button', { name: 'Generate API key' });
+      const generateButton = await screen.findByRole('button', { name: 'Generate API Key' });
       fireEvent.click(generateButton);
 
       // The generate action carries the configured port, as the old
@@ -393,7 +392,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('posts the normalized bind address and origins when applying network settings', async () => {
       mountApiMocks({ api_port: 7338, api_bind_address: '127.0.0.1', api_allowed_origins: ['https://a.example'] });
       render(<SettingsPage />);
-      const applyButton = await screen.findByRole('button', { name: 'Apply network settings' });
+      const applyButton = await screen.findByRole('button', { name: 'Apply Network Settings' });
       // Normalise whitespace and drop empty entries before posting.
       fireEvent.click(applyButton);
       await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', {
@@ -407,7 +406,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       mountApiMocks({ api_port: 7338, api_bind_address: '127.0.0.1' });
       apiPostMock.mockRejectedValueOnce(new Error('The authenticated API listener could not be reconfigured: bind failed. The previous settings were restored.'));
       render(<SettingsPage />);
-      const applyButton = await screen.findByRole('button', { name: 'Apply network settings' });
+      const applyButton = await screen.findByRole('button', { name: 'Apply Network Settings' });
       fireEvent.click(applyButton);
       await waitFor(() => expect(screen.getByText(/could not be reconfigured/)).toBeDefined());
     });
@@ -439,7 +438,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       render(<SettingsPage />);
 
       const portInput = await screen.findByLabelText('Port');
-      const generateButton = screen.getByRole('button', { name: /Generate (new )?API key/ });
+      const generateButton = screen.getByRole('button', { name: /Generate (New )?API Key/ });
       fireEvent.change(portInput, { target: { value: '' } });
       fireEvent.click(generateButton);
 
@@ -497,7 +496,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     });
   });
 
-  describe('Octopus save — validation (issue #212)', () => {
+  describe('Octopus save (issue #212)', () => {
     // Helper: scope queries to the "Octopus Energy Data" section so they
     // don't collide with the panel-visibility checkboxes elsewhere.
     async function octopusSection(): Promise<HTMLElement> {
@@ -515,44 +514,49 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       return saveBtn;
     }
 
-    it('rejects enabling without an account number', async () => {
-      mountApiMocks({ octopus_api_key_configured: true });
+    it('has no on/off switch: the saved credentials are the switch', async () => {
+      mountApiMocks();
       render(<SettingsPage />);
       const section = await octopusSection();
-      const saveBtn = findOctopusSaveBtn(section);
-      // Enable the checkbox inside this section.
-      const enableCheckbox = section.querySelector('input[type="checkbox"]') as HTMLInputElement;
-      fireEvent.click(enableCheckbox);
-      fireEvent.click(saveBtn);
-      await waitFor(() => {
-        expect(screen.getByText(/Enter both the Octopus account number and API key/)).toBeDefined();
-      });
-      // No POST should have been made.
-      expect(apiPostMock).not.toHaveBeenCalled();
+      // The only switch left is the gas one; there is no import tick.
+      const boxes = section.querySelectorAll('input[type="checkbox"]');
+      expect(boxes).toHaveLength(1);
+      expect(section.textContent).toContain('My Home Has Gas');
+      expect(screen.queryByText('Import Meter Readings')).toBeNull();
     });
 
-    it('rejects enabling without any key configured or entered', async () => {
+    it('saves the account number alone without starting a sync, and says what is missing', async () => {
       mountApiMocks({ octopus_api_key_configured: false });
       render(<SettingsPage />);
       const section = await octopusSection();
-      const saveBtn = findOctopusSaveBtn(section);
-      const enableCheckbox = section.querySelector('input[type="checkbox"]') as HTMLInputElement;
-      fireEvent.click(enableCheckbox);
       const accountInput = section.querySelector('input[placeholder="A-1234ABCD"]') as HTMLInputElement;
       fireEvent.change(accountInput, { target: { value: 'A-1234ABCD' } });
-      fireEvent.click(saveBtn);
+      fireEvent.click(findOctopusSaveBtn(section));
       await waitFor(() => {
-        expect(screen.getByText(/Enter both the Octopus account number and API key/)).toBeDefined();
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
+          octopus_account_number: 'A-1234ABCD',
+        }));
       });
+      expect(await screen.findByText(/Add both the account number and API key/)).toBeDefined();
+      expect(apiPostMock).not.toHaveBeenCalledWith('/api/octopus/sync');
     });
 
-    it('saves and triggers a sync when enabling with account + key', async () => {
+    it('saves a key alone without starting a sync', async () => {
+      mountApiMocks({ octopus_api_key_configured: false });
+      render(<SettingsPage />);
+      const section = await octopusSection();
+      const keyInput = section.querySelector('input[type="password"]') as HTMLInputElement;
+      fireEvent.change(keyInput, { target: { value: 'sk_live_test123' } });
+      fireEvent.click(findOctopusSaveBtn(section));
+      expect(await screen.findByText(/Add both the account number and API key/)).toBeDefined();
+      expect(apiPostMock).not.toHaveBeenCalledWith('/api/octopus/sync');
+    });
+
+    it('saves and triggers a sync once account and key are both there', async () => {
       mountApiMocks({ octopus_api_key_configured: false });
       render(<SettingsPage />);
       const section = await octopusSection();
       const saveBtn = findOctopusSaveBtn(section);
-      const enableCheckbox = section.querySelector('input[type="checkbox"]') as HTMLInputElement;
-      fireEvent.click(enableCheckbox);
       const accountInput = section.querySelector('input[placeholder="A-1234ABCD"]') as HTMLInputElement;
       fireEvent.change(accountInput, { target: { value: 'A-1234ABCD' } });
       const keyInput = section.querySelector('input[type="password"]') as HTMLInputElement;
@@ -560,11 +564,13 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       fireEvent.click(saveBtn);
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
-          octopus_enabled: true,
           octopus_account_number: 'A-1234ABCD',
           octopus_api_key: 'sk_live_test123',
         }));
       });
+      // The retired switch is never sent.
+      const body = apiPostMock.mock.calls.find((c) => c[0] === '/api/settings')![1] as Record<string, unknown>;
+      expect('octopus_enabled' in body).toBe(false);
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/octopus/sync');
       });
@@ -573,8 +579,35 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       });
     });
 
+    it('starts a sync when only the account number is entered and a key is already saved', async () => {
+      mountApiMocks({ octopus_api_key_configured: true });
+      render(<SettingsPage />);
+      const section = await octopusSection();
+      const accountInput = section.querySelector('input[placeholder="A-1234ABCD"]') as HTMLInputElement;
+      fireEvent.change(accountInput, { target: { value: 'A-1234ABCD' } });
+      fireEvent.click(findOctopusSaveBtn(section));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/octopus/sync'));
+    });
+
+    it('clearing the account number saves, switches the integration off and does not sync', async () => {
+      mountApiMocks({ octopus_account_number: 'A-1234ABCD', octopus_api_key_configured: true });
+      render(<SettingsPage />);
+      const section = await octopusSection();
+      const accountInput = section.querySelector('input[placeholder="A-1234ABCD"]') as HTMLInputElement;
+      await waitFor(() => expect(accountInput.value).toBe('A-1234ABCD'));
+      fireEvent.change(accountInput, { target: { value: '' } });
+      fireEvent.click(findOctopusSaveBtn(section));
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
+          octopus_account_number: '',
+        }));
+      });
+      expect(await screen.findByText(/Add both the account number and API key/)).toBeDefined();
+      expect(apiPostMock).not.toHaveBeenCalledWith('/api/octopus/sync');
+    });
+
     it('dispatches the octopus-settings-changed window event on save', async () => {
-      mountApiMocks({ octopus_enabled: true, octopus_account_number: 'A-1234ABCD', octopus_api_key_configured: true });
+      mountApiMocks({ octopus_account_number: 'A-1234ABCD', octopus_api_key_configured: true });
       const handler = vi.fn();
       window.addEventListener('octopus-settings-changed', handler);
       render(<SettingsPage />);
@@ -592,8 +625,6 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       render(<SettingsPage />);
       const section = await octopusSection();
       const saveBtn = findOctopusSaveBtn(section);
-      const enableCheckbox = section.querySelector('input[type="checkbox"]') as HTMLInputElement;
-      fireEvent.click(enableCheckbox);
       const accountInput = section.querySelector('input[placeholder="A-1234ABCD"]') as HTMLInputElement;
       fireEvent.change(accountInput, { target: { value: 'A-1234ABCD' } });
       const keyInput = section.querySelector('input[type="password"]') as HTMLInputElement;
@@ -741,7 +772,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
         },
       });
       render(<SettingsPage />);
-      const toggle = await screen.findByRole('switch', { name: 'Check for new releases' });
+      const toggle = await screen.findByRole('switch', { name: 'Check for New Releases' });
       expect(toggle.getAttribute('aria-checked')).toBe('true');
       fireEvent.click(toggle); // turn OFF
       await waitFor(() => {
@@ -762,7 +793,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       };
       useInverterStore.setState({ latestVersionInfo: info });
       render(<SettingsPage />);
-      const toggle = await screen.findByRole('switch', { name: 'Check for new releases' });
+      const toggle = await screen.findByRole('switch', { name: 'Check for New Releases' });
       fireEvent.click(toggle); // turn ON
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { check_for_updates: true });

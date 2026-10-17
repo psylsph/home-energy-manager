@@ -141,7 +141,7 @@ describe('<InverterPage/> battery mechanism summary', () => {
     for (const key of ['eco', 'timed_charge', 'timed_export', 'timed_discharge']) {
       const row = screen.getByTestId(`battery-mode-${key}`);
       expect(row.getAttribute('data-state')).toBe('off');
-      expect(within(row).getByTestId(`battery-mode-desc-${key}`).textContent).toBe('off');
+      expect(within(row).getByTestId(`battery-mode-desc-${key}`).textContent).toBe('Off');
     }
   });
 
@@ -153,7 +153,7 @@ describe('<InverterPage/> battery mechanism summary', () => {
 
     const row = screen.getByTestId('battery-mode-eco');
     expect(row.getAttribute('data-state')).toBe('active');
-    expect(within(row).getByTestId('battery-mode-desc-eco').textContent).toBe('on');
+    expect(within(row).getByTestId('battery-mode-desc-eco').textContent).toBe('On');
   });
 
   it('shows Timed Charge as active when armed, in-window and charging', () => {
@@ -170,7 +170,7 @@ describe('<InverterPage/> battery mechanism summary', () => {
     const row = screen.getByTestId('battery-mode-timed_charge');
     expect(row.getAttribute('data-state')).toBe('active');
     expect(within(row).getByTestId('battery-mode-desc-timed_charge').textContent).toBe(
-      'armed · charging now',
+      'Armed · Charging Now',
     );
   });
 
@@ -188,7 +188,7 @@ describe('<InverterPage/> battery mechanism summary', () => {
     const row = screen.getByTestId('battery-mode-timed_export');
     expect(row.getAttribute('data-state')).toBe('active');
     expect(within(row).getByTestId('battery-mode-desc-timed_export').textContent).toBe(
-      'armed · exporting now',
+      'Armed · Exporting Now',
     );
   });
 
@@ -206,7 +206,7 @@ describe('<InverterPage/> battery mechanism summary', () => {
     const row = screen.getByTestId('battery-mode-timed_discharge');
     expect(row.getAttribute('data-state')).toBe('active');
     expect(within(row).getByTestId('battery-mode-desc-timed_discharge').textContent).toBe(
-      'armed · covering demand now',
+      'Armed · Covering Demand Now',
     );
   });
 
@@ -228,12 +228,12 @@ describe('<InverterPage/> battery mechanism summary', () => {
       within(screen.getByTestId('battery-mode-timed_charge')).getByTestId(
         'battery-mode-desc-timed_charge',
       ).textContent,
-    ).toBe('armed');
+    ).toBe('Armed');
     expect(
       within(screen.getByTestId('battery-mode-timed_export')).getByTestId(
         'battery-mode-desc-timed_export',
       ).textContent,
-    ).toBe('armed');
+    ).toBe('Armed');
   });
 
   it('renders the reporter case: Eco on + Timed Export active', () => {
@@ -254,7 +254,7 @@ describe('<InverterPage/> battery mechanism summary', () => {
       within(screen.getByTestId('battery-mode-timed_export')).getByTestId(
         'battery-mode-desc-timed_export',
       ).textContent,
-    ).toBe('armed · exporting now');
+    ).toBe('Armed · Exporting Now');
 
     expect(screen.getByTestId('battery-mode-timed_charge').getAttribute('data-state')).toBe('off');
     expect(screen.getByTestId('battery-mode-timed_discharge').getAttribute('data-state')).toBe('off');

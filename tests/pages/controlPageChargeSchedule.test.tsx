@@ -335,7 +335,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
 
     const section = await chargeScheduleSection();
     fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
 
     // Poll readback changes after each physical register write. The editor
     // must not remount and lose its pending state before the API completes.
@@ -354,7 +354,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
       });
     });
 
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
     expect(within(section).getByRole('button', { name: 'Applying…' })).toBeDisabled();
 
     await act(async () => {
@@ -364,7 +364,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
       useInverterStore.setState({ snapshot: makeSnapshot() });
     });
     await waitFor(() => {
-      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+      expect(screen.queryByText('Applying Changes to Inverter…')).toBeNull();
     });
   });
 
@@ -385,13 +385,13 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
       expect.objectContaining({ slot: 1 }),
     ));
 
-    expect(screen.getByText('Applying changes to inverter…')).toBeDefined();
+    expect(screen.getByText('Applying Changes to Inverter…')).toBeDefined();
 
     act(() => {
       useInverterStore.setState({ snapshot: makeSnapshot() });
     });
     await waitFor(() => {
-      expect(screen.queryByText('Applying changes to inverter…')).toBeNull();
+      expect(screen.queryByText('Applying Changes to Inverter…')).toBeNull();
     });
   });
 

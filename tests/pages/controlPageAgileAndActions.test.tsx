@@ -193,27 +193,27 @@ describe('<ControlPage/> — Agile postcode lookup', () => {
     postcodeResponse = async () => ({ ok: false });
     const box = await openAgile();
     await typeAndWait(box, 'SW1A 1AA');
-    await screen.findByText('Could not determine region');
+    await screen.findByText('Could Not Determine Region');
   });
 
   it('reports a service answer that is not a success', async () => {
     postcodeResponse = async () => ({ ok: true, json: async () => ({ status: 404 }) });
     const box = await openAgile();
     await typeAndWait(box, 'SW1A 1AA');
-    await screen.findByText('Could not determine region');
+    await screen.findByText('Could Not Determine Region');
   });
 
   it('reports a postcode whose area maps to no Octopus region', async () => {
     const box = await openAgile();
     await typeAndWait(box, 'ZZ9 9ZZ');
-    await screen.findByText('Could not determine region');
+    await screen.findByText('Could Not Determine Region');
     expect(screen.queryByText(/Region set to/)).toBeNull();
   });
 
   it('reports a postcode that starts with no letters', async () => {
     const box = await openAgile();
     await typeAndWait(box, '123 456');
-    await screen.findByText('Could not determine region');
+    await screen.findByText('Could Not Determine Region');
   });
 
   it('reports a failed lookup', async () => {
@@ -222,7 +222,7 @@ describe('<ControlPage/> — Agile postcode lookup', () => {
     };
     const box = await openAgile();
     await typeAndWait(box, 'SW1A 1AA');
-    await screen.findByText('Lookup failed');
+    await screen.findByText('Lookup Failed');
   });
 
   it('clears the lookup status again when the postcode is shortened', async () => {

@@ -860,6 +860,45 @@ async fn temperature_limiter_round_trip_and_validation() {
         .is_some_and(|message| { message.contains("Recovery threshold must be below") }));
 }
 
+/// Plan 2026-10-17-002, gap 4: a config posted over HTTP reaches the live
+/// `discharge_floor_config` the poll loop reads (GET serves that same state),
+/// and a rejected post leaves it untouched.
+#[tokio::test]
+async fn discharge_floor_post_reaches_the_live_config() {
+    let router = fresh_router();
+
+    let (status, initial) = get_json(&router, "/api/discharge-floor").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(initial["data"]["config"]["enabled"], false);
+
+    let (status, saved) = post_json(
+        &router,
+        "/api/discharge-floor",
+        &serde_json::json!({ "enabled": true, "floor_soc": 55 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["ok"], true);
+
+    let (_, live) = get_json(&router, "/api/discharge-floor").await;
+    assert_eq!(live["data"]["config"]["enabled"], true);
+    assert_eq!(live["data"]["config"]["floor_soc"], 55);
+    assert_eq!(live["data"]["state"], "Idle");
+
+    // A rejected floor changes nothing, neither live nor on a later read.
+    let (status, rejected) = post_json(
+        &router,
+        "/api/discharge-floor",
+        &serde_json::json!({ "floor_soc": 3 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["ok"], false);
+    let (_, after) = get_json(&router, "/api/discharge-floor").await;
+    assert_eq!(after["data"]["config"]["floor_soc"], 55);
+    assert_eq!(after["data"]["config"]["enabled"], true);
+}
+
 #[tokio::test]
 async fn history_summary_route_is_wired() {
     let router = fresh_router();

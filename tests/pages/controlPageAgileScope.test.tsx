@@ -498,7 +498,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
 
     const allCombos = await screen.findAllByRole('combobox');
     expect((allCombos[0] as HTMLSelectElement).value).toBe('adaptive');
-    expect(await screen.findByText('Low-SOC recovery active')).toBeDefined();
+    expect(await screen.findByText('Low-SOC Recovery Active')).toBeDefined();
     expect(screen.getByRole('button', { name: 'Save Adaptive Charge' })).toBeDefined();
     expect(screen.getByText(/Controlled by Adaptive Charge/)).toBeDefined();
   });
@@ -745,9 +745,9 @@ describe('<ControlPage/> — Agile scope UI', () => {
     render(<ControlPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Charge when below')).toBeDefined();
+      expect(screen.getByText('Charge When Below')).toBeDefined();
     });
-    expect(screen.getByText('Discharge when above')).toBeDefined();
+    expect(screen.getByText('Discharge When Above')).toBeDefined();
   });
 
   it('hides Discharge threshold in Agile Charge Only mode and shows the hidden-value hint', async () => {
@@ -758,10 +758,10 @@ describe('<ControlPage/> — Agile scope UI', () => {
     render(<ControlPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Charge when below')).toBeDefined();
+      expect(screen.getByText('Charge When Below')).toBeDefined();
     });
     // Discharge threshold slider is hidden.
-    expect(screen.queryByText('Discharge when above')).toBeNull();
+    expect(screen.queryByText('Discharge When Above')).toBeNull();
     // The hidden-value hint is shown so the user knows their setting
     // is preserved.
     expect(screen.getByText(/Discharge threshold.*hidden because Charge Only mode ignores discharging/)).toBeDefined();
@@ -775,9 +775,9 @@ describe('<ControlPage/> — Agile scope UI', () => {
     render(<ControlPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Discharge when above')).toBeDefined();
+      expect(screen.getByText('Discharge When Above')).toBeDefined();
     });
-    expect(screen.queryByText('Charge when below')).toBeNull();
+    expect(screen.queryByText('Charge When Below')).toBeNull();
     expect(screen.getByText(/Charge threshold.*hidden because Discharge Only mode ignores charging/)).toBeDefined();
   });
 
@@ -884,15 +884,15 @@ describe('<ControlPage/> — Agile scope UI', () => {
     // Scope to the AgileControls root (it shares a root with the
     // thresholds AND the Save button, which disambiguates it from the
     // per-slot "Save" buttons in the schedule editors below).
-    const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    const agileRoot = screen.getByText('Charge When Below').closest('div.space-y-4')!;
     // Save stays disabled until the saved thresholds have loaded; interact only
     // after that, or the late load would overwrite the dragged values.
     await waitFor(() => expect(within(agileRoot).getByRole('button', { name: 'Save' })).toBeEnabled());
     const chargeSlider = within(
-      screen.getByText('Charge when below').parentElement!.parentElement!,
+      screen.getByText('Charge When Below').parentElement!.parentElement!,
     ).getByRole('slider');
     const dischargeSlider = within(
-      screen.getByText('Discharge when above').parentElement!.parentElement!,
+      screen.getByText('Discharge When Above').parentElement!.parentElement!,
     ).getByRole('slider');
 
     // Drag charge above discharge (inverted).
@@ -920,15 +920,15 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    const agileRoot = screen.getByText('Charge When Below').closest('div.space-y-4')!;
     // Save stays disabled until the saved thresholds have loaded; interact only
     // after that, or the late load would overwrite the dragged values.
     await waitFor(() => expect(within(agileRoot).getByRole('button', { name: 'Save' })).toBeEnabled());
     const chargeSlider = within(
-      screen.getByText('Charge when below').parentElement!.parentElement!,
+      screen.getByText('Charge When Below').parentElement!.parentElement!,
     ).getByRole('slider');
     const dischargeSlider = within(
-      screen.getByText('Discharge when above').parentElement!.parentElement!,
+      screen.getByText('Discharge When Above').parentElement!.parentElement!,
     ).getByRole('slider');
 
     // 12p / 35p — a 23p gap, well clear of the clamp.
@@ -959,15 +959,15 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    const agileRoot = screen.getByText('Charge when below').closest('div.space-y-4')!;
+    const agileRoot = screen.getByText('Charge When Below').closest('div.space-y-4')!;
     // Save stays disabled until the saved thresholds have loaded; interact only
     // after that, or the late load would overwrite the dragged values.
     await waitFor(() => expect(within(agileRoot).getByRole('button', { name: 'Save' })).toBeEnabled());
     const chargeSlider = within(
-      screen.getByText('Charge when below').parentElement!.parentElement!,
+      screen.getByText('Charge When Below').parentElement!.parentElement!,
     ).getByRole('slider');
     const dischargeSlider = within(
-      screen.getByText('Discharge when above').parentElement!.parentElement!,
+      screen.getByText('Discharge When Above').parentElement!.parentElement!,
     ).getByRole('slider');
 
     fireEvent.change(chargeSlider, { target: { value: '11' } });

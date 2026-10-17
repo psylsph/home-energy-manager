@@ -68,7 +68,7 @@ export default function InverterPage() {
             <>
               <span className="text-text-secondary">Grid Export Limit</span>
               <span className="text-text-primary font-mono text-right whitespace-nowrap">
-                {s.export_limit_w > 0 ? `${(s.export_limit_w / 1000).toFixed(2)} kW` : 'No limit set'}
+                {s.export_limit_w > 0 ? `${(s.export_limit_w / 1000).toFixed(2)} kW` : 'No Limit Set'}
               </span>
             </>
           )}
@@ -102,7 +102,7 @@ export default function InverterPage() {
           (gateway_fault_codes, IR 1622-1623) in its own section below; the
           two are independent datasets — a grid outage flips grid_online
           without necessarily setting a bitmask bit, so the bitmask's own
-          "✓ No faults" can coexist with a real grid-loss state shown here.
+          "✓ No Faults" can coexist with a real grid-loss state shown here.
           hasGridFault() deliberately ORs grid_loss with !grid_online so the
           Gateway (whose decode path never sets grid_loss) is covered too. */}
       <section className="bg-bg-surface rounded-2xl p-5">
@@ -112,12 +112,12 @@ export default function InverterPage() {
           // so wording stays consistent with the global banner.
           const active: string[] = [];
           if (hasGridFault(s)) active.push(gridFaultTitle());
-          if (hasInverterTrip(s)) active.push('Inverter trip detected');
-          if (hasBatteryOverTemp(s)) active.push('Battery over temperature');
+          if (hasInverterTrip(s)) active.push('Inverter Trip Detected');
+          if (hasBatteryOverTemp(s)) active.push('Battery Over Temperature');
           if (active.length === 0) {
             return (
               <div className="bg-bg-elevated rounded-lg px-3 py-2">
-                <span className="text-green-400 text-xs font-medium">✓ No faults</span>
+                <span className="text-green-400 text-xs font-medium">✓ No Faults</span>
               </div>
             );
           }
@@ -207,7 +207,7 @@ export default function InverterPage() {
           )}
           {s.gateway_fault_codes && s.gateway_fault_codes.length === 0 && (
             <div className="mt-4 bg-bg-elevated rounded-lg px-3 py-2">
-              <span className="text-green-400 text-xs font-medium">✓ No faults</span>
+              <span className="text-green-400 text-xs font-medium">✓ No Faults</span>
             </div>
           )}
 
@@ -354,7 +354,7 @@ export default function InverterPage() {
             {s.cosy_active
               ? 'Active'
               : cosyBlockedMessage(s.cosy_blocked_by, s.cosy_enabled)
-                ? 'On hold'
+                ? 'On Hold'
                 : s.cosy_enabled ? 'Enabled' : 'Disabled'}
           </span>
           <span className="text-text-secondary">Agile Mode</span>
@@ -366,7 +366,7 @@ export default function InverterPage() {
                     ? 'Discharging'
                     : 'Active')
               : agileBlockedMessage(s.agile_blocked_by, s.agile_enabled)
-                ? 'On hold'
+                ? 'On Hold'
               : s.agile_scope === 'charge_only'
                 ? 'Enabled (charge only)'
                 : s.agile_scope === 'discharge_only'

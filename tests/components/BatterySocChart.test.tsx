@@ -66,7 +66,7 @@ describe('<BatterySocChart/>', () => {
     fetchHistoryMock.mockResolvedValue({ soc: [] });
     const { container } = render(<BatterySocChart />);
     await waitFor(() => {
-      expect(container.textContent).toContain('No SOC history in the last 24h');
+      expect(container.textContent).toContain('No SOC History in the Last 24h');
     });
   });
 
@@ -75,7 +75,7 @@ describe('<BatterySocChart/>', () => {
     fetchHistoryMock.mockResolvedValue({ soc: [] });
     const { container } = render(<BatterySocChart />);
     await waitFor(() => {
-      expect(container.textContent).toContain('No SOC history yet today');
+      expect(container.textContent).toContain('No SOC History Yet Today');
     });
   });
 
@@ -107,7 +107,7 @@ describe('<BatterySocChart/>', () => {
     // the component has moved into the chart-render branch.
     await waitFor(() => {
       expect(container.querySelector('.animate-spin')).toBeNull();
-      expect(container.textContent).not.toContain('No SOC history yet today');
+      expect(container.textContent).not.toContain('No SOC History Yet Today');
       expect(container.textContent).not.toContain('Failed to load SOC history');
     });
   });

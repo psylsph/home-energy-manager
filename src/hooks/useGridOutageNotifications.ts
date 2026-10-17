@@ -55,15 +55,15 @@ export function useGridOutageNotifications() {
         ? ` Battery is discharging at ${formatPower(Math.abs(snapshot.battery_power))}.`
         : '';
       const title = kind === 'grid'
-        ? 'Grid power lost'
+        ? 'Grid Power Lost'
         : kind === 'battery_temp'
-          ? 'Battery over temperature'
-          : 'Inverter trip detected';
+          ? 'Battery Over Temperature'
+          : 'Inverter Trip Detected';
       const reason = kind === 'grid'
         ? gridFaultReason(snapshot)
         : kind === 'battery_temp'
-          ? 'Battery over temp warning'
-          : 'Inverter fault';
+          ? 'Battery Over Temp Warning'
+          : 'Inverter Fault';
       sendNotification(
         title,
         `The inverter reports ${reason}. Battery SOC is ${formatPercent(snapshot.soc)}.${discharging}`,
@@ -76,12 +76,12 @@ export function useGridOutageNotifications() {
       const prev = previousKind.current;
       if (prev === 'grid' || prev === 'inverter') {
         sendNotification(
-          'Grid power restored',
+          'Grid Power Restored',
           `Grid voltage is back at ${formatVoltage(snapshot.grid_voltage)}. Battery SOC is ${formatPercent(snapshot.soc)}.`,
         );
       } else if (prev === 'battery_temp') {
         sendNotification(
-          'Battery temperature normal',
+          'Battery Temperature Normal',
           `The battery has cooled down. Battery SOC is ${formatPercent(snapshot.soc)}.`,
         );
       }

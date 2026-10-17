@@ -263,6 +263,6 @@ describe('Control page: inverter-reported charge limit', () => {
   it('says unknown rather than guessing when the snapshot cannot be dated', async () => {
     renderWith(makeSnapshot(), null);
     await act(async () => {});
-    expect(screen.getAllByText('Inverter Charge Rate: unknown')).toHaveLength(1);
+    expect(screen.getAllByText('Inverter Charge Rate: Unknown')).toHaveLength(1);
   });
 });

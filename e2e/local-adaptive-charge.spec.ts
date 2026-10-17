@@ -177,7 +177,7 @@ test.describe.serial('Adaptive Charge with real simulator', () => {
       && value.charge_rate === 50,
     );
 
-    await expect(page.getByText('Low-SOC recovery active')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Low-SOC Recovery Active')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText('100%', { exact: true }).first()).toBeVisible();
   });
 

@@ -55,8 +55,8 @@ test.describe.serial('Adaptive Charge', () => {
     await expect(modeSelect).toBeVisible({ timeout: 15_000 });
     await modeSelect.selectOption('adaptive');
 
-    await expect(page.getByText('Preferred charge rate').first()).toBeVisible();
-    await expect(page.getByText('Recovery charge rate').first()).toBeVisible();
+    await expect(page.getByText('Preferred Charge Rate').first()).toBeVisible();
+    await expect(page.getByText('Recovery Charge Rate').first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Add period' })).toBeVisible();
 
     await page.getByLabel('Low SOC period 1').fill('90');

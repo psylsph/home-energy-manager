@@ -240,7 +240,7 @@ describe('<InverterPage/> Cosy on hold', () => {
     const { container } = render(<InverterPage />);
     const labelEl = Array.from(container.querySelectorAll('span.text-text-secondary'))
       .find((r) => r.textContent === 'Cosy Mode');
-    expect(labelEl?.nextElementSibling?.textContent).toBe('On hold');
+    expect(labelEl?.nextElementSibling?.textContent).toBe('On Hold');
     expect(container.textContent).toMatch(/Cosy is on hold: a manual Force Charge or Force Discharge/);
   });
 
@@ -272,7 +272,7 @@ describe('<InverterPage/> Agile on hold', () => {
       }),
     });
     const { container } = render(<InverterPage />);
-    expect(agileValue(container)).toBe('On hold');
+    expect(agileValue(container)).toBe('On Hold');
     expect(container.textContent).toMatch(/Agile is on hold: a battery pause is active/);
   });
 
@@ -281,7 +281,7 @@ describe('<InverterPage/> Agile on hold', () => {
       snapshot: makeSnapshot({ agile_enabled: true, agile_blocked_by: '' }),
     });
     const { container } = render(<InverterPage />);
-    expect(agileValue(container)).not.toBe('On hold');
+    expect(agileValue(container)).not.toBe('On Hold');
     expect(container.textContent).not.toMatch(/Agile is on hold/);
   });
 });

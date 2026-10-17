@@ -206,7 +206,7 @@ export default function LogsPage() {
             type="text"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter logs…"
+            placeholder="Filter Logs…"
             className="flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
           />
           {filter && (
@@ -233,7 +233,7 @@ export default function LogsPage() {
       >
         {filteredLogs.length === 0 ? (
           <div className="flex items-center justify-center h-full text-text-secondary text-sm font-sans">
-            {logs.length === 0 ? 'No logs captured yet' : 'No logs match the filter'}
+            {logs.length === 0 ? 'No Logs Captured Yet' : 'No Logs Match the Filter'}
           </div>
         ) : (
           <div className="px-2 py-1 font-mono text-xs leading-5 whitespace-pre-wrap">

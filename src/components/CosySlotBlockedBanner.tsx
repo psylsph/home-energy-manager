@@ -22,7 +22,7 @@ export default function CosySlotBlockedBanner() {
     >
       <div className="max-w-4xl mx-auto flex flex-wrap items-center gap-x-2 gap-y-1">
         <span aria-hidden="true">⚠️</span>
-        <strong>Cosy charging is being held back</strong>
+        <strong>Cosy Charging Is Being Held Back</strong>
         <span className="text-amber-100/85">
           {reason ? `${reason}.` : 'Something is holding the inverter.'} It will resume by itself
           once this clears.

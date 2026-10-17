@@ -11,7 +11,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
     // Return a shape that satisfies every SettingsPage fetcher so the
-    // page can mount past its "Loading settings…" spinner without
+    // page can mount past its "Loading Settings…" spinner without
     // crashing on undefined nested fields.
     if (path === '/api/settings') {
       return {
@@ -105,7 +105,7 @@ describe('<SettingsPage/> — Chart Grid Lines sub-section (issue #111)', () => 
   describe('render', () => {
     it('renders the sub-section heading inside Panel Controls', async () => {
       render(<SettingsPage />);
-      // SettingsPage shows a "Loading settings…" spinner until the first
+      // SettingsPage shows a "Loading Settings…" spinner until the first
       // /api/settings fetch resolves. The mock apiGet resolves immediately,
       // but the resulting setState is async — use findBy* to wait for the
       // real heading to appear.

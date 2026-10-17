@@ -118,7 +118,7 @@ test.describe('local inverter temperature alert banner', () => {
     const infra = await startHighTemperatureInfrastructure();
     try {
       await page.goto(infra.baseUrl);
-      await expect(page.getByText('Inverter temperature high')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText('Inverter Temperature High')).toBeVisible({ timeout: 15_000 });
       await expect(page.getByText(/Inverter temperature above 60°C/)).toBeVisible();
     } finally {
       await infra.cleanup();

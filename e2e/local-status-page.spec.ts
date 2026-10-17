@@ -10,7 +10,7 @@ import { test, expect } from './local-fixture.js';
 test.describe('Status Page - Loading', () => {
   test('should show data after initial load', async ({ page }) => {
     await page.goto('/');
-    // Should NOT show "Waiting for data" after the poll loop has warmed up
+    // Should NOT show "Waiting for Data" after the poll loop has warmed up
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
   });
 });

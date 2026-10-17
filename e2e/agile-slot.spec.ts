@@ -18,7 +18,7 @@
  *   - Expensive price + Charge Only → NO discharge writes (HR 56/57/59 untouched)
  *   - Cheap price + Discharge Only   → NO charge writes (HR 94/95/96 untouched)
  *   - scope=off after arming    → AgileClearActiveSlot zeros HR 94/95/96/56/57/59
- *   - UI: selecting "Agile — Charge only" POSTs { scope: "charge_only" }
+ *   - UI: selecting "Agile — Charge Only" POSTs { scope: "charge_only" }
  *
  * Isolation: the backend's Agile config persists to settings.json and
  * the poll loop re-evaluates every cycle, so every test disarms
@@ -390,7 +390,7 @@ test.describe('Agile slot-based mode (register-write verification)', () => {
     drainModbusWrites,
     peekModbusWrites,
   }) => {
-    // Regression: changing "Discharge when above" redrew the forecast tiles,
+    // Regression: changing "Discharge When Above" redrew the forecast tiles,
     // but the backend did not wake/re-evaluate the live 30-minute slot until
     // an app restart. This pins the live inverter action: if the current price
     // was discharging under the old threshold, and becomes hold under the new
@@ -569,7 +569,7 @@ test.describe('Agile Charging Mode dropdown (UI)', () => {
     await disarmAgile(baseUrl, drainModbusWrites);
   });
 
-  test('selecting "Agile — Charge only" POSTs scope=charge_only', async ({ page }) => {
+  test('selecting "Agile — Charge Only" POSTs scope=charge_only', async ({ page }) => {
     // Intercept the unified /api/charging-mode POST so we can assert
     // the body the frontend builds from the dropdown selection. The
     // backend maps `agile_charge` -> AgileScope::ChargeOnly, so this is
@@ -587,7 +587,7 @@ test.describe('Agile Charging Mode dropdown (UI)', () => {
     await expect(page.getByText(/Charging Mode/i).first()).toBeVisible({ timeout: 15_000 });
 
     // The <select> groups Agile options under an <optgroup label="Agile">.
-    // Open it and pick "Agile — Charge only".
+    // Open it and pick "Agile — Charge Only".
     const dropdown = page.getByRole('combobox');
     await dropdown.selectOption('agile_charge');
 

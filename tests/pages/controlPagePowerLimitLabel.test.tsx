@@ -592,7 +592,7 @@ describe('<ControlPage/> — power-limit saves wait for the inverter to confirm'
     discharge_rate: 50,
     ...overrides,
   });
-  const BANNER = 'Applying changes to inverter…';
+  const BANNER = 'Applying Changes to Inverter…';
 
   beforeEach(() => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -669,7 +669,7 @@ describe('<ControlPage/> — power-limit saves wait for the inverter to confirm'
 
     expect(screen.queryByText(BANNER)).toBeNull();
     const alert = screen.getByRole('alert').textContent ?? '';
-    expect(alert).toMatch(/Charge power limit/);
+    expect(alert).toMatch(/Charge Power Limit/);
     expect(alert).toMatch(/not confirmed|did not confirm/i);
     // A running Force Charge defers limit changes, so say so.
     expect(alert).toMatch(/Force Charge/);
@@ -797,15 +797,15 @@ describe('<ControlPage/> — charge-limit readout across every device family', (
     { code: '2301', family: 'PV inverter', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 25, expected: '50%', showsActivePower: true },
     { code: '3001', family: 'AC-coupled', caption: 'AC Charge Power Limit', maxBatteryPowerW: 3000, chargeRegister: 66, expected: '66% (2.0 kW)', showsActivePower: true },
     { code: '3002', family: 'AC-coupled Mk2', caption: 'AC Charge Power Limit', maxBatteryPowerW: 3000, chargeRegister: 66, expected: '66% (2.0 kW)', showsActivePower: true },
-    { code: '4001', family: 'Three-phase', caption: 'Three-phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
+    { code: '4001', family: 'Three-phase', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
     { code: '5001', family: 'EMS', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 25, expected: '50%', showsActivePower: true },
-    { code: '6001', family: 'AC three-phase', caption: 'Three-phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
+    { code: '6001', family: 'AC three-phase', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
     { code: '7001', family: 'Gateway', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 66, expected: '66%', showsActivePower: true },
     { code: '8001', family: 'AIO 6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
     { code: '8002', family: 'AIO 3.6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 3600, chargeRegister: 25, expected: '66% (2.4 kW)', showsActivePower: true },
     { code: '8003', family: 'AIO 5kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
-    { code: '8101', family: 'Hybrid HV Gen3', caption: 'Three-phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
-    { code: '8201', family: 'AIO Hybrid', caption: 'Three-phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
+    { code: '8101', family: 'Hybrid HV Gen3', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
+    { code: '8201', family: 'AIO Hybrid', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
     { code: '8301', family: 'Gen4 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
   ];
 

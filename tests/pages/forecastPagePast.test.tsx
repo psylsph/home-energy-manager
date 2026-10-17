@@ -4,7 +4,7 @@ import { act, render, screen, cleanup, fireEvent, waitFor, within } from '@testi
 import { useInverterStore } from '../../src/store/useInverterStore';
 
 // ---------------------------------------------------------------------------
-// ForecastPage "Show past" view (issue #361): earlier planner decisions and
+// ForecastPage "Show Past" view (issue #361): earlier planner decisions and
 // what really happened are drawn on the Battery and Solar charts, with the
 // reasons listed underneath so a past night can be judged.
 // ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('fetches the decisions and the measured history for the chosen range', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await waitFor(() => expect(calledWith('/api/history?')).toHaveLength(1));
     const decisions = new URLSearchParams(calledWith('/api/forecast/plan-history')[0].split('?')[1]);
     expect(decisions.get('from')).toBe(String(G - 24 * HOUR + 1));
@@ -255,8 +255,8 @@ describe('ForecastPage — Show past (issue #361)', () => {
   it('offers 30 and 90 day views and reads the full window for the longest one', async () => {
     render(<ForecastPage />);
     const control = await screen.findByTestId('forecast-past-range');
-    expect(within(control).getByRole('button', { name: '30 days' })).toBeTruthy();
-    await choose('90 days');
+    expect(within(control).getByRole('button', { name: '30 Days' })).toBeTruthy();
+    await choose('90 Days');
     await waitFor(() => expect(calledWith('/api/history?')).toHaveLength(1));
     const decisions = new URLSearchParams(calledWith('/api/forecast/plan-history')[0].split('?')[1]);
     expect(decisions.get('from')).toBe(String(G - 90 * 24 * HOUR + 1));
@@ -272,11 +272,11 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('draws the past plan and the actual SOC on the battery chart, in their own colours', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     expect(await screen.findByTestId('line-pastPlanned')).toBeTruthy();
     expect(screen.getByTestId('line-actualSoc')).toBeTruthy();
     const legend = screen.getByTestId('forecast-line-legend');
-    expect(within(legend).getByRole('button', { name: /Planned \(past\)/ })).toBeTruthy();
+    expect(within(legend).getByRole('button', { name: /Planned \(Past\)/ })).toBeTruthy();
     expect(within(legend).getByRole('button', { name: /Actual/ })).toBeTruthy();
     // The forward lines are still there.
     expect(screen.getByTestId('line-soc')).toBeTruthy();
@@ -284,7 +284,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('does not rebuild the past series for an unrelated store update', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await screen.findByTestId('line-pastPlanned');
     const before = stitchSpy.mock.calls.length;
     expect(before).toBeGreaterThan(0);
@@ -299,17 +299,17 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('lets the past lines be hidden from the legend like the others', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await screen.findByTestId('line-pastPlanned');
     const legend = screen.getByTestId('forecast-line-legend');
-    fireEvent.click(within(legend).getByRole('button', { name: /Planned \(past\)/ }));
+    fireEvent.click(within(legend).getByRole('button', { name: /Planned \(Past\)/ }));
     expect(screen.queryByTestId('line-pastPlanned')).toBeNull();
     expect(screen.getByTestId('line-actualSoc')).toBeTruthy();
   });
 
   it('stretches the axis back by the range and marks where the past ends', async () => {
     render(<ForecastPage />);
-    await choose('3 days');
+    await choose('3 Days');
     await screen.findByTestId('line-pastPlanned');
     const domains = screen
       .getAllByTestId('x-axis')
@@ -331,7 +331,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
     const profile = Array.from({ length: 24 }, (_, hour) => ({ hour, kwh: 0.5, p25: 0.3, p75: 0.8 }));
     forward = () => ({ ...forwardPayload(), consumption_weekday: profile, consumption_weekend: profile });
     const { container } = render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await screen.findByTestId('line-pastSolar');
     for (const chart of ['battery', 'solar', 'consumption']) {
       const panel = container.querySelector<HTMLElement>(`#forecast-chart-panel-${chart}`);
@@ -361,7 +361,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('labels the solar chart in kW, because each hourly point is an average power', async () => {
     const { container } = render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await screen.findByTestId('line-pastSolar');
     const solarPanel = container.querySelector<HTMLElement>('#forecast-chart-panel-solar')!;
     expect(within(solarPanel).getByTestId('y-axis').getAttribute('data-unit')).toBe('kW');
@@ -369,14 +369,14 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('draws the past forecast and the measured generation on the solar chart', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     expect(await screen.findByTestId('line-pastSolar')).toBeTruthy();
     expect(screen.getByTestId('line-actualSolar')).toBeTruthy();
   });
 
   it('says how far the plan and the forecast were from reality', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     const battery = await screen.findByTestId('forecast-past-battery-accuracy');
     // Planned 58 and 55 (the 60 it started from isn't scored) against
     // measured 60 and 50: 3.5 points out on average, finishing 1.5 below.
@@ -391,11 +391,11 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('lists each decision with when, why and what it recommended', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     const list = await screen.findByTestId('forecast-past-decisions');
     const items = within(list).getAllByTestId('forecast-past-decision');
     expect(items).toHaveLength(1);
-    expect(items[0].textContent).toContain('Before the cheap window');
+    expect(items[0].textContent).toContain('Before the Cheap Window');
     expect(items[0].textContent).toContain('No overnight charge needed');
     expect(items[0].textContent).toContain('Sunny day — the battery fills from solar.');
   });
@@ -403,7 +403,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
   it('explains when nothing was recorded in the period', async () => {
     route({ planHistory: () => ({ ok: true, data: { snapshots: [] } }) });
     render(<ForecastPage />);
-    await choose('7 days');
+    await choose('7 Days');
     const empty = await screen.findByTestId('forecast-past-empty');
     expect(empty.textContent).toMatch(/No planner decisions/);
     expect(screen.queryByTestId('forecast-past-decisions')).toBeNull();
@@ -417,7 +417,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
       },
     });
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     const error = await screen.findByTestId('forecast-past-error');
     expect(error.textContent).toMatch(/history offline/);
     // The forward charts are untouched.
@@ -432,7 +432,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
       },
     });
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     expect(await screen.findByTestId('forecast-past-decisions')).toBeTruthy();
     expect(screen.getByTestId('line-pastPlanned')).toBeTruthy();
     expect(screen.queryByTestId('line-actualSoc')).toBeNull();
@@ -441,7 +441,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('switching back to Off removes the past from the page', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await screen.findByTestId('line-pastPlanned');
     await choose('Off');
     expect(screen.queryByTestId('line-pastPlanned')).toBeNull();
@@ -478,8 +478,8 @@ describe('ForecastPage — Show past (issue #361)', () => {
       },
     });
     render(<ForecastPage />);
-    await choose('24 hours');
-    await choose('7 days');
+    await choose('24 Hours');
+    await choose('7 Days');
     await waitFor(() =>
       expect(screen.getAllByTestId('forecast-past-decision')[0].textContent).toMatch(
         /second request/,
@@ -500,7 +500,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
   });
   it('follows the forecast forward: a later generation time fetches the past again', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await waitFor(() => expect(calledWith('/api/history?')).toHaveLength(1));
     // The forecast refetches (the battery moved) and now reports a time
     // well past the window the first fetch used.
@@ -525,7 +525,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('does not refetch for a forecast that has barely moved', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await waitFor(() => expect(calledWith('/api/history?')).toHaveLength(1));
     forward = () => ({ ...forwardPayload(), generated_at: G + 60 });
     act(() => {
@@ -542,7 +542,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('shows the loading state again, not the old result, after Off and back', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await screen.findByTestId('line-pastPlanned');
     await choose('Off');
     let release: (value: unknown) => void = () => {};
@@ -550,7 +550,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
       release = resolve;
     });
     route({ planHistory: () => gate });
-    await choose('24 hours');
+    await choose('24 Hours');
     expect(screen.getByRole('status').textContent).toMatch(/Loading the past/);
     expect(screen.queryByTestId('line-pastPlanned')).toBeNull();
     release({ ok: true, data: { snapshots: [pastDecision(START, HS)] } });
@@ -573,7 +573,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
         }),
       });
       render(<ForecastPage />);
-      await choose('24 hours');
+      await choose('24 Hours');
       const items = await screen.findAllByTestId('forecast-past-decision');
       expect(items).toHaveLength(2);
       const duplicateKey = errors.mock.calls.some((call) => String(call[0]).includes('same key'));
@@ -585,7 +585,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('leaves the decisions off the Home use tab, which has no past view', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     await screen.findByTestId('forecast-past-decisions');
     fireEvent.click(screen.getByTestId('forecast-chart-tab-consumption'));
     expect(screen.queryByTestId('forecast-past-decisions')).toBeNull();
@@ -597,7 +597,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
   it('still draws the past when there is no forward projection to show', async () => {
     forward = () => ({ ...forwardPayload(), battery: null, solar: [] });
     render(<ForecastPage />);
-    await choose('7 days');
+    await choose('7 Days');
     expect(await screen.findByTestId('line-pastPlanned')).toBeTruthy();
     expect(screen.getByTestId('line-actualSoc')).toBeTruthy();
     expect(screen.getByTestId('line-pastSolar')).toBeTruthy();
@@ -608,7 +608,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
 
   it('says the planned line is what the plan expected if it was followed', async () => {
     render(<ForecastPage />);
-    await choose('24 hours');
+    await choose('24 Hours');
     const note = await screen.findByTestId('forecast-past-plan-note');
     expect(note.textContent).toMatch(/if its recommendation was followed/);
   });

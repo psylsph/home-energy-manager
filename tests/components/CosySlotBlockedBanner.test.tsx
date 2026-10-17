@@ -25,7 +25,7 @@ describe('CosySlotBlockedBanner', () => {
   it('raises an alert when a Cosy slot is at risk and says why', () => {
     show({ cosy_enabled: true, cosy_slot_at_risk: true, cosy_blocked_by: 'pause' });
     const banner = screen.getByRole('alert');
-    expect(banner).toHaveTextContent(/Cosy charging is being held back/);
+    expect(banner).toHaveTextContent(/Cosy Charging Is Being Held Back/);
     expect(banner).toHaveTextContent(/battery pause/i);
   });
 

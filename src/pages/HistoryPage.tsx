@@ -164,7 +164,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
         // null otherwise.
         {
           key: 'pv-pct',
-          title: 'PV % of Rated (kWp)',
+          title: 'PV % Of Rated (kWp)',
           unit: '%',
           fields: [
             { field: 'pv1_pct', color: '#F59E0B', label: 'PV1' },
@@ -338,10 +338,10 @@ function getPeriodTotalItems(tab: MetricTab, summary: HistorySummary): PeriodTot
       ];
     case 'cost':
       return [
-        { label: 'Import cost', value: formatGbp(summary.import_cost_gbp), color: '#EF4444' },
-        { label: 'Export income', value: formatGbp(summary.export_income_gbp), color: '#22C55E' },
+        { label: 'Import Cost', value: formatGbp(summary.import_cost_gbp), color: '#EF4444' },
+        { label: 'Export Income', value: formatGbp(summary.export_income_gbp), color: '#22C55E' },
         {
-          label: 'Net cost',
+          label: 'Net Cost',
           value: formatGbp(summary.net_cost_gbp),
           color: summary.net_cost_gbp >= 0 ? '#F59E0B' : '#22C55E',
         },
@@ -362,9 +362,9 @@ function PeriodTotals({ tab, summary, windowLabel }: {
   if (items.length === 0) return null;
 
   return (
-    <section className="bg-bg-surface rounded-xl p-3" aria-label="Period totals">
+    <section className="bg-bg-surface rounded-xl p-3" aria-label="Period Totals">
       <div className="flex items-baseline justify-between gap-3 mb-2 px-1">
-        <h2 className="text-text-primary text-sm font-sans font-bold">Period totals</h2>
+        <h2 className="text-text-primary text-sm font-sans font-bold">Period Totals</h2>
         <span className="text-text-secondary/70 text-[11px] font-sans text-right">{windowLabel}</span>
       </div>
       <div className={`grid gap-2 ${items.length === 1 ? 'grid-cols-1' : items.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
@@ -695,7 +695,7 @@ async function downloadWithPrompt(csvContent: string, fileName: string, onExport
     const handle = await (window as any).showSaveFilePicker({
       suggestedName: fileName,
       types: [{
-        description: 'CSV file',
+        description: 'CSV File',
         accept: { 'text/csv': ['.csv'] },
       }],
     });
@@ -924,7 +924,7 @@ export default function HistoryPage() {
           value={tab}
           onChange={(e) => handleTabChange(e.target.value as MetricTab)}
           className="sm:hidden w-full bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans font-medium outline-none border border-white/10"
-          aria-label="Select metric"
+          aria-label="Select Metric"
         >
           {TABS.map((t) => (
             <option key={t.key} value={t.key}>{t.label}</option>
@@ -953,7 +953,7 @@ export default function HistoryPage() {
           value={range}
           onChange={(e) => handleRangeChange(e.target.value as HistoryRange)}
           className="sm:hidden w-full bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-sans font-medium outline-none border border-white/10"
-          aria-label="Select time range"
+          aria-label="Select Time Range"
         >
           {HISTORY_RANGES.map((r) => (
             <option key={r.key} value={r.key}>{r.label}</option>
@@ -1014,7 +1014,7 @@ export default function HistoryPage() {
                   e.target.blur();
                 }
               }}
-              aria-label="Select period date"
+              aria-label="Select Period Date"
               className="bg-transparent text-text-primary text-sm font-sans text-center px-1 py-0.5 rounded-md outline-none cursor-pointer hover:bg-bg-elevated transition-colors"
             />
           ) : (
@@ -1053,13 +1053,13 @@ export default function HistoryPage() {
           <button
             onClick={handleExportAll}
             disabled={!hasData || exportingAll}
-            aria-label="Export all tabs as a single combined CSV"
+            aria-label="Export All Tabs as a Single Combined CSV"
             className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30 flex items-center gap-1"
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
-            {exportingAll ? 'Preparing…' : 'Export all'}
+            {exportingAll ? 'Preparing…' : 'Export All'}
           </button>
         </div>
       </div>
@@ -1085,7 +1085,7 @@ export default function HistoryPage() {
       {/* Charts */}
       {!hasData ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3">
-          <p className="text-text-secondary text-sm font-sans">No data available for this period</p>
+          <p className="text-text-secondary text-sm font-sans">No Data Available for This Period</p>
           <p className="text-text-secondary/50 text-xs font-sans">
             History is recorded while the app is running and connected
           </p>

@@ -41,7 +41,7 @@ function settings(overrides: Json = {}): Json {
     evc_host: '', evc_port: 502, disable_auto_discovery: true, autostart_enabled: false,
     minimise_to_tray: false, start_minimised: false, check_for_updates: true, api_key: '', api_port: 7338,
     hidden_panels: [], solar_arrays: [], import_tariff_config: flat(), export_tariff_config: flat(),
-    octopus_enabled: false, octopus_account_number: '', octopus_api_key_configured: false,
+    octopus_account_number: '', octopus_api_key_configured: false,
     octopus_gas_unit: 'unknown', octopus_economy7_start: '00:30', octopus_economy7_end: '07:30',
     ...overrides,
   };
@@ -115,16 +115,16 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
       fireEvent.change(within(s).getByLabelText(label), { target: { value } });
     set('Bot Token (from @BotFather)', 'tok-123');
     set('Chat ID (from @userinfobot)', '555');
-    set(/^Topic \(subscribe to this in the ntfy app\)/, 'my-topic');
+    set(/^Topic \(Subscribe to This in the ntfy App\)/, 'my-topic');
     set('Server (optional, default: ntfy.sh)', 'https://ntfy.example');
     set('App API Token (from pushover.net/apps/build)', 'po-app');
     set('User Key (from your Pushover account)', 'po-user');
-    set('Battery temp below °C', '2.5');
-    set('Battery temp above °C', '48');
-    set('SOC below %', '15');
-    set('SOC above %', '95');
+    set('Battery Temp Below °C', '2.5');
+    set('Battery Temp Above °C', '48');
+    set('SOC Below %', '15');
+    set('SOC Above %', '95');
     set(/Clipping Ceiling/, '5500');
-    set('minutes between all alerts', '45');
+    set('Minutes Between All Alerts', '45');
 
     await waitFor(() => expect(within(s).getByRole('button', { name: 'Save Notification Settings' })).toBeEnabled());
     fireEvent.click(within(s).getByRole('button', { name: 'Save Notification Settings' }));
@@ -187,9 +187,9 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
     mount({ settings: { serial: 'SA12345678' }, alerts: { ntfy_topic: 'my-topic' } });
     render(<SettingsPage />);
     const s = await heading('Notifications');
-    await waitFor(() => expect((within(s).getByLabelText('Topic (subscribe to this in the ntfy app)') as HTMLInputElement).value).toBe('my-topic'));
+    await waitFor(() => expect((within(s).getByLabelText('Topic (Subscribe to This in the ntfy App)') as HTMLInputElement).value).toBe('my-topic'));
 
-    const topicRow = within(s).getByLabelText('Topic (subscribe to this in the ntfy app)').closest('label')!.parentElement!;
+    const topicRow = within(s).getByLabelText('Topic (Subscribe to This in the ntfy App)').closest('label')!.parentElement!;
     fireEvent.click(within(topicRow).getByRole('button', { name: /Copy/ }));
 
     await screen.findByText('Topic copied!');
@@ -274,9 +274,9 @@ describe('<SettingsPage/> — tariff window editor', () => {
     await waitFor(() => expect((within(imp).getAllByLabelText('End') as HTMLSelectElement[])[0].value).not.toBe('07:00'));
 
     // Then drop the second window: back to one flat window.
-    fireEvent.click(within(imp).getAllByTitle('Remove window')[1]);
+    fireEvent.click(within(imp).getAllByTitle('Remove Window')[1]);
     await waitFor(() => expect(within(imp).getAllByLabelText('Rate (p/kWh)')).toHaveLength(1));
-    expect(within(imp).queryByTitle('Remove window')).toBeNull();
+    expect(within(imp).queryByTitle('Remove Window')).toBeNull();
   });
 
   it('edits the end of a window', async () => {
@@ -411,8 +411,8 @@ describe('<SettingsPage/> — connection and EV charger fields', () => {
     mount();
     useInverterStore.setState({ developerMode: true });
     render(<SettingsPage />);
-    const apply = await screen.findByRole('button', { name: 'Apply network settings' });
-    fireEvent.change(screen.getByLabelText('Listen address'), { target: { value: '0.0.0.0' } });
+    const apply = await screen.findByRole('button', { name: 'Apply Network Settings' });
+    fireEvent.change(screen.getByLabelText('Listen Address'), { target: { value: '0.0.0.0' } });
     fireEvent.change(screen.getByLabelText('Allowed browser origins (CORS, comma-separated)'), {
       target: { value: 'https://a.example, https://b.example' },
     });
@@ -432,7 +432,7 @@ describe('<SettingsPage/> — connection and EV charger fields', () => {
     useInverterStore.setState({ developerMode: true });
     render(<SettingsPage />);
     apiPostMock.mockResolvedValue({ ok: true, data: { api_key: 'secret-abcdef-1234' } });
-    fireEvent.click(await screen.findByRole('button', { name: /Generate (new )?API key/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Generate (New )?API Key/ }));
     const key = await screen.findByText('secret-abcdef-1234');
     fireEvent.click(within(key.parentElement!).getByRole('button', { name: 'Copy' }));
     expect(writeText).toHaveBeenCalledWith('secret-abcdef-1234');
@@ -445,8 +445,8 @@ describe('<SettingsPage/> — network access list and links', () => {
     render(<SettingsPage />);
     await screen.findByText('Connected clients (4)');
     // Loopback, IPv6 loopback (as seen without a port) and the LAN address count as this device.
-    expect(screen.getAllByText('This device')).toHaveLength(2);
-    expect(screen.getByText('192.168.1.50:50003').parentElement!.textContent).not.toMatch(/This device/);
+    expect(screen.getAllByText('This Device')).toHaveLength(2);
+    expect(screen.getByText('192.168.1.50:50003').parentElement!.textContent).not.toMatch(/This Device/);
   });
 
   it('copies the read-only and mini-page links', async () => {
@@ -480,14 +480,14 @@ describe('<SettingsPage/> — network access list and links', () => {
 
 describe('<SettingsPage/> — Octopus, solar and panels', () => {
   it('saves the Economy 7 night-rate window', async () => {
-    mount({ settings: { octopus_enabled: false } });
+    mount();
     render(<SettingsPage />);
     const s = await heading('Octopus Energy Data');
-    fireEvent.change(within(s).getByLabelText('Economy 7 night rate starts'), { target: { value: '01:00' } });
-    fireEvent.change(within(s).getByLabelText('Economy 7 night rate ends'), { target: { value: '08:00' } });
+    fireEvent.change(within(s).getByLabelText('Economy 7 Night Rate Starts'), { target: { value: '01:00' } });
+    fireEvent.change(within(s).getByLabelText('Economy 7 Night Rate Ends'), { target: { value: '08:00' } });
     fireEvent.click(within(s).getByRole('button', { name: 'Save Octopus Settings' }));
 
-    await screen.findByText('Octopus integration disabled');
+    await screen.findByText(/Octopus settings saved\./);
     expect(lastPost('/api/settings')).toMatchObject({ octopus_economy7_start: '01:00', octopus_economy7_end: '08:00' });
   });
 

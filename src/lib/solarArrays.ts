@@ -75,7 +75,7 @@ export function arrayLabel(arr: SolarArraySummary): string {
       return `Meter 0x${addr.toString(16).padStart(2, '0')}`;
     }
     default:
-      return 'Solar array';
+      return 'Solar Array';
   }
 }
 

@@ -109,7 +109,7 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
     // StatusPage throws on render — the route's ErrorBoundary must catch it
     // and show the fallback UI rather than blanking the whole app.
     render(<App />);
-    expect(screen.getByText('Something went wrong')).toBeDefined();
+    expect(screen.getByText('Something Went Wrong')).toBeDefined();
     expect(screen.getByText('Status exploded')).toBeDefined();
   });
 
@@ -219,19 +219,28 @@ describe('<App/> Octopus navigation (issue #212)', () => {
 
   it('does not show the tab when the integration is incomplete', async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
-      ? { ok: true, data: { octopus_enabled: true, octopus_account_number: 'A-123', octopus_api_key_configured: false } }
+      ? { ok: true, data: { octopus_account_number: 'A-123', octopus_api_key_configured: false } }
       : { ok: true, data: {} });
     render(<App />);
     await act(async () => {});
     expect(screen.queryByRole('link', { name: 'Octopus' })).toBeNull();
   });
 
-  it('shows the dedicated tab only when enabled with account and key configured', async () => {
+  it('shows the dedicated tab once the account number and key are saved', async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
-      ? { ok: true, data: { octopus_enabled: true, octopus_account_number: 'A-123', octopus_api_key_configured: true } }
+      ? { ok: true, data: { octopus_account_number: 'A-123', octopus_api_key_configured: true } }
       : { ok: true, data: {} });
     render(<App />);
     expect(await screen.findByRole('link', { name: 'Octopus' })).toBeDefined();
+  });
+
+  it('does not show the tab without an account number', async () => {
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_account_number: '', octopus_api_key_configured: true } }
+      : { ok: true, data: {} });
+    render(<App />);
+    await act(async () => {});
+    expect(screen.queryByRole('link', { name: 'Octopus' })).toBeNull();
   });
 });
 
@@ -281,10 +290,10 @@ describe('<App/> system alert banners', () => {
 
     render(<App />);
 
-    expect(screen.getByText('Grid power lost')).toBeDefined();
-    expect(screen.getByText('Inverter trip detected')).toBeDefined();
-    expect(screen.getByText('Battery over temperature')).toBeDefined();
-    expect(screen.getByText('Inverter temperature high')).toBeDefined();
+    expect(screen.getByText('Grid Power Lost')).toBeDefined();
+    expect(screen.getByText('Inverter Trip Detected')).toBeDefined();
+    expect(screen.getByText('Battery Over Temperature')).toBeDefined();
+    expect(screen.getByText('Inverter Temperature High')).toBeDefined();
   });
 
   it('shows the Cosy-held-back banner on every page while a slot is at risk', async () => {
@@ -299,7 +308,7 @@ describe('<App/> system alert banners', () => {
         } as never,
       });
       const { unmount } = render(<App />);
-      expect(screen.getByText(/Cosy charging is being held back/)).toBeDefined();
+      expect(screen.getByText(/Cosy Charging Is Being Held Back/)).toBeDefined();
       unmount();
     }
   });
@@ -310,7 +319,7 @@ describe('<App/> system alert banners', () => {
       snapshot: { cosy_enabled: true, cosy_slot_at_risk: false, cosy_blocked_by: 'force', soc: 50 } as never,
     });
     render(<App />);
-    expect(screen.queryByText(/Cosy charging is being held back/)).toBeNull();
+    expect(screen.queryByText(/Cosy Charging Is Being Held Back/)).toBeNull();
   });
 
   it('re-evaluates the inverter-temperature banner when the threshold changes in the store (issue #183)', async () => {
@@ -335,7 +344,7 @@ describe('<App/> system alert banners', () => {
 
     render(<App />);
     // 61°C is above the 60°C max threshold → high-temperature banner shows.
-    expect(await screen.findByText('Inverter temperature high')).toBeDefined();
+    expect(await screen.findByText('Inverter Temperature High')).toBeDefined();
 
     // Simulate the user raising the threshold on Settings and saving: the
     // store is the reactive glue, so the banner must drop without a refresh.
@@ -345,7 +354,7 @@ describe('<App/> system alert banners', () => {
       });
     });
     // 61°C is now below the 65°C threshold → banner disappears.
-    expect(screen.queryByText('Inverter temperature high')).toBeNull();
+    expect(screen.queryByText('Inverter Temperature High')).toBeNull();
   });
 });
 
@@ -449,7 +458,7 @@ describe('<App/> read-only mode (issue #114)', () => {
 //
 // Instances run unattended for days. The banner used to fetch
 // /api/latest-version once on mount and then freeze, so an instance left
-// running kept pointing "View release" at whatever release was current when
+// running kept pointing "View Release" at whatever release was current when
 // the page loaded — potentially several releases behind. The app must
 // re-fetch on an interval so the banner text, its link, and the per-version
 // dismissal latch all track the real latest release without a reload.

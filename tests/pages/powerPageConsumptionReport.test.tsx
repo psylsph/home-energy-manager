@@ -186,7 +186,7 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
       });
 
       reportFailure = true;
-      fireEvent.change(screen.getByLabelText('Select time range'), {
+      fireEvent.change(screen.getByLabelText('Select Time Range'), {
         target: { value: '7d' },
       });
       await waitFor(() => {
@@ -239,12 +239,26 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
         expect(written.length).toBe(1);
       });
       const html = written[0];
-      expect(html).toContain('Import cost</span><strong style="color:#dc2626">£5.42</strong>');
-      expect(html).toContain('Export income</span><strong style="color:#0284c7">£1.13</strong>');
-      expect(html).toContain('Net cost</span><strong>£4.29</strong>');
+      expect(html).toContain('Import Cost</span><strong style="color:#dc2626">£5.42</strong>');
+      expect(html).toContain('Export Income</span><strong style="color:#0284c7">£1.13</strong>');
+      expect(html).toContain('Net Cost</span><strong>£4.29</strong>');
       expect(html).toContain('class="donut-svg"');
       expect(html).not.toContain('conic-gradient');
-      expect(html).toContain('Print / save as PDF');
+      expect(html).toContain('Print / Save As PDF');
+      // Chart titles and labels in the generated report follow the same casing
+      // as the page (the report is a string, so check the rendered output).
+      for (const title of [
+        'Solar Generation Vs Home Load',
+        'Battery Charge Vs Discharge',
+        'Grid Import Vs Export',
+        'Grid Balance',
+        'Battery Activity',
+        'Estimated Solar Destination',
+        'Estimated Home Source',
+        'Used Locally',
+      ]) {
+        expect(html, title).toContain(title);
+      }
       expect(html).not.toContain('setTimeout(() => window.print()');
     });
   });

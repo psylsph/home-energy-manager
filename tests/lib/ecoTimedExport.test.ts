@@ -388,7 +388,7 @@ describe('extractMachineStateName (legacy Debug-string fallback)', () => {
 describe('formatEcoState', () => {
     it.each([
         ['active', 'Eco — Active'],
-        ['temporarily_overridden', 'Eco — Temporarily overridden'],
+        ['temporarily_overridden', 'Eco — Temporarily Overridden'],
         ['off', 'Eco — Off'],
     ] as const)('formats %s as %s', (state: EcoPresentationState, expected: string) => {
         expect(formatEcoState(state)).toBe(expected);
@@ -402,8 +402,8 @@ describe('formatTimedExportState', () => {
         ['armed', 'Timed Export — Armed'],
         ['entering', 'Timed Export — Entering…'],
         ['exiting', 'Timed Export — Exiting…'],
-        ['active_now', 'Timed Export — Exporting now'],
-        ['blocked_by_pause', 'Timed Export — Blocked by Pause Discharge'],
+        ['active_now', 'Timed Export — Exporting Now'],
+        ['blocked_by_pause', 'Timed Export — Blocked By Pause Discharge'],
         ['error', 'Timed Export — Error'],
     ] as const)('formats %s as %s', (state: TimedExportPresentationState, expected: string) => {
         expect(formatTimedExportState(state)).toBe(expected);
@@ -671,7 +671,7 @@ describe('deriveTimedExportButton (single toggle, dynamic label)', () => {
         expect(button.variant).toBe('active');
         expect(button.label).toBe('Stop Timed Export');
         expect(button.action).toBe('stop');
-        expect(button.ariaLabel).toContain('Exporting now');
+        expect(button.ariaLabel).toContain('Exporting Now');
         expect(button.ariaLabel).toContain('Press to stop');
     });
 
@@ -694,7 +694,7 @@ describe('deriveTimedExportButton (single toggle, dynamic label)', () => {
         expect(button.variant).toBe('blocked');
         expect(button.label).toBe('Timed Export — Blocked');
         expect(button.action).toBe('stop');
-        expect(button.ariaLabel).toContain('Blocked by Pause Discharge');
+        expect(button.ariaLabel).toContain('Blocked By Pause Discharge');
     });
 
     it('machine error shows the error variant instead of active', () => {

@@ -63,7 +63,7 @@ describe('<BatteryModeSummary/>', () => {
     );
     const row = container.querySelector('[data-testid="battery-mode-eco"]');
     expect(row?.getAttribute('data-state')).toBe('active');
-    expect(row?.textContent).toContain('on');
+    expect(row?.textContent).toContain('On');
     expect(row?.querySelector('.bg-accent')).not.toBeNull();
     expect(
       container.querySelector('[data-testid="battery-mode-desc-eco"]')?.className,
@@ -83,7 +83,7 @@ describe('<BatteryModeSummary/>', () => {
     );
     const row = container.querySelector('[data-testid="battery-mode-timed_export"]');
     expect(row?.getAttribute('data-state')).toBe('active');
-    expect(row?.textContent).toContain('armed · exporting now');
+    expect(row?.textContent).toContain('Armed · Exporting Now');
   });
 
   it('renders an active Timed Discharge row with the covering-demand suffix', () => {
@@ -99,7 +99,7 @@ describe('<BatteryModeSummary/>', () => {
     );
     const row = container.querySelector('[data-testid="battery-mode-timed_discharge"]');
     expect(row?.getAttribute('data-state')).toBe('active');
-    expect(row?.textContent).toContain('armed · covering demand now');
+    expect(row?.textContent).toContain('Armed · Covering Demand Now');
   });
 
   it('keeps armed-but-inactive mechanisms in the armed state', () => {
@@ -114,7 +114,7 @@ describe('<BatteryModeSummary/>', () => {
     );
     const row = container.querySelector('[data-testid="battery-mode-timed_charge"]');
     expect(row?.getAttribute('data-state')).toBe('armed');
-    expect(row?.textContent).toContain('armed');
+    expect(row?.textContent).toContain('Armed');
     expect(row?.textContent).not.toContain('charging now');
   });
 

@@ -194,7 +194,7 @@ describe('<ControlPage/> — Auto Winter save', () => {
 
 describe('<ControlPage/> — Load Discharge Limiter save', () => {
   // This component's root is a div, not a section, so scope to the heading's
-  // own container rather than the enclosing "Battery and Power Controls" one.
+  // own container rather than the enclosing "Battery And Power Controls" one.
   const save = () =>
     within(screen.getByRole('heading', { name: 'Load Discharge Limiter' }).parentElement as HTMLElement).getByRole(
       'button',
@@ -278,7 +278,7 @@ describe('<ControlPage/> — Charging Mode', () => {
     beforeEach(() => {
       state.cosy = { ok: true, enabled: true, slots: cosySlots() };
     });
-    const saveSlots = () => within(section('Charging Mode')).getByRole('button', { name: /Save slots|Saving|Saved|Error/ });
+    const saveSlots = () => within(section('Charging Mode')).getByRole('button', { name: /Save Slots|Saving|Saved|Error/ });
 
     it('saves an edited slot', async () => {
       connect();
@@ -311,7 +311,7 @@ describe('<ControlPage/> — Charging Mode', () => {
 });
 
 describe('<ControlPage/> — Adaptive Charge save', () => {
-  const save = () => screen.getByRole('button', { name: /Save Adaptive Charge|Saving|Saved|Check settings/ });
+  const save = () => screen.getByRole('button', { name: /Save Adaptive Charge|Saving|Saved|Check Settings/ });
   const period = (overrides: Record<string, unknown> = {}) => ({
     ...DEFAULT_ADAPTIVE_PERIOD,
     enabled: true,
@@ -347,7 +347,7 @@ describe('<ControlPage/> — Adaptive Charge save', () => {
     fireEvent.click(save());
 
     expect(await screen.findByText('Enable at least one period.')).toBeInTheDocument();
-    expect(save().textContent).toBe('Check settings');
+    expect(save().textContent).toBe('Check Settings');
     expect(calls('/api/adaptive-charge')).toHaveLength(0);
   });
 
@@ -374,7 +374,7 @@ describe('<ControlPage/> — Adaptive Charge save', () => {
     expect(
       await screen.findByText('Adaptive Charge is not supported on this inverter'),
     ).toBeInTheDocument();
-    expect(save().textContent).toBe('Check settings');
+    expect(save().textContent).toBe('Check Settings');
   });
 
   it('uses a generic message when the rejection carries none', async () => {
