@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.91.0] - 2026-10-17
+
+### Added
+
+- **Book a one-off export from the Control page.** Under Timed Export, "Export Once" lets you pick a slot, a date and the start and end times. HEM puts the export into that slot shortly before it starts and puts the slot back to how it was afterwards, so it never repeats the next day. You can cancel it, or stop one that is running. Cosy and Agile treat it like any other export window (#366).
+- **Octopus Saving Session alerts.** Choose "Alert Only" at the top of the Octopus page and HEM tells you through Telegram, ntfy or Pushover when you have joined a Saving Session, and again about half an hour before it starts. Only real Saving Sessions count; Weekend Happy Hours and other events are ignored.
+- **Optional automatic exports for Saving Sessions.** Choose "Activate Export" and HEM books an export for every session you have joined, using the slot you pick, and puts the slot back when it ends. You can skip any session, and you get a message when an export starts, finishes or cannot run.
+- **Hide gas if you are electricity only.** A new "My Home Has Gas" setting, on by default, stops HEM fetching gas readings and removes gas from the Octopus page, from Settings and from the CSV and PDF exports.
+
+### Changed
+
+- **The Octopus tab now appears as soon as your account number and API key are saved.** The separate "Enable Octopus data" tick is gone: saving both turns on the tab, the meter-reading import and Saving Sessions, and clearing the account number turns them off. If you had saved your details but left the old tick off, the import will now start after you update.
+- **Labels are now consistently Pascal Case.** Headings, buttons, table headers, chart legends and status badges across the app capitalise every word (for example "Retry Now", "Period Totals" and "Export All").
+
 ## [0.90.0] - 2026-10-14
 
 ### Added
