@@ -183,7 +183,7 @@
       <p class="lead">The Status page shows your whole system at a glance, updating every few seconds.</p>
       <ul>
         <li><strong>Solar generation</strong>, <strong>battery charge level</strong>, <strong>grid import/export</strong> and <strong>home consumption</strong>, live.</li>
-        <li>The <strong>Power</strong> page charts solar, battery, grid and home power over any range from 15 minutes to 7 days. Click a legend label to show or hide a line.</li>
+        <li>The <strong>Power</strong> page charts solar, battery, grid and home power over any range from 1 hour to 1 year. Click a legend label to show or hide a line.</li>
         <li>The <strong>Inverter</strong> page lists the detected model, firmware versions, serial number, temperatures and every electrical reading.</li>
       </ul>
       <p>The app reads straight from the inverter's data adapter, so there's no cloud delay. Your WiFi dongle keeps reporting to the GivEnergy cloud as it always has.</p>
@@ -229,7 +229,7 @@
       <ul>
         <li><strong>Cell voltages</strong> and <strong>temperatures</strong> for every battery module.</li>
         <li><strong>Health</strong> per module, so you can spot a weak pack early.</li>
-        <li>A <strong>cold battery warning</strong> when the battery temperature drops near freezing, so you can protect it. Pair it with <a href="#winter-mode">Auto Winter Mode</a> to warm the battery automatically.</li>
+        <li>A <strong>cold battery warning</strong> when the battery temperature falls below the limit you set under Settings → Notifications (<em>Battery temp below °C</em>; it stays off until you set one), so you can protect it. Pair it with <a href="#winter-mode">Auto Winter Mode</a> to warm the battery automatically.</li>
         <li><strong>Battery calibration</strong> can be started from the app when your battery needs it.</li>
       </ul>
       <figure>
@@ -244,7 +244,7 @@
       <h2>Charge Schedules</h2>
       <p class="lead">Choose when your battery charges from the grid and when it discharges, from the Control page.</p>
       <ul>
-        <li><strong>Up to 10 charge and 10 discharge slots</strong> on Gen 3, Gen 4, three-phase, HV Gen 3, All-in-One and Gateway systems. Gen 2 and Gen 3 Plus have 2 slots, and Gen 1 and AC Coupled have 1.</li>
+        <li><strong>Up to 10 charge and 10 discharge slots</strong> on Gen 3, Gen 4, three-phase, HV Gen 3, All-in-One and Gateway systems. Gen 3 Plus has 2 of each. Gen 2 has 1 charge slot and 2 discharge slots, and Gen 1 and AC Coupled have 1 of each.</li>
         <li><strong>Battery modes:</strong> Eco (automatic self-consumption), Timed Discharge (discharge or export during your slots), and Pause Discharge, which holds stored energy while still allowing solar or scheduled grid charging.</li>
         <li><strong>Limits:</strong> battery reserve level, charge target, and charge and discharge power limits.</li>
       </ul>
@@ -299,9 +299,9 @@
       <h2>History &amp; Costs</h2>
       <p class="lead">Everything the app records is kept on your machine, so you can look back at any day.</p>
       <ul>
-        <li><strong>Seven time ranges</strong> from 15 minutes to 7 days.</li>
+        <li><strong>Ten time ranges</strong> from 1 hour to 1 year, including Today and a month picker.</li>
         <li><strong>Separate views</strong> for solar, home, grid and battery that share the same time range.</li>
-        <li><strong>Month calendar</strong> with daily energy totals for the whole month.</li>
+        <li><strong>Month view:</strong> pick any month and see the day-by-day chart for the whole month.</li>
         <li><strong>Cost tracking:</strong> enter your import and export tariffs under Settings → Energy Tariffs and running cost estimates appear on your charts.</li>
         <li><strong>CSV export</strong> of your history for a spreadsheet.</li>
       </ul>

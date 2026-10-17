@@ -118,18 +118,18 @@ Home Energy Manager connects directly to your inverter over your home network. I
 
 - **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
 - **Energy flow diagram** — animated visual showing where your power is flowing right now (solar → battery → home → grid)
-- **Power chart** — live chart tracking solar, battery, grid, and home power with selectable time ranges from 15 minutes to 7 days. Click legend labels to show or hide individual lines.
+- **Power chart** — live chart tracking solar, battery, grid, and home power with selectable time ranges from 1 hour to 1 year. Click legend labels to show or hide individual lines.
 - **Battery detail** — individual cell voltages, temperatures, and health per battery module
 - **Solar page** — voltage, current, and power for each solar string (supports dual-string systems)
 - **Inverter page** — model name, firmware versions, serial number, temperatures, and all electrical readings at a glance
 - **Meters page** — external meter readings with per-phase voltage, current, and power, plus a CT clamp status card
-- **Cold battery warning** — alerts you when your battery temperature drops near freezing so you can protect it
+- **Cold battery warning** — warns you when your battery temperature falls below the limit you set under Settings → Notifications (off until you set one) so you can protect it
 
 ### History & Cost Tracking
 
-- **Time-range charts** — 7 selectable ranges from 15 minutes to 7 days, covering solar, battery, grid, and home energy
+- **Time-range charts** — 10 selectable ranges from 1 hour to 1 year, covering solar, battery, grid, and home energy
 - **Energy breakdown views** — separate charts for solar, home, grid, and battery with shared time-range selection
-- **Month calendar view** — daily energy totals at a glance for the whole month
+- **Month view** — pick any month and see the day-by-day chart for the whole month
 - **Cost tracking** — enter your import and export tariffs to see running cost estimates on your charts
 - **CSV export** — download your energy history as a spreadsheet
 - **PDF consumption reports** — generate formatted reports with charts and summary tables for solar, home, grid, and battery energy, including cost breakdowns. Open **Consumption Report** from the Power page, then choose **Print / save as PDF**. The History page exports CSV only.
