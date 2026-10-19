@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.92.1] - 2026-10-19
+
+### Fixed
+
+- **Joining Saving Sessions automatically now works.** With "Join New Saving Sessions Automatically" ticked, Octopus turned down every join HEM asked for, so you got a "could not join" warning and had to join in the Octopus app. HEM now joins the session and confirms it on your account as intended. A session HEM already tried and failed to join is not retried, so join that one in the app (#366).
+
 ## [0.92.0] - 2026-10-19
 
 ### Added
