@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.92.0] - 2026-10-19
+
+### Added
+
+- **Charge slots now show the charge limit and warn when it will hold the slot back.** Each enabled slot under Charge Schedule says what the inverter's charge limit is, and if that limit can't deliver the slot's Target SOC in the time available it says how far the battery would get. The warning follows the times and Target SOC as you edit them, and stands aside while Adaptive Charge or the Forecast plan is managing the limit (#362).
+- **Optional automatic joining of Saving Sessions.** Tick "Join New Saving Sessions Automatically" on the Octopus page and HEM asks Octopus to join each Saving Session it offers your account, then checks your account shows it before telling you or booking an export. Each session is tried once only, an account that has not signed up to Octoplus Saving Sessions is left alone, and if a join fails you get a message and HEM does not try that session again. It is off unless you turn it on.
+
 ## [0.91.0] - 2026-10-17
 
 ### Added
