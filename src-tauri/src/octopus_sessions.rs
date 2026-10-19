@@ -421,29 +421,26 @@ fn join_mutation(account: &str, code: &str) -> String {
     let quote = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         "mutation {{ joinSavingSessionsEvent(input: {{ accountNumber: {}, eventCode: {} }}) \
-         {{ possibleErrors {{ message }} }} }}",
+         {{ joinedEventCodes }} }}",
         quote(account),
         quote(code),
     )
 }
 
-/// Whether Octopus refused a join request. Success here only means "no
-/// refusal": the caller still confirms against the joined list.
+/// Whether Octopus refused a join request. The reply type has no error field,
+/// so a refusal arrives as top-level GraphQL `errors`. Success here only means
+/// "no refusal": the caller still confirms against the joined list.
 fn join_outcome(response: &Value) -> Result<(), String> {
-    let messages = |list: Option<&Value>| -> Vec<String> {
-        list.and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item["message"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let mut problems = messages(response.get("errors"));
-    problems.extend(messages(
-        response.pointer("/data/joinSavingSessionsEvent/possibleErrors"),
-    ));
+    let problems: Vec<String> = response
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["message"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     if problems.is_empty() {
         Ok(())
     } else {
