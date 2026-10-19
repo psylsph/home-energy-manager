@@ -1608,6 +1608,19 @@ mod tests {
         _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
+    /// The first field a join request selects that Octopus's
+    /// `JoinSavingSessionsEvent` lacks. Its only fields, read from the live
+    /// schema, are `joinedEventCodes` and `joinedEvent`.
+    fn unknown_join_field(body: &str) -> Option<String> {
+        let query: Value = serde_json::from_str(body).ok()?;
+        let query = query["query"].as_str()?;
+        let selection = query.split(')').nth(1)?;
+        selection
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .find(|word| !word.is_empty() && !matches!(*word, "joinedEventCodes" | "joinedEvent"))
+            .map(str::to_string)
+    }
+
     impl MockOctopus {
         async fn spawn(sessions: Value) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1619,7 +1632,7 @@ mod tests {
             let sessions_body = Arc::new(std::sync::Mutex::new(sessions.to_string()));
             let sessions_delay_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let join_body = Arc::new(std::sync::Mutex::new(
-                json!({ "data": { "joinSavingSessionsEvent": { "possibleErrors": null } } })
+                json!({ "data": { "joinSavingSessionsEvent": { "joinedEventCodes": [] } } })
                     .to_string(),
             ));
             let after_join: Arc<std::sync::Mutex<Option<(String, u64, bool)>>> =
@@ -1660,6 +1673,14 @@ mod tests {
                     if body.contains("obtainKrakenToken") {
                         (StatusCode::OK, t2.lock().unwrap().clone())
                     } else if body.contains("joinSavingSessionsEvent") {
+                        // Like Octopus, refuse the whole request if it asks
+                        // for a field the reply type does not have.
+                        if let Some(field) = unknown_join_field(&body) {
+                            let error = json!({ "errors": [{ "message": format!(
+                                "Cannot query field '{field}' on type 'JoinSavingSessionsEvent'."
+                            ) }] });
+                            return (StatusCode::OK, error.to_string());
+                        }
                         if let Some(pending) = a2.lock().unwrap().as_mut() {
                             pending.2 = true;
                         }
@@ -2805,7 +2826,7 @@ mod tests {
         assert_eq!(
             m,
             "mutation { joinSavingSessionsEvent(input: { accountNumber: \"A-1\\\"2\", \
-             eventCode: \"co\\\"de}{ \\\\ x\" }) { possibleErrors { message } } }"
+             eventCode: \"co\\\"de}{ \\\\ x\" }) { joinedEventCodes } }"
         );
     }
 
@@ -2813,24 +2834,37 @@ mod tests {
     fn a_refused_join_is_reported_with_octopus_own_words() {
         assert_eq!(
             join_outcome(
-                &json!({ "data": { "joinSavingSessionsEvent": { "possibleErrors": null } } })
+                &json!({ "data": { "joinSavingSessionsEvent": { "joinedEventCodes": ["c"] } } })
             ),
             Ok(())
         );
         assert_eq!(
             join_outcome(
-                &json!({ "data": { "joinSavingSessionsEvent": { "possibleErrors": [] } } })
+                &json!({ "data": { "joinSavingSessionsEvent": { "joinedEventCodes": [] } } })
             ),
             Ok(())
         );
         assert_eq!(
-            join_outcome(&json!({ "data": { "joinSavingSessionsEvent": {
-                "possibleErrors": [{ "message": "Event has ended" }] } } })),
-            Err("Octopus would not join it: Event has ended".to_string())
+            join_outcome(&json!({ "data": { "joinSavingSessionsEvent": null },
+                "errors": [{ "message": "Event has ended" }, { "message": "Try later" }] })),
+            Err("Octopus would not join it: Event has ended; Try later".to_string())
         );
         assert_eq!(
             join_outcome(&json!({ "errors": [{ "message": "Cannot query field" }] })),
             Err("Octopus would not join it: Cannot query field".to_string())
+        );
+    }
+
+    #[test]
+    fn the_join_request_selects_only_fields_octopus_has() {
+        let body = json!({ "query": join_mutation("A-1", "code") }).to_string();
+        assert_eq!(unknown_join_field(&body), None);
+        let stale = json!({ "query": "mutation { joinSavingSessionsEvent(input: {}) \
+            { possibleErrors { message } } }" })
+        .to_string();
+        assert_eq!(
+            unknown_join_field(&stale),
+            Some("possibleErrors".to_string())
         );
     }
 
@@ -2897,8 +2931,8 @@ mod tests {
     async fn a_refused_join_is_recorded_alerted_once_and_never_retried() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(unjoined_response()).await;
-            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": {
-                "possibleErrors": [{ "message": "Event has ended" }] } } }));
+            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": null },
+                "errors": [{ "message": "Event has ended" }] }));
             let state = configure_auto_join(&mock, SessionsMode::Alert).await;
             check_once(&state, utc(NOW)).await;
             check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
@@ -3086,8 +3120,8 @@ mod tests {
             // HEM's request is refused (the user got there first in the app),
             // and the account shows the session joined all the same.
             let mock = MockOctopus::spawn(unjoined_response()).await;
-            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": {
-                "possibleErrors": [{ "message": "Already joined" }] } } }));
+            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": null },
+                "errors": [{ "message": "Already joined" }] }));
             mock.set_sessions_after_join(one_session_response());
             let state = configure_auto_join(&mock, SessionsMode::Alert).await;
             check_once(&state, utc(NOW)).await;
@@ -3169,8 +3203,8 @@ mod tests {
                 })
                 .collect();
             let mock = MockOctopus::spawn(response(json!([]), json!(offers))).await;
-            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": {
-                "possibleErrors": [{ "message": "Account locked" }] } } }));
+            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": null },
+                "errors": [{ "message": "Account locked" }] }));
             let state = configure_auto_join(&mock, SessionsMode::Alert).await;
             check_once(&state, utc(NOW)).await;
 
