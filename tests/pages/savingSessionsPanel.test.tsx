@@ -20,6 +20,8 @@ function reply(overrides: Partial<SavingSessionsResponse> = {}): SavingSessionsR
     checked_at: '2026-10-17T12:00:00Z',
     error: null,
     enrolled: true,
+    auto_join: false,
+    join_failures: [],
     sessions: [],
     export_slot: 1,
     export_floor_soc: 20,
@@ -324,6 +326,97 @@ describe('SavingSessionsPanel', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
       expect(await screen.findByText('Slot must be between 1 and 2 on this inverter')).toBeTruthy();
       expect(screen.queryByRole('alert')).toBeNull();
+    });
+  });
+
+  describe('automatic joining', () => {
+    it('offers the switch off by default and says what it does', async () => {
+      apiGet.mockResolvedValue(reply());
+      render(<SavingSessionsPanel />);
+      const box = (await screen.findByRole('checkbox', {
+        name: /Join New Saving Sessions Automatically/,
+      })) as HTMLInputElement;
+      expect(box.checked).toBe(false);
+      expect(screen.getByText(/HEM will not sign it up/)).toBeTruthy();
+    });
+
+    it('turns it on without changing the mode, then reloads', async () => {
+      apiGet.mockResolvedValue(reply({ mode: 'export' }));
+      apiPost.mockResolvedValue({ ok: true });
+      render(<SavingSessionsPanel />);
+      fireEvent.click(await screen.findByRole('checkbox', { name: /Join New Saving Sessions/ }));
+      await waitFor(() =>
+        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
+          mode: 'export',
+          auto_join: true,
+        }),
+      );
+      await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(2));
+    });
+
+    it('turns it off again', async () => {
+      apiGet.mockResolvedValue(reply({ auto_join: true }));
+      apiPost.mockResolvedValue({ ok: true });
+      render(<SavingSessionsPanel />);
+      const box = (await screen.findByRole('checkbox', { name: /Join New Saving Sessions/ })) as HTMLInputElement;
+      expect(box.checked).toBe(true);
+      fireEvent.click(box);
+      await waitFor(() =>
+        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
+          mode: 'alert',
+          auto_join: false,
+        }),
+      );
+    });
+
+    it('is not offered when the feature is off or Octopus is not set up', async () => {
+      apiGet.mockResolvedValue(reply({ mode: 'off' }));
+      const { unmount } = render(<SavingSessionsPanel />);
+      await screen.findByRole('button', { name: 'Off' });
+      expect(screen.queryByRole('checkbox')).toBeNull();
+      unmount();
+
+      apiGet.mockResolvedValue(reply({ configured: false }));
+      render(<SavingSessionsPanel />);
+      await screen.findByText(/needs your Octopus account number/);
+      expect(screen.queryByRole('checkbox')).toBeNull();
+    });
+
+    it('says nothing will happen until the account is signed up to Octoplus', async () => {
+      apiGet.mockResolvedValue(reply({ auto_join: true, enrolled: false }));
+      render(<SavingSessionsPanel />);
+      expect(await screen.findByText(/Nothing will be joined until the account has joined/)).toBeTruthy();
+    });
+
+    it('reports a failed join and that it will not be retried', async () => {
+      apiGet.mockResolvedValue(reply({
+        auto_join: true,
+        join_failures: [{
+          id: 9,
+          start: '2026-10-19T17:00:00Z',
+          end: '2026-10-19T18:00:00Z',
+          error: 'Octopus would not join it: Event has ended',
+        }],
+      }));
+      render(<SavingSessionsPanel />);
+      const note = await screen.findByText(/Could not join Mon 19 Oct, 18:00–19:00/);
+      expect(note.textContent).toMatch(/Event has ended/);
+      expect(note.textContent).toMatch(/will not try this one again/);
+    });
+
+    it('hides old failures once automatic joining is switched off', async () => {
+      apiGet.mockResolvedValue(reply({
+        auto_join: false,
+        join_failures: [{
+          id: 9,
+          start: '2026-10-19T17:00:00Z',
+          end: '2026-10-19T18:00:00Z',
+          error: 'x',
+        }],
+      }));
+      render(<SavingSessionsPanel />);
+      await screen.findByRole('checkbox', { name: /Join New Saving Sessions/ });
+      expect(screen.queryByText(/Could not join/)).toBeNull();
     });
   });
 });

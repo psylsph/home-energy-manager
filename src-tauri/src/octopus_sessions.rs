@@ -11,6 +11,13 @@
 //! the offered `events` list; anything whose type cannot be established is
 //! ignored. A joined Weekend Happy Hour (cheap import, no reward) must never
 //! be mistaken for a session.
+//!
+//! Joining is opt-in and separate from everything above. With auto-join on,
+//! upcoming `TURN_DOWN` events the account has not joined are joined through
+//! the same API. Every join is attempted at most once (the id is persisted
+//! before the request is sent), is gated on the account already being enrolled
+//! in the campaign, and is confirmed by re-reading the joined list before
+//! anything - an alert or an export - relies on it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -57,11 +64,25 @@ pub struct Session {
     pub reward_octopoints_per_kwh: Option<i64>,
 }
 
+/// An upcoming Saving Session Octopus is offering that the account has not
+/// joined, with the code the join request needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Joinable {
+    pub id: i64,
+    #[serde(skip)]
+    pub code: String,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub reward_octopoints_per_kwh: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
     /// Whether the account has joined the Octoplus campaign, if reported.
     pub enrolled: Option<bool>,
     pub sessions: Vec<Session>,
+    /// Offered sessions that have not started and are not joined yet.
+    pub joinable: Vec<Joinable>,
 }
 
 /// Turn the combined `savingSessions` response into upcoming joined
@@ -129,9 +150,43 @@ pub fn parse_response(response: &Value, now: DateTime<Utc>) -> Result<Parsed, St
         })
         .collect();
     sessions.sort_by_key(|session| (session.start, session.id));
+
+    let joined_ids: HashSet<i64> = joined
+        .iter()
+        .filter_map(|entry| entry["eventId"].as_i64())
+        .collect();
+    let mut joinable: Vec<Joinable> = events
+        .iter()
+        .filter_map(|event| {
+            let id = event["id"].as_i64()?;
+            if event["eventType"].as_str()? != SESSION_EVENT_TYPE
+                || event["status"].as_str()? != "UPCOMING"
+                || joined_ids.contains(&id)
+            {
+                return None;
+            }
+            let code = event["code"].as_str().filter(|code| !code.is_empty())?;
+            let start = DateTime::parse_from_rfc3339(event["startAt"].as_str()?)
+                .ok()?
+                .with_timezone(&Utc);
+            let end = DateTime::parse_from_rfc3339(event["endAt"].as_str()?)
+                .ok()?
+                .with_timezone(&Utc);
+            // A session that has begun cannot be usefully joined.
+            (end > start && start > now).then(|| Joinable {
+                id,
+                code: code.to_string(),
+                start,
+                end,
+                reward_octopoints_per_kwh: event["rewardPerKwhInOctoPoints"].as_i64(),
+            })
+        })
+        .collect();
+    joinable.sort_by_key(|offer| (offer.start, offer.id));
     Ok(Parsed {
         enrolled: account["hasJoinedCampaign"].as_bool(),
         sessions,
+        joinable,
     })
 }
 
@@ -174,21 +229,29 @@ pub fn due_alerts(
     }
 }
 
+/// `Mon 19 Oct, 18:00–19:00 (UK time)`.
+fn session_window_text(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
+    let start = start.with_timezone(&London);
+    let end = end.with_timezone(&London);
+    format!(
+        "{}, {}–{} (UK time)",
+        start.format("%a %-d %b"),
+        start.format("%H:%M"),
+        end.format("%H:%M"),
+    )
+}
+
 /// Notification text. Times are shown in UK time, which is what Octopus
 /// sessions are announced in.
 pub fn alert_text(session: &Session, reminder: bool) -> String {
-    let start = session.start.with_timezone(&London);
-    let end = session.end.with_timezone(&London);
     let headline = if reminder {
         format!("⚡ HEM — Octopus Saving Session starts in about {REMINDER_LEAD_MINUTES} minutes")
     } else {
         "⚡ HEM — Octopus Saving Session joined".to_string()
     };
     let mut text = format!(
-        "{headline}\n{}, {}–{} (UK time)",
-        start.format("%a %-d %b"),
-        start.format("%H:%M"),
-        end.format("%H:%M"),
+        "{headline}\n{}",
+        session_window_text(session.start, session.end)
     );
     if let Some(reward) = session.reward_octopoints_per_kwh {
         text.push_str(&format!("\nReward: {reward} OctoPoints per kWh"));
@@ -248,7 +311,7 @@ const POLL_INTERVAL: StdDuration = StdDuration::from_secs(10 * 60);
 const TOKEN_MUTATION: &str =
     "mutation($key: String!) { obtainKrakenToken(input: { APIKey: $key }) { token } }";
 const SESSIONS_QUERY: &str = "query($account: String!) { savingSessions { \
-    events { id startAt endAt status eventType rewardPerKwhInOctoPoints } \
+    events { id code startAt endAt status eventType rewardPerKwhInOctoPoints } \
     account(accountNumber: $account) { hasJoinedCampaign joinedEvents { eventId startAt endAt } } } }";
 
 /// What the last check found.
@@ -263,6 +326,11 @@ pub struct SessionsState {
     pub sessions: Vec<Session>,
     /// Sessions whose export could not be booked at the last check, and why.
     pub booking_errors: HashMap<i64, String>,
+    /// Offered sessions the account has not joined.
+    pub joinable: Vec<Joinable>,
+    /// Sessions HEM tried to join and could not, and why. Kept while the
+    /// session is still on offer, since a failed join is never retried.
+    pub join_errors: HashMap<i64, String>,
 }
 
 /// Where the token exchange and the sessions query go. A configured
@@ -301,9 +369,9 @@ fn post_graphql(url: &str, token: Option<&str>, body: &Value) -> Result<Value, S
         .map_err(|error| format!("Octopus sent an unreadable response: {error}"))
 }
 
-/// Exchange the API key for a short-lived token and read the sessions.
-fn fetch_blocking(settings: &Settings, now: DateTime<Utc>) -> Result<Parsed, String> {
-    let (auth_url, query_url) = endpoints(settings);
+/// Exchange the API key for a short-lived token.
+fn obtain_token(settings: &Settings) -> Result<String, String> {
+    let (auth_url, _) = endpoints(settings);
     let key = settings.octopus_api_key.trim();
     let token_response = post_graphql(
         &auth_url,
@@ -318,11 +386,16 @@ fn fetch_blocking(settings: &Settings, now: DateTime<Utc>) -> Result<Parsed, Str
     {
         return Err(format!("Octopus did not accept the API key: {message}"));
     }
-    let token = token_response
+    token_response
         .pointer("/data/obtainKrakenToken/token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| "Octopus did not return an access token".to_string())?;
+        .map(str::to_string)
+        .ok_or_else(|| "Octopus did not return an access token".to_string())
+}
+
+fn query_sessions(settings: &Settings, token: &str, now: DateTime<Utc>) -> Result<Parsed, String> {
+    let (_, query_url) = endpoints(settings);
     let response = post_graphql(
         &query_url,
         Some(token),
@@ -332,6 +405,114 @@ fn fetch_blocking(settings: &Settings, now: DateTime<Utc>) -> Result<Parsed, Str
         }),
     )?;
     parse_response(&response, now)
+}
+
+/// Exchange the API key for a short-lived token and read the sessions. The
+/// token comes back too, so a join in the same check does not need another.
+fn fetch_blocking(settings: &Settings, now: DateTime<Utc>) -> Result<(Parsed, String), String> {
+    let token = obtain_token(settings)?;
+    let parsed = query_sessions(settings, &token, now)?;
+    Ok((parsed, token))
+}
+
+/// The join request for one offered session. Values go in as JSON string
+/// literals, which GraphQL accepts, so neither can break out of the query.
+fn join_mutation(account: &str, code: &str) -> String {
+    let quote = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "mutation {{ joinSavingSessionsEvent(input: {{ accountNumber: {}, eventCode: {} }}) \
+         {{ possibleErrors {{ message }} }} }}",
+        quote(account),
+        quote(code),
+    )
+}
+
+/// Whether Octopus refused a join request. Success here only means "no
+/// refusal": the caller still confirms against the joined list.
+fn join_outcome(response: &Value) -> Result<(), String> {
+    let messages = |list: Option<&Value>| -> Vec<String> {
+        list.and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["message"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut problems = messages(response.get("errors"));
+    problems.extend(messages(
+        response.pointer("/data/joinSavingSessionsEvent/possibleErrors"),
+    ));
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Octopus would not join it: {}",
+            problems.join("; ")
+        ))
+    }
+}
+
+/// What one round of join requests achieved.
+struct JoinPass {
+    /// Per requested session, whether Octopus refused it.
+    requests: Vec<Result<(), String>>,
+    /// The joined list read again afterwards, which is what decides success.
+    after: Result<Parsed, String>,
+}
+
+/// How many times the joined list is read to confirm a join, and how long to
+/// wait between reads. Octopus can take a moment to show a session it has just
+/// accepted; reading again is safe where sending again is not.
+const CONFIRM_READS: usize = 3;
+#[cfg(not(test))]
+const CONFIRM_DELAY: StdDuration = StdDuration::from_secs(2);
+#[cfg(test)]
+const CONFIRM_DELAY: StdDuration = StdDuration::from_millis(5);
+
+/// Send a join request for each of `targets`, then read the sessions again
+/// until each accepted one shows up (or the reads run out).
+fn join_blocking(
+    settings: &Settings,
+    token: &str,
+    targets: &[Joinable],
+    now: DateTime<Utc>,
+) -> JoinPass {
+    let (_, query_url) = endpoints(settings);
+    let account = settings.octopus_account_number.trim();
+    let requests: Vec<Result<(), String>> = targets
+        .iter()
+        .map(|target| {
+            post_graphql(
+                &query_url,
+                Some(token),
+                &json!({ "query": join_mutation(account, &target.code) }),
+            )
+            .and_then(|response| join_outcome(&response))
+        })
+        .collect();
+    let mut after = query_sessions(settings, token, now);
+    for _ in 1..CONFIRM_READS {
+        let all_visible = after.as_ref().is_ok_and(|parsed| {
+            requests
+                .iter()
+                .zip(targets)
+                .filter(|(outcome, _)| outcome.is_ok())
+                .all(|(_, target)| {
+                    parsed
+                        .sessions
+                        .iter()
+                        .any(|session| session.id == target.id)
+                })
+        });
+        if all_visible {
+            break;
+        }
+        std::thread::sleep(CONFIRM_DELAY);
+        after = query_sessions(settings, token, now);
+    }
+    JoinPass { requests, after }
 }
 
 // ---------------------------------------------------------------------------
@@ -350,8 +531,8 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         .await
         .map_err(|error| format!("Saving Sessions check failed: {error}"))
         .and_then(|result| result);
-    let parsed = match fetched {
-        Ok(parsed) => parsed,
+    let (parsed, token) = match fetched {
+        Ok(fetched) => fetched,
         Err(error) => {
             // A failed check changes nothing: bookings stay as they were.
             let mut current = state.octopus_sessions.lock().await;
@@ -369,6 +550,7 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
     if !session_checks_wanted(state, &settings).await {
         return;
     }
+    let (parsed, joined_by_hem) = auto_join(state, &settings, parsed, &token, now).await;
     let floor_applies = max_discharge_slots(state).await > 2;
     let outcomes = if settings.octopus_sessions_mode == SessionsMode::Export {
         cancel_withdrawn_exports(state, &settings, &parsed.sessions).await;
@@ -383,6 +565,22 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         current.error = None;
         current.enrolled = parsed.enrolled;
         current.sessions = parsed.sessions.clone();
+        current
+            .join_errors
+            .retain(|id, _| parsed.joinable.iter().any(|offer| offer.id == *id));
+        // An attempt is remembered across restarts but its reason is not.
+        // A session still on offer after an attempt did not get joined, and
+        // must not silently drop off the page.
+        for offer in &parsed.joinable {
+            if settings.octopus_sessions_join_attempted.contains(&offer.id) {
+                current.join_errors.entry(offer.id).or_insert_with(|| {
+                    "HEM tried to join this earlier and it is still not joined. HEM will not \
+                     try again; check the Octopus app"
+                        .to_string()
+                });
+            }
+        }
+        current.joinable = parsed.joinable.clone();
         current.booking_errors = outcomes
             .iter()
             .filter_map(|(id, result)| result.as_ref().err().map(|error| (*id, error.clone())))
@@ -395,8 +593,147 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         now,
         &outcomes,
         floor_applies,
+        &joined_by_hem,
     )
     .await;
+}
+
+/// Most join requests sent in one check. Offers are few; this bounds how much
+/// of the account one pass can change if Octopus ever lists a great many.
+const MAX_JOINS_PER_CHECK: usize = 5;
+
+/// Join offered sessions when the user has opted in, and return what Octopus
+/// now reports plus the ids HEM joined and confirmed.
+///
+/// Safeguards: only an account already enrolled in the campaign is touched
+/// (HEM never enrols one); a session the user skipped is left alone; each
+/// session is attempted once, the id saved just before its request is sent
+/// (after the token is in hand, so a failed login costs nothing); and a join
+/// counts only once the joined list shows it. A failure is recorded and
+/// alerted, never retried.
+async fn auto_join(
+    state: &Arc<AppState>,
+    settings: &Settings,
+    parsed: Parsed,
+    token: &str,
+    now: DateTime<Utc>,
+) -> (Parsed, HashSet<i64>) {
+    let mut joined_by_hem = HashSet::new();
+    if !settings.octopus_sessions_auto_join || parsed.enrolled != Some(true) {
+        return (parsed, joined_by_hem);
+    }
+    let targets: Vec<Joinable> = parsed
+        .joinable
+        .iter()
+        .filter(|offer| {
+            !settings.octopus_sessions_join_attempted.contains(&offer.id)
+                && !settings.octopus_sessions_skipped.contains(&offer.id)
+        })
+        .take(MAX_JOINS_PER_CHECK)
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return (parsed, joined_by_hem);
+    }
+
+    // Persist the attempt first. If it cannot be saved, a crash could repeat
+    // the request on restart, so nothing is sent.
+    let ids: Vec<i64> = targets.iter().map(|offer| offer.id).collect();
+    if let Err(error) = Settings::update_async(move |settings| {
+        for id in ids {
+            remember(&mut settings.octopus_sessions_join_attempted, id);
+        }
+    })
+    .await
+    {
+        tracing::error!("Saving Sessions: not joining, could not record the attempt: {error}");
+        return (parsed, joined_by_hem);
+    }
+
+    let for_join = settings.clone();
+    let for_targets = targets.clone();
+    let for_token = token.to_string();
+    let pass = tokio::task::spawn_blocking(move || {
+        join_blocking(&for_join, &for_token, &for_targets, now)
+    })
+    .await;
+    let Ok(pass) = pass else {
+        // The attempt is on record, so it is not repeated; say so.
+        let mut current = state.octopus_sessions.lock().await;
+        for offer in &targets {
+            current.join_errors.insert(
+                offer.id,
+                "The join request did not complete, so it was not retried".to_string(),
+            );
+        }
+        return (parsed, joined_by_hem);
+    };
+
+    let confirmed: HashSet<i64> = pass
+        .after
+        .as_ref()
+        .map(|after| after.sessions.iter().map(|session| session.id).collect())
+        .unwrap_or_default();
+    let mut failures = Vec::new();
+    for (offer, request) in targets.iter().zip(pass.requests.iter()) {
+        if confirmed.contains(&offer.id) {
+            // Credit HEM only when Octopus took HEM's request. If it refused
+            // (say the user joined in the app a moment earlier) the session is
+            // joined all the same, but not by HEM.
+            if request.is_ok() {
+                joined_by_hem.insert(offer.id);
+            }
+            continue;
+        }
+        // `unconfirmed`: Octopus took the request but the account does not show
+        // the session (yet). That is not the same as a refusal, and the message
+        // must not claim a failure that the next check may disprove.
+        let (reason, unconfirmed) = match (request, &pass.after) {
+            (Err(error), _) => (error.clone(), false),
+            (Ok(()), Ok(_)) => (
+                "Octopus accepted the request but the session is not showing on the account \
+                 yet. HEM will not send it again; if it appears you will get the usual \
+                 message, otherwise join it in the Octopus app"
+                    .to_string(),
+                true,
+            ),
+            (Ok(()), Err(error)) => (
+                format!("The request was sent but could not be confirmed: {error}"),
+                true,
+            ),
+        };
+        tracing::warn!(
+            "Saving Sessions: could not join session {}: {reason}",
+            offer.id
+        );
+        failures.push((offer.clone(), reason, unconfirmed));
+    }
+    {
+        let mut current = state.octopus_sessions.lock().await;
+        for (offer, reason, _) in &failures {
+            current.join_errors.insert(offer.id, reason.clone());
+        }
+    }
+    if !failures.is_empty() {
+        // One message however many sessions failed: a login or account
+        // problem fails them all, and five notifications at once is noise.
+        let headline = if failures.iter().all(|(_, _, unconfirmed)| *unconfirmed) {
+            "⚡ HEM — Octopus Saving Session join not confirmed"
+        } else {
+            "⚡ HEM — could not join an Octopus Saving Session"
+        };
+        let mut text = headline.to_string();
+        for (offer, reason, _) in &failures {
+            text.push_str(&format!(
+                "\n{}: {reason}",
+                session_window_text(offer.start, offer.end)
+            ));
+        }
+        crate::alerts::send_text_notification(state, &text, "saving-session").await;
+    }
+    // Carry on with what Octopus reports now; if it could not be read again,
+    // with what it reported before, and the next check picks up any join.
+    (pass.after.unwrap_or(parsed), joined_by_hem)
 }
 
 /// Whether to check for sessions at all. Also enforces that nothing booked for
@@ -574,6 +911,7 @@ async fn send_due_alerts(
     now: DateTime<Utc>,
     outcomes: &HashMap<i64, Result<(), String>>,
     floor_applies: bool,
+    joined_by_hem: &HashSet<i64>,
 ) {
     let due = due_alerts(
         sessions,
@@ -583,6 +921,9 @@ async fn send_due_alerts(
     );
     for session in due.announce {
         let mut text = alert_text(&session, false);
+        if joined_by_hem.contains(&session.id) {
+            text.push_str("\nHEM joined this session for you.");
+        }
         if let Some(note) = export_note(settings, session.id, outcomes, floor_applies) {
             text.push('\n');
             text.push_str(&note);
@@ -714,6 +1055,23 @@ pub async fn get_sessions(State(state): State<Arc<AppState>>) -> (StatusCode, Js
             })
         })
         .collect();
+    let join_failures: Vec<Value> = if settings.octopus_sessions_auto_join {
+        current
+            .joinable
+            .iter()
+            .filter_map(|offer| {
+                let error = current.join_errors.get(&offer.id)?;
+                Some(json!({
+                    "id": offer.id,
+                    "start": offer.start,
+                    "end": offer.end,
+                    "error": error,
+                }))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -727,6 +1085,8 @@ pub async fn get_sessions(State(state): State<Arc<AppState>>) -> (StatusCode, Js
             "checked_at": current.checked_at,
             "error": current.error,
             "enrolled": current.enrolled,
+            "auto_join": settings.octopus_sessions_auto_join,
+            "join_failures": join_failures,
             "sessions": sessions,
         })),
     )
@@ -739,6 +1099,9 @@ pub struct ModeRequest {
     export_slot: Option<u8>,
     #[serde(default)]
     export_floor_soc: Option<u8>,
+    /// Join new sessions automatically. Left as it is when absent.
+    #[serde(default)]
+    auto_join: Option<bool>,
 }
 
 fn rejected(message: String) -> (StatusCode, Json<Value>) {
@@ -749,7 +1112,8 @@ fn rejected(message: String) -> (StatusCode, Json<Value>) {
 }
 
 /// POST /api/octopus/sessions/mode — body `{ "mode": "off" | "alert" | "export",
-/// "export_slot": 1, "export_floor_soc": 20 }` (the last two optional).
+/// "export_slot": 1, "export_floor_soc": 20, "auto_join": false }` (the last
+/// three optional).
 pub async fn set_sessions_mode(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ModeRequest>,
@@ -769,6 +1133,7 @@ pub async fn set_sessions_mode(
         }
     }
     let (export_slot, export_floor_soc) = (body.export_slot, body.export_floor_soc);
+    let auto_join = body.auto_join;
     let before = Settings::load_async().await;
     if let Err(error) = Settings::update_async(move |settings| {
         settings.octopus_sessions_mode = mode;
@@ -777,6 +1142,9 @@ pub async fn set_sessions_mode(
         }
         if let Some(floor) = export_floor_soc {
             settings.octopus_sessions_export_floor_soc = floor;
+        }
+        if let Some(on) = auto_join {
+            settings.octopus_sessions_auto_join = on;
         }
     })
     .await
@@ -871,8 +1239,8 @@ mod tests {
     }
 
     fn event(id: i64, kind: &str, start: &str, end: &str, reward: i64) -> Value {
-        json!({ "id": id, "eventType": kind, "startAt": start, "endAt": end,
-                "status": "UPCOMING", "rewardPerKwhInOctoPoints": reward })
+        json!({ "id": id, "code": format!("code-{id}"), "eventType": kind, "startAt": start,
+                "endAt": end, "status": "UPCOMING", "rewardPerKwhInOctoPoints": reward })
     }
 
     fn joined(id: i64, start: &str, end: &str) -> Value {
@@ -1231,6 +1599,12 @@ mod tests {
         sessions_body: Arc<std::sync::Mutex<String>>,
         /// Milliseconds the sessions query waits before answering.
         sessions_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+        /// What the join mutation answers.
+        join_body: Arc<std::sync::Mutex<String>>,
+        /// If set: the sessions answer to switch to once a join has been seen,
+        /// how many reads after the join still get the old answer, and
+        /// whether a join has been seen yet.
+        after_join: Arc<std::sync::Mutex<Option<(String, u64, bool)>>>,
         _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
@@ -1244,14 +1618,29 @@ mod tests {
             ));
             let sessions_body = Arc::new(std::sync::Mutex::new(sessions.to_string()));
             let sessions_delay_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let (s2, t2, b2, d2) = (
+            let join_body = Arc::new(std::sync::Mutex::new(
+                json!({ "data": { "joinSavingSessionsEvent": { "possibleErrors": null } } })
+                    .to_string(),
+            ));
+            let after_join: Arc<std::sync::Mutex<Option<(String, u64, bool)>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let (s2, t2, b2, d2, j2, a2) = (
                 seen.clone(),
                 token_body.clone(),
                 sessions_body.clone(),
                 sessions_delay_ms.clone(),
+                join_body.clone(),
+                after_join.clone(),
             );
             let app = axum::Router::new().fallback(move |req: Request| {
-                let (s2, t2, b2, d2) = (s2.clone(), t2.clone(), b2.clone(), d2.clone());
+                let (s2, t2, b2, d2, j2, a2) = (
+                    s2.clone(),
+                    t2.clone(),
+                    b2.clone(),
+                    d2.clone(),
+                    j2.clone(),
+                    a2.clone(),
+                );
                 async move {
                     let path = req.uri().path().to_string();
                     let auth = req
@@ -1270,7 +1659,23 @@ mod tests {
                     });
                     if body.contains("obtainKrakenToken") {
                         (StatusCode::OK, t2.lock().unwrap().clone())
+                    } else if body.contains("joinSavingSessionsEvent") {
+                        if let Some(pending) = a2.lock().unwrap().as_mut() {
+                            pending.2 = true;
+                        }
+                        (StatusCode::OK, j2.lock().unwrap().clone())
                     } else if body.contains("savingSessions") {
+                        {
+                            let mut pending = a2.lock().unwrap();
+                            if let Some((next, stale, joined)) = pending.as_mut() {
+                                if *joined && *stale > 0 {
+                                    *stale -= 1;
+                                } else if *joined {
+                                    *b2.lock().unwrap() = next.clone();
+                                    *pending = None;
+                                }
+                            }
+                        }
                         let delay = d2.load(std::sync::atomic::Ordering::Relaxed);
                         if delay > 0 {
                             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -1297,6 +1702,8 @@ mod tests {
                 token_body,
                 sessions_body,
                 sessions_delay_ms,
+                join_body,
+                after_join,
                 _shutdown: Some(tx),
             }
         }
@@ -1312,8 +1719,32 @@ mod tests {
                 .collect()
         }
 
+        /// Join requests the mock has received.
+        fn joins(&self) -> Vec<Seen> {
+            self.seen()
+                .into_iter()
+                .filter(|s| s.body.contains("joinSavingSessionsEvent"))
+                .collect()
+        }
+
         fn set_sessions(&self, body: Value) {
             *self.sessions_body.lock().unwrap() = body.to_string();
+        }
+
+        /// What the join mutation answers.
+        fn set_join_answer(&self, body: Value) {
+            *self.join_body.lock().unwrap() = body.to_string();
+        }
+
+        /// The sessions answer once a join request has been seen.
+        fn set_sessions_after_join(&self, body: Value) {
+            self.set_sessions_after_join_lagging(body, 0);
+        }
+
+        /// As above, but the first `stale_reads` reads after the join still
+        /// get the old answer, as when Octopus is slow to show a new join.
+        fn set_sessions_after_join_lagging(&self, body: Value, stale_reads: u64) {
+            *self.after_join.lock().unwrap() = Some((body.to_string(), stale_reads, false));
         }
     }
 
@@ -1607,6 +2038,7 @@ mod tests {
                     mode: SessionsMode::Alert,
                     export_slot: None,
                     export_floor_soc: None,
+                    auto_join: None,
                 }),
             )
             .await;
@@ -1633,6 +2065,7 @@ mod tests {
                     mode: SessionsMode::Off,
                     export_slot: None,
                     export_floor_soc: None,
+                    auto_join: None,
                 }),
             )
             .await;
@@ -2143,6 +2576,7 @@ mod tests {
                         mode: leave_to,
                         export_slot: None,
                         export_floor_soc: None,
+                        auto_join: None,
                     }),
                 )
                 .await;
@@ -2176,6 +2610,7 @@ mod tests {
                     mode: SessionsMode::Export,
                     export_slot: Some(3),
                     export_floor_soc: Some(40),
+                    auto_join: None,
                 }),
             )
             .await;
@@ -2207,6 +2642,7 @@ mod tests {
                         mode: SessionsMode::Export,
                         export_slot: slot,
                         export_floor_soc: floor,
+                        auto_join: None,
                     }),
                 )
                 .await;
@@ -2252,6 +2688,497 @@ mod tests {
             assert_eq!(body["max_discharge_slots"], 10);
             assert_eq!(body["sessions"][0]["export"]["state"], "booked");
             assert_eq!(body["sessions"][0]["skipped"], false);
+        })
+        .await;
+    }
+
+    // ---- auto-join ----
+
+    fn unjoined_response() -> Value {
+        response(
+            json!([]),
+            json!([event(
+                9,
+                "TURN_DOWN",
+                "2026-10-19T17:00:00+00:00",
+                "2026-10-19T18:00:00+00:00",
+                73
+            )]),
+        )
+    }
+
+    async fn configure_auto_join(mock: &MockOctopus, mode: SessionsMode) -> Arc<AppState> {
+        let state = configure(mock, mode).await;
+        Settings::update(|s| s.octopus_sessions_auto_join = true).unwrap();
+        state
+    }
+
+    #[test]
+    fn an_offered_session_the_account_has_not_joined_is_joinable() {
+        let r = parse_response(&unjoined_response(), utc(NOW)).unwrap();
+        assert!(r.sessions.is_empty());
+        assert_eq!(r.joinable.len(), 1);
+        let offer = &r.joinable[0];
+        assert_eq!((offer.id, offer.code.as_str()), (9, "code-9"));
+        assert_eq!(offer.start, utc("2026-10-19T17:00:00+00:00"));
+        assert_eq!(offer.reward_octopoints_per_kwh, Some(73));
+    }
+
+    #[test]
+    fn only_upcoming_unjoined_saving_sessions_with_a_code_are_joinable() {
+        let mut no_code = event(
+            5,
+            "TURN_DOWN",
+            "2026-10-20T17:00:00+00:00",
+            "2026-10-20T18:00:00+00:00",
+            73,
+        );
+        no_code.as_object_mut().unwrap().remove("code");
+        let mut done = event(
+            6,
+            "TURN_DOWN",
+            "2026-10-21T17:00:00+00:00",
+            "2026-10-21T18:00:00+00:00",
+            73,
+        );
+        done["status"] = json!("DONE");
+        let r = parse_response(
+            &response(
+                json!([joined(
+                    1,
+                    "2026-10-19T17:00:00+00:00",
+                    "2026-10-19T18:00:00+00:00"
+                )]),
+                json!([
+                    // Already joined.
+                    event(
+                        1,
+                        "TURN_DOWN",
+                        "2026-10-19T17:00:00+00:00",
+                        "2026-10-19T18:00:00+00:00",
+                        73
+                    ),
+                    // Not a Saving Session.
+                    event(
+                        2,
+                        "WEEKEND_HAPPY_HOUR",
+                        "2026-10-24T10:00:00+00:00",
+                        "2026-10-24T11:00:00+00:00",
+                        0
+                    ),
+                    event(
+                        3,
+                        "TURN_UP",
+                        "2026-10-24T10:00:00+00:00",
+                        "2026-10-24T11:00:00+00:00",
+                        0
+                    ),
+                    // Already started.
+                    event(
+                        4,
+                        "TURN_DOWN",
+                        "2026-10-17T11:00:00+00:00",
+                        "2026-10-17T13:00:00+00:00",
+                        73
+                    ),
+                    no_code,
+                    done,
+                    // The one that qualifies.
+                    event(
+                        7,
+                        "TURN_DOWN",
+                        "2026-10-22T17:00:00+00:00",
+                        "2026-10-22T18:00:00+00:00",
+                        73
+                    ),
+                ]),
+            ),
+            utc(NOW),
+        )
+        .unwrap();
+        assert_eq!(r.joinable.iter().map(|o| o.id).collect::<Vec<_>>(), vec![7]);
+    }
+
+    #[test]
+    fn the_join_request_keeps_hostile_values_inside_their_string_literals() {
+        let m = join_mutation("A-1\"2", "co\"de}{ \\ x");
+        assert_eq!(
+            m,
+            "mutation { joinSavingSessionsEvent(input: { accountNumber: \"A-1\\\"2\", \
+             eventCode: \"co\\\"de}{ \\\\ x\" }) { possibleErrors { message } } }"
+        );
+    }
+
+    #[test]
+    fn a_refused_join_is_reported_with_octopus_own_words() {
+        assert_eq!(
+            join_outcome(
+                &json!({ "data": { "joinSavingSessionsEvent": { "possibleErrors": null } } })
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            join_outcome(
+                &json!({ "data": { "joinSavingSessionsEvent": { "possibleErrors": [] } } })
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            join_outcome(&json!({ "data": { "joinSavingSessionsEvent": {
+                "possibleErrors": [{ "message": "Event has ended" }] } } })),
+            Err("Octopus would not join it: Event has ended".to_string())
+        );
+        assert_eq!(
+            join_outcome(&json!({ "errors": [{ "message": "Cannot query field" }] })),
+            Err("Octopus would not join it: Cannot query field".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_join_is_off_by_default_and_joins_nothing() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure(&mock, SessionsMode::Alert).await;
+            assert!(!Settings::load().octopus_sessions_auto_join);
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.joins().is_empty());
+            assert!(Settings::load().octopus_sessions_join_attempted.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_offered_session_is_joined_and_confirmed_before_it_is_announced() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_sessions_after_join(one_session_response());
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+
+            let joins = mock.joins();
+            assert_eq!(joins.len(), 1);
+            assert_eq!(joins[0].auth.as_deref(), Some("jwt-abc"));
+            assert!(joins[0].body.contains("A-TEST1"));
+            assert!(joins[0].body.contains("code-9"));
+            assert!(!joins[0].body.contains(KEY), "the key never rides along");
+
+            assert_eq!(Settings::load().octopus_sessions_join_attempted, vec![9]);
+            assert_eq!(state.octopus_sessions.lock().await.sessions.len(), 1);
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1);
+            assert!(alerts[0].body.contains("HEM joined this session for you."));
+            assert!(state.octopus_sessions.lock().await.join_errors.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_join_is_confirmed_by_a_second_read_not_by_the_reply() {
+        with_isolated_config_dir_async(|| async {
+            // Octopus says fine, but the account still lists nothing joined.
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+
+            assert_eq!(mock.joins().len(), 1);
+            let current = state.octopus_sessions.lock().await.clone();
+            assert!(current.sessions.is_empty());
+            assert!(current.join_errors[&9].contains("not showing on the account yet"));
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1);
+            assert!(alerts[0].body.contains("join not confirmed"));
+            assert!(!alerts[0].body.contains("could not join"));
+            assert!(!alerts[0].body.contains("joined this session for you"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_join_is_recorded_alerted_once_and_never_retried() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": {
+                "possibleErrors": [{ "message": "Event has ended" }] } } }));
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
+
+            assert_eq!(mock.joins().len(), 1, "not retried");
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1, "alerted once");
+            assert!(alerts[0].body.contains("Event has ended"));
+            assert!(alerts[0].body.contains("Mon 19 Oct, 18:00–19:00"));
+
+            let (_, Json(body)) = get_sessions(State(state)).await;
+            assert_eq!(body["auto_join"], true);
+            assert_eq!(body["join_failures"][0]["id"], 9);
+            assert!(body["join_failures"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Event has ended"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_attempted_join_is_not_repeated_after_a_restart() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.joins().len(), 1);
+
+            let restarted = Arc::new(AppState::new());
+            *restarted.alert_config.lock().await = state.alert_config.lock().await.clone();
+            check_once(&restarted, utc("2026-10-17T12:20:00+00:00")).await;
+            assert_eq!(mock.joins().len(), 1, "still one request");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_account_not_enrolled_in_the_campaign_is_never_joined() {
+        with_isolated_config_dir_async(|| async {
+            let mut body = unjoined_response();
+            body["data"]["savingSessions"]["account"]["hasJoinedCampaign"] = json!(false);
+            body["data"]["savingSessions"]["account"]["canJoinCampaign"] = json!(true);
+            let mock = MockOctopus::spawn(body).await;
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.joins().is_empty());
+            assert!(Settings::load().octopus_sessions_join_attempted.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn off_mode_never_joins_even_with_auto_join_set() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure_auto_join(&mock, SessionsMode::Off).await;
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.seen().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn offers_that_are_not_saving_sessions_are_not_joined() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(response(
+                json!([]),
+                json!([event(
+                    7244,
+                    "WEEKEND_HAPPY_HOUR",
+                    "2026-10-24T10:00:00+00:00",
+                    "2026-10-24T11:00:00+00:00",
+                    0
+                )]),
+            ))
+            .await;
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.joins().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn one_check_joins_a_bounded_number_and_the_rest_follow() {
+        with_isolated_config_dir_async(|| async {
+            let offers: Vec<Value> = (1..=7)
+                .map(|n| {
+                    event(
+                        n,
+                        "TURN_DOWN",
+                        &format!("2026-10-{:02}T17:00:00+00:00", 18 + n),
+                        &format!("2026-10-{:02}T18:00:00+00:00", 18 + n),
+                        73,
+                    )
+                })
+                .collect();
+            let mock = MockOctopus::spawn(response(json!([]), json!(offers))).await;
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.joins().len(), MAX_JOINS_PER_CHECK);
+            check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
+            assert_eq!(mock.joins().len(), 7, "the remaining two, none repeated");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_session_joined_in_export_mode_is_booked_in_the_same_check() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_sessions_after_join(one_session_response());
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            Settings::update(|s| s.octopus_sessions_auto_join = true).unwrap();
+            check_once(&state, utc(EXPORT_NOW)).await;
+            let events = session_events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].source, "saving_session:9");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_join_books_no_export() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            Settings::update(|s| s.octopus_sessions_auto_join = true).unwrap();
+            check_once(&state, utc(EXPORT_NOW)).await;
+            assert!(session_events().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_mode_endpoint_sets_auto_join_and_leaves_it_alone_when_absent() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure(&mock, SessionsMode::Alert).await;
+            let request = |auto_join| {
+                Json(ModeRequest {
+                    mode: SessionsMode::Alert,
+                    export_slot: None,
+                    export_floor_soc: None,
+                    auto_join,
+                })
+            };
+            let (status, _) = set_sessions_mode(State(state.clone()), request(Some(true))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(Settings::load().octopus_sessions_auto_join);
+            let _ = set_sessions_mode(State(state.clone()), request(None)).await;
+            assert!(
+                Settings::load().octopus_sessions_auto_join,
+                "absent means unchanged"
+            );
+            let _ = set_sessions_mode(State(state), request(Some(false))).await;
+            assert!(!Settings::load().octopus_sessions_auto_join);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_join_that_octopus_is_slow_to_show_is_confirmed_by_reading_again() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_sessions_after_join_lagging(one_session_response(), 1);
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+
+            assert_eq!(mock.joins().len(), 1, "read again, not sent again");
+            let current = state.octopus_sessions.lock().await.clone();
+            assert_eq!(current.sessions.len(), 1);
+            assert!(current.join_errors.is_empty());
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1, "no false failure alert");
+            assert!(alerts[0].body.contains("HEM joined this session for you."));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_session_joined_elsewhere_is_not_credited_to_hem() {
+        with_isolated_config_dir_async(|| async {
+            // HEM's request is refused (the user got there first in the app),
+            // and the account shows the session joined all the same.
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": {
+                "possibleErrors": [{ "message": "Already joined" }] } } }));
+            mock.set_sessions_after_join(one_session_response());
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1);
+            assert!(!alerts[0].body.contains("HEM joined this session for you"));
+            assert!(alerts[0].body.contains("Saving Session joined"));
+            assert!(state.octopus_sessions.lock().await.join_errors.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_session_the_user_skipped_is_not_joined() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            Settings::update(|s| s.octopus_sessions_skipped = vec![9]).unwrap();
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.joins().is_empty());
+            assert!(Settings::load().octopus_sessions_join_attempted.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_login_that_fails_joins_nothing_and_uses_up_no_attempt() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            *mock.token_body.lock().unwrap() =
+                json!({ "errors": [{ "message": "Authentication failed" }] }).to_string();
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.joins().is_empty());
+            assert!(Settings::load().octopus_sessions_join_attempted.is_empty());
+
+            // Once the login works again the session is still joined.
+            *mock.token_body.lock().unwrap() =
+                json!({ "data": { "obtainKrakenToken": { "token": "jwt-abc" } } }).to_string();
+            check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
+            assert_eq!(mock.joins().len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_join_is_still_shown_after_a_restart() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            // A previous run tried this session; its reason was only in memory.
+            Settings::update(|s| s.octopus_sessions_join_attempted = vec![9]).unwrap();
+            check_once(&state, utc(NOW)).await;
+
+            assert!(mock.joins().is_empty(), "never retried");
+            let (_, Json(body)) = get_sessions(State(state)).await;
+            assert_eq!(body["join_failures"][0]["id"], 9);
+            assert!(body["join_failures"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("tried to join this earlier"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn several_refused_joins_send_one_message() {
+        with_isolated_config_dir_async(|| async {
+            let offers: Vec<Value> = (1..=3)
+                .map(|n| {
+                    event(
+                        n,
+                        "TURN_DOWN",
+                        &format!("2026-10-{:02}T17:00:00+00:00", 18 + n),
+                        &format!("2026-10-{:02}T18:00:00+00:00", 18 + n),
+                        73,
+                    )
+                })
+                .collect();
+            let mock = MockOctopus::spawn(response(json!([]), json!(offers))).await;
+            mock.set_join_answer(json!({ "data": { "joinSavingSessionsEvent": {
+                "possibleErrors": [{ "message": "Account locked" }] } } }));
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+
+            assert_eq!(mock.joins().len(), 3);
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1, "one message for all three");
+            assert_eq!(alerts[0].body.matches("Account locked").count(), 3);
+            assert!(alerts[0].body.contains("could not join"));
         })
         .await;
     }

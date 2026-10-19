@@ -519,5 +519,16 @@ export interface SavingSessionsResponse {
   checked_at: string | null;
   error: string | null;
   enrolled: boolean | null;
+  /** HEM joins newly offered sessions for the account. */
+  auto_join: boolean;
+  /** Sessions HEM tried to join and could not. It does not retry them. */
+  join_failures: SavingSessionJoinFailure[];
   sessions: SavingSession[];
+}
+
+export interface SavingSessionJoinFailure {
+  id: number;
+  start: string;
+  end: string;
+  error: string;
 }

@@ -95,7 +95,7 @@ export default function SavingSessionsPanel() {
           <h3 className="font-medium text-text-primary">Saving Sessions</h3>
           <p className="mt-1 text-xs text-text-secondary">
             Get a message when you have joined a Saving Session, and again shortly before it
-            starts. Join sessions in the Octopus app; HEM only watches for them.
+            starts. Join sessions in the Octopus app, or let HEM join them for you below.
           </p>
         </div>
         <div className="flex flex-wrap gap-1" role="group" aria-label="Saving Sessions">
@@ -177,6 +177,51 @@ export default function SavingSessionsPanel() {
           </div>
           )}
         </div>
+      )}
+
+      {watching && data.configured && (
+        <div className="mt-3 rounded-lg bg-bg-elevated p-3">
+          <label className="flex items-start gap-2 text-sm text-text-primary">
+            <input
+              type="checkbox"
+              checked={data.auto_join}
+              disabled={saving}
+              onChange={(e) =>
+                void post('/api/octopus/sessions/mode', { mode: data.mode, auto_join: e.target.checked })
+              }
+              className="mt-0.5"
+            />
+            <span>
+              Join New Saving Sessions Automatically
+              <span className="mt-1 block text-xs text-text-secondary">
+                HEM asks Octopus to join each Saving Session it offers your account, once per
+                session, and only counts it as joined after checking your account shows it. Your
+                account must already be signed up to Octoplus Saving Sessions; HEM will not sign
+                it up. If a join fails, HEM tells you and does not try that session again.
+              </span>
+            </span>
+          </label>
+          {data.auto_join && data.enrolled === false && (
+            <p role="status" className="mt-2 text-xs text-text-secondary">
+              Nothing will be joined until the account has joined Octoplus Saving Sessions.
+            </p>
+          )}
+        </div>
+      )}
+
+      {watching && data.configured && data.auto_join && data.join_failures.length > 0 && (
+        <ul className="mt-3 space-y-1" aria-label="Sessions HEM could not join">
+          {data.join_failures.map((failure) => (
+            <li
+              key={failure.id}
+              role="status"
+              className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-text-primary"
+            >
+              Could not join {formatSessionWindow(failure.start, failure.end)}: {failure.error}
+              {' '}HEM will not try this one again; you can join it in the Octopus app.
+            </li>
+          ))}
+        </ul>
       )}
 
       {watching && !data.configured && (

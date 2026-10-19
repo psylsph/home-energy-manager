@@ -108,7 +108,14 @@ In `Activate export` mode each joined session is turned into an `ExportOnceEvent
 
 ## Phase 4: Auto-join
 
-Separate opt-in checkbox with explicit wording. After a join call, re-query joined events to confirm before creating any export. Track attempted ids so a restart cannot re-fire the mutation. Never retry blindly.
+Implemented. A separate opt-in checkbox on the Octopus page (`octopus_sessions_auto_join`, off by default) that works in Alert only and Activate export modes. Each upcoming, unjoined `TURN_DOWN` event is joined with `joinSavingSessionsEvent`, at most five per check. Safeguards:
+
+- The account must already report `hasJoinedCampaign`; HEM never enrols one.
+- The id is saved to `octopus_sessions_join_attempted` once the token is in hand and just before the request is sent (a failed login costs nothing), and is never retried, so a crash or restart cannot fire the mutation twice. A failed join is alerted once and listed on the page.
+- The reply to the mutation is not trusted. The joined list is read again (up to three reads, since Octopus can be slow to show a join), and only a session that appears there is announced as joined or booked for export. A session is credited to HEM only if Octopus took HEM's request.
+- A session the user skipped is not joined. A refused or unconfirmed join stays listed on the page, including after a restart.
+
+**Not yet verified against a real account.** The mutation name and its `possibleErrors` reply are taken from community clients, not captured from this account (joining is a write, unlike the Phase 2 reads). Because success is decided by the second read, a wrong shape fails soft: the session is reported as not joined and never retried. Check it once against a real offered session before relying on it.
 
 ## Test plan
 
@@ -125,4 +132,4 @@ Separate opt-in checkbox with explicit wording. After a join call, re-query join
 
 - Re-arm firmware (Gen3 variants that re-assert `enable_discharge` when any slot is non-zero) clears slots outside the window; the override must go through the same restore path. Covered by reusing the slot-save handler.
 - Whether Weekend Happy Hour or other event types should be ignored explicitly (yes: only Saving Session / Power Down types).
-- Octopus terms for automated joining (Phase 4).
+- Octopus terms for automated joining (Phase 4). Not checked.

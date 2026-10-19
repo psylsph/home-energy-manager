@@ -1650,6 +1650,15 @@ pub struct Settings {
     /// twice, and one the user cancelled by hand stays cancelled).
     #[serde(default)]
     pub octopus_sessions_booked: Vec<i64>,
+    /// Join newly offered Saving Sessions automatically. Off unless the user
+    /// opts in: it changes their Octopus account.
+    #[serde(default)]
+    pub octopus_sessions_auto_join: bool,
+    /// Sessions HEM has already sent a join request for. Recorded before the
+    /// request goes out and never retried, so a crash or a restart can never
+    /// fire the mutation twice for the same session.
+    #[serde(default)]
+    pub octopus_sessions_join_attempted: Vec<i64>,
 
     // -- Solar array capacities (issue #110) --
     /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
@@ -2070,6 +2079,8 @@ impl Default for Settings {
             octopus_sessions_export_floor_soc: default_sessions_export_floor_soc(),
             octopus_sessions_skipped: Vec::new(),
             octopus_sessions_booked: Vec::new(),
+            octopus_sessions_auto_join: false,
+            octopus_sessions_join_attempted: Vec::new(),
             // Issue #110: solar array capacities default to unset so a
             // fresh install (and every existing install on upgrade) sees
             // no behaviour change until the user opts in via Settings.
@@ -2748,6 +2759,8 @@ mod tests {
             octopus_sessions_export_floor_soc: default_sessions_export_floor_soc(),
             octopus_sessions_skipped: Vec::new(),
             octopus_sessions_booked: Vec::new(),
+            octopus_sessions_auto_join: false,
+            octopus_sessions_join_attempted: Vec::new(),
             // Issue #110: solar array capacities must round-trip exactly.
             pv1_rated_kw: 6.0,
             pv2_rated_kw: 4.2,
@@ -3483,6 +3496,8 @@ mod tests {
             octopus_sessions_export_floor_soc: default_sessions_export_floor_soc(),
             octopus_sessions_skipped: Vec::new(),
             octopus_sessions_booked: Vec::new(),
+            octopus_sessions_auto_join: false,
+            octopus_sessions_join_attempted: Vec::new(),
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),
