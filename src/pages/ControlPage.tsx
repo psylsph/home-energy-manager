@@ -15,6 +15,7 @@ import {
 } from '../lib/deviceCapabilities';
 import { waitForSnapshotReadback } from '../lib/readback';
 import { describeLiveReadout, liveReadout } from '../lib/liveReadback';
+import { describeChargeSlotLimit, type ChargeSlotLimitContext } from '../lib/chargeSlotLimit';
 import { formatPowerLimitLabel, percentToRawLimit, percentToWatts, rawLimitToPercent, resolveLimitDraft, snapLimitPercent } from '../lib/powerLimit';
 import type { LimitDraft, LimitScale } from '../lib/powerLimit';
 import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
@@ -403,6 +404,39 @@ function ChargeLimitReadout({
   return <p className="text-text-secondary text-xs">{text}</p>;
 }
 
+/**
+ * The charge limit as it applies to one charge slot (#362): always the limit
+ * itself, and a warning when the slot cannot reach its target at that limit.
+ * Reads the slot being edited, so it follows unsaved changes to the times and
+ * Target SOC.
+ */
+function ChargeSlotLimitNotes({
+  slot,
+  context,
+  armed,
+}: {
+  slot: ScheduleSlot;
+  context: ChargeSlotLimitContext;
+  armed: boolean;
+}) {
+  const { limitLine, shortfall } = describeChargeSlotLimit({ ...context, slot, armed });
+  if (!limitLine) return null;
+  return (
+    <div className="space-y-1" data-testid="charge-slot-limit">
+      <p className="text-text-secondary text-xs">{limitLine}</p>
+      {shortfall && (
+        <p
+          role="status"
+          className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-text-primary"
+          data-testid="charge-slot-limit-shortfall"
+        >
+          {shortfall}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ScheduleSlotEditor({
   slotIndex,
   slot,
@@ -424,6 +458,7 @@ function ScheduleSlotEditor({
    * here won't affect the inverter while Agile is on".
    */
   mode = 'normal',
+  chargeLimit,
 }: {
   slotIndex: number;
   slot: ScheduleSlot;
@@ -440,6 +475,8 @@ function ScheduleSlotEditor({
   /** Target used when a fresh slot still contains the inverter's minimum/default value. */
   defaultTargetSoc?: number;
   mode?: 'normal' | 'agile_readonly';
+  /** Charge slots only: the inverter's charge limit, so the card can say what the slot can deliver (#362). */
+  chargeLimit?: ChargeSlotLimitContext;
 }) {
   const [local, setLocal] = useState<ScheduleSlot>({ ...slot });
   const [saving, setSaving] = useState(false);
@@ -581,6 +618,8 @@ function ScheduleSlotEditor({
               />
             </div>
           )}
+
+          {chargeLimit && <ChargeSlotLimitNotes slot={local} context={chargeLimit} armed={masterArmed} />}
         </>
       )}
 
@@ -4022,6 +4061,20 @@ export default function ControlPage() {
                 apiPath="/api/control/charge-slot"
                 masterArmed={snapshot?.enable_charge === true}
                 mode={scheduleModeForSlots}
+                chargeLimit={inverterConnected && snapshotChargeShown != null && !(usesDirectPowerLimit && snapshotChargeShown === 0) ? {
+                  limitPercent: snapshotChargeShown,
+                  limitWatts: percentToWatts(snapshotChargeShown, maxBatteryPowerW),
+                  capacityKwh: snapshot?.battery_capacity_kwh,
+                  socPercent: snapshot?.soc,
+                  nowMinute: currentInverterMinute,
+                  otherSlots: chargeSlots.filter((other, j) => j !== i && isSlotConfigured(other)),
+                  managedBy: adaptiveOwnsChargeRate
+                    ? 'Adaptive Charge'
+                    : (snapshot?.forecast_plan_auto_refresh === true
+                      || snapshot?.forecast_plan_auto_apply_enabled === true)
+                      ? 'The Forecast plan'
+                      : null,
+                } : undefined}
               />
             </Fragment>
           ))}
