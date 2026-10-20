@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.92.2] - 2026-10-20
+
+### Changed
+
+- **The Saving Sessions controls on the Octopus page are easier to tell apart.** The mode buttons are now Off, Alert Only and Alert And Export, and they only decide what HEM does for sessions you have joined. Joining has its own section, with the tick renamed to "Join Sessions For Me". It now stays visible while Saving Sessions is Off, with a note that joining is paused, so you can untick it before turning alerts back on (#377).
+
+### Fixed
+
+- **Saving from an out-of-date Octopus page no longer undoes a change made elsewhere.** With the page open in two places, changing the join tick or the export settings on the older one could switch Saving Sessions back and stop an export that was running. HEM now saves only what you changed, and tells you when your export settings won't be used because Alert And Export isn't chosen.
+- **Unticking "Join Sessions For Me" takes effect even while a check is running.** Before, a session could still be joined moments after you unticked it.
+
 ## [0.92.1] - 2026-10-19
 
 ### Fixed
