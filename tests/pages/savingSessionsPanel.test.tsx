@@ -85,7 +85,28 @@ describe('SavingSessionsPanel', () => {
   it('warns when no alert channel is set up', async () => {
     apiGet.mockResolvedValue(reply({ alerts_ready: false }));
     render(<SavingSessionsPanel />);
-    expect((await screen.findByText(/No alert channel is set up/)).textContent).toMatch(/Notifications/);
+    const warning = await screen.findByText(/Alerts are off or no alert channel is set up, so you will not be told/);
+    expect(warning.textContent).toMatch(/Notifications/);
+    expect(warning.className).toMatch(/yellow/);
+    // alerts_ready is also false with a channel set up but alerts switched off.
+    expect(warning.textContent).toMatch(/Turn alerts on/);
+  });
+
+  it('explains that the mode buttons act on joined sessions and that Off also stops joining', async () => {
+    // #377: the buttons and the join tick read as one setting.
+    apiGet.mockResolvedValue(reply());
+    render(<SavingSessionsPanel />);
+    const modes = await screen.findByRole('group', { name: /^For Sessions You Have Joined/ });
+    // The group is named by the visible caption, not a second copy of it.
+    expect(modes.hasAttribute('aria-label')).toBe(false);
+    // Off sits under that caption but also stops joining; the caption says so.
+    expect(modes.getAttribute('aria-labelledby')).toBeTruthy();
+    expect(document.getElementById(modes.getAttribute('aria-labelledby')!)!.textContent).toMatch(/Off also stops joining/);
+    expect(screen.getByText(/Joining is separate/)).toBeTruthy();
+    // Messages follow joining, not Octopus's announcement.
+    expect(screen.getByText(/when you have joined a Saving Session/)).toBeTruthy();
+    expect(screen.queryByText(/when it is announced/)).toBeNull();
+    expect(screen.getByText(/Off turns all of this off, joining included/)).toBeTruthy();
   });
 
   it('asks for Octopus credentials when they are missing', async () => {
@@ -140,14 +161,14 @@ describe('SavingSessionsPanel', () => {
     expect(second.container.querySelector('[data-testid="saving-sessions-panel"]')).toBeNull();
   });
 
-  describe('Activate Export', () => {
+  describe('Alert And Export', () => {
     const exporting = (overrides: Partial<SavingSessionsResponse> = {}) =>
       reply({ mode: 'export', ...overrides });
 
     it('offers three modes and marks the current one', async () => {
       apiGet.mockResolvedValue(exporting());
       render(<SavingSessionsPanel />);
-      expect((await screen.findByRole('button', { name: 'Activate Export' })).getAttribute('aria-pressed')).toBe('true');
+      expect((await screen.findByRole('button', { name: 'Alert And Export' })).getAttribute('aria-pressed')).toBe('true');
       expect(screen.getByRole('button', { name: 'Alert Only' }).getAttribute('aria-pressed')).toBe('false');
       expect(screen.getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('false');
     });
@@ -157,7 +178,7 @@ describe('SavingSessionsPanel', () => {
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
       expect(screen.queryByText(/will export from your battery/)).toBeNull();
-      fireEvent.click(await screen.findByRole('button', { name: 'Activate Export' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Alert And Export' }));
       await waitFor(() =>
         expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { mode: 'export' }),
       );
@@ -199,8 +220,9 @@ describe('SavingSessionsPanel', () => {
       expect(save).toBeEnabled();
       fireEvent.click(save);
       await waitFor(() =>
+        // No mode: re-sending one loaded up to a minute ago could undo a
+        // change made elsewhere.
         expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
-          mode: 'export',
           export_slot: 3,
           export_floor_soc: 45,
         }),
@@ -234,7 +256,6 @@ describe('SavingSessionsPanel', () => {
       fireEvent.click(save);
       await waitFor(() =>
         expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
-          mode: 'export',
           export_slot: 2,
           export_floor_soc: 20,
         }),
@@ -255,7 +276,6 @@ describe('SavingSessionsPanel', () => {
       fireEvent.click(save);
       await waitFor(() =>
         expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
-          mode: 'export',
           export_slot: 1,
           export_floor_soc: 20,
         }),
@@ -318,6 +338,30 @@ describe('SavingSessionsPanel', () => {
       expect(screen.queryByLabelText('Slot To Use')).toBeNull();
     });
 
+    it('says so when export settings are saved while the mode has changed elsewhere', async () => {
+      // The save sends no mode, so from a stale page it keeps whatever mode
+      // is set now; without a word, the export box would just vanish.
+      apiGet.mockResolvedValue(exporting());
+      apiPost.mockResolvedValue({ ok: true, mode: 'alert' });
+      render(<SavingSessionsPanel />);
+      fireEvent.change(await screen.findByLabelText('Slot To Use'), { target: { value: '3' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
+      const notice = await screen.findByText(/Export settings saved, but Saving Sessions is set to Alert Only/);
+      expect(notice.getAttribute('role')).toBe('status');
+      expect(notice.textContent).toMatch(/Choose Alert And Export/);
+    });
+
+    it('says nothing extra when export settings are saved in Alert And Export', async () => {
+      apiGet.mockResolvedValue(exporting());
+      apiPost.mockResolvedValue({ ok: true, mode: 'export' });
+      render(<SavingSessionsPanel />);
+      fireEvent.change(await screen.findByLabelText('Slot To Use'), { target: { value: '3' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
+      await waitFor(() => expect(apiPost).toHaveBeenCalled());
+      await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(2));
+      expect(screen.queryByText(/Export settings saved, but/)).toBeNull();
+    });
+
     it('shows a save failure without an alert role', async () => {
       apiGet.mockResolvedValue(exporting());
       apiPost.mockRejectedValue(new Error('Slot must be between 1 and 2 on this inverter'));
@@ -334,22 +378,27 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply());
       render(<SavingSessionsPanel />);
       const box = (await screen.findByRole('checkbox', {
-        name: /Join New Saving Sessions Automatically/,
+        name: /Join Sessions For Me/,
       })) as HTMLInputElement;
+      // Not "new": sessions already on offer are joined too.
+      expect(screen.queryByText(/new sessions/i)).toBeNull();
       expect(box.checked).toBe(false);
       expect(screen.getByText(/HEM will not sign it up/)).toBeTruthy();
+      expect(screen.getByText(/shows it here, messages you if an alert channel is set up/)).toBeTruthy();
+      // auto_join() takes everything on offer it has not tried, not only
+      // offers that arrive after the tick.
+      expect(screen.getByText(/including any already on offer when you tick this/)).toBeTruthy();
     });
 
     it('turns it on without changing the mode, then reloads', async () => {
       apiGet.mockResolvedValue(reply({ mode: 'export' }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      fireEvent.click(await screen.findByRole('checkbox', { name: /Join New Saving Sessions/ }));
+      fireEvent.click(await screen.findByRole('checkbox', { name: /Join Sessions For Me/ }));
       await waitFor(() =>
-        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
-          mode: 'export',
-          auto_join: true,
-        }),
+        // The tick alone: a stale mode sent with it could switch the
+        // feature and stop a running export.
+        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: true }),
       );
       await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(2));
     });
@@ -358,34 +407,45 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ auto_join: true }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      const box = (await screen.findByRole('checkbox', { name: /Join New Saving Sessions/ })) as HTMLInputElement;
+      const box = (await screen.findByRole('checkbox', { name: /Join Sessions For Me/ })) as HTMLInputElement;
       expect(box.checked).toBe(true);
       fireEvent.click(box);
       await waitFor(() =>
-        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
-          mode: 'alert',
-          auto_join: false,
-        }),
+        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: false }),
       );
     });
 
-    it('is not offered when the feature is off or Octopus is not set up', async () => {
-      apiGet.mockResolvedValue(reply({ mode: 'off' }));
-      const { unmount } = render(<SavingSessionsPanel />);
-      await screen.findByRole('button', { name: 'Off' });
-      expect(screen.queryByRole('checkbox')).toBeNull();
-      unmount();
-
-      apiGet.mockResolvedValue(reply({ configured: false }));
+    it('is offered while Off, so it can be unticked before a mode is chosen', async () => {
+      // Choosing a mode wakes a check straight away; if the tick were hidden
+      // while Off, sessions would be joined before it could be unticked.
+      apiGet.mockResolvedValue(reply({ mode: 'off', auto_join: true }));
+      apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      await screen.findByText(/needs your Octopus account number/);
-      expect(screen.queryByRole('checkbox')).toBeNull();
+      const box = (await screen.findByRole('checkbox', { name: /Join Sessions For Me/ })) as HTMLInputElement;
+      expect(box.checked).toBe(true);
+      fireEvent.click(box);
+      await waitFor(() =>
+        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: false }),
+      );
     });
 
-    it('says nothing will happen until the account is signed up to Octoplus', async () => {
+    it('is not offered when Octopus is not set up', async () => {
+      for (const mode of ['off', 'alert'] as const) {
+        apiGet.mockResolvedValue(reply({ mode, configured: false, auto_join: true }));
+        const { unmount } = render(<SavingSessionsPanel />);
+        await screen.findByRole('button', { name: 'Off' });
+        expect(screen.queryByRole('checkbox')).toBeNull();
+        // Nothing to promise about resuming without credentials.
+        expect(screen.queryByText(/paused/)).toBeNull();
+        unmount();
+      }
+    });
+
+    it('says nothing will happen until the account is signed up to Octoplus, once', async () => {
       apiGet.mockResolvedValue(reply({ auto_join: true, enrolled: false }));
       render(<SavingSessionsPanel />);
-      expect(await screen.findByText(/Nothing will be joined until the account has joined/)).toBeTruthy();
+      expect(await screen.findByText(/Nothing will be joined until it has/)).toBeTruthy();
+      expect(screen.getAllByText(/Octoplus Saving Sessions yet|Nothing will be joined/)).toHaveLength(1);
     });
 
     it('reports a failed join and that it will not be retried', async () => {
@@ -404,6 +464,114 @@ describe('SavingSessionsPanel', () => {
       expect(note.textContent).toMatch(/will not try this one again/);
     });
 
+    it('sits in its own Joining section, ahead of the export settings', async () => {
+      // Below the export box it read as part of export mode (#377).
+      apiGet.mockResolvedValue(reply({ mode: 'export' }));
+      render(<SavingSessionsPanel />);
+      const section = await screen.findByRole('group', { name: 'Joining' });
+      const box = screen.getByRole('checkbox', { name: /Join Sessions For Me/ });
+      expect(section.contains(box)).toBe(true);
+      const exportText = screen.getByText(/will export from your battery/);
+      expect(section.compareDocumentPosition(exportText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('works the same whichever of the two active modes is chosen', async () => {
+      for (const mode of ['alert', 'export'] as const) {
+        apiGet.mockResolvedValue(reply({ mode }));
+        apiPost.mockReset();
+        apiPost.mockResolvedValue({ ok: true });
+        const { unmount } = render(<SavingSessionsPanel />);
+        fireEvent.click(await screen.findByRole('checkbox', { name: /Join Sessions For Me/ }));
+        expect(screen.getByText(/whichever of Alert Only or Alert And Export is chosen/)).toBeTruthy();
+        await waitFor(() =>
+          expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: true }),
+        );
+        unmount();
+      }
+    });
+
+    it('says joining is paused while Off, when it is saved on', async () => {
+      // Off stops every request to Octopus, joins included, but the saved
+      // choice survives. Without this note it looked like joining was armed.
+      apiGet.mockResolvedValue(reply({ mode: 'off', auto_join: true }));
+      render(<SavingSessionsPanel />);
+      const note = await screen.findByText(/Joining is paused while Saving Sessions is Off/);
+      expect(note.getAttribute('role')).toBe('status');
+      expect(note.textContent).toMatch(/Alert Only or Alert And Export/);
+      // Choosing a mode checks at once, joining whatever is on offer now.
+      expect(note.textContent).toMatch(/straight away joins any session on offer that it has not tried before/);
+      // Joining needs an account signed up to Octoplus, which is not known while Off.
+      expect(note.textContent).toMatch(/if your account is signed up to Octoplus Saving Sessions/);
+      expect(screen.getByRole('group', { name: 'Joining' }).contains(note)).toBe(true);
+    });
+
+    it('says nothing about pausing when joining was never turned on', async () => {
+      apiGet.mockResolvedValue(reply({ mode: 'off', auto_join: false }));
+      render(<SavingSessionsPanel />);
+      await screen.findByRole('button', { name: 'Off' });
+      expect(screen.queryByText(/paused/)).toBeNull();
+    });
+
+    it('treats a missing alert channel as a choice, not a fault, when joining is on', async () => {
+      // Join-only is "Alert Only + tick" with no channel; a yellow warning
+      // there reads as something being broken.
+      apiGet.mockResolvedValue(reply({ alerts_ready: false, auto_join: true }));
+      render(<SavingSessionsPanel />);
+      const note = await screen.findByText(/HEM will still join sessions for you/);
+      expect(note.textContent).toMatch(/failed joins still show here/);
+      expect(note.textContent).toMatch(/Alerts are off or no alert channel is set up/);
+      expect(note.className).not.toMatch(/yellow/);
+      expect(screen.queryByText(/Alerts are off or no alert channel is set up, so you will not be told/)).toBeNull();
+    });
+
+    it('does not promise joining for an account that is not signed up to Octoplus', async () => {
+      // auto_join() does nothing until the account is enrolled.
+      apiGet.mockResolvedValue(reply({ alerts_ready: false, auto_join: true, enrolled: false }));
+      render(<SavingSessionsPanel />);
+      await screen.findByText(/Nothing will be joined until it has/);
+      expect(screen.queryByText(/HEM will still join sessions for you/)).toBeNull();
+      expect(screen.getByText(/so you will not be told/).className).toMatch(/yellow/);
+    });
+
+    it('does not promise joining before enrolment is known', async () => {
+      // Before the first check, or after a failed login, enrolled is null and
+      // auto_join() joins nothing.
+      apiGet.mockResolvedValue(reply({
+        alerts_ready: false,
+        auto_join: true,
+        enrolled: null,
+        error: 'Octopus answered HTTP 401',
+      }));
+      render(<SavingSessionsPanel />);
+      const warning = await screen.findByText(/so you will not be told/);
+      expect(warning.className).toMatch(/yellow/);
+      expect(screen.queryByText(/HEM will still join sessions for you/)).toBeNull();
+    });
+
+    it('does not promise joining when the latest check failed after a good one', async () => {
+      // A failed check keeps the last enrolment answer, but with no login
+      // nothing can be joined.
+      apiGet.mockResolvedValue(reply({
+        alerts_ready: false,
+        auto_join: true,
+        enrolled: true,
+        error: 'Octopus answered HTTP 401',
+      }));
+      render(<SavingSessionsPanel />);
+      const warning = await screen.findByText(/so you will not be told/);
+      expect(warning.className).toMatch(/yellow/);
+      expect(screen.queryByText(/HEM will still join sessions for you/)).toBeNull();
+    });
+
+    it('still warns about a missing alert channel in Alert And Export, joining or not', async () => {
+      // Export start, finish and failure messages would go nowhere too.
+      apiGet.mockResolvedValue(reply({ mode: 'export', alerts_ready: false, auto_join: true }));
+      render(<SavingSessionsPanel />);
+      const warning = await screen.findByText(/Alerts are off or no alert channel is set up, so you will not be told/);
+      expect(warning.className).toMatch(/yellow/);
+      expect(screen.queryByText(/HEM will still join sessions for you/)).toBeNull();
+    });
+
     it('hides old failures once automatic joining is switched off', async () => {
       apiGet.mockResolvedValue(reply({
         auto_join: false,
@@ -415,7 +583,7 @@ describe('SavingSessionsPanel', () => {
         }],
       }));
       render(<SavingSessionsPanel />);
-      await screen.findByRole('checkbox', { name: /Join New Saving Sessions/ });
+      await screen.findByRole('checkbox', { name: /Join Sessions For Me/ });
       expect(screen.queryByText(/Could not join/)).toBeNull();
     });
   });

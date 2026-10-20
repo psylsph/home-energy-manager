@@ -2053,7 +2053,7 @@ mod tests {
             let (status, _) = set_sessions_mode(
                 State(state.clone()),
                 Json(ModeRequest {
-                    mode: SessionsMode::Alert,
+                    mode: Some(SessionsMode::Alert),
                     export_slot: None,
                     export_floor_soc: None,
                     auto_join: None,
@@ -2080,7 +2080,7 @@ mod tests {
             let (_, _) = set_sessions_mode(
                 State(state.clone()),
                 Json(ModeRequest {
-                    mode: SessionsMode::Off,
+                    mode: Some(SessionsMode::Off),
                     export_slot: None,
                     export_floor_soc: None,
                     auto_join: None,
@@ -2108,7 +2108,7 @@ mod tests {
         .await;
     }
 
-    // ---- Activate export (phase 3) ----
+    // ---- Alert And Export (phase 3) ----
 
     use crate::inverter::export_once::{list_events, ExportOnceState};
     use crate::inverter::model::{DeviceType, InverterSnapshot};
@@ -2591,7 +2591,7 @@ mod tests {
                 let (status, _) = set_sessions_mode(
                     State(state.clone()),
                     Json(ModeRequest {
-                        mode: leave_to,
+                        mode: Some(leave_to),
                         export_slot: None,
                         export_floor_soc: None,
                         auto_join: None,
@@ -2625,7 +2625,7 @@ mod tests {
             let (status, _) = set_sessions_mode(
                 State(state.clone()),
                 Json(ModeRequest {
-                    mode: SessionsMode::Export,
+                    mode: Some(SessionsMode::Export),
                     export_slot: Some(3),
                     export_floor_soc: Some(40),
                     auto_join: None,
@@ -2657,7 +2657,7 @@ mod tests {
                 let (status, body) = set_sessions_mode(
                     State(state.clone()),
                     Json(ModeRequest {
-                        mode: SessionsMode::Export,
+                        mode: Some(SessionsMode::Export),
                         export_slot: slot,
                         export_floor_soc: floor,
                         auto_join: None,
@@ -2994,6 +2994,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn joining_can_be_switched_off_while_off_so_turning_alerts_on_joins_nothing() {
+        // #377: the page offers the tick while Off so the user can untick it
+        // before choosing a mode; otherwise the mode change itself joins. This
+        // guards existing behaviour: an untick saved while Off sticks, so the
+        // first check after switching to Alert joins nothing.
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            let state = configure_auto_join(&mock, SessionsMode::Off).await;
+            // What the page sends: the tick alone, no mode.
+            let request: ModeRequest =
+                serde_json::from_value(json!({ "auto_join": false })).unwrap();
+            let (status, _) = set_sessions_mode(State(state.clone()), Json(request)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!Settings::load().octopus_sessions_auto_join);
+            assert_eq!(Settings::load().octopus_sessions_mode, SessionsMode::Off);
+
+            Settings::update(|s| s.octopus_sessions_mode = SessionsMode::Alert).unwrap();
+            check_once(&state, utc(NOW)).await;
+            assert!(!mock.seen().is_empty(), "the check reached Octopus");
+            assert!(mock.joins().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn offers_that_are_not_saving_sessions_are_not_joined() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(response(
@@ -3072,7 +3097,7 @@ mod tests {
             let state = configure(&mock, SessionsMode::Alert).await;
             let request = |auto_join| {
                 Json(ModeRequest {
-                    mode: SessionsMode::Alert,
+                    mode: Some(SessionsMode::Alert),
                     export_slot: None,
                     export_floor_soc: None,
                     auto_join,
@@ -3090,6 +3115,146 @@ mod tests {
             assert!(!Settings::load().octopus_sessions_auto_join);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn auto_join_alone_leaves_the_mode_and_its_exports_alone() {
+        // #377: the page posts the tick by itself. Re-sending a mode from a
+        // page loaded before someone else changed it would silently switch
+        // the feature and stop a booked or running export.
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            check_once(&state, utc(EXPORT_NOW)).await;
+            assert_eq!(
+                session_events().last().unwrap().state,
+                ExportOnceState::Pending
+            );
+
+            for on in [true, false] {
+                let request: ModeRequest =
+                    serde_json::from_value(json!({ "auto_join": on })).unwrap();
+                let (status, Json(body)) =
+                    set_sessions_mode(State(state.clone()), Json(request)).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body["mode"], "export", "reports the mode left in place");
+                let saved = Settings::load();
+                assert_eq!(saved.octopus_sessions_auto_join, on);
+                assert_eq!(saved.octopus_sessions_mode, SessionsMode::Export);
+                assert_eq!(
+                    session_events().last().unwrap().state,
+                    ExportOnceState::Pending,
+                    "the booked export survives"
+                );
+                let (_, Json(sessions)) = get_sessions(State(state.clone())).await;
+                assert_eq!(sessions["sessions"][0]["id"], 9, "the list is not cleared");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn export_settings_alone_rebook_in_export_mode_and_never_switch_into_it() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            check_once(&state, utc(EXPORT_NOW)).await;
+            let request: ModeRequest =
+                serde_json::from_value(json!({ "export_slot": 3, "export_floor_soc": 40 }))
+                    .unwrap();
+            let (status, _) = set_sessions_mode(State(state.clone()), Json(request)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(session_events()[0].state, ExportOnceState::Cancelled);
+            check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
+            let events = session_events();
+            assert_eq!((events[1].slot, events[1].target_soc), (3, 40));
+
+            // From a page loaded before someone chose Off: the values are
+            // kept, but the mode stays Off.
+            Settings::update(|s| s.octopus_sessions_mode = SessionsMode::Off).unwrap();
+            let request: ModeRequest =
+                serde_json::from_value(json!({ "export_slot": 2, "export_floor_soc": 30 }))
+                    .unwrap();
+            let (status, Json(body)) = set_sessions_mode(State(state), Json(request)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["mode"], "off");
+            let saved = Settings::load();
+            assert_eq!(saved.octopus_sessions_mode, SessionsMode::Off);
+            assert_eq!(saved.octopus_sessions_export_slot, 2);
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_mode_request_with_a_misspelled_field_is_refused() {
+        // Alongside a valid field, an ignored typo would switch the mode and
+        // silently drop the untick, so HEM would keep joining.
+        for body in [
+            json!({ "autoJoin": true }),
+            json!({ "mode": "alert", "autoJoin": false }),
+            json!({ "export_slot": 2, "exportFloorSoc": 30 }),
+        ] {
+            assert!(
+                serde_json::from_value::<ModeRequest>(body.clone()).is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mode_request_that_changes_nothing_is_rejected() {
+        // With every field optional, an empty request would otherwise answer
+        // OK having saved nothing.
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure(&mock, SessionsMode::Alert).await;
+            for body in [json!({}), json!({ "mode": null })] {
+                let request: ModeRequest = serde_json::from_value(body.clone()).unwrap();
+                let (status, Json(reply)) =
+                    set_sessions_mode(State(state.clone()), Json(request)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+                assert_eq!(reply["ok"], false);
+            }
+            assert!(!Settings::load().octopus_sessions_auto_join);
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    state.octopus_sessions_wake.notified(),
+                )
+                .await
+                .is_err(),
+                "a rejected request wakes no check"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_untick_saved_while_a_check_runs_stops_its_joins() {
+        // The check works from settings read before the join; an untick (or
+        // Off) saved since then must still stop the request going out.
+        for untick in [
+            (|s: &mut Settings| s.octopus_sessions_auto_join = false) as fn(&mut Settings),
+            |s: &mut Settings| s.octopus_sessions_mode = SessionsMode::Off,
+        ] {
+            with_isolated_config_dir_async(|| async {
+                let mock = MockOctopus::spawn(unjoined_response()).await;
+                let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+                let read_by_the_check = Settings::load();
+                Settings::update(untick).unwrap();
+                let parsed = parse_response(&unjoined_response(), utc(NOW)).unwrap();
+
+                let (_, joined) =
+                    auto_join(&state, &read_by_the_check, parsed, "jwt-abc", utc(NOW)).await;
+                assert!(joined.is_empty());
+                assert!(mock.joins().is_empty());
+                assert!(
+                    Settings::load().octopus_sessions_join_attempted.is_empty(),
+                    "not recorded as tried, so a later re-tick can still join it"
+                );
+            })
+            .await;
+        }
     }
 
     #[tokio::test]
