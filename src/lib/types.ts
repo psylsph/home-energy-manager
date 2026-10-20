@@ -498,7 +498,7 @@ export interface SavingSession {
   announced: boolean;
   /** The user chose not to export for this session. */
   skipped: boolean;
-  /** How the export for this session stands. Null outside Activate Export. */
+  /** How the export for this session stands. Null outside Alert And Export. */
   export: {
     state: 'booked' | 'running' | 'done' | 'cancelled' | 'failed' | 'skipped' | 'error';
     detail?: string | null;

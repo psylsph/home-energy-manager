@@ -1627,7 +1627,8 @@ pub struct Settings {
     /// reverted when they end. See `inverter::export_once`.
     #[serde(default)]
     pub export_once_events: Vec<crate::inverter::export_once::ExportOnceEvent>,
-    /// Octopus Saving Sessions: off, or check for joined sessions and alert.
+    /// Octopus Saving Sessions: off, alert about joined sessions, or alert and
+    /// export during them. Off also stops automatic joining.
     #[serde(default)]
     pub octopus_sessions_mode: crate::octopus_sessions::SessionsMode,
     /// Saving Session ids already announced / reminded about, so a restart
@@ -1636,7 +1637,7 @@ pub struct Settings {
     pub octopus_sessions_announced: Vec<i64>,
     #[serde(default)]
     pub octopus_sessions_reminded: Vec<i64>,
-    /// Discharge slot used for Saving Session exports in "Activate export"
+    /// Discharge slot used for Saving Session exports in "Alert And Export"
     /// mode. It is borrowed for the session and put back afterwards.
     #[serde(default = "default_sessions_export_slot")]
     pub octopus_sessions_export_slot: u8,

@@ -634,17 +634,28 @@ async fn auto_join(
     }
 
     // Persist the attempt first. If it cannot be saved, a crash could repeat
-    // the request on restart, so nothing is sent.
+    // the request on restart, so nothing is sent. The opt-in is read again
+    // under the same lock: `settings` was read before Octopus answered, and an
+    // untick (or Off) saved since then must still stop the join.
     let ids: Vec<i64> = targets.iter().map(|offer| offer.id).collect();
-    if let Err(error) = Settings::update_async(move |settings| {
-        for id in ids {
-            remember(&mut settings.octopus_sessions_join_attempted, id);
+    let recorded = Settings::update_async(move |settings| {
+        let still_wanted = settings.octopus_sessions_auto_join
+            && settings.octopus_sessions_mode != SessionsMode::Off;
+        if still_wanted {
+            for id in ids {
+                remember(&mut settings.octopus_sessions_join_attempted, id);
+            }
         }
+        still_wanted
     })
-    .await
-    {
-        tracing::error!("Saving Sessions: not joining, could not record the attempt: {error}");
-        return (parsed, joined_by_hem);
+    .await;
+    match recorded {
+        Ok(true) => {}
+        Ok(false) => return (parsed, joined_by_hem),
+        Err(error) => {
+            tracing::error!("Saving Sessions: not joining, could not record the attempt: {error}");
+            return (parsed, joined_by_hem);
+        }
     }
 
     let for_join = settings.clone();
@@ -734,7 +745,7 @@ async fn auto_join(
 }
 
 /// Whether to check for sessions at all. Also enforces that nothing booked for
-/// a session outlives Activate Export (or the Octopus credentials it needs),
+/// a session outlives Alert And Export (or the Octopus credentials it needs),
 /// however the setting was changed, and clears what the page shows when the
 /// feature is off.
 async fn session_checks_wanted(state: &Arc<AppState>, settings: &Settings) -> bool {
@@ -1089,14 +1100,20 @@ pub async fn get_sessions(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     )
 }
 
+/// Unknown fields are refused: every field is optional, so a misspelled one
+/// would otherwise be dropped while the rest of the request is applied.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModeRequest {
-    mode: SessionsMode,
+    /// Left as it is when absent, so the join tick can be saved without
+    /// re-sending a mode the page may have loaded before it last changed.
+    #[serde(default)]
+    mode: Option<SessionsMode>,
     #[serde(default)]
     export_slot: Option<u8>,
     #[serde(default)]
     export_floor_soc: Option<u8>,
-    /// Join new sessions automatically. Left as it is when absent.
+    /// Join offered sessions automatically. Left as it is when absent.
     #[serde(default)]
     auto_join: Option<bool>,
 }
@@ -1109,13 +1126,24 @@ fn rejected(message: String) -> (StatusCode, Json<Value>) {
 }
 
 /// POST /api/octopus/sessions/mode — body `{ "mode": "off" | "alert" | "export",
-/// "export_slot": 1, "export_floor_soc": 20, "auto_join": false }` (the last
-/// three optional).
+/// "export_slot": 1, "export_floor_soc": 20, "auto_join": false }`. Any field
+/// may be left out, but not all of them. Without `mode` the mode stays as saved
+/// and nothing that follows a mode change (cancelling session exports, clearing
+/// the list) happens.
 pub async fn set_sessions_mode(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ModeRequest>,
 ) -> (StatusCode, Json<Value>) {
-    let mode = body.mode;
+    let requested_mode = body.mode;
+    if requested_mode.is_none()
+        && body.export_slot.is_none()
+        && body.export_floor_soc.is_none()
+        && body.auto_join.is_none()
+    {
+        return rejected(
+            "Nothing to change: send mode, export_slot, export_floor_soc or auto_join".to_string(),
+        );
+    }
     let max_slots = max_discharge_slots(&state).await;
     if let Some(slot) = body.export_slot {
         if !(1..=max_slots).contains(&slot) {
@@ -1131,9 +1159,16 @@ pub async fn set_sessions_mode(
     }
     let (export_slot, export_floor_soc) = (body.export_slot, body.export_floor_soc);
     let auto_join = body.auto_join;
-    let before = Settings::load_async().await;
-    if let Err(error) = Settings::update_async(move |settings| {
-        settings.octopus_sessions_mode = mode;
+    // Whether the export values changed is decided under the settings lock,
+    // against the values actually replaced, so a concurrent save cannot make
+    // it skip (or needlessly do) the re-book.
+    let saved = Settings::update_async(move |settings| {
+        if let Some(mode) = requested_mode {
+            settings.octopus_sessions_mode = mode;
+        }
+        let export_settings_changed = export_slot
+            .is_some_and(|s| s != settings.octopus_sessions_export_slot)
+            || export_floor_soc.is_some_and(|f| f != settings.octopus_sessions_export_floor_soc);
         if let Some(slot) = export_slot {
             settings.octopus_sessions_export_slot = slot;
         }
@@ -1143,27 +1178,30 @@ pub async fn set_sessions_mode(
         if let Some(on) = auto_join {
             settings.octopus_sessions_auto_join = on;
         }
+        (settings.octopus_sessions_mode, export_settings_changed)
     })
-    .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": format!("Could not save the setting: {error}") })),
-        );
-    }
-    let export_settings_changed = export_slot
-        .is_some_and(|s| s != before.octopus_sessions_export_slot)
-        || export_floor_soc.is_some_and(|f| f != before.octopus_sessions_export_floor_soc);
-    if mode != SessionsMode::Export {
+    .await;
+    let (mode, export_settings_changed) = match saved {
+        Ok(saved) => saved,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({ "ok": false, "error": format!("Could not save the setting: {error}") }),
+                ),
+            )
+        }
+    };
+    if requested_mode.is_some_and(|m| m != SessionsMode::Export) {
         // Leaving export mode: nothing booked for sessions may fire, and a
         // running one is stopped and its slot put back.
         cancel_session_exports(&state, None, true).await;
-    } else if export_settings_changed {
+    } else if mode == SessionsMode::Export && export_settings_changed {
         // The slot or floor changed: pending exports are re-booked with the
         // new values at the next check. A running one finishes as it is.
         cancel_session_exports(&state, None, false).await;
     }
-    if mode == SessionsMode::Off {
+    if requested_mode == Some(SessionsMode::Off) {
         *state.octopus_sessions.lock().await = SessionsState::default();
     }
     state.octopus_sessions_wake.notify_one();
