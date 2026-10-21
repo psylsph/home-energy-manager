@@ -37,8 +37,9 @@ use crate::modbus::registers::{
 /// slots).  Treating those writes as independent commands lets a lower
 /// priority feature undo a safety or user action later in the same poll.  The
 /// poll loop therefore selects one owner before it emits any overlapping
-/// mode writes. Variant order is the documented priority order, with Manual
-/// Force retaining the deliberate HR318 override described in `DESIGN.md`.
+/// mode writes. Variant order is the priority order documented in
+/// `DESIGN.md` ("Discharge control ownership"), with Manual Force retaining
+/// its deliberate HR318 override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DischargeControlOwner {
     /// Price-driven Agile automation.

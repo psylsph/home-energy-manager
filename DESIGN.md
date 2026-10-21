@@ -459,14 +459,10 @@ HR318, HR319 and HR320 first and restore all three when the force action ends.
 Thermal and hardware safety protection always has higher priority than manual
 or scheduled discharge.
 
-The intended priority is:
-
-1. Hardware and thermal safety
-2. Explicit Pause Discharge / HR318
-3. Manual Force Charge or Force Discharge (with captured pause-state restore)
-4. Scheduled Timed Export
-5. Timed Charge
-6. Eco baseline
+The priority order that was implemented is described in
+[Discharge control ownership](#discharge-control-ownership). It differs from
+the original proposal in one respect: Manual Force outranks an explicit
+Pause Discharge, because the force action captures and restores HR318-320.
 
 #### Battery-mode presentation
 
@@ -527,6 +523,68 @@ Implementation must add deterministic tests for:
 - Eco **Active**, **Temporarily overridden** and **Off** presentation.
 - Timed Export **Configured**, **Active now** and **Blocked** presentation.
 - Fixed clocks for every time-window test.
+
+### Discharge control ownership
+
+Several features write the same shared discharge controls: HR27, the
+model-routed discharge enable (HR59 or HR1122) and the discharge slots. On
+each poll cycle the loop makes one decision about which feature owns them
+(`DischargeControlOwner` / `DischargeControlArbiter` in
+`inverter/state_machines.rs`, selected in `inverter/poll.rs`). Only the
+owner's writes are emitted. Queued writes that belong to a lower-priority
+owner stay queued until that owner wins a later cycle.
+
+From highest to lowest priority:
+
+1. **Safety**: the load or temperature limiter is holding discharge.
+2. **Manual Force**: a Force Charge or Force Discharge is running. It may
+   lift an HR318 pause for its window, but only after capturing HR318-320,
+   and it restores them when it ends.
+3. **Explicit pause**: HR318 is blocking discharge right now, the inverter
+   reports Eco Paused or Export Paused, or a native battery pause has been
+   requested through the API.
+4. **Manual mode**: the inverter is in Timed Demand (HR27=1 with discharge
+   enabled) and neither Cosy nor Agile set it, so it is treated as a mode
+   the user chose, whether in HEM or elsewhere.
+5. **Timed Export**: an enabled HEM-managed export schedule is inside its
+   window or still in transition. There is one exception: when the managed
+   schedule is enabled, Timed Export may override a register-derived Manual
+   mode claim. That Timed Demand shape is exactly what re-arming firmware
+   leaves behind (see [Firmware that re-arms HR59](#firmware-that-re-arms-hr59)),
+   and the reconciler has to be able to repair it.
+6. **Timed Charge**: the Cosy / scheduled charge automation.
+7. **Agile**: the price-driven Agile automation.
+
+An automation that is outranked goes on hold rather than failing. The
+Control page shows why (`deferral_reason` in `inverter/cosy.rs`,
+`cosyBlocked.ts` in the frontend), and the automation resumes by itself once
+the higher owner lets go. Starting a Force Charge, Force Discharge or battery
+pause while another of those is running is refused, so their captured
+settings never overlap.
+
+### Export Once
+
+Timed Export slots are daily windows with no date. Export Once
+(`inverter/export_once.rs`) books a single dated export into a slot the user
+picks:
+
+- The booking is written into its slot 10 minutes before the start, and the
+  slot's previous content (including whether Timed Export was armed) is
+  captured first. When the window ends, that content is restored. Apply and
+  revert use the same handlers as the Control page, so Cosy and Agile see an
+  ordinary enabled export window and defer to it.
+- If the user edits the slot while the export is running, HEM finishes the
+  booking without restoring anything, and the user's edit stands.
+- A booking whose entire window passed while HEM was down is marked
+  **missed** and is not run late. A booking that HEM comes back to partway
+  through its window still runs for the time that is left.
+- Two bookings back to back in the same slot run one after the other: the
+  second waits until the first has reverted.
+- Applying the booking is attempted up to six times, one minute apart. If it
+  still fails, the booking is marked failed and the slot is reverted.
+- Saving Sessions exports are Export Once bookings with a non-manual source.
+  Only those bookings can be cancelled by HEM itself, when a session is
+  skipped or withdrawn.
 
 ## Testing
 
