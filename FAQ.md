@@ -181,7 +181,49 @@ On **Intel** Macs, use the **x64 .dmg** download.
 
 - The connection to the inverter may have dropped. The app reconnects automatically — wait 30 seconds.
 - Check that your inverter's data adapter hasn't rebooted or lost its network connection.
+- If you've changed or reset your router recently, the inverter has probably moved to a new IP address — see [I got a new router and the app can't find my inverter](#i-got-a-new-router-and-the-app-cant-find-my-inverter).
 - If the problem persists, restart the app.
+
+---
+
+### I got a new router and the app can't find my inverter
+
+Home Energy Manager remembers your inverter by its IP address. A new router
+(or a factory-reset one) usually hands out different addresses, so the app keeps
+trying the old one and never connects. To get going again:
+
+1. **Get the data adapter back on your network.** An Ethernet adapter rejoins
+   by itself once it's plugged into the new router. A WiFi dongle only rejoins
+   if the new router uses exactly the same WiFi name and password as the old
+   one. If not, you'll need to connect the dongle to the new network first
+   (using the GivEnergy app, or the dongle's own setup page in access-point
+   mode). The app can't find the inverter until this step is done, and you'll
+   know it worked when the dongle shows up in your router's device list.
+2. **Find its new address.** Go to **Settings** and click **Scan Network**,
+   then click the inverter it finds. If the scan comes up empty, look for the
+   dongle in your router's device list (see
+   [How do I find my inverter's IP address?](#how-do-i-find-my-inverters-ip-address)).
+   Don't be surprised if the address looks quite different: many routers use
+   `192.168.0.x` where the old one used `192.168.1.x`, or something else
+   entirely.
+3. **Save it.** Check the new address is in the **Inverter Address** field and save. The
+   app reconnects within a few seconds. Your history, schedules and other
+   settings are kept.
+4. **Stop it changing again.** In your new router's admin page, look for
+   **DHCP reservation**, **static lease** or **always use this IP address**
+   and set it for the GivEnergy dongle. The inverter then keeps the same
+   address after power cuts and router restarts.
+
+While you're there, check a few other things that may have moved too:
+
+- **EV Charger** — if you've set one up, it will probably have a new address
+  as well. Use **Scan Network** in the EV Charger section of Settings.
+- **Phones and tablets** — if you open the dashboard in a browser using the
+  address of the computer running the app, that address may have changed as
+  well. See [I can't access the dashboard from my phone or tablet](#i-cant-access-the-dashboard-from-my-phone-or-tablet).
+- **Home server or Proxmox installs** — if the machine running the app has a
+  new address, update any bookmarks, reverse proxy or Home Assistant setup
+  that points at it. Tailscale addresses don't change.
 
 ---
 
