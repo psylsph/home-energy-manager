@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.93.0] - 2026-10-22
+
+### Added
+
+- **Automatic backups of your history.** HEM now takes a checked copy of `history.db` every day and keeps the last 3, in a `backups` folder next to your settings unless you choose another folder, such as a NAS share. Copies are safe to take while HEM is running, which copying the file yourself is not. Settings has a new History Backup section showing the last backup, with a Back up now button, and you can change how often backups run and how many are kept. If a backup fails, for example because the share isn't mounted or the disk is nearly full, the previous one is left untouched and you get an alert. You can include `settings.json` too, but it holds your Octopus key and alert tokens, so only do that if the folder is private (#379).
+
+### Changed
+
+- **History no longer grows faster when you shorten the poll interval.** HEM now stores one reading a minute however often it polls, averaging power and temperature readings across the minute, so a 10-second poll uses the same space as the 60-second default. The live display still updates at your chosen rate, and readings you already have are kept as they are (#379).
+
 ## [0.92.2] - 2026-10-20
 
 ### Changed
