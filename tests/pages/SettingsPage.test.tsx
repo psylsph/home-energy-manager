@@ -277,6 +277,16 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       }
     });
 
+    it('places History Backup directly above Developer', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+      await screen.findByRole('heading', { name: 'History Backup' });
+      const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+      const backup = headings.indexOf('History Backup');
+      expect(backup).toBeGreaterThan(-1);
+      expect(headings[backup + 1]).toBe('Developer');
+    });
+
     it('shows the Apple Watch / mini display GUI URL', async () => {
       // The mini page is a tiny self-contained glance view the user opens
       // in a browser (phone/watch). It must be copyable and point at /mini.

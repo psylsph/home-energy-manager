@@ -1,7 +1,11 @@
 //! SQLite-backed history storage for inverter readings.
 //!
-//! Stores one row per poll cycle and provides aggregated queries
-//! for the history chart API.
+//! Stores one row per wall-clock minute of polling (see [`minute`]; a minute
+//! HEM restarted in can hold two) and provides aggregated queries for the
+//! history chart API.
+
+pub mod backup;
+pub mod minute;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1042,7 +1046,22 @@ pub struct ForecastPoint {
 
 pub struct HistoryDb {
     conn: Mutex<Connection>,
+    /// Where the database lives, for backups taken on their own connection.
+    path: std::path::PathBuf,
+    /// Minute rows from [`Self::queue_poll_reading`] awaiting a flush.
+    /// Lock order: `conn` before `poll_rows`, never the reverse.
+    poll_rows: Mutex<minute::PollRows>,
+    /// The rows this process inserted for recently written minutes. Only
+    /// the writer touches it, while holding `conn`.
+    owned_rows: Mutex<OwnedRows>,
 }
+
+/// How many recent minutes' own rows the writer remembers. A minute can only
+/// be rewritten while the accumulator keeps it open, a few minutes at most.
+const OWNED_MINUTES: usize = 16;
+
+/// Per minute start, the timestamps of rows this process inserted.
+type OwnedRows = std::collections::VecDeque<(i64, Vec<i64>)>;
 
 static REPAIR_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1057,33 +1076,52 @@ fn next_repair_nonce() -> u64 {
 fn backup_history_database(conn: &Connection, path: &Path) -> Result<(), String> {
     let backup_path = path.with_extension("db.bak");
     let temporary_path = path.with_extension(format!("db.bak.tmp-{}", next_repair_nonce()));
-    let escaped_path = temporary_path.to_string_lossy().replace('\'', "''");
-    // A crash can leave VACUUM INTO's output behind. The nonce is process-local,
-    // so remove a stale path before retrying the repair.
-    let _ = std::fs::remove_file(&temporary_path);
 
     conn.execute_batch("PRAGMA wal_checkpoint(FULL);")
         .map_err(|e| format!("failed to checkpoint WAL: {e}"))?;
-    conn.execute(&format!("VACUUM INTO '{escaped_path}'"), [])
-        .map_err(|e| format!("failed to create backup: {e}"))?;
+    write_verified_copy(conn, &temporary_path, &backup_path, verify_integrity)
+}
 
-    let verification = Connection::open(&temporary_path)
+/// `VACUUM INTO` `temporary`, check it with `verify`, then rename it over
+/// `destination`. Any failure removes the temporary file and leaves
+/// `destination` (a previous good backup) untouched.
+pub(crate) fn write_verified_copy(
+    conn: &Connection,
+    temporary: &Path,
+    destination: &Path,
+    verify: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    // A crash can leave VACUUM INTO's output behind, and VACUUM INTO refuses
+    // to overwrite an existing file.
+    let _ = std::fs::remove_file(temporary);
+    let result = conn
+        .execute("VACUUM INTO ?1", [temporary.to_string_lossy()])
+        .map_err(|e| format!("failed to create backup: {e}"))
+        .and_then(|_| verify(temporary));
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(temporary);
+        return Err(error);
+    }
+
+    // Windows rename does not replace an existing destination.
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(destination);
+    if let Err(error) = std::fs::rename(temporary, destination) {
+        let _ = std::fs::remove_file(temporary);
+        return Err(format!("failed to install verified backup: {error}"));
+    }
+    Ok(())
+}
+
+/// `PRAGMA integrity_check` on a finished copy.
+pub(crate) fn verify_integrity(path: &Path) -> Result<(), String> {
+    let verification = Connection::open(path)
         .map_err(|e| format!("failed to open backup for verification: {e}"))?;
     let integrity: String = verification
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|e| format!("failed to verify backup: {e}"))?;
     if integrity != "ok" {
-        let _ = std::fs::remove_file(&temporary_path);
         return Err(format!("backup integrity check returned {integrity}"));
-    }
-    drop(verification);
-
-    // Windows rename does not replace an existing destination.
-    #[cfg(windows)]
-    let _ = std::fs::remove_file(&backup_path);
-    if let Err(error) = std::fs::rename(&temporary_path, &backup_path) {
-        let _ = std::fs::remove_file(&temporary_path);
-        return Err(format!("failed to install verified backup: {error}"));
     }
     Ok(())
 }
@@ -1111,6 +1149,122 @@ fn add_readings_column_if_missing(
         "ALTER TABLE readings ADD COLUMN {column} {definition}"
     ))
     .map_err(|e| format!("failed to add readings column {column}: {e}"))
+}
+
+/// Write a minute row in place of the rows this process inserted for that
+/// minute earlier, in one transaction, so a failed insert keeps them. A row
+/// already in the database at the same second that isn't ours is left alone
+/// and ours is skipped: rows written by anything else (a previous process,
+/// real history under a clock that came up wrong) are never replaced or
+/// deleted. `owned` is updated only once the transaction commits.
+fn replace_minute_row(conn: &Connection, owned: &mut OwnedRows, row: &minute::MinuteRow) {
+    let timestamp = row.row.timestamp;
+    let mine: Vec<i64> = owned
+        .iter()
+        .find(|(start, _)| *start == row.start)
+        .map(|(_, stamps)| stamps.clone())
+        .unwrap_or_default();
+    let stale: Vec<i64> = mine.iter().copied().filter(|&t| t != timestamp).collect();
+    let result = conn.unchecked_transaction().and_then(|tx| {
+        if !stale.is_empty() {
+            let placeholders = vec!["?"; stale.len()].join(",");
+            tx.execute(
+                &format!("DELETE FROM readings WHERE timestamp IN ({placeholders})"),
+                rusqlite::params_from_iter(&stale),
+            )?;
+        }
+        let inserted = insert_reading_into(&tx, &row.row, mine.contains(&timestamp))?;
+        tx.commit()?;
+        Ok(inserted)
+    });
+    match result {
+        Ok(inserted) => {
+            let stamps = if inserted {
+                vec![timestamp]
+            } else {
+                Vec::new()
+            };
+            match owned.iter_mut().find(|(start, _)| *start == row.start) {
+                Some(entry) => entry.1 = stamps,
+                None => {
+                    if owned.len() == OWNED_MINUTES {
+                        owned.pop_front();
+                    }
+                    owned.push_back((row.start, stamps));
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Failed to replace history minute row: {e}"),
+    }
+}
+
+/// Insert `snap` as a reading row. `replace` overwrites a row at the same
+/// second; otherwise such a row is left as it is and nothing is inserted.
+/// Returns whether the row was written.
+fn insert_reading_into(
+    conn: &Connection,
+    snap: &InverterSnapshot,
+    replace: bool,
+) -> SqlResult<bool> {
+    let (verb, on_conflict) = if replace {
+        ("INSERT OR REPLACE", "")
+    } else {
+        ("INSERT", " ON CONFLICT(timestamp) DO NOTHING")
+    };
+    let changed = conn.execute(
+        &format!("{verb} INTO readings (
+            timestamp, solar_power, pv1_power, pv2_power,
+            battery_power, grid_power, home_power,
+            pv1_voltage, pv2_voltage, pv1_current, pv2_current,
+            soc, battery_voltage, battery_current,
+            battery_temperature, battery_capacity_kwh,
+            grid_voltage, grid_frequency, inverter_temperature,
+            today_solar_kwh, today_pv1_kwh, today_pv2_kwh,
+            today_import_kwh, today_export_kwh,
+            today_charge_kwh, today_discharge_kwh, today_consumption_kwh,
+            today_ac_charge_kwh, home_energy_today_kwh,
+            charge_rate, discharge_rate, battery_reserve, target_soc,
+            pv1_pct, pv2_pct
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35){on_conflict}"),
+        params![
+            snap.timestamp,
+            snap.solar_power,
+            snap.pv1_power,
+            snap.pv2_power,
+            snap.battery_power,
+            snap.grid_power,
+            snap.home_power,
+            snap.pv1_voltage,
+            snap.pv2_voltage,
+            snap.pv1_current,
+            snap.pv2_current,
+            snap.soc,
+            snap.battery_voltage,
+            snap.battery_current,
+            snap.battery_temperature,
+            snap.battery_capacity_kwh,
+            snap.grid_voltage,
+            snap.grid_frequency,
+            snap.inverter_temperature,
+            snap.today_solar_kwh,
+            snap.today_pv1_kwh,
+            snap.today_pv2_kwh,
+            snap.today_import_kwh,
+            snap.today_export_kwh,
+            snap.today_charge_kwh,
+            snap.today_discharge_kwh,
+            snap.today_consumption_kwh,
+            snap.today_ac_charge_kwh,
+            snap.home_energy_today_kwh,
+            snap.charge_rate,
+            snap.discharge_rate,
+            snap.battery_reserve,
+            snap.target_soc,
+            snap.pv1_pct,
+            snap.pv2_pct,
+        ],
+    )?;
+    Ok(changed > 0)
 }
 
 impl HistoryDb {
@@ -1394,53 +1548,58 @@ impl HistoryDb {
             .unwrap_or(false);
 
             let repair_nonce = next_repair_nonce();
+            // Attach the backup before the transaction and detach it after:
+            // SQLite refuses to DETACH a database the open transaction has
+            // read, which left history.db.bak attached (and open) for the
+            // connection's lifetime.
+            let backup_path = path.with_extension("db.bak");
+            let backup_attached = if !v2_ran {
+                false
+            } else if backup_path.exists() {
+                match conn.execute("ATTACH DATABASE ?1 AS bak", [backup_path.to_string_lossy()]) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::warn!("repair_v3: failed to attach backup: {e}");
+                        false
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "repair_v3: no backup found at {} — cannot automatically restore",
+                    backup_path.display()
+                );
+                false
+            };
             let tx = conn
                 .transaction()
                 .map_err(|e| format!("Failed to begin repair_v3 transaction: {e}"))?;
-            if v2_ran {
-                let backup_path = path.with_extension("db.bak");
-                if backup_path.exists() {
-                    tracing::info!("repair_v3: restoring original data from backup");
-                    let bak_str = backup_path.to_string_lossy().replace('\'', "''");
-                    if let Err(e) = tx.execute(&format!("ATTACH DATABASE '{}' AS bak", bak_str), [])
-                    {
-                        tracing::warn!("repair_v3: failed to attach backup: {e}");
-                    } else {
-                        let energy_cols = [
-                            "today_solar_kwh",
-                            "today_import_kwh",
-                            "today_export_kwh",
-                            "today_charge_kwh",
-                            "today_discharge_kwh",
-                            "today_consumption_kwh",
-                            "today_ac_charge_kwh",
-                        ];
-                        for col in &energy_cols {
-                            // Try to restore each column. If the backup table
-                            // doesn't have this column, the UPDATE will fail
-                            // with "no such column" — we catch and skip.
-                            let sql = format!(
-                                "UPDATE readings SET {col} = (\
-                                  SELECT {col} FROM bak.readings \
-                                  WHERE bak.readings.timestamp = main.readings.timestamp\
-                                ) WHERE timestamp IN (\
-                                  SELECT timestamp FROM bak.readings \
-                                  WHERE {col} IS NOT NULL\
-                                )"
-                            );
-                            if let Err(e) = tx.execute(&sql, []) {
-                                tracing::debug!("repair_v3: could not restore {col}: {e}");
-                            }
-                        }
-                        if let Err(e) = tx.execute_batch("DETACH bak") {
-                            tracing::warn!("repair_v3: failed to detach backup: {e}");
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        "repair_v3: no backup found at {} — cannot automatically restore",
-                        backup_path.display()
+            if backup_attached {
+                tracing::info!("repair_v3: restoring original data from backup");
+                let energy_cols = [
+                    "today_solar_kwh",
+                    "today_import_kwh",
+                    "today_export_kwh",
+                    "today_charge_kwh",
+                    "today_discharge_kwh",
+                    "today_consumption_kwh",
+                    "today_ac_charge_kwh",
+                ];
+                for col in &energy_cols {
+                    // Try to restore each column. If the backup table
+                    // doesn't have this column, the UPDATE will fail
+                    // with "no such column" — we catch and skip.
+                    let sql = format!(
+                        "UPDATE readings SET {col} = (\
+                          SELECT {col} FROM bak.readings \
+                          WHERE bak.readings.timestamp = main.readings.timestamp\
+                        ) WHERE timestamp IN (\
+                          SELECT timestamp FROM bak.readings \
+                          WHERE {col} IS NOT NULL\
+                        )"
                     );
+                    if let Err(e) = tx.execute(&sql, []) {
+                        tracing::debug!("repair_v3: could not restore {col}: {e}");
+                    }
                 }
             }
 
@@ -1521,11 +1680,19 @@ impl HistoryDb {
             .map_err(|e| format!("Failed to mark repair_v3 complete: {e}"))?;
             tx.commit()
                 .map_err(|e| format!("Failed to commit repair_v3 transaction: {e}"))?;
+            if backup_attached {
+                if let Err(e) = conn.execute_batch("DETACH bak") {
+                    tracing::warn!("repair_v3: failed to detach backup: {e}");
+                }
+            }
         }
 
         tracing::info!("History database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
+            path: path.to_path_buf(),
+            poll_rows: Mutex::new(minute::PollRows::new()),
+            owned_rows: Mutex::new(OwnedRows::new()),
         })
     }
 
@@ -1638,7 +1805,81 @@ impl HistoryDb {
         Ok(count)
     }
 
-    /// Insert a snapshot as a new reading row.
+    /// Path of the database file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Fold a live poll into its minute (one `readings` row per wall-clock
+    /// minute, written at the minute's first poll and again with the full
+    /// aggregate when it ends). Cheap and non-blocking; call it in poll order.
+    /// Returns whether rows became ready, i.e. whether a
+    /// [`Self::flush_poll_rows`] on the blocking pool has anything to write;
+    /// call [`Self::close_open_minutes`] on shutdown.
+    ///
+    /// A restart within a minute leaves the pre-restart row in place beside
+    /// the new process's row for that minute: a new process can't tell it
+    /// from real history, and every query buckets or takes MAX anyway.
+    pub fn queue_poll_reading(&self, snap: InverterSnapshot) -> bool {
+        // The queue holds no state that matters for correctness, so a
+        // poisoned lock (a panic mid-fold) is recovered rather than stopping
+        // history for good.
+        let mut rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
+        rows.push(snap)
+    }
+
+    /// Hold the connection lock while `f` runs (tests of lock contention).
+    #[cfg(test)]
+    pub(crate) fn with_connection_held_for_test(&self, f: impl FnOnce()) {
+        let _conn = self.conn.lock().unwrap();
+        f();
+    }
+
+    /// Write the rows of every minute still open, for shutdown. Blocking.
+    pub fn close_open_minutes(&self) {
+        self.poll_rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .close_open();
+        self.flush_poll_rows();
+    }
+
+    /// Write every queued poll row. Blocking (SQLite).
+    ///
+    /// The queue is taken while holding the connection lock, which serialises
+    /// every write, so rows reach the database in poll order however many
+    /// flushes race.
+    pub fn flush_poll_rows(&self) {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                // Drop the queued rows rather than let the queue grow for the
+                // rest of the process; nothing can be written anyway.
+                let dropped = self
+                    .poll_rows
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                tracing::warn!(
+                    "History DB lock poisoned, dropped {} row(s): {e}",
+                    dropped.len()
+                );
+                return;
+            }
+        };
+        let queued = self
+            .poll_rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let mut owned = self.owned_rows.lock().unwrap_or_else(|e| e.into_inner());
+        for row in &queued {
+            replace_minute_row(&conn, &mut owned, row);
+        }
+    }
+
+    /// Insert a snapshot as its own reading row, unbucketed. Live polls go
+    /// through [`Self::queue_poll_reading`]; this is for seeding and imports.
     pub fn insert_reading(&self, snap: &InverterSnapshot) {
         let conn = match self.conn.lock() {
             Ok(c) => c,
@@ -1647,62 +1888,7 @@ impl HistoryDb {
                 return;
             }
         };
-
-        let r = conn.execute(
-            "INSERT OR REPLACE INTO readings (
-                timestamp, solar_power, pv1_power, pv2_power,
-                battery_power, grid_power, home_power,
-                pv1_voltage, pv2_voltage, pv1_current, pv2_current,
-                soc, battery_voltage, battery_current,
-                battery_temperature, battery_capacity_kwh,
-                grid_voltage, grid_frequency, inverter_temperature,
-                today_solar_kwh, today_pv1_kwh, today_pv2_kwh,
-                today_import_kwh, today_export_kwh,
-                today_charge_kwh, today_discharge_kwh, today_consumption_kwh,
-                today_ac_charge_kwh, home_energy_today_kwh,
-                charge_rate, discharge_rate, battery_reserve, target_soc,
-                pv1_pct, pv2_pct
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)",
-            params![
-                snap.timestamp,
-                snap.solar_power,
-                snap.pv1_power,
-                snap.pv2_power,
-                snap.battery_power,
-                snap.grid_power,
-                snap.home_power,
-                snap.pv1_voltage,
-                snap.pv2_voltage,
-                snap.pv1_current,
-                snap.pv2_current,
-                snap.soc,
-                snap.battery_voltage,
-                snap.battery_current,
-                snap.battery_temperature,
-                snap.battery_capacity_kwh,
-                snap.grid_voltage,
-                snap.grid_frequency,
-                snap.inverter_temperature,
-                snap.today_solar_kwh,
-                snap.today_pv1_kwh,
-                snap.today_pv2_kwh,
-                snap.today_import_kwh,
-                snap.today_export_kwh,
-                snap.today_charge_kwh,
-                snap.today_discharge_kwh,
-                snap.today_consumption_kwh,
-                snap.today_ac_charge_kwh,
-                snap.home_energy_today_kwh,
-                snap.charge_rate,
-                snap.discharge_rate,
-                snap.battery_reserve,
-                snap.target_soc,
-                snap.pv1_pct,
-                snap.pv2_pct,
-            ],
-        );
-
-        if let Err(e) = r {
+        if let Err(e) = insert_reading_into(&conn, snap, true) {
             tracing::warn!("Failed to insert history reading: {e}");
         }
     }
@@ -3536,6 +3722,307 @@ mod tests {
         }
     }
 
+    /// 2026-10-21 12:00:00 UTC — minute aligned.
+    const POLL_NOON: i64 = 1_792_584_000;
+
+    fn poll_snap(timestamp: i64, home_power: i32, today_import_kwh: f32) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp,
+            soc: 50,
+            home_power,
+            today_import_kwh,
+            ..InverterSnapshot::default()
+        }
+    }
+
+    impl HistoryDb {
+        fn record_poll(&self, snap: InverterSnapshot) {
+            self.queue_poll_reading(snap);
+            self.flush_poll_rows();
+        }
+    }
+
+    fn reading_rows(db: &HistoryDb) -> Vec<(i64, i64, f64)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, home_power, today_import_kwh FROM readings ORDER BY timestamp",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn ten_second_polls_store_one_averaged_row_per_minute() {
+        let db = test_db();
+        for i in 0..12 {
+            // Minute one: 100..600 W (avg 350); minute two: 700..1200 W (avg 950).
+            db.record_poll(poll_snap(
+                POLL_NOON + i * 10,
+                100 * (i as i32 + 1),
+                i as f32,
+            ));
+        }
+        db.close_open_minutes();
+        let rows = reading_rows(&db);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // Each row is stamped with its minute's last poll.
+        assert_eq!(rows[0].0, POLL_NOON + 50);
+        assert_eq!(rows[0].1, 350);
+        assert!((rows[0].2 - 5.0).abs() < 1e-6);
+        assert_eq!(rows[1].0, POLL_NOON + 110);
+        assert_eq!(rows[1].1, 950);
+        assert!((rows[1].2 - 11.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slow_polls_store_one_row_per_poll_at_its_own_time() {
+        let db = test_db();
+        for i in 0..3 {
+            db.record_poll(poll_snap(POLL_NOON + 15 + i * 120, 10 + i as i32, 0.0));
+        }
+        db.close_open_minutes();
+        let rows = reading_rows(&db);
+        let got: Vec<(i64, i64)> = rows.iter().map(|r| (r.0, r.1)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (POLL_NOON + 15, 10),
+                (POLL_NOON + 135, 11),
+                (POLL_NOON + 255, 12)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_restart_within_a_minute_keeps_the_earlier_row() {
+        // A new process can't tell a row written seconds before it started
+        // from real history, so it leaves it: the minute holds two rows.
+        let dir = unique_test_dir("givenergy-history-restart");
+        let path = dir.join("history.db");
+        let first = HistoryDb::open(&path).unwrap();
+        first.record_poll(poll_snap(POLL_NOON + 5, 100, 1.0));
+        first.close_open_minutes(); // clean shutdown
+        drop(first);
+        let reopened = HistoryDb::open(&path).unwrap();
+        reopened.record_poll(poll_snap(POLL_NOON + 9, 300, 1.1));
+        reopened.record_poll(poll_snap(POLL_NOON + 19, 500, 1.2));
+        reopened.close_open_minutes();
+        let stamps: Vec<i64> = reading_rows(&reopened).iter().map(|r| r.0).collect();
+        assert_eq!(stamps, vec![POLL_NOON + 5, POLL_NOON + 19]);
+    }
+
+    #[test]
+    fn a_large_backwards_clock_step_never_deletes_existing_history() {
+        // A Pi whose clock comes up hours behind writes into minutes that
+        // already hold real history; those rows must survive.
+        let db = test_db();
+        for i in 0..6 {
+            db.insert_reading(&poll_snap(POLL_NOON + i * 10, 1, 4.0));
+        }
+        db.record_poll(poll_snap(POLL_NOON + 25, 900, 0.5));
+        db.record_poll(poll_snap(POLL_NOON + 35, 900, 0.6));
+        db.close_open_minutes();
+        let stamps: Vec<i64> = reading_rows(&db).iter().map(|r| r.0).collect();
+        assert_eq!(
+            stamps,
+            vec![
+                POLL_NOON,
+                POLL_NOON + 10,
+                POLL_NOON + 20,
+                POLL_NOON + 30,
+                POLL_NOON + 35,
+                POLL_NOON + 40,
+                POLL_NOON + 50
+            ]
+        );
+    }
+
+    #[test]
+    fn a_first_poll_on_the_same_second_as_existing_history_leaves_it_alone() {
+        // Clock behind: a poll lands on the exact second of a real row.
+        let db = test_db();
+        db.insert_reading(&poll_snap(POLL_NOON + 20, 1, 4.0));
+        db.record_poll(poll_snap(POLL_NOON + 20, 900, 0.5));
+        db.record_poll(poll_snap(POLL_NOON + 30, 700, 0.6));
+        db.record_poll(poll_snap(POLL_NOON + 65, 500, 0.7));
+        db.close_open_minutes();
+        let rows = reading_rows(&db);
+        // The real row is untouched; HEM's minute row sits beside it.
+        assert_eq!(rows[0], (POLL_NOON + 20, 1, 4.0));
+        assert_eq!((rows[1].0, rows[1].1), (POLL_NOON + 30, 800));
+        assert_eq!(rows.len(), 3, "{rows:?}");
+    }
+
+    #[test]
+    fn queueing_reports_whether_rows_are_ready_to_write() {
+        let db = test_db();
+        assert!(
+            db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0)),
+            "first poll"
+        );
+        assert!(
+            !db.queue_poll_reading(poll_snap(POLL_NOON + 15, 0, 0.0)),
+            "mid-minute"
+        );
+        assert!(
+            db.queue_poll_reading(poll_snap(POLL_NOON + 65, 0, 0.0)),
+            "minute ended"
+        );
+    }
+
+    #[test]
+    fn a_minute_row_replaces_only_rows_this_process_wrote() {
+        let db = test_db();
+        // Rows from elsewhere either side of the minute, and one inside it.
+        for ts in [POLL_NOON - 1, POLL_NOON + 30, POLL_NOON + 60] {
+            db.insert_reading(&poll_snap(ts, 1, 0.0));
+        }
+        // 12:00 is written (:45), then a clock correction reopens it so it
+        // is rewritten (:55) in place of its own row only; 12:01 likewise.
+        db.record_poll(poll_snap(POLL_NOON + 45, 500, 2.0));
+        db.record_poll(poll_snap(POLL_NOON + 65, 500, 2.0));
+        db.record_poll(poll_snap(POLL_NOON + 55, 700, 2.1));
+        db.record_poll(poll_snap(POLL_NOON + 70, 700, 2.1));
+        db.close_open_minutes();
+        let stamps: Vec<i64> = reading_rows(&db).iter().map(|r| r.0).collect();
+        assert_eq!(
+            stamps,
+            vec![
+                POLL_NOON - 1,
+                POLL_NOON + 30,
+                POLL_NOON + 55,
+                POLL_NOON + 60,
+                POLL_NOON + 70
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_insert_keeps_the_minutes_existing_row() {
+        let db = test_db();
+        db.record_poll(poll_snap(POLL_NOON + 5, 100, 1.0));
+        // 12:01 begins, so 12:00 is written.
+        db.record_poll(poll_snap(POLL_NOON + 65, 100, 1.0));
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_insert BEFORE INSERT ON readings \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        // A clock correction reopens 12:00; its rewrite (delete the old row,
+        // insert the new) fails on the insert and must roll the delete back.
+        db.record_poll(poll_snap(POLL_NOON + 15, 300, 1.1));
+        db.record_poll(poll_snap(POLL_NOON + 70, 300, 1.2));
+        assert_eq!(
+            reading_rows(&db),
+            vec![(POLL_NOON + 5, 100, 1.0), (POLL_NOON + 65, 100, 1.0)]
+        );
+    }
+
+    #[test]
+    fn a_poisoned_connection_lock_does_not_grow_the_queue() {
+        let db = std::sync::Arc::new(test_db());
+        let poisoner = db.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.conn.lock().unwrap();
+            panic!("poison the connection lock");
+        })
+        .join();
+        for i in 0..3 {
+            db.queue_poll_reading(poll_snap(POLL_NOON + i * 60, 100, 0.0));
+            db.flush_poll_rows();
+        }
+        assert!(db.poll_rows.lock().unwrap().take().is_empty());
+    }
+
+    #[test]
+    fn racing_flushes_write_every_minute_in_poll_order() {
+        // The poll loop queues in order but flushes on its own blocking task
+        // per poll, so flushes race each other and the queue. Across minute
+        // boundaries every minute must end up with its full aggregate.
+        for _round in 0..20 {
+            let db = std::sync::Arc::new(test_db());
+            let mut flushers = Vec::new();
+            for i in 0..18 {
+                db.queue_poll_reading(poll_snap(
+                    POLL_NOON + i * 10,
+                    100 * (i as i32 % 6 + 1),
+                    i as f32,
+                ));
+                let db = db.clone();
+                flushers.push(std::thread::spawn(move || db.flush_poll_rows()));
+            }
+            for flusher in flushers {
+                flusher.join().unwrap();
+            }
+            db.close_open_minutes();
+            let stored = reading_rows(&db);
+            assert_eq!(
+                stored,
+                vec![
+                    (POLL_NOON + 50, 350, 5.0),
+                    (POLL_NOON + 110, 350, 11.0),
+                    (POLL_NOON + 170, 350, 17.0)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_minute_is_written_at_its_first_poll_and_again_when_it_ends() {
+        let db = test_db();
+        let stored = |db: &HistoryDb| -> Vec<(i64, i64)> {
+            reading_rows(db).iter().map(|r| (r.0, r.1)).collect()
+        };
+        db.record_poll(poll_snap(POLL_NOON + 5, 100, 1.0));
+        assert_eq!(
+            stored(&db),
+            vec![(POLL_NOON + 5, 100)],
+            "new data shows at once"
+        );
+        db.record_poll(poll_snap(POLL_NOON + 15, 200, 1.1));
+        db.record_poll(poll_snap(POLL_NOON + 25, 300, 1.2));
+        assert_eq!(
+            stored(&db),
+            vec![(POLL_NOON + 5, 100)],
+            "no write mid-minute"
+        );
+        // 12:01 begins: 12:00's aggregate replaces its first row, and 12:01's
+        // first poll is written.
+        db.record_poll(poll_snap(POLL_NOON + 65, 400, 1.3));
+        assert_eq!(
+            stored(&db),
+            vec![(POLL_NOON + 25, 200), (POLL_NOON + 65, 400)]
+        );
+        db.record_poll(poll_snap(POLL_NOON + 75, 600, 1.4));
+        db.close_open_minutes();
+        assert_eq!(
+            stored(&db),
+            vec![(POLL_NOON + 25, 200), (POLL_NOON + 75, 500)]
+        );
+    }
+
+    #[test]
+    fn a_poisoned_accumulator_lock_does_not_stop_history() {
+        let db = std::sync::Arc::new(test_db());
+        let poisoner = db.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.poll_rows.lock().unwrap();
+            panic!("poison the accumulator lock");
+        })
+        .join();
+        assert!(db.poll_rows.is_poisoned());
+        db.record_poll(poll_snap(POLL_NOON + 5, 100, 1.0));
+        db.close_open_minutes();
+        assert_eq!(reading_rows(&db).len(), 1);
+    }
+
     #[test]
     fn plan_snapshots_round_trip_in_time_order_within_the_range() {
         let db = test_db();
@@ -3585,6 +4072,26 @@ mod tests {
             rows.iter().map(|r| r.recorded_at).collect::<Vec<_>>(),
             vec![200, 300]
         );
+    }
+
+    /// Schemas attached to `conn`, excluding the per-connection temp schema.
+    fn attached_databases(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("PRAGMA database_list").unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|name| name != "temp")
+            .collect()
+    }
+
+    #[test]
+    fn opening_a_new_database_leaves_no_repair_backup_attached() {
+        // A fresh database runs repair_v2 (which writes history.db.bak) and
+        // then repair_v3, which attaches that backup to restore from it.
+        let db = test_db();
+        assert!(db.path().with_extension("db.bak").exists());
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(attached_databases(&conn), vec!["main".to_string()]);
     }
 
     #[test]
@@ -6726,6 +7233,11 @@ mod tests {
             )
             .unwrap_or(false);
         assert!(v3_flag, "repair_v3_done meta flag should be set");
+        assert_eq!(
+            attached_databases(&conn),
+            vec!["main".to_string()],
+            "the backup must be detached once the restore is done"
+        );
 
         // Clean up after closing SQLite so Windows can remove the files.
         drop(conn);

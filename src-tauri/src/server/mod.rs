@@ -254,6 +254,12 @@ fn create_router_at(
             "/api/discharge-floor",
             get(api::get_discharge_floor).post(api::set_discharge_floor),
         )
+        // History database backups (issue #379)
+        .route(
+            "/api/backup",
+            get(crate::backup::get_backup).post(crate::backup::set_backup),
+        )
+        .route("/api/backup/run", post(crate::backup::post_backup_run))
         // Email alerts
         .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))
         .route("/api/alerts/test", post(api::test_alerts))
@@ -321,6 +327,8 @@ async fn static_cache_control(request: Request, next: Next) -> Response {
 /// so that API/WebSocket calls are same-origin (avoids WebView2 cross-origin
 /// blocking). The bundled `dist/` resources serve the Vite output.
 pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Router {
+    *state.served_dir.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(std::path::PathBuf::from(dist_dir));
     let router = create_router(state);
     let serve_dir =
         ServeDir::new(dist_dir).fallback(ServeDir::new(format!("{}/index.html", dist_dir)));
@@ -978,6 +986,83 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn serving_the_frontend_records_its_folder_for_the_backup_check() {
+        let state = Arc::new(AppState::new());
+        assert!(state.served_dir.lock().unwrap().is_none());
+        let _ = create_router_with_frontend(state.clone(), "/srv/hem/dist");
+        assert_eq!(
+            state.served_dir.lock().unwrap().as_deref(),
+            Some(std::path::Path::new("/srv/hem/dist"))
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_routes_are_served() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let db_path = crate::settings::Settings::settings_dir().join("history.db");
+            *state.history.lock().await =
+                Some(Arc::new(crate::history::HistoryDb::open(&db_path).unwrap()));
+            let done = state.backup.lock().await.done.clone();
+            let app = create_router(state);
+            let call = |method: &str, uri: &str, body: &str| {
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap()
+            };
+            let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).unwrap();
+
+            let response = app
+                .clone()
+                .oneshot(call("GET", "/api/backup", ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(body["data"]["config"]["enabled"], true);
+
+            let response = app
+                .clone()
+                .oneshot(call("POST", "/api/backup", r#"{"keep": 3}"#))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .clone()
+                .oneshot(call("POST", "/api/backup/run", ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            // The backup runs in the background; await its done signal (a
+            // stored permit, so it can't be missed), then read the result.
+            tokio::time::timeout(std::time::Duration::from_secs(60), done.notified())
+                .await
+                .expect("backup finished");
+            let response = app
+                .clone()
+                .oneshot(call("GET", "/api/backup", ""))
+                .await
+                .unwrap();
+            let body = json(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(body["data"]["running"], false);
+            assert_eq!(body["data"]["last"]["ok"], true, "{body}");
+        })
+        .await;
+    }
 
     /// Minimal `dist/` tree on a unique temp path, removed when dropped.
     struct TempDist {

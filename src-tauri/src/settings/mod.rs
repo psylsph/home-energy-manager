@@ -615,6 +615,61 @@ pub fn find_next_cosy_slot<'a>(
     best.map(|(idx, slot, until)| (idx, slot, until as u16))
 }
 
+/// Automatic `history.db` backups (issue #379). Every field carries a serde
+/// default so a `settings.json` written before this shipped loads unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryBackupConfig {
+    /// Take scheduled backups. On by default.
+    #[serde(default = "default_history_backup_enabled")]
+    pub enabled: bool,
+    /// Directory for backups. Empty means `backups/` in the config
+    /// directory, which is created on demand; a directory the user chose
+    /// (a NAS mount, say) must already exist, so an unmounted share fails
+    /// loudly rather than filling the local disk under the mount point.
+    #[serde(default)]
+    pub destination: String,
+    /// How many backups to keep; older ones are deleted after a good backup.
+    #[serde(default = "default_history_backup_keep")]
+    pub keep: u32,
+    /// Hours between scheduled backups.
+    #[serde(default = "default_history_backup_interval_hours")]
+    pub interval_hours: u32,
+    /// Also copy `settings.json`. Off by default: it holds plaintext
+    /// credentials (Octopus API key, alert channel tokens), and backups may
+    /// live on shared storage.
+    #[serde(default)]
+    pub include_settings: bool,
+}
+
+pub const HISTORY_BACKUP_KEEP_MAX: u32 = 365;
+pub const HISTORY_BACKUP_INTERVAL_HOURS_MAX: u32 = 24 * 7;
+
+fn default_history_backup_enabled() -> bool {
+    true
+}
+
+/// Three copies: enough to step back past a bad one without quietly taking
+/// many times the database's size on a small disk.
+fn default_history_backup_keep() -> u32 {
+    3
+}
+
+fn default_history_backup_interval_hours() -> u32 {
+    24
+}
+
+impl Default for HistoryBackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_history_backup_enabled(),
+            destination: String::new(),
+            keep: default_history_backup_keep(),
+            interval_hours: default_history_backup_interval_hours(),
+            include_settings: false,
+        }
+    }
+}
+
 /// Local weather integration settings.
 ///
 /// Drives the optional Phase-2 weather fetcher (Open-Meteo forecast for
@@ -1485,6 +1540,10 @@ pub struct Settings {
     #[serde(default = "default_check_for_updates")]
     pub check_for_updates: bool,
 
+    /// Automatic `history.db` backups. See [`HistoryBackupConfig`].
+    #[serde(default)]
+    pub history_backup: HistoryBackupConfig,
+
     // -- Octopus Energy customer consumption (issue #212) --
     /// Octopus customer API key. Never returned by the settings API or logged.
     #[serde(default)]
@@ -2049,6 +2108,7 @@ impl Default for Settings {
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
             check_for_updates: default_check_for_updates(),
+            history_backup: HistoryBackupConfig::default(),
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
             octopus_api_base_url: String::new(),
@@ -2166,7 +2226,7 @@ impl Settings {
     }
 
     /// Get the path to the settings file.
-    fn settings_path() -> PathBuf {
+    pub(crate) fn settings_path() -> PathBuf {
         Self::settings_dir().join("settings.json")
     }
 
@@ -2694,6 +2754,7 @@ mod tests {
             hidden_panels: Vec::new(),
             alerts_config: AlertsConfig::default(),
             check_for_updates: default_check_for_updates(),
+            history_backup: HistoryBackupConfig::default(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
             forecast_plan_auto_refresh: false,
             forecast_plan_auto_apply_enabled: false,
@@ -3460,6 +3521,7 @@ mod tests {
             forecast_charge_efficiency: default_forecast_charge_efficiency(),
             forecast_discharge_efficiency: default_forecast_discharge_efficiency(),
             check_for_updates: default_check_for_updates(),
+            history_backup: HistoryBackupConfig::default(),
             forecast_min_soc_pct: default_forecast_min_soc_pct(),
             forecast_plan_auto_refresh: false,
             forecast_plan_auto_apply_enabled: false,

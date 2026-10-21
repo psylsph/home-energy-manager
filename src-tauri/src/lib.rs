@@ -3,6 +3,7 @@
 #![recursion_limit = "512"]
 
 pub mod alerts;
+pub mod backup;
 pub mod evc;
 pub mod forecast;
 pub mod history;
@@ -137,6 +138,54 @@ fn prune_old_logs(log_dir: &std::path::Path) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
+    }
+}
+
+/// Write the history minute still open (issue #379) before the process
+/// exits. Called from the headless signal handler and the desktop app's exit
+/// event; a hard crash or power cut skips it and loses at most that minute's
+/// later polls (its first poll is already on disk).
+pub(crate) async fn flush_history_on_shutdown(state: &Arc<AppState>) {
+    flush_history_on_shutdown_within(state, SHUTDOWN_FLUSH_LIMIT).await;
+}
+
+/// How long shutdown waits to write the open history minute. A long query
+/// holding the database must not keep the process from stopping.
+const SHUTDOWN_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn flush_history_on_shutdown_within(state: &Arc<AppState>, limit: std::time::Duration) {
+    let Some(db) = state.history.lock().await.clone() else {
+        return;
+    };
+    let write = tokio::task::spawn_blocking(move || db.close_open_minutes());
+    match tokio::time::timeout(limit, write).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("Failed to write the last history minute on shutdown: {e}"),
+        Err(_) => tracing::warn!("Gave up writing the last history minute on shutdown"),
+    }
+}
+
+/// Resolves on Ctrl-C, or SIGTERM on Unix (systemd stop, `docker stop`).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Cannot listen for SIGTERM ({e}); Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -341,6 +390,9 @@ pub fn run() {
                 Some(s) => s,
                 None => return Ok(()),
             };
+            // Reachable from the exit event, which writes the open history
+            // minute (see `run()`'s event loop below).
+            app.manage(state.clone());
 
             // Self-heal the platform autostart entry. If the user has
             // enabled "Start on login" but the OS-level autostart entry
@@ -645,6 +697,12 @@ pub fn run() {
                 update::run_update_loop(update_state).await;
             });
 
+            // Scheduled history.db backups (issue #379).
+            let backup_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                backup::run_backup_loop(backup_state).await;
+            });
+
             // One-off Timed Export: applies and reverts booked "Export Once"
             // windows. A separate task, not part of the poll loop, because
             // it waits on the poll loop to drain its writes.
@@ -692,8 +750,15 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<Arc<AppState>>() {
+                    tauri::async_runtime::block_on(flush_history_on_shutdown(&state));
+                }
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,6 +1092,12 @@ pub fn run_headless(args: &[String]) {
             update::run_update_loop(update_state).await;
         });
 
+        // Scheduled history.db backups (issue #379).
+        let backup_state = state.clone();
+        tokio::spawn(async move {
+            backup::run_backup_loop(backup_state).await;
+        });
+
         // One-off Timed Export (see the desktop-mode spawn for why this is
         // its own task).
         let export_once_state = state.clone();
@@ -1034,23 +1105,35 @@ pub fn run_headless(args: &[String]) {
             inverter::export_once::run_export_once_loop(export_once_state).await;
         });
 
-        // Start the HTTP server
+        // Start the HTTP server, until it stops or the process is asked to.
         let server_state = state.clone();
-        match resolve_dist_dir(args) {
-            Some(dist_dir) => {
-                tracing::info!("Serving frontend from: {dist_dir}");
-                start_server_with_frontend(server_state, "0.0.0.0", port, dist_dir).await;
+        let server = async {
+            match resolve_dist_dir(args) {
+                Some(dist_dir) => {
+                    tracing::info!("Serving frontend from: {dist_dir}");
+                    start_server_with_frontend(server_state, "0.0.0.0", port, dist_dir).await;
+                }
+                // `resolve_dist_dir()` already logged the searched paths and the
+                // remediation steps. Fall through to API-only mode so the JSON /
+                // WebSocket surface stays available for users who don't need the
+                // web UI (e.g. they're driving the API from a separate front-end
+                // or running on a server that has no browser).
+                None => {
+                    start_server(server_state, "0.0.0.0", port).await;
+                }
             }
-            // `resolve_dist_dir()` already logged the searched paths and the
-            // remediation steps. Fall through to API-only mode so the JSON /
-            // WebSocket surface stays available for users who don't need the
-            // web UI (e.g. they're driving the API from a separate front-end
-            // or running on a server that has no browser).
-            None => {
-                start_server(server_state, "0.0.0.0", port).await;
-            }
+        };
+        tokio::select! {
+            _ = server => {}
+            _ = shutdown_signal() => tracing::warn!("Shutting down"),
         }
+        flush_history_on_shutdown(&state).await;
     });
+    // Don't wait on blocking work still running (a backup to a stalled NAS
+    // share, a metadata call on a stalled mount): stop now, as SIGTERM did
+    // before HEM handled it. An interrupted backup leaves only a hidden
+    // temporary file, which the next backup removes.
+    rt.shutdown_timeout(std::time::Duration::from_secs(1));
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1169,68 @@ mod tests {
     use super::*;
     use crate::inverter::poll::LoadLimiterState;
     use crate::test_util::with_isolated_config_dir_async;
+
+    #[tokio::test]
+    async fn shutdown_gives_up_on_history_it_cannot_write_promptly() {
+        with_isolated_config_dir_async(|| async {
+            let dir = Settings::settings_dir();
+            let db = Arc::new(HistoryDb::open(&dir.join("history.db")).unwrap());
+            let state = Arc::new(AppState::new());
+            *state.history.lock().await = Some(db.clone());
+            // A long query holds the connection for the whole shutdown.
+            let (release_tx, release) = std::sync::mpsc::channel::<()>();
+            let (locked_tx, locked) = std::sync::mpsc::channel::<()>();
+            let holder = db.clone();
+            let blocker = std::thread::spawn(move || {
+                holder.with_connection_held_for_test(|| {
+                    locked_tx.send(()).unwrap();
+                    let _ = release.recv();
+                });
+            });
+            locked.recv().unwrap();
+            // Returns (rather than hanging the process) although it can't finish.
+            flush_history_on_shutdown_within(&state, std::time::Duration::from_millis(50)).await;
+            release_tx.send(()).unwrap();
+            blocker.join().unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_writes_the_history_minute_still_open() {
+        with_isolated_config_dir_async(|| async {
+            let dir = Settings::settings_dir();
+            let db = Arc::new(HistoryDb::open(&dir.join("history.db")).unwrap());
+            let state = Arc::new(AppState::new());
+            *state.history.lock().await = Some(db.clone());
+            // 2026-10-21 12:00:05 and :15 UTC: the first is written at once,
+            // the minute's aggregate only when it ends or on shutdown.
+            for (offset, power) in [(5, 100), (15, 300)] {
+                db.queue_poll_reading(crate::inverter::model::InverterSnapshot {
+                    timestamp: 1_792_584_000 + offset,
+                    soc: 50,
+                    home_power: power,
+                    ..Default::default()
+                });
+                db.flush_poll_rows();
+            }
+            let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+            let rows = |db: &HistoryDb| -> Vec<(i64, Option<i32>)> {
+                db.get_readings_for_date(date)
+                    .unwrap()
+                    .into_iter()
+                    .chain(db.get_readings_for_date(date.succ_opt().unwrap()).unwrap())
+                    .map(|r| (r.timestamp, r.home_power))
+                    .collect()
+            };
+            assert_eq!(rows(&db), vec![(1_792_584_005, Some(100))]);
+            flush_history_on_shutdown(&state).await;
+            assert_eq!(rows(&db), vec![(1_792_584_015, Some(200))]);
+            // Without a history database it is a no-op.
+            flush_history_on_shutdown(&Arc::new(AppState::new())).await;
+        })
+        .await;
+    }
 
     /// `looks_like_unconfigured_utc` is the decision behind the headless
     /// timezone warning (issue #134). It must fire for the unconfigured-UTC

@@ -17,34 +17,8 @@ import {
 } from '../lib/tariff';
 import { useInverterStore } from '../store/useInverterStore';
 import { isValidIpv4Host } from '../lib/validators';
-
-/**
- * An on/off switch. The label is required: every switch must have an
- * accessible name, and the type system now enforces it. It is focusable and
- * flips on Space or Enter as well as on click.
- */
-function Toggle({ checked, onChange, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; ariaLabel: string }) {
-  return (
-    <div
-      className="relative cursor-pointer shrink-0"
-      role="switch"
-      aria-label={ariaLabel}
-      aria-checked={checked}
-      tabIndex={0}
-      onClick={() => onChange(!checked)}
-      onKeyDown={(e) => {
-        if (e.key === ' ' || e.key === 'Enter') {
-          // Space would otherwise scroll the page.
-          e.preventDefault();
-          onChange(!checked);
-        }
-      }}
-    >
-      <div className={`w-10 h-5 rounded-full transition-colors ${checked ? 'bg-accent/40' : 'bg-bg-elevated'}`} />
-      <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full transition-all ${checked ? 'translate-x-5 bg-accent' : 'bg-text-secondary'}`} />
-    </div>
-  );
-}
+import Toggle from '../components/Toggle';
+import HistoryBackupPanel from '../components/HistoryBackupPanel';
 
 const TIME_OPTIONS = halfHourOptions();
 
@@ -2848,6 +2822,9 @@ export default function SettingsPage() {
       </section>
 
 
+
+      {/* ── History backups (issue #379) ── */}
+      <HistoryBackupPanel />
 
       {/* ─── Section 9: Developer Mode ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">

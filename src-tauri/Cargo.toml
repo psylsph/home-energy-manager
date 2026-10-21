@@ -79,6 +79,7 @@ parking_lot = "0.12"
 socket2 = { version = "0.6.4", features = ["all"] }
 dirs = "7"
 tokio-modbus = "0.17.0"
+fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
 # Property-based testing for the sanitizer's delta-check edge cases

@@ -648,6 +648,12 @@ pub struct AppState {
     /// [`crate::update::run_update_loop`]; read (never written) by the
     /// [`crate::update::get_latest_version`] HTTP handler.
     pub update: Arc<Mutex<crate::update::UpdateState>>,
+    /// History backup status, shared by [`crate::backup::run_backup_loop`]
+    /// and the `/api/backup` handlers.
+    pub backup: Arc<Mutex<crate::backup::BackupState>>,
+    /// The folder the HTTP server serves the web UI from, once it starts
+    /// serving one; backups are never written inside it.
+    pub served_dir: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     /// Wall-clock time when the current connection was established (None if disconnected).
     pub connected_since: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     /// How many consecutive TCP connect attempts have failed since the last success.
@@ -839,6 +845,8 @@ impl AppState {
             octopus_sessions_wake: Arc::new(tokio::sync::Notify::new()),
             export_once_backoff: Arc::new(Mutex::new(std::collections::HashMap::new())),
             update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
+            backup: Arc::new(Mutex::new(crate::backup::BackupState::default())),
+            served_dir: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -3113,17 +3121,19 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
     // Broadcast to WebSocket subscribers (move, no clone).
     let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot)));
 
-    // Persist to history database. Clone the Arc and
-    // drop the lock so synchronous SQLite I/O doesn't
-    // block the Tokio worker (same pattern as get_history).
+    // Persist to history. Queue here, in poll order, so the minute's
+    // aggregate sees every poll; only the SQLite write goes to the blocking
+    // pool, so it never blocks a Tokio worker (same pattern as get_history).
     if let Some(snap) = history_snapshot {
         let db_guard = state.history.lock().await;
         let db = db_guard.clone();
         drop(db_guard);
         if let Some(db) = db {
-            tokio::task::spawn_blocking(move || {
-                db.insert_reading(&snap);
-            });
+            // Most polls only fold into the open minute; spawn a writer only
+            // when a row is ready.
+            if db.queue_poll_reading(snap) {
+                tokio::task::spawn_blocking(move || db.flush_poll_rows());
+            }
         }
     }
 }
@@ -13073,6 +13083,44 @@ mod tests {
                 Some(66.42),
                 "no settings save mid-cycle → publish must not disturb the cycle's stamps"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn publish_stores_fast_polls_as_one_history_row_per_minute() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let dir = crate::settings::Settings::settings_dir();
+            let db = Arc::new(HistoryDb::open(&dir.join("history.db")).expect("open history"));
+            let state = Arc::new(AppState::new());
+            *state.history.lock().await = Some(db.clone());
+
+            // 2026-10-21 12:00:00 UTC, polled every 10 s for one minute.
+            let minute = 1_792_584_000;
+            for i in 0..6 {
+                let mut snap = pv_snapshot();
+                snap.timestamp = minute + i * 10;
+                snap.soc = 50;
+                snap.home_power = 100 * (i as i32 + 1);
+                publish_snapshot(&state, snap).await;
+            }
+
+            // Write the still-open minute as shutdown does. This takes the
+            // connection lock behind any in-flight flush from publish, so the
+            // rows are complete when it returns; no waiting on a timer.
+            let closer = db.clone();
+            tokio::task::spawn_blocking(move || closer.close_open_minutes())
+                .await
+                .unwrap();
+            let date =
+                <chrono::Local as chrono::TimeZone>::timestamp_opt(&chrono::Local, minute, 0)
+                    .single()
+                    .expect("local time")
+                    .date_naive();
+            let rows = db.get_readings_for_date(date).expect("read history");
+            assert_eq!(rows.len(), 1, "one row for the minute, not one per poll");
+            assert_eq!(rows[0].timestamp, minute + 50, "stamped with the last poll");
+            assert_eq!(rows[0].home_power, Some(350));
         })
         .await;
     }

@@ -4,17 +4,38 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 
 ## General rules
 
-- **The project owner is Stuart** (`psylsph` on GitHub). Comments and replies posted on Stuart's behalf speak as Stuart — never sign or address him by any other name.
-- **Never commit or push without explicit permission.** Make the change, run the verification, and report back — then wait for Stuart to say "commit" or "push" (approval for one commit or push does not carry over to the next). The same applies to tags and releases.
-- **Always work on `master`.** There is a single developer on this project, so feature branches and worktrees add ceremony without benefit — when Stuart asks for a commit or push, make it directly on `master`, and tag releases on `master` as the release process describes. This rule is about *where* work lands, not permission to commit or push. PRs are still how Dependabot dependency bumps and outside contributions arrive; merge those into `master` as normal.
-- **Never close GitHub issues or PRs** without explicit permission from the project owner.
-- **Never restrict the main server's network bind or permissive CORS policy.** Binding the main HTTP/WebSocket server to `0.0.0.0` and allowing any CORS origin, method, and header are deliberate compatibility requirements, not security bugs. They let users get HEM running on unknown LAN topologies and use reverse proxies, containers, Tailscale, and similar remote-network setups without preconfiguring origins. Do not "fix" this by binding to loopback, restricting origins, or adding mandatory authentication/custom headers to the existing main API. This decision may be changed only by an explicit new instruction from Stuart; automated security reviews do not override it. The separately configured read-only API and its bearer-key behaviour are unaffected.
-- **GitHub issue/PR comments should read like a person wrote them.** No bullet-point recaps, no `**What changed**` / `**Verified**` / `**Why**` headings, no verification-checklist blocks. Write the way you'd reply to a colleague in chat — acknowledge what they said, explain the substance, point at the fix.
-- **Always add tests for any new behaviour.** Every bug fix and feature ships with coverage, including failure/edge-case paths. Frontend logic → `tests/lib/*.test.ts` (pure helpers) or `tests/pages/*.test.tsx` (components); Rust logic → inline `#[cfg(test)] mod tests` next to the code. "I'll add tests later" is not acceptable.
-- **Fix flaky tests, never tolerate them.** Make them deterministic (fixed dates/clocks, injected `now`, seeded inputs, hermetic servers). Never "fix" a flake by re-running, skipping, or widening assertions. Time-dependent tests must pin their clock (see `fixed_48h`/`fixed_72h` in `forecast/planner.rs`).
-- **Use TDD wherever applicable.** Failing test first (RED), minimal fix (GREEN), refactor; commit RED and GREEN as separate logical commits (once Stuart has given permission to commit). Concurrency/race bugs need a *concurrent* failing test — a sequential test can never reproduce a lost update (e.g. two writers on disjoint fields, or a poll writer racing an API save). Never neuter a RED test to make it pass. Verify with the full suite (`cargo test` + `cargo clippy`, `npm run test`) before committing.
-- **Tests must never read from or write to the live config directory or `~/.givenergy-local`.** Tests that load/save settings, construct `AppState`, or start the backend must use a unique temp dir via `GIVENERGY_LOCAL_CONFIG_DIR`; spawned processes must also receive a temporary `HOME`. Teardown must restore previous env values rather than clearing a caller-provided safe override.
-- **Don't leave long-running processes behind.** Don't start `npm run dev`, `cargo tauri dev`, or other dev servers for testing unless explicitly asked — the project's test commands run to completion on their own. If you start one legitimately, stop it before finishing and verify the port (5173, 7337, etc.) is freed.
+**The project owner is Stuart** (`psylsph` on GitHub). Comments and replies posted on Stuart's behalf speak as Stuart — never sign or address him by any other name.
+
+### Git and GitHub
+
+- **Never commit, push, tag, or release without explicit permission.** Make the change, verify, report back, then wait for Stuart to say "commit" or "push". Each approval covers one commit or push only.
+- **Commit directly on `master`** when permitted — single developer, so no feature branches or worktrees. Dependabot bumps and outside contributions still arrive as PRs; merge them into `master`.
+- **No `Co-Authored-By: Claude` (or similar AI attribution) trailers** on commits or PRs.
+- **Never close GitHub issues or PRs** without Stuart's explicit permission.
+- **Issue/PR comments read like a person wrote them** — a colleague's chat reply that acknowledges what they said, explains the substance, and points at the fix. No bullet recaps, no `**What changed**` / `**Verified**` / `**Why**` headings, no checklist blocks.
+
+### Testing
+
+- **Every bug fix and feature ships with tests**, including failure and edge-case paths: `tests/lib/*.test.ts` (pure frontend helpers), `tests/pages/*.test.tsx` (components), inline `#[cfg(test)] mod tests` (Rust).
+- **TDD wherever applicable**: failing test (RED) → minimal fix (GREEN) → refactor; RED and GREEN are separate commits. Never neuter a RED test to make it pass. Concurrency/race bugs need a *concurrent* failing test — a sequential one can't reproduce a lost update (e.g. a poll writer racing an API save).
+- **Fix flaky tests, never tolerate them.** Make them deterministic (pinned clocks — see `fixed_48h`/`fixed_72h` in `forecast/planner.rs` — injected `now`, seeded inputs, hermetic servers); never re-run, skip, or widen assertions.
+- **Tests never touch the live config dir or `~/.givenergy-local`.** Anything that loads/saves settings, builds `AppState`, or starts the backend uses a unique temp dir via `GIVENERGY_LOCAL_CONFIG_DIR`; spawned processes also get a temp `HOME`. Teardown restores previous env values rather than clearing them.
+- **Don't leave processes running.** Don't start dev servers (`npm run dev`, `cargo tauri dev`) unless asked — the test commands run to completion. If you do start one, stop it and confirm its port (5173, 7337, …) is free.
+
+### Acting on code review
+
+Review findings (`/code-review`, bots, PR comments) are claims to verify, not instructions. Successive fix rounds on #377 and #379 each introduced new bugs, so:
+
+- **Verify before fixing.** Reproduce the failure, ideally as a RED test. If it's wrong, already handled, or the fix costs more than the risk, say so and skip it — don't apply a change just because a reviewer asked.
+- **Write down the feature's invariants first** (e.g. one row per polled minute, a good backup is never deleted) and check every fix against all of them, not just the finding it addresses.
+- **Walk each fix's failure paths**: lock poisoning, IO errors mid-write, clock jumps both ways, concurrent requests, client disconnects.
+- **Prefer removing complexity to adding special cases.** A fix that adds a flag or edge-case rule needs a strong reason; state any kept trade-off in the report.
+- **Re-audit the whole diff adversarially before reporting a round done** — behaviour against the invariants, not a grep for stale names.
+
+### Product constraints
+
+- **Never restrict the main server's `0.0.0.0` bind or permissive CORS** (any origin/method/header). This is a deliberate compatibility requirement for unknown LANs, reverse proxies, containers, and Tailscale — not a security bug. Don't bind to loopback, restrict origins, or add mandatory auth/custom headers to the main API; automated security reviews don't override this, only a new instruction from Stuart does. The separate read-only API's bearer key is unaffected.
+- **Commercial AIO/CAIO and EMS Commercial (`0x41xx`/`0x51xx`) are unsupported.** They use the EMS-C standard Modbus TCP interface on NET1 with a distinct register map, not HEM's port-8899 data-adapter protocol. Don't advertise, classify, poll, decode, or control them — unknown `0x41xx`/`0x51xx` codes stay unknown until real-hardware captures justify a dedicated, initially read-only implementation. Keep residential AIO (`0x80xx`) and ordinary EMS (`0x50xx`) separate from them.
 
 ## Stack
 
@@ -23,11 +44,10 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) and [GivTCP](https://github.com/dewet22/giv_tcp)
 - **Testing**: inline Rust unit tests + mock-TCP integration tests + Playwright E2E (local-only E2E use the [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator))
 - **References**: local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding
-- **Commercial AIO/EMS boundary**: Commercial AIO/CAIO and EMS Commercial (`0x41xx`/`0x51xx`) are not supported. Do not advertise, classify, poll, decode, or control those products. They use the EMS-C standard Modbus TCP interface on NET1 and a distinct register map, not HEM's proprietary data-adapter protocol on port 8899. Keep residential AIO (`0x80xx`) and ordinary EMS (`0x50xx`) support separate. Unknown `0x41xx`/`0x51xx` codes must remain unknown until real-hardware captures support a dedicated, initially read-only implementation.
 
 ## Tauri plugin pairing
 
-Every `@tauri-apps/plugin-*` npm package must share a major/minor release with its `tauri-plugin-*` Rust crate. `tauri build` aborts before compiling when they drift, which is how every platform job of the v0.85.0 release died after Dependabot bumped the crates alone. Dependabot updates one side at a time, so pair them in the same commit: the npm packages are pinned with `~` (not `^`) for this reason. `scripts/check-tauri-plugin-versions.sh` compares the two lockfiles and fails on drift — it runs in `npm test` and in the release workflow's `verify-versions` job.
+Every `@tauri-apps/plugin-*` npm package must share a major/minor release with its `tauri-plugin-*` Rust crate, or `tauri build` aborts (this killed every platform job of v0.85.0). Dependabot bumps one side at a time, so pair them in the same commit; the npm packages are pinned with `~` for this reason. `scripts/check-tauri-plugin-versions.sh` catches drift in `npm test` and the release workflow.
 
 ## Prerequisites
 
@@ -51,7 +71,7 @@ Every `@tauri-apps/plugin-*` npm package must share a major/minor release with i
 | `npm run test:e2e` | Playwright E2E (needs `npm run build` + `cargo build --release` first) |
 | `npm run test:local[:headed]` | Local-only E2E via simulator at `~/repos/givenergy-simulator/target/release/sim-api` |
 
-Full verification order: `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` → `cargo test` → `npm run test:e2e` → `docker build .`
+Full verification order: `cargo fmt --check` → `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` → `cargo test` → `npm run test` → `npm run test:e2e` → `docker build .`. At minimum, run everything up to `npm run test` before committing.
 
 ### Dongle misbehaviour tests
 
@@ -59,10 +79,8 @@ Full verification order: `cargo clippy` → `npm run lint` → `npm run lint:md`
 
 ## Linting rules
 
-- **Clippy**: all warnings must be fixed (`cd src-tauri && cargo clippy`).
-- **rustfmt**: all Rust files must be fmt-clean (`cd src-tauri && cargo fmt --check`); run `cargo fmt` before committing — fix pre-existing drift in touched files rather than working around it.
-- **ESLint** (`npm run lint`): `verbatimModuleSyntax` — use `import type` for type-only imports; `erasableSyntaxOnly` — no `enum`, `namespace`, or constructor parameter properties; `noUnusedLocals`/`noUnusedParameters`; `react-hooks/set-state-in-effect` — don't call setState directly inside `useEffect`, use key-based remounting or derived values.
-- **Markdown**: `npm run lint:md` after significant .md edits.
+- **Rust**: zero clippy warnings; fmt-clean — run `cargo fmt` and fix pre-existing drift in touched files rather than working around it.
+- **TypeScript/ESLint**: `verbatimModuleSyntax` — `import type` for type-only imports; `erasableSyntaxOnly` — no `enum`, `namespace`, or constructor parameter properties; `noUnusedLocals`/`noUnusedParameters`; `react-hooks/set-state-in-effect` — no direct setState in `useEffect`, use key-based remounting or derived values.
 
 ## Coverage
 
@@ -81,7 +99,7 @@ Entrypoint `src/main.tsx`. **Pages**: Status, Battery, History, Forecast, Contro
 ### Backend (`src-tauri/src/`)
 
 - **`lib.rs`** — Tauri setup + headless CLI; spawns Axum server + Modbus poll loop. Two tracing layers: stdout `fmt` (WARN, `RUST_LOG` override) and `LogCaptureLayer` into the in-memory `LogRing` (runtime-adjustable via `PUT /api/log-level`).
-- **`history/`** — SQLite (`~/.givenergy-local/history.db`); `HistoryDb`, `insert_reading()`, time-bucketed `query_history()` (AVG, or MAX for cumulative fields).
+- **`history/`** — SQLite (`~/.givenergy-local/history.db`); `HistoryDb`, time-bucketed `query_history()` (AVG, or MAX for cumulative fields), `insert_reading()` (raw row for seeding/imports). The poll loop records via `minute.rs` (issue #379): `queue_poll_reading()` → `flush_poll_rows()` on the blocking pool writes one row per wall-clock minute (power/voltage/temperature averaged; SOC and `today_*` from the latest poll), rewritten with the full aggregate when the next minute starts; `close_open_minutes()` writes the open minute on shutdown (`flush_history_on_shutdown`, bounded to 5 s headless). Invariants: rows land in poll order (queue taken under the connection lock); the writer replaces only rows it inserted itself and never overwrites another row at the same second, so existing history is never deleted (a restart may leave two rows in one minute).
 - **`inverter/`** — `model.rs` (`InverterSnapshot`, `DeviceType` Gen1-4 / AC-coupled / three-phase / AIO / HV Gen3-4 / EMS, with model-aware slave addresses, poll blocks, slot counts, battery-protocol selection); `decoder.rs`/`encoder.rs` (register ↔ snapshot / `ControlCommand` → whitelist-validated writes); `sanitizer.rs` (corruption defense, see below); `poll.rs` (drain writes → read → sanitize → broadcast; dongle memory-leak fingerprinting, model-aware slave switching, carry-forward, LV battery protocol at 0x32+ vs HV at 0xA0→0x70+/0x50+); `discovery.rs` (network scan validating the 0x5959 magic header); `state_machines.rs` (connect/reconnect, battery protocol, tariff automation).
 - **`modbus/`** — `client.rs` (`ModbusClient`: FC6 writes, stale-frame drain, dongle heartbeat echo, default slave `0x11`; `read_all_with_extras()` picks optional blocks by device type); `framer.rs` (proprietary MBAP + transparent sub-frame + CRC); `registers.rs` (addresses, poll blocks, safe-write whitelist, HHMM codec; per-battery BMS reads and HV stack reads polled separately from `STANDARD_POLL_BLOCKS`).
 - **`server/`** — Axum: `api.rs` (REST), `ws.rs` (snapshot stream), `logs.rs` (`GET /api/logs`), `mod.rs` (router + graceful bind). EVC endpoints: `/api/evc/discover`, `/api/evc/status` (reachability + cached snapshot, seeds `evcEverConnected` on page load).
@@ -91,6 +109,7 @@ Entrypoint `src/main.tsx`. **Pages**: Status, Battery, History, Forecast, Contro
 - **`octopus.rs`** — Octopus account integration (issue #212): authenticated half-hourly import/export/gas intervals stored separately from inverter history (supplier data arrives late and may be corrected; gas units preserved as returned — SMETS1 kWh vs SMETS2 m³); powers `/api/octopus/*` (billing costs, HEM-vs-supplier comparison, CSV/PDF export). Cosy/Agile tariff automation is separate, riding the poll loop via `state_machines.rs`.
 - **`alerts/`** — evaluates each sanitized snapshot against user thresholds (battery temp/SOC, solar clipping, inverter battery-warning flag, grid offline) with per-type cooldown + consecutive-read confirmation; delivers via Telegram Bot API, ntfy (incl. self-hosted), Pushover; daily consumption report; Telegram `/status` `/today` `/report` commands. Covers issue #85.
 - **`update.rs`** — GitHub Releases poll every 6h (gated by `check_for_updates`), cached in `AppState::update`; `GET /api/latest-version` triggers a non-blocking refresh when stale (60s min interval; gated on `loop_registered` so tests stay hermetic).
+- **`backup.rs`** + **`history/backup.rs`** — scheduled `history.db` backups (issue #379) via `VACUUM INTO` on a separate read-only connection (never holds the `HistoryDb` lock), integrity-checked as a hidden temp file, then renamed to `history-YYYYMMDD-HHMMSS.db` (UTC) in `backups/` under the config dir or a user-chosen folder. Safety invariants: rotate to `keep` (default 3) only after a success, ignoring files stamped later than the new backup (a wrong clock never destroys a good backup); skip with an error when free space < 1.5× the DB size; the optional `settings.json` copy is off by default (plaintext credentials) and its failure removes the history copy too; a custom folder must already exist and must not be inside `AppState::served_dir`. Status persists in `meta`; the first scheduled failure in a row alerts. `GET`/`POST /api/backup`, `POST /api/backup/run` (202 started, 409 if already running; Settings → History Backup polls `GET` while `running`).
 
 ### Shared state (`AppState`)
 
