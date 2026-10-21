@@ -60,7 +60,7 @@ test.describe('Logs Page - Controls', () => {
     await enableDeveloperMode(page);
     await page.goto('/#/logs');
 
-    await expect(page.locator('input[placeholder="Filter logs\u2026"]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('input[placeholder="Filter Logs\u2026"]')).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Refresh button', async ({ page }) => {
@@ -126,11 +126,11 @@ test.describe('Logs Page - Log Content', () => {
     await page.goto('/#/logs');
 
     // Type a very specific filter that won't match anything
-    const filterInput = page.locator('input[placeholder="Filter logs\u2026"]');
+    const filterInput = page.locator('input[placeholder="Filter Logs\u2026"]');
     await filterInput.fill('ZZZZZZ_NO_MATCH_ZZZZZZ');
     await page.waitForTimeout(500);
 
     // Should show no-match message
-    await expect(page.locator('text=/No logs match/')).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('text=/No Logs Match/')).toBeVisible({ timeout: 5_000 });
   });
 });

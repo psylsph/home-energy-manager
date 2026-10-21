@@ -587,8 +587,9 @@ test.describe('Agile Charging Mode dropdown (UI)', () => {
     await expect(page.getByText(/Charging Mode/i).first()).toBeVisible({ timeout: 15_000 });
 
     // The <select> groups Agile options under an <optgroup label="Agile">.
-    // Open it and pick "Agile — Charge Only".
-    const dropdown = page.getByRole('combobox');
+    // The Control page has other <select>s (Export Once's slot picker), so
+    // scope to the one owning the Agile options, then pick "Agile — Charge Only".
+    const dropdown = page.getByRole('combobox').filter({ hasText: 'Agile' });
     await dropdown.selectOption('agile_charge');
 
     // The dropdown change fires the POST immediately.

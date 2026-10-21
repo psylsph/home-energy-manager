@@ -229,7 +229,11 @@ test.describe('Control Page - Battery And Power Controls', () => {
 
   test('should show Charge Power Limit section', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=/Charge Power Limit|Charge Rate/')).toBeVisible({ timeout: 15_000 });
+    // The section label names the model's limit bank; the separate read-only
+    // "Inverter Charge Rate" line (#362) is not the section.
+    await expect(
+      page.getByText(/^(Battery|AC|Three-Phase) Charge Power Limit$/),
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Discharge Power Limit section', async ({ page }) => {
