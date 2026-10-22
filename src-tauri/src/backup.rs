@@ -798,7 +798,7 @@ mod tests {
     async fn a_manual_attempt_leaves_the_alert_state_alone() {
         crate::test_util::with_isolated_config_dir_async(|| async {
             let state = state_with_history().await;
-            Settings::update(|s| s.history_backup.destination = "/no/such/hem/nas".into()).unwrap();
+            Settings::update(|s| s.history_backup.destination = missing_folder()).unwrap();
             // An outage already alerted...
             state.backup.lock().await.status.failure_alerted = true;
             // ...a failed "Back up now" neither clears nor re-arms it.
@@ -913,10 +913,11 @@ mod tests {
     async fn an_unchanged_unavailable_folder_does_not_block_other_changes() {
         crate::test_util::with_isolated_config_dir_async(|| async {
             // The NAS is offline right now; the user only changes "keep".
-            Settings::update(|s| s.history_backup.destination = "/no/such/hem/nas".into()).unwrap();
+            let nas = missing_folder();
+            Settings::update(|s| s.history_backup.destination = nas.clone()).unwrap();
             let (code, Json(body)) = set_backup(
                 State(Arc::new(AppState::new())),
-                Json(json!({"destination": "/no/such/hem/nas", "keep": 3})),
+                Json(json!({"destination": nas, "keep": 3})),
             )
             .await;
             assert_eq!(code, StatusCode::OK, "{body}");
@@ -977,7 +978,7 @@ mod tests {
                 (json!({"destination": 5}), "destination"),
                 (json!({"destination": "relative/dir"}), "full path"),
                 (
-                    json!({"keep": 3, "destination": "/no/such/hem/dir"}),
+                    json!({"keep": 3, "destination": missing_folder()}),
                     "does not exist",
                 ),
             ] {
@@ -993,6 +994,16 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// An absolute path to a folder that doesn't exist, on every platform —
+    /// a literal like `/no/such/dir` has no drive letter, so Windows rejects
+    /// it as relative before the existence check runs.
+    fn missing_folder() -> String {
+        Settings::settings_dir()
+            .join("no-such-nas")
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Wait for a backup started by `POST /api/backup/run` to finish. The
@@ -1168,7 +1179,7 @@ mod tests {
             assert_eq!(code, StatusCode::CONFLICT);
             state.backup.lock().await.running = false;
 
-            Settings::update(|s| s.history_backup.destination = "/no/such/hem/dir".into()).unwrap();
+            Settings::update(|s| s.history_backup.destination = missing_folder()).unwrap();
             let (code, _) = post_backup_run(State(state.clone())).await;
             assert_eq!(code, StatusCode::ACCEPTED);
             let record = finished(&state).await;
