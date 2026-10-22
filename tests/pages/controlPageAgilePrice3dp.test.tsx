@@ -116,6 +116,7 @@ describe('<ControlPage/> — Agile price card renders pence to 3dp', () => {
 
     // First combobox is the charging-mode dropdown.
     const select = (await screen.findAllByRole('combobox'))[0] as HTMLSelectElement;
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'agile' } });
 
     await waitFor(() => {

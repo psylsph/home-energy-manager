@@ -11,7 +11,7 @@
  * hasn't chosen a newer mode since the failing request started.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -256,6 +256,7 @@ describe('<ControlPage/> — Cosy mode failure revert', () => {
 
     const select = (await screen.findByRole('combobox')) as HTMLSelectElement;
     expect(select.value).toBe('standard');
+    await waitFor(() => expect(select).toBeEnabled());
 
     // 1) User picks Cosy — request in flight, dropdown optimistically flips.
     await act(async () => {
@@ -294,6 +295,7 @@ describe('<ControlPage/> — Cosy mode failure revert', () => {
 
     const select = (await screen.findByRole('combobox')) as HTMLSelectElement;
     expect(select.value).toBe('standard');
+    await waitFor(() => expect(select).toBeEnabled());
 
     await act(async () => {
       fireEvent.change(select, { target: { value: 'cosy' } });

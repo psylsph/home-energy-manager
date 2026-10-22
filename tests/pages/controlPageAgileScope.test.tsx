@@ -396,6 +396,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const allCombos = await screen.findAllByRole('combobox');
     const select = allCombos[0] as HTMLSelectElement;
 
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'agile' } });
     // Wait for the POST to fire after the change.
     await waitFor(() => {
@@ -414,6 +415,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const allCombos = await screen.findAllByRole('combobox');
     const select = allCombos[0] as HTMLSelectElement;
 
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'agile_charge' } });
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
@@ -431,6 +433,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const allCombos = await screen.findAllByRole('combobox');
     const select = allCombos[0] as HTMLSelectElement;
 
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'agile_discharge' } });
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
@@ -475,6 +478,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
       expect(select.value).toBe('agile');
     });
 
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'standard' } });
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(
@@ -518,6 +522,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     expect(select.value).toBe('adaptive');
     await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/cosy'));
 
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'standard' } });
     expect(select.value).toBe('standard');
 
@@ -538,6 +543,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const select = (await screen.findAllByRole('combobox'))[0] as HTMLSelectElement;
     await waitFor(() => expect(select.value).toBe('standard'));
 
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'cosy' } });
     await waitFor(() => {
       expect(apiPost).toHaveBeenCalledWith(

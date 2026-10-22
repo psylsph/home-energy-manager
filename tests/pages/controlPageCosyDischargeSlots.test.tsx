@@ -21,7 +21,7 @@
  * the visibility for Cosy and accidentally also lifted it for Agile.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -337,7 +337,7 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
 
     const select = await screen.findByRole('combobox');
     expect((select as HTMLSelectElement).value).toBe('cosy');
-    expect(screen.getAllByText('Charging')).toHaveLength(1);
+    expect(await screen.findAllByText('Charging')).toHaveLength(1);
   });
 
   it('still renders Timed Discharge + Timed Export in Standard mode (regression guard)', async () => {
@@ -375,6 +375,7 @@ describe('<ControlPage/> — Cosy mode discharge schedule visibility', () => {
     render(<ControlPage />);
 
     const select = (await screen.findByRole('combobox')) as HTMLSelectElement;
+    await waitFor(() => expect(select).toBeEnabled());
     fireEvent.change(select, { target: { value: 'agile' } });
 
     // Confirm the dropdown actually flipped — otherwise this is a
