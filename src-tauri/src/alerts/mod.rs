@@ -1698,6 +1698,9 @@ fn build_mode_message(snapshot: &InverterSnapshot) -> String {
     if snapshot.temperature_limiter_active {
         flags.push("Temperature limiter");
     }
+    if snapshot.dispatch_hold_active {
+        flags.push("Holding for car charging");
+    }
     if flags.is_empty() {
         msg.push_str("Automation: none active");
     } else {
@@ -3744,12 +3747,14 @@ mod tests {
         snap.auto_winter_active = true;
         snap.load_limiter_active = true;
         snap.temperature_limiter_active = true;
+        snap.dispatch_hold_active = true;
         let msg = build_mode_message(&snap);
         assert!(msg.contains("Cosy charging"));
         assert!(msg.contains("Agile active"));
         assert!(msg.contains("Auto-winter"));
         assert!(msg.contains("Load limiter"));
         assert!(msg.contains("Temperature limiter"));
+        assert!(msg.contains("Holding for car charging"));
     }
 
     #[test]

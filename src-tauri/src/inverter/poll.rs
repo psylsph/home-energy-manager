@@ -73,9 +73,9 @@ use crate::inverter::sanitizer::{
 use crate::inverter::solar_position::calculate_solar_position;
 use crate::inverter::state_machines::{
     build_timed_export_disable_writes, check_adaptive_charge, check_auto_winter_with_outcome,
-    check_discharge_floor, check_load_limiter_at, check_temperature_limiter_after_automation,
-    should_repair_timed_export, write_registers_to_inverter, AgileSlotAction,
-    AutoWinterWriteOutcome, DischargeControlArbiter, DischargeControlOwner,
+    check_discharge_floor, evaluate_pause_limiters, should_repair_timed_export,
+    write_registers_to_inverter, AgileSlotAction, AutoWinterWriteOutcome, DischargeControlArbiter,
+    DischargeControlOwner, PauseLimiters,
 };
 pub use crate::inverter::state_machines::{
     AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, DischargeFloorConfig,
@@ -2560,6 +2560,7 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
         .lock()
         .await
         .is_actively_pausing();
+    let dispatch_paused = state.dispatch_hold_state.lock().await.is_actively_pausing();
     let cosy_active = *state.cosy_active.lock().await;
     let timed_export_config = state.timed_export_config.lock().await.clone();
     let timed_export_state = state.timed_export_state.lock().await.clone();
@@ -2579,7 +2580,7 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
     );
 
     let mut arbiter = DischargeControlArbiter::default();
-    if load_paused || temperature_paused {
+    if load_paused || temperature_paused || dispatch_paused {
         arbiter.request(DischargeControlOwner::Safety);
     }
     if snapshot.as_ref().is_some_and(|s| {
@@ -4312,6 +4313,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     discharge_arbiter.request(owner);
                                 }
 
+                                // Whether Intelligent Octopus Go is smart-charging the car
+                                // now, by a dispatch list fresh enough to trust (#394).
+                                let in_dispatch = state
+                                    .octopus_dispatches
+                                    .lock()
+                                    .await
+                                    .hold_now(chrono::Utc::now());
                                 let safety_demand = {
                                     let load_config =
                                         state.load_limiter_config.lock().await.clone();
@@ -4320,32 +4328,32 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         state.temperature_limiter_config.lock().await.clone();
                                     let temperature_state =
                                         state.temperature_limiter_state.lock().await.clone();
-                                    let saved = state.load_limiter_saved.lock().await.clone();
-                                    let mut preview_temperature_state = temperature_state.clone();
-                                    let mut preview_load_state = load_state.clone();
-                                    let mut preview_saved = saved.clone();
-                                    let temperature_writes =
-                                        check_temperature_limiter_after_automation(
-                                            &snapshot,
-                                            &temperature_config,
-                                            &mut preview_temperature_state,
-                                            &mut preview_saved,
-                                            false,
-                                            false,
-                                        );
-                                    let load_writes = check_load_limiter_at(
-                                        &snapshot,
-                                        &load_config,
-                                        &mut preview_load_state,
-                                        poll_settings.poll_interval,
-                                        &mut preview_saved,
-                                        inverter_minute,
-                                        preview_temperature_state.is_actively_pausing(),
-                                    );
-                                    load_state.is_actively_pausing()
+                                    let dispatch_state =
+                                        state.dispatch_hold_state.lock().await.clone();
+                                    let already_pausing = load_state.is_actively_pausing()
                                         || temperature_state.is_actively_pausing()
-                                        || temperature_writes.is_some()
-                                        || load_writes.is_some()
+                                        || dispatch_state.is_actively_pausing();
+                                    let mut preview_temperature_state = temperature_state;
+                                    let mut preview_load_state = load_state;
+                                    let mut preview_dispatch_state = dispatch_state;
+                                    let mut preview_saved =
+                                        state.load_limiter_saved.lock().await.clone();
+                                    let preview_writes = evaluate_pause_limiters(
+                                        &snapshot,
+                                        PauseLimiters {
+                                            temperature_config: &temperature_config,
+                                            temperature_state: &mut preview_temperature_state,
+                                            load_config: &load_config,
+                                            load_state: &mut preview_load_state,
+                                            dispatch_state: &mut preview_dispatch_state,
+                                            saved: &mut preview_saved,
+                                        },
+                                        in_dispatch,
+                                        poll_settings.poll_interval,
+                                        inverter_minute,
+                                        false,
+                                    );
+                                    already_pausing || !preview_writes.is_empty()
                                 };
                                 if safety_demand {
                                     discharge_arbiter.request(DischargeControlOwner::Safety);
@@ -5073,9 +5081,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
                                 // ---- Discharge pause limiters ----
                                 // Run after all charging/discharging automation so thermal
-                                // protection is the final authority in this poll. Both limiters
-                                // share the saved pre-pause reserve; each releases only its own
-                                // ownership, and the final owner to clear performs the Eco restore.
+                                // protection is the final authority in this poll. The limiters
+                                // and the dispatch hold share the saved pre-pause reserve; each
+                                // releases only its own ownership, and the final owner to clear
+                                // performs the Eco restore.
                                 {
                                     let load_config = state.load_limiter_config.lock().await;
                                     let mut load_state = state.load_limiter_state.lock().await;
@@ -5083,40 +5092,39 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         state.temperature_limiter_config.lock().await;
                                     let mut temperature_state =
                                         state.temperature_limiter_state.lock().await;
+                                    let mut dispatch_state =
+                                        state.dispatch_hold_state.lock().await;
                                     let mut shared_saved = state.load_limiter_saved.lock().await;
 
-                                    let load_was_active = load_state.is_actively_pausing();
-                                    let temperature_writes =
-                                        check_temperature_limiter_after_automation(
-                                            &snapshot,
-                                            &temperature_config,
-                                            &mut temperature_state,
-                                            &mut shared_saved,
-                                            load_was_active,
-                                            discharge_control_may_override_pause,
-                                        );
-                                    let temperature_active =
-                                        temperature_state.is_actively_pausing();
-                                    let load_writes = check_load_limiter_at(
+                                    let limiter_writes = evaluate_pause_limiters(
                                         &snapshot,
-                                        &load_config,
-                                        &mut load_state,
+                                        PauseLimiters {
+                                            temperature_config: &temperature_config,
+                                            temperature_state: &mut temperature_state,
+                                            load_config: &load_config,
+                                            load_state: &mut load_state,
+                                            dispatch_state: &mut dispatch_state,
+                                            saved: &mut shared_saved,
+                                        },
+                                        in_dispatch,
                                         poll_settings.poll_interval,
-                                        &mut shared_saved,
                                         inverter_minute,
-                                        temperature_active,
+                                        discharge_control_may_override_pause,
                                     );
 
                                     snapshot.load_limiter_active =
                                         load_state.is_actively_pausing();
                                     snapshot.temperature_limiter_active =
                                         temperature_state.is_actively_pausing();
+                                    snapshot.dispatch_hold_active =
+                                        dispatch_state.is_actively_pausing();
                                     let persist_saved = shared_saved.clone();
 
                                     drop(load_config);
                                     drop(load_state);
                                     drop(temperature_config);
                                     drop(temperature_state);
+                                    drop(dispatch_state);
                                     drop(shared_saved);
 
                                     let persisted_reserve =
@@ -5124,17 +5132,22 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     let load_limiter_active = snapshot.load_limiter_active;
                                     let temperature_limiter_active =
                                         snapshot.temperature_limiter_active;
+                                    let dispatch_hold_active = snapshot.dispatch_hold_active;
                                     let persistence_changed = settings_update_blocking(move |s| {
                                         let changed = s.load_limiter_saved_reserve
                                             != persisted_reserve
                                             || s.load_limiter_active_persisted != load_limiter_active
                                             || s.temperature_limiter_active_persisted
-                                                != temperature_limiter_active;
+                                                != temperature_limiter_active
+                                            || s.dispatch_hold_active_persisted
+                                                != dispatch_hold_active;
                                         if changed {
                                             s.load_limiter_saved_reserve = persisted_reserve;
                                             s.load_limiter_active_persisted = load_limiter_active;
                                             s.temperature_limiter_active_persisted =
                                                 temperature_limiter_active;
+                                            s.dispatch_hold_active_persisted =
+                                                dispatch_hold_active;
                                         }
                                     })
                                     .await;
@@ -5144,17 +5157,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         );
                                     }
 
-                                    let limiter_writes_present =
-                                        temperature_writes.is_some() || load_writes.is_some();
-                                    let limiter_owns_discharge = !limiter_writes_present
+                                    let limiter_owns_discharge = limiter_writes.is_empty()
                                         || discharge_arbiter
                                             .request(DischargeControlOwner::Safety);
-                                    for (label, writes) in [
-                                        ("Temperature limiter", temperature_writes),
-                                        ("Load limiter", load_writes),
-                                    ] {
+                                    for (label, writes) in limiter_writes {
                                         if limiter_owns_discharge {
-                                            if let Some(writes) = writes {
+                                            {
                                             for write in &writes {
                                                 match client
                                                     .write_register(write.address, write.value)

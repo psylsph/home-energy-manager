@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import { apiGet, apiPost } from '../lib/api';
 import SavingSessionsPanel from '../components/SavingSessionsPanel';
+import SmartChargingPanel from '../components/SmartChargingPanel';
 import {
   cumulativeOctopusSeries,
   mergeOctopusSeries,
@@ -393,6 +394,7 @@ export default function OctopusPage() {
           </div>
         )}
         <SavingSessionsPanel />
+        <SmartChargingPanel />
       </section>
 
       <div className="flex gap-1 overflow-x-auto rounded-xl bg-bg-surface p-2">

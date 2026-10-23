@@ -1318,6 +1318,10 @@ pub struct InverterSnapshot {
     /// True when inverter-temperature protection is actively pausing discharge.
     #[serde(default)]
     pub temperature_limiter_active: bool,
+    /// True while the battery is held for an Intelligent Octopus Go smart
+    /// charge (issue #394).
+    #[serde(default)]
+    pub dispatch_hold_active: bool,
     /// Whether this device supports manual battery calibration via HR(29).
     /// False for Gen3+ (auto-calibrates via BMS) and batteryless devices.
     #[serde(default)]
@@ -1565,6 +1569,7 @@ impl InverterSnapshot {
             battery_calibration_stage: 0,
             load_limiter_active: false,
             temperature_limiter_active: false,
+            dispatch_hold_active: false,
             supports_battery_calibration: false,
             inverter_serial: String::new(),
             firmware_version: String::new(),

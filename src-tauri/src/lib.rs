@@ -265,6 +265,13 @@ async fn initialize_app_state(
         *limiter_state = crate::inverter::poll::TemperatureLimiterState::PausedFromRestart;
         tracing::info!("Restored temperature limiter state: PausedFromRestart (post-crash)");
     }
+    // A dispatch hold active at shutdown restores Eco on the first poll
+    // unless a fresh dispatch list shows the charge is still running.
+    if app_settings.dispatch_hold_active_persisted {
+        *state.dispatch_hold_state.lock().await =
+            crate::inverter::poll::DispatchHoldState::Releasing;
+        tracing::info!("Restored dispatch hold state: Releasing (post-restart)");
+    }
 
     // Restore the shared limiter reserve so the exact previous
     // reserve is written back (not a hardcoded default).
@@ -692,6 +699,12 @@ pub fn run() {
                 octopus_sessions::run_sessions_loop(sessions_state).await;
             });
 
+            // Opt-in Intelligent Octopus Go dispatch hold (issue #394).
+            let dispatches_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                octopus_dispatches::run_dispatches_loop(dispatches_state).await;
+            });
+
             // Spawn the "new version available" checker (GitHub Releases).
             let update_state = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -1087,6 +1100,12 @@ pub fn run_headless(args: &[String]) {
             octopus_sessions::run_sessions_loop(sessions_state).await;
         });
 
+        // Opt-in Intelligent Octopus Go dispatch hold (issue #394).
+        let dispatches_state = state.clone();
+        tokio::spawn(async move {
+            octopus_dispatches::run_dispatches_loop(dispatches_state).await;
+        });
+
         // Spawn the "new version available" checker (GitHub Releases).
         let update_state = state.clone();
         tokio::spawn(async move {
@@ -1308,6 +1327,7 @@ mod tests {
             s.load_limiter_end_hour = 9;
             s.load_limiter_end_minute = 10;
             s.load_limiter_active_persisted = true;
+            s.dispatch_hold_active_persisted = true;
             s.auto_winter_saved_enable_target = Some(true);
             s.auto_winter_saved_target_soc = Some(77);
             s.alerts_config.enabled = true;
@@ -1366,6 +1386,13 @@ mod tests {
                     "load limiter state should be restored to PausedFromRestart"
                 );
             }
+
+            // A hold active at shutdown is released unless the dispatch is
+            // confirmed still running.
+            assert_eq!(
+                *state.dispatch_hold_state.lock().await,
+                crate::inverter::poll::DispatchHoldState::Releasing
+            );
 
             // Auto-winter saved register values
             {

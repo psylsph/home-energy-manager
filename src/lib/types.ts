@@ -97,6 +97,8 @@ export interface InverterSnapshot {
   adaptive_charge_desired_rate_percent?: number | null;
   load_limiter_active: boolean;
   temperature_limiter_active?: boolean;
+  /** The battery is held for an Intelligent Octopus Go smart charge (#394). */
+  dispatch_hold_active?: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
   /** Why Cosy is not running: 'pause', 'force' or 'safety'; empty or absent when nothing blocks it. */

@@ -56,7 +56,20 @@ impl Dispatch {
     /// off-peak rate. An unlabelled dispatch counts as smart, as it does for
     /// Octopus; a boost or anything unrecognised does not.
     pub fn is_smart(&self) -> bool {
-        false
+        self.kind.as_deref().is_none_or(|kind| {
+            matches!(kind.to_ascii_lowercase().as_str(), "smart" | "smart-charge")
+        })
+    }
+}
+
+/// An Octopus access token. Its `Debug` output is redacted so logging the
+/// state never leaks it.
+#[derive(Clone)]
+struct Token(String);
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(redacted)")
     }
 }
 
@@ -72,8 +85,8 @@ pub struct DispatchesState {
     pub devices: Vec<String>,
     devices_checked_at: Option<DateTime<Utc>>,
     pub dispatches: Vec<Dispatch>,
-    /// Reused between checks; never serialised or logged.
-    token: Option<(String, DateTime<Utc>)>,
+    /// Reused between checks, with when it was obtained.
+    token: Option<(Token, DateTime<Utc>)>,
     /// Bumped when the hold is switched, so a check that was already asking
     /// Octopus cannot bring back a list the user has just turned off.
     generation: u64,
@@ -82,8 +95,17 @@ pub struct DispatchesState {
 impl DispatchesState {
     /// Whether a smart dispatch is running now, by a list fresh enough to
     /// trust. Unknown means no.
-    pub fn hold_now(&self, _now: DateTime<Utc>) -> bool {
-        false
+    pub fn hold_now(&self, now: DateTime<Utc>) -> bool {
+        // Absolute age: a check stamped in the future (the clock stepped
+        // back) says nothing about now either.
+        let fresh = self
+            .checked_at
+            .is_some_and(|checked| (now - checked).abs() <= Duration::minutes(STALE_AFTER_MINUTES));
+        fresh
+            && self
+                .dispatches
+                .iter()
+                .any(|dispatch| dispatch.is_smart() && dispatch.start <= now && now < dispatch.end)
     }
 
     /// Forget everything, as when the hold is turned off.
@@ -96,19 +118,220 @@ impl DispatchesState {
 }
 
 /// Smart-charging devices from the `devices` response: live cars and chargers.
-pub fn parse_devices(_response: &Value) -> Result<Vec<String>, String> {
-    Ok(Vec::new())
+pub fn parse_devices(response: &Value) -> Result<Vec<String>, String> {
+    graphql_errors(response)?;
+    let devices = response
+        .pointer("/data/devices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Octopus returned an unexpected device list".to_string())?;
+    Ok(devices
+        .iter()
+        .filter(|device| {
+            device["deviceType"].as_str() == Some("ELECTRIC_VEHICLES")
+                && device.pointer("/status/current").and_then(Value::as_str) == Some("LIVE")
+        })
+        .filter_map(|device| device["id"].as_str().map(str::to_string))
+        .collect())
 }
 
 /// Planned dispatches from the `flexPlannedDispatches` response. An error or
 /// a malformed entry fails the whole read: a partial list could miss the
 /// dispatch that is running.
-pub fn parse_dispatches(_response: &Value) -> Result<Vec<Dispatch>, String> {
-    Ok(Vec::new())
+pub fn parse_dispatches(response: &Value) -> Result<Vec<Dispatch>, String> {
+    graphql_errors(response)?;
+    let unexpected = || "Octopus returned an unexpected dispatch list".to_string();
+    let data = response
+        .get("data")
+        .filter(|data| data.get("flexPlannedDispatches").is_some())
+        .ok_or_else(unexpected)?;
+    let items = match &data["flexPlannedDispatches"] {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(items) => items,
+        _ => return Err(unexpected()),
+    };
+    items
+        .iter()
+        .map(|item| {
+            let time = |field: &str| {
+                item[field]
+                    .as_str()
+                    .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+                    .map(|time| time.with_timezone(&Utc))
+            };
+            let (start, end) = match (time("start"), time("end")) {
+                (Some(start), Some(end)) if start < end => (start, end),
+                _ => return Err(unexpected()),
+            };
+            let energy_added_kwh = match &item["energyAddedKwh"] {
+                Value::Number(number) => number.as_f64(),
+                Value::String(text) => text.trim().parse::<f64>().ok(),
+                _ => None,
+            };
+            Ok(Dispatch {
+                start,
+                end,
+                kind: item["type"].as_str().map(str::to_string),
+                energy_added_kwh,
+            })
+        })
+        .collect()
+}
+
+/// A GraphQL error response as one message, with Octopus's error codes so a
+/// known failure such as KT-CT-4340 can be recognised on the page.
+fn graphql_errors(response: &Value) -> Result<(), String> {
+    let Some(errors) = response
+        .get("errors")
+        .and_then(Value::as_array)
+        .filter(|errors| !errors.is_empty())
+    else {
+        return Ok(());
+    };
+    let message = errors
+        .iter()
+        .map(|error| {
+            let text = error["message"].as_str().unwrap_or("unknown error");
+            match error
+                .pointer("/extensions/errorCode")
+                .and_then(Value::as_str)
+            {
+                Some(code) => format!("{text} ({code})"),
+                None => text.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!("Octopus returned an error: {message}"))
+}
+
+// ---------------------------------------------------------------------------
+// Octopus requests
+// ---------------------------------------------------------------------------
+
+/// What one check needs from the last one.
+struct Known {
+    token: Option<String>,
+    devices: Option<Vec<String>>,
+}
+
+/// What one check found. `token` is set when a new one was obtained and
+/// `devices` when the list was re-read.
+struct Fetched {
+    token: Option<String>,
+    devices: Option<Vec<String>>,
+    dispatches: Vec<Dispatch>,
+}
+
+/// Where the device and dispatch queries go: the public Kraken API, the same
+/// place the token comes from. The backend API Saving Sessions uses does not
+/// have `devices` or `flexPlannedDispatches`.
+fn query_url(settings: &Settings) -> String {
+    endpoints(settings).0
+}
+
+fn fetch_blocking(settings: &Settings, known: Known) -> Result<Fetched, String> {
+    let query_url = query_url(settings);
+    let (token, new_token) = match known.token {
+        Some(token) => (token, None),
+        None => {
+            let token = obtain_token(settings)?;
+            (token.clone(), Some(token))
+        }
+    };
+    let (devices, new_devices) = match known.devices {
+        Some(devices) => (devices, None),
+        None => {
+            let response = post_graphql(
+                &query_url,
+                Some(&token),
+                &json!({
+                    "query": DEVICES_QUERY,
+                    "variables": { "account": settings.octopus_account_number.trim() },
+                }),
+            )?;
+            let devices = parse_devices(&response)?;
+            (devices.clone(), Some(devices))
+        }
+    };
+    let mut dispatches = Vec::new();
+    for device in &devices {
+        let response = post_graphql(
+            &query_url,
+            Some(&token),
+            &json!({ "query": DISPATCHES_QUERY, "variables": { "device": device } }),
+        )?;
+        dispatches.extend(parse_dispatches(&response)?);
+    }
+    dispatches.sort_by_key(|dispatch| dispatch.start);
+    Ok(Fetched {
+        token: new_token,
+        devices: new_devices,
+        dispatches,
+    })
+}
+
+/// Whether the hold should be checking at all.
+fn wanted(settings: &Settings) -> bool {
+    settings.octopus_dispatch_hold && crate::octopus::configured(settings)
 }
 
 /// One pass: read the dispatches and publish them.
-pub async fn check_once(_state: &Arc<AppState>, _now: DateTime<Utc>) {}
+pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
+    // Read the generation before the settings: a switch after this point
+    // bumps it, and the answer below is then dropped.
+    let (generation, known) = {
+        let current = state.octopus_dispatches.lock().await;
+        let token = current
+            .token
+            .as_ref()
+            .filter(|(_, at)| (now - *at).abs() < Duration::minutes(TOKEN_REUSE_MINUTES))
+            .map(|(token, _)| token.0.clone());
+        let devices = current
+            .devices_checked_at
+            .filter(|at| (now - *at).abs() < Duration::hours(DEVICE_REFRESH_HOURS))
+            .map(|_| current.devices.clone());
+        (current.generation, Known { token, devices })
+    };
+    let settings = Settings::load_async().await;
+    if !wanted(&settings) {
+        let mut current = state.octopus_dispatches.lock().await;
+        if current.checked_at.is_some() || current.error.is_some() || current.token.is_some() {
+            current.reset();
+        }
+        return;
+    }
+    let fetched = tokio::task::spawn_blocking(move || fetch_blocking(&settings, known))
+        .await
+        .map_err(|error| format!("Dispatch check failed: {error}"))
+        .and_then(|result| result);
+
+    let mut current = state.octopus_dispatches.lock().await;
+    if current.generation != generation {
+        return;
+    }
+    match fetched {
+        Ok(fetched) => {
+            if let Some(token) = fetched.token {
+                current.token = Some((Token(token), now));
+            }
+            if let Some(devices) = fetched.devices {
+                current.devices = devices;
+                current.devices_checked_at = Some(now);
+            }
+            current.dispatches = fetched.dispatches;
+            current.checked_at = Some(now);
+            current.error = None;
+        }
+        Err(error) => {
+            if current.error.as_deref() != Some(error.as_str()) {
+                tracing::warn!("Intelligent Octopus dispatches: {error}");
+            }
+            // The token may be what failed; get a fresh one next time.
+            current.token = None;
+            current.error = Some(error);
+        }
+    }
+}
 
 /// Background loop. Wakes early when the hold is switched.
 pub async fn run_dispatches_loop(state: Arc<AppState>) {
@@ -126,8 +349,39 @@ pub async fn run_dispatches_loop(state: Arc<AppState>) {
 // ---------------------------------------------------------------------------
 
 /// GET /api/octopus/dispatches
-pub async fn get_dispatches(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    (StatusCode::OK, Json(json!({ "ok": true })))
+pub async fn get_dispatches(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let settings = Settings::load_async().await;
+    let current = state.octopus_dispatches.lock().await.clone();
+    let holding = state.dispatch_hold_state.lock().await.is_actively_pausing();
+    let now = Utc::now();
+    let dispatches: Vec<Value> = current
+        .dispatches
+        .iter()
+        .filter(|dispatch| dispatch.end > now)
+        .map(|dispatch| {
+            json!({
+                "start": dispatch.start,
+                "end": dispatch.end,
+                "type": dispatch.kind,
+                "energy_added_kwh": dispatch.energy_added_kwh,
+                "smart": dispatch.is_smart(),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "enabled": settings.octopus_dispatch_hold,
+            "configured": crate::octopus::configured(&settings),
+            "checked_at": current.checked_at,
+            "error": current.error,
+            "devices": current.devices.len(),
+            "holding": holding,
+            "stale_after_minutes": STALE_AFTER_MINUTES,
+            "dispatches": dispatches,
+        })),
+    )
 }
 
 /// Unknown fields are refused so a misspelled one is not silently dropped.
@@ -139,10 +393,28 @@ pub struct HoldRequest {
 
 /// POST /api/octopus/dispatches/hold — body `{ "enabled": true }`.
 pub async fn set_hold(
-    State(_state): State<Arc<AppState>>,
-    Json(_body): Json<HoldRequest>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<HoldRequest>,
 ) -> (StatusCode, Json<Value>) {
-    (StatusCode::OK, Json(json!({ "ok": true })))
+    let enabled = body.enabled;
+    if let Err(error) = Settings::update_async(move |settings| {
+        settings.octopus_dispatch_hold = enabled;
+    })
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("Could not save the setting: {error}") })),
+        );
+    }
+    // Either way the old list goes: off must stop holding at the next poll,
+    // and on starts from a fresh read.
+    state.octopus_dispatches.lock().await.reset();
+    state.octopus_dispatches_wake.notify_one();
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "enabled": enabled })),
+    )
 }
 
 #[cfg(test)]
@@ -748,6 +1020,29 @@ mod tests {
             assert!(body["dispatches"].as_array().unwrap().is_empty());
         })
         .await;
+    }
+
+    #[test]
+    fn dispatches_are_read_from_the_kraken_api_not_the_backend() {
+        // `devices` and `flexPlannedDispatches` exist only on the public
+        // Kraken API; the backend API Saving Sessions uses refuses them with
+        // "Cannot query field 'devices' on type 'Query'".
+        let mut settings = Settings::default();
+        assert_eq!(
+            query_url(&settings),
+            "https://api.octopus.energy/v1/graphql/"
+        );
+        settings.octopus_api_base_url = "http://127.0.0.1:9/".to_string();
+        assert_eq!(query_url(&settings), "http://127.0.0.1:9/v1/graphql/");
+    }
+
+    #[test]
+    fn the_state_never_prints_the_token() {
+        let state = DispatchesState {
+            token: Some((Token("jwt-secret".to_string()), utc(NOW))),
+            ..Default::default()
+        };
+        assert!(!format!("{state:?}").contains("jwt-secret"));
     }
 
     #[test]
