@@ -16,6 +16,11 @@ export interface DeferredSaver {
   flush: () => void;
   /** Drop a pending edit — another save has already carried the value. */
   cancel: () => void;
+  /**
+   * Resolves once no save is in flight or queued, so a related save made
+   * elsewhere can land after this field's rather than racing it.
+   */
+  idle: () => Promise<void>;
 }
 
 /**
@@ -43,6 +48,7 @@ function createDeferredSaver(delayMs: number): DeferredSaver & { setSave: (fn: S
   let dirty = false;
   let inFlight = false;
   let queued = false;
+  let idleWaiters: (() => void)[] = [];
 
   const clearTimer = () => {
     if (timer != null) clearTimeout(timer);
@@ -70,7 +76,11 @@ function createDeferredSaver(delayMs: number): DeferredSaver & { setSave: (fn: S
         if (queued) {
           queued = false;
           run();
+          return;
         }
+        const waiters = idleWaiters;
+        idleWaiters = [];
+        waiters.forEach((resolve) => resolve());
       });
   };
 
@@ -92,6 +102,8 @@ function createDeferredSaver(delayMs: number): DeferredSaver & { setSave: (fn: S
       clearTimer();
       dirty = false;
     },
+    idle: () =>
+      inFlight ? new Promise<void>((resolve) => idleWaiters.push(resolve)) : Promise.resolve(),
     setSave: (fn) => {
       save = fn;
     },

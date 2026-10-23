@@ -353,7 +353,6 @@ export default function ForecastPage() {
   const [planAutoRefresh, setPlanAutoRefresh] = useState<boolean>(false);
   const [planAutoApply, setPlanAutoApply] = useState<boolean>(false);
   const [planAutoApplyLeadInput, setPlanAutoApplyLeadInput] = useState<string>('30');
-  const [planAutoApplySaving, setPlanAutoApplySaving] = useState(false);
   // True while the checkbox's own save is in flight. The lead field is
   // locked then: a lead edit would save with the pre-toggle enabled state
   // and could switch the trigger straight back on.
@@ -624,7 +623,6 @@ export default function ForecastPage() {
       return;
     }
     setPlanAutoApplyError(null);
-    setPlanAutoApplySaving(true);
     try {
       await apiPost('/api/settings', {
         forecast_plan_auto_apply_enabled: nextEnabled,
@@ -637,8 +635,6 @@ export default function ForecastPage() {
       await load(false);
     } catch (e) {
       setPlanAutoApplyError(e instanceof Error ? e.message : 'Save failed');
-    } finally {
-      setPlanAutoApplySaving(false);
     }
   };
 
@@ -1293,13 +1289,18 @@ export default function ForecastPage() {
                 onChange={() => {
                   // This save carries the lead field too, so a pending lead
                   // save must not follow it and flip the trigger back on.
+                  // Clicking here blurs an edited lead field first, which
+                  // starts a lead save; wait for it so this one lands last,
+                  // rather than disabling the box and losing the click.
+                  const next = !planAutoHandling;
                   leadSaver.cancel();
                   setPlanAutoToggleSaving(true);
-                  void savePlanAutoApply(!planAutoHandling).finally(() =>
-                    setPlanAutoToggleSaving(false),
-                  );
+                  void leadSaver
+                    .idle()
+                    .then(() => savePlanAutoApply(next))
+                    .finally(() => setPlanAutoToggleSaving(false));
                 }}
-                disabled={planAutoApplySaving}
+                disabled={planAutoToggleSaving}
                 className="h-5 w-5 accent-accent"
                 data-testid="forecast-auto-apply-toggle"
               />
