@@ -221,6 +221,9 @@ import { apiGet, apiPost } from '../../src/lib/api';
 
 const apiGetMock = vi.mocked(apiGet);
 const apiPostMocked = vi.mocked(apiPost);
+// The auto-apply control's on and locked states.
+const isOn = (el: Element) => (el as HTMLInputElement).checked;
+const isLocked = (el: Element) => (el as HTMLInputElement).disabled;
 
 describe('ForecastPage', () => {
   beforeEach(() => {
@@ -1684,10 +1687,8 @@ describe('ForecastPage auto-apply toggle', () => {
         forecast_plan_auto_refresh: false,
       });
     });
-    const toggle = screen.getByTestId(
-      'forecast-auto-apply-toggle',
-    ) as HTMLInputElement;
-    expect(toggle.checked).toBe(true);
+    const toggle = screen.getByTestId('forecast-auto-apply-toggle');
+    expect(isOn(toggle)).toBe(true);
   });
 
   it('blurring an untouched lead field does not save', async () => {
@@ -1707,10 +1708,8 @@ describe('ForecastPage auto-apply toggle', () => {
   it('the checkbox posts the flipped enabled state', async () => {
     mockLoad();
     render(<ForecastPage />);
-    const toggle = (await screen.findByTestId(
-      'forecast-auto-apply-toggle',
-    )) as HTMLInputElement;
-    await waitFor(() => expect(toggle.checked).toBe(true));
+    const toggle = (await screen.findByTestId('forecast-auto-apply-toggle'));
+    await waitFor(() => expect(isOn(toggle)).toBe(true));
     apiPostMocked.mockClear();
     fireEvent.click(toggle);
     await waitFor(() => {
@@ -1726,10 +1725,8 @@ describe('ForecastPage auto-apply toggle', () => {
   it('an invalid lead blocks the save and reports the constraint', async () => {
     mockLoad();
     render(<ForecastPage />);
-    const toggle = (await screen.findByTestId(
-      'forecast-auto-apply-toggle',
-    )) as HTMLInputElement;
-    await waitFor(() => expect(toggle.checked).toBe(true));
+    const toggle = (await screen.findByTestId('forecast-auto-apply-toggle'));
+    await waitFor(() => expect(isOn(toggle)).toBe(true));
     const lead = screen.getByTestId('forecast-auto-apply-lead');
     apiPostMocked.mockClear();
     fireEvent.change(lead, { target: { value: '999' } });
@@ -1744,8 +1741,7 @@ describe('ForecastPage auto-apply toggle', () => {
     ).toBe(false);
     // The controlled checkbox never flipped.
     expect(
-      (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement)
-        .checked,
+      isOn(screen.getByTestId('forecast-auto-apply-toggle')),
     ).toBe(true);
   });
 
@@ -1758,8 +1754,7 @@ describe('ForecastPage auto-apply toggle', () => {
     const lead = await screen.findByTestId('forecast-auto-apply-lead');
     await waitFor(() => {
       expect(
-        (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement)
-          .checked,
+        isOn(screen.getByTestId('forecast-auto-apply-toggle')),
       ).toBe(true);
     });
     apiPostMocked.mockClear();
@@ -1841,10 +1836,8 @@ describe('ForecastPage merged automatic-handling control', () => {
   it('reads on for a legacy auto-refresh-only setting and explains the upgrade', async () => {
     mockLoad({ autoRefresh: true });
     render(<ForecastPage />);
-    const toggle = (await screen.findByTestId(
-      'forecast-auto-apply-toggle',
-    )) as HTMLInputElement;
-    await waitFor(() => expect(toggle.checked).toBe(true));
+    const toggle = (await screen.findByTestId('forecast-auto-apply-toggle'));
+    await waitFor(() => expect(isOn(toggle)).toBe(true));
     expect(screen.getByTestId('forecast-auto-apply-note').textContent).toMatch(
       /Auto-refresh keeps this plan/i,
     );
@@ -1853,10 +1846,8 @@ describe('ForecastPage merged automatic-handling control', () => {
   it('turning the control off clears both planner flags', async () => {
     mockLoad({ autoRefresh: true });
     render(<ForecastPage />);
-    const toggle = (await screen.findByTestId(
-      'forecast-auto-apply-toggle',
-    )) as HTMLInputElement;
-    await waitFor(() => expect(toggle.checked).toBe(true));
+    const toggle = (await screen.findByTestId('forecast-auto-apply-toggle'));
+    await waitFor(() => expect(isOn(toggle)).toBe(true));
     fireEvent.click(toggle);
     await waitFor(() => {
       const post = apiPostMocked.mock.calls.find((c) => c[0] === '/api/settings');
@@ -1866,7 +1857,7 @@ describe('ForecastPage merged automatic-handling control', () => {
         forecast_plan_auto_refresh: false,
       });
     });
-    await waitFor(() => expect(toggle.checked).toBe(false));
+    await waitFor(() => expect(isOn(toggle)).toBe(false));
   });
 
   it('editing the lead time upgrades legacy auto-refresh to auto-apply', async () => {
@@ -1875,8 +1866,7 @@ describe('ForecastPage merged automatic-handling control', () => {
     const lead = await screen.findByTestId('forecast-auto-apply-lead');
     await waitFor(() => {
       expect(
-        (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement)
-          .checked,
+        isOn(screen.getByTestId('forecast-auto-apply-toggle')),
       ).toBe(true);
     });
     fireEvent.change(lead, { target: { value: '45' } });
@@ -1900,10 +1890,8 @@ describe('ForecastPage merged automatic-handling control', () => {
     mockLoad();
     apiPostMocked.mockRejectedValueOnce(new Error('backend offline'));
     render(<ForecastPage />);
-    const toggle = (await screen.findByTestId(
-      'forecast-auto-apply-toggle',
-    )) as HTMLInputElement;
-    await waitFor(() => expect(toggle.checked).toBe(false));
+    const toggle = (await screen.findByTestId('forecast-auto-apply-toggle'));
+    await waitFor(() => expect(isOn(toggle)).toBe(false));
     fireEvent.click(toggle);
     await waitFor(() => {
       expect(screen.getByTestId('forecast-auto-apply-error').textContent).toMatch(
@@ -1912,7 +1900,7 @@ describe('ForecastPage merged automatic-handling control', () => {
     });
     // The optimistic flip is rolled back so the UI never claims the
     // planner owns the slot when the backend says otherwise.
-    expect(toggle.checked).toBe(false);
+    expect(isOn(toggle)).toBe(false);
   });
 });
 
@@ -2095,7 +2083,7 @@ describe('ForecastPage plan settings save without a blur (issue #391)', () => {
     await waitFor(() => {
       expect(minSoc.value).toBe('7');
       expect(
-        (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement).checked,
+        isOn(screen.getByTestId('forecast-auto-apply-toggle')),
       ).toBe(true);
       expect(minSoc.disabled).toBe(false);
     });
@@ -2264,6 +2252,46 @@ describe('ForecastPage plan settings save without a blur (issue #391)', () => {
     postGate = null;
     await act(async () => release());
     await waitFor(() => expect(lead.disabled).toBe(false));
+  });
+
+  it('a click on auto-apply right after a lead edit is not lost and lands last', async () => {
+    // Clicking the checkbox blurs the lead field first, which starts the lead
+    // save. That save used to disable the checkbox before the click landed,
+    // so the untick was silently dropped (also in v0.93.0). The untick must
+    // be honoured and must reach the backend after the lead save.
+    mockLoad();
+    await renderLoaded();
+    const lead = screen.getByTestId('forecast-auto-apply-lead');
+    const toggle = screen.getByTestId('forecast-auto-apply-toggle');
+    let release!: () => void;
+    postGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fireEvent.change(lead, { target: { value: '50' } });
+    fireEvent.blur(lead);
+    expect(settingsPosts()).toHaveLength(1);
+    expect(isLocked(toggle)).toBe(false);
+    fireEvent.click(toggle);
+    // Waits for the lead save rather than racing it.
+    expect(settingsPosts()).toHaveLength(1);
+    postGate = null;
+    await act(async () => release());
+    await waitFor(() =>
+      expect(settingsPosts()).toEqual([
+        {
+          forecast_plan_auto_apply_enabled: true,
+          forecast_plan_auto_apply_lead_minutes: 50,
+          forecast_plan_auto_refresh: false,
+        },
+        {
+          forecast_plan_auto_apply_enabled: false,
+          forecast_plan_auto_apply_lead_minutes: 50,
+          forecast_plan_auto_refresh: false,
+        },
+      ]),
+    );
+    await waitFor(() => expect(isOn(toggle)).toBe(false));
+    expect(backend.forecast_plan_auto_apply_enabled).toBe(false);
   });
 
   it('keeps the lead field editable while its own save is in flight', async () => {

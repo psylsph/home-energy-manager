@@ -55,5 +55,15 @@ export default defineConfig({
       name: 'e2e',
       testDir: './e2e',
     },
+    {
+      // Issue #391 was Firefox-only: its number-field spin arrows change the
+      // value without focusing the field. Install with
+      // `npx playwright install firefox` (on LMDE/Mint set
+      // PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=debian13-x64 for the install).
+      name: 'e2e-firefox',
+      testDir: './e2e',
+      testMatch: '**/forecast-plan-settings.spec.ts',
+      use: { browserName: 'firefox', launchOptions: {} },
+    },
   ],
 });
