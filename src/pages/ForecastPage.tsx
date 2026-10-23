@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent } from 'react';
 import {
   Area,
   CartesianGrid,
@@ -15,6 +16,7 @@ import {
 } from 'recharts';
 import { apiGet, apiPost } from '../lib/api';
 import { openExternal } from '../lib/openExternal';
+import { useDeferredSave } from '../hooks/useDeferredSave';
 import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
@@ -323,6 +325,17 @@ function ForecastGridOverlay({
   );
 }
 
+/** A minimum battery level the planner accepts: a number from 0 to 100. */
+function isValidMinSocInput(value: string): boolean {
+  const n = Number(value);
+  return value.trim() !== '' && Number.isFinite(n) && n >= 0 && n <= 100;
+}
+
+/** A battery efficiency the planner accepts, as a whole percent. */
+function isValidEfficiencyPct(n: number): boolean {
+  return Number.isInteger(n) && n >= 50 && n <= 100;
+}
+
 export default function ForecastPage() {
   const [data, setData] = useState<ForecastData | null>(null);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -332,7 +345,6 @@ export default function ForecastPage() {
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [minSocPctInput, setMinSocPctInput] = useState<string>('20');
-  const [minSocSaving, setMinSocSaving] = useState(false);
   const [minSocError, setMinSocError] = useState<string | null>(null);
   const [minSocPct, setMinSocPct] = useState<number>(20);
   const [planStrategy, setPlanStrategy] = useState<PlanStrategy>('min_soc');
@@ -341,11 +353,11 @@ export default function ForecastPage() {
   const [planAutoRefresh, setPlanAutoRefresh] = useState<boolean>(false);
   const [planAutoApply, setPlanAutoApply] = useState<boolean>(false);
   const [planAutoApplyLeadInput, setPlanAutoApplyLeadInput] = useState<string>('30');
-  // True while the lead field holds edits that haven't been saved yet —
-  // the blur handler only saves then, so merely focusing the field can't
-  // fire a spurious request.
-  const [planAutoApplyLeadDirty, setPlanAutoApplyLeadDirty] = useState(false);
   const [planAutoApplySaving, setPlanAutoApplySaving] = useState(false);
+  // True while the checkbox's own save is in flight. The lead field is
+  // locked then: a lead edit would save with the pre-toggle enabled state
+  // and could switch the trigger straight back on.
+  const [planAutoToggleSaving, setPlanAutoToggleSaving] = useState(false);
   const [planAutoApplyError, setPlanAutoApplyError] = useState<string | null>(null);
   // Battery projection lines the user has hidden via the legend (issue
   // #297): keys are 'soc' | 'withCharge' | 'withCurrent'. Session-scoped
@@ -370,13 +382,10 @@ export default function ForecastPage() {
   // both, editing the lead upgrades legacy auto-refresh to auto-apply.
   const planAutoHandling = planAutoApply || planAutoRefresh;
   // Forecast battery efficiencies (issue #283), edited as whole percents
-  // and persisted as 0–1 ratios. They save together on blur — the planner
-  // needs both to be sane, so one invalid field blocks the pair.
+  // and persisted as 0–1 ratios. They save together — the planner needs
+  // both to be sane, so one invalid field blocks the pair.
   const [chargeEffInput, setChargeEffInput] = useState<string>('90');
   const [dischargeEffInput, setDischargeEffInput] = useState<string>('95');
-  const [chargeEffPct, setChargeEffPct] = useState<number>(90);
-  const [dischargeEffPct, setDischargeEffPct] = useState<number>(95);
-  const [effSaving, setEffSaving] = useState(false);
   const [effError, setEffError] = useState<string | null>(null);
   const [activeChart, setActiveChart] = useState<ForecastChart>('battery');
   // "Show Past" (issue #361): earlier planner decisions and what the
@@ -457,9 +466,7 @@ export default function ForecastPage() {
           ? Math.round(settingsRes.data.forecast_discharge_efficiency * 100)
           : 95;
         setChargeEffInput(String(chargeEfficiencyPct));
-        setChargeEffPct(chargeEfficiencyPct);
         setDischargeEffInput(String(dischargeEfficiencyPct));
-        setDischargeEffPct(dischargeEfficiencyPct);
         setPlanAutoApplyLeadInput(
           String(settingsRes.data.forecast_plan_auto_apply_lead_minutes ?? 30),
         );
@@ -570,7 +577,6 @@ export default function ForecastPage() {
       return;
     }
     setMinSocError(null);
-    setMinSocSaving(true);
     try {
       await apiPost('/api/settings', { forecast_min_soc_pct: next });
       setMinSocPct(next);
@@ -578,8 +584,6 @@ export default function ForecastPage() {
       await load(false);
     } catch (e) {
       setMinSocError(e instanceof Error ? e.message : 'Save failed');
-    } finally {
-      setMinSocSaving(false);
     }
   };
 
@@ -629,7 +633,6 @@ export default function ForecastPage() {
       });
       setPlanAutoApply(nextEnabled);
       setPlanAutoRefresh(false);
-      setPlanAutoApplyLeadDirty(false);
       // Refetch so the plan note and trigger time reflect the new state.
       await load(false);
     } catch (e) {
@@ -646,27 +649,35 @@ export default function ForecastPage() {
   const saveEfficiencies = async () => {
     const charge = Number(chargeEffInput);
     const discharge = Number(dischargeEffInput);
-    const valid = (n: number) => Number.isInteger(n) && n >= 50 && n <= 100;
-    if (!valid(charge) || !valid(discharge)) {
+    if (!isValidEfficiencyPct(charge) || !isValidEfficiencyPct(discharge)) {
       setEffError('Battery efficiencies must be whole numbers between 50 and 100');
       return;
     }
     setEffError(null);
-    setEffSaving(true);
     try {
       await apiPost('/api/settings', {
         forecast_charge_efficiency: charge / 100,
         forecast_discharge_efficiency: discharge / 100,
       });
-      setChargeEffPct(charge);
-      setDischargeEffPct(discharge);
       // Refetch — the planner sees the new efficiencies on the next call.
       await load(false);
     } catch (e) {
       setEffError(e instanceof Error ? e.message : 'Save failed');
-    } finally {
-      setEffSaving(false);
     }
+  };
+
+  // The Plan Settings number fields save after a pause, on blur or Enter,
+  // and when the page unmounts — never only on blur (issue #391).
+  const minSocSaver = useDeferredSave(saveMinSoc);
+  const effSaver = useDeferredSave(saveEfficiencies);
+  // An edited lead time never toggles the trigger — it saves only while
+  // automatic handling is on, and upgrades a legacy auto-refresh setting
+  // to auto-apply.
+  const leadSaver = useDeferredSave(() =>
+    planAutoHandling ? savePlanAutoApply(true) : undefined,
+  );
+  const saveOnEnter = (saver: { flush: () => void }) => (e: KeyboardEvent) => {
+    if (e.key === 'Enter') saver.flush();
   };
 
   const handleApply = async () => {
@@ -1230,9 +1241,13 @@ export default function ForecastPage() {
                 max={100}
                 step={1}
                 value={minSocPctInput}
-                onChange={(e) => setMinSocPctInput(e.target.value)}
-                onBlur={() => void saveMinSoc()}
-                disabled={!data || minSocSaving}
+                onChange={(e) => {
+                  setMinSocPctInput(e.target.value);
+                  minSocSaver.edited(isValidMinSocInput(e.target.value));
+                }}
+                onBlur={minSocSaver.flush}
+                onKeyDown={saveOnEnter(minSocSaver)}
+                disabled={!data}
                 className="bg-bg-surface text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
                 data-testid="forecast-min-soc-input"
               />
@@ -1275,7 +1290,15 @@ export default function ForecastPage() {
                 id="forecast-auto-apply-toggle"
                 type="checkbox"
                 checked={planAutoHandling}
-                onChange={() => void savePlanAutoApply(!planAutoHandling)}
+                onChange={() => {
+                  // This save carries the lead field too, so a pending lead
+                  // save must not follow it and flip the trigger back on.
+                  leadSaver.cancel();
+                  setPlanAutoToggleSaving(true);
+                  void savePlanAutoApply(!planAutoHandling).finally(() =>
+                    setPlanAutoToggleSaving(false),
+                  );
+                }}
                 disabled={planAutoApplySaving}
                 className="h-5 w-5 accent-accent"
                 data-testid="forecast-auto-apply-toggle"
@@ -1290,18 +1313,12 @@ export default function ForecastPage() {
                 value={planAutoApplyLeadInput}
                 onChange={(e) => {
                   setPlanAutoApplyLeadInput(e.target.value);
-                  setPlanAutoApplyLeadDirty(true);
+                  const lead = parseLeadMinutes(e.target.value);
+                  leadSaver.edited(planAutoHandling && lead != null && lead <= 120);
                 }}
-                onBlur={() => {
-                  // Save an edited lead time without touching the enabled
-                  // state — this must never toggle the trigger off. For a
-                  // legacy auto-refresh-only setting this also upgrades it
-                  // to auto-apply.
-                  if (planAutoHandling && planAutoApplyLeadDirty) {
-                    void savePlanAutoApply(true);
-                  }
-                }}
-                disabled={planAutoApplySaving}
+                onBlur={leadSaver.flush}
+                onKeyDown={saveOnEnter(leadSaver)}
+                disabled={planAutoToggleSaving}
                 className="bg-bg-elevated text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
                 data-testid="forecast-auto-apply-lead"
               />
@@ -1354,7 +1371,7 @@ export default function ForecastPage() {
           </div>
           {/* Battery efficiencies — planner inputs (issue #283). Moved here
               from the Settings page so all Forecast settings live on the
-              Forecast page. They save together on blur. */}
+              Forecast page. They save together. */}
           <div className="border-t border-white/10 pt-2 mt-1 flex flex-col gap-1">
             <div className="flex items-center gap-3 flex-wrap">
               <label
@@ -1370,16 +1387,15 @@ export default function ForecastPage() {
                 max={100}
                 step={1}
                 value={chargeEffInput}
-                onChange={(e) => setChargeEffInput(e.target.value)}
-                onBlur={() => {
-                  if (
-                    Number(chargeEffInput) !== chargeEffPct ||
-                    Number(dischargeEffInput) !== dischargeEffPct
-                  ) {
-                    void saveEfficiencies();
-                  }
+                onChange={(e) => {
+                  setChargeEffInput(e.target.value);
+                  effSaver.edited(
+                    isValidEfficiencyPct(Number(e.target.value)) &&
+                      isValidEfficiencyPct(Number(dischargeEffInput)),
+                  );
                 }}
-                disabled={effSaving}
+                onBlur={effSaver.flush}
+                onKeyDown={saveOnEnter(effSaver)}
                 className="bg-bg-elevated text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
                 data-testid="forecast-charge-eff-input"
               />
@@ -1396,16 +1412,15 @@ export default function ForecastPage() {
                 max={100}
                 step={1}
                 value={dischargeEffInput}
-                onChange={(e) => setDischargeEffInput(e.target.value)}
-                onBlur={() => {
-                  if (
-                    Number(chargeEffInput) !== chargeEffPct ||
-                    Number(dischargeEffInput) !== dischargeEffPct
-                  ) {
-                    void saveEfficiencies();
-                  }
+                onChange={(e) => {
+                  setDischargeEffInput(e.target.value);
+                  effSaver.edited(
+                    isValidEfficiencyPct(Number(e.target.value)) &&
+                      isValidEfficiencyPct(Number(chargeEffInput)),
+                  );
                 }}
-                disabled={effSaving}
+                onBlur={effSaver.flush}
+                onKeyDown={saveOnEnter(effSaver)}
                 className="bg-bg-elevated text-text-primary rounded-lg px-3 py-1.5 text-sm font-mono w-20 border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
                 data-testid="forecast-discharge-eff-input"
               />

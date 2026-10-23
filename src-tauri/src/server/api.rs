@@ -2607,6 +2607,45 @@ fn settings_log_fields(
             persist.api_control_enabled
         ));
     }
+    // Forecast page planner settings (issue #391).
+    if is_present("forecast_min_soc_pct") {
+        out.push(format!(
+            "forecast_min_soc={}%",
+            persist.forecast_min_soc_pct
+        ));
+    }
+    if is_present("forecast_plan_strategy") {
+        let strategy = serde_json::to_value(persist.forecast_plan_strategy)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        out.push(format!("forecast_plan_strategy={strategy}"));
+    }
+    if is_present("forecast_charge_efficiency") || is_present("forecast_discharge_efficiency") {
+        out.push(format!(
+            "forecast_efficiency={}%/{}%",
+            (persist.forecast_charge_efficiency * 100.0).round(),
+            (persist.forecast_discharge_efficiency * 100.0).round()
+        ));
+    }
+    if is_present("forecast_plan_auto_apply_enabled") {
+        out.push(format!(
+            "forecast_plan_auto_apply={}",
+            persist.forecast_plan_auto_apply_enabled
+        ));
+    }
+    if is_present("forecast_plan_auto_apply_lead_minutes") {
+        out.push(format!(
+            "forecast_plan_auto_apply_lead={}min",
+            persist.forecast_plan_auto_apply_lead_minutes
+        ));
+    }
+    if is_present("forecast_plan_auto_refresh") {
+        out.push(format!(
+            "forecast_plan_auto_refresh={}",
+            persist.forecast_plan_auto_refresh
+        ));
+    }
     out
 }
 
