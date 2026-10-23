@@ -34,6 +34,10 @@ pub const STALE_AFTER_MINUTES: i64 = 15;
 const DEVICE_REFRESH_HOURS: i64 = 6;
 /// How long an access token is reused. Octopus tokens last an hour.
 const TOKEN_REUSE_MINUTES: i64 = 50;
+/// The longest a restart keeps a hold it found active while waiting for the
+/// first dispatch check, so a check that never finishes cannot hold the
+/// battery for ever.
+const RESTART_HOLD_MINUTES: i64 = 5;
 
 const DEVICES_QUERY: &str = "query($account: String!) { devices(accountNumber: $account) { \
     id deviceType status { current } } }";
@@ -90,6 +94,9 @@ pub struct DispatchesState {
     /// Bumped when the hold is switched, so a check that was already asking
     /// Octopus cannot bring back a list the user has just turned off.
     generation: u64,
+    /// After a restart mid-hold: keep holding until this time or until the
+    /// first check finishes, whichever is first.
+    restart_hold_until: Option<DateTime<Utc>>,
 }
 
 impl DispatchesState {
@@ -108,8 +115,24 @@ impl DispatchesState {
                 .any(|dispatch| dispatch.is_smart() && dispatch.start <= now && now < dispatch.end)
     }
 
+    /// After a restart that found a hold active, keep holding until the first
+    /// check has finished (whether it worked or failed): without a list yet,
+    /// the hold would restore Eco and re-pause up to a check interval later.
+    pub fn hold_until_first_check(&mut self, now: DateTime<Utc>) {
+        self.restart_hold_until = Some(now + Duration::minutes(RESTART_HOLD_MINUTES));
+    }
+
+    /// Whether the hold is being kept for a restart that is still waiting for
+    /// its first check. Absolute distance: a clock stepped far back must not
+    /// stretch the wait.
+    pub fn holding_for_restart(&self, now: DateTime<Utc>) -> bool {
+        self.restart_hold_until.is_some_and(|until| {
+            now < until && (until - now) <= Duration::minutes(RESTART_HOLD_MINUTES)
+        })
+    }
+
     /// Forget everything, as when the hold is turned off.
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         *self = Self {
             generation: self.generation.wrapping_add(1),
             ..Self::default()
@@ -271,7 +294,7 @@ fn fetch_blocking(settings: &Settings, known: Known) -> Result<Fetched, String> 
 }
 
 /// Whether the hold should be checking at all.
-fn wanted(settings: &Settings) -> bool {
+pub(crate) fn wanted(settings: &Settings) -> bool {
     settings.octopus_dispatch_hold && crate::octopus::configured(settings)
 }
 
@@ -295,6 +318,8 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
     let settings = Settings::load_async().await;
     if !wanted(&settings) {
         let mut current = state.octopus_dispatches.lock().await;
+        // A hold that is off has nothing to wait for after a restart.
+        current.restart_hold_until = None;
         if current.checked_at.is_some() || current.error.is_some() || current.token.is_some() {
             current.reset();
         }
@@ -309,6 +334,9 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
     if current.generation != generation {
         return;
     }
+    // The first check has finished, worked or not: from here the list (or
+    // its absence) decides, as it does in normal running.
+    current.restart_hold_until = None;
     match fetched {
         Ok(fetched) => {
             if let Some(token) = fetched.token {
@@ -352,7 +380,9 @@ pub async fn run_dispatches_loop(state: Arc<AppState>) {
 pub async fn get_dispatches(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = Settings::load_async().await;
     let current = state.octopus_dispatches.lock().await.clone();
-    let holding = state.dispatch_hold_state.lock().await.is_actively_pausing();
+    // Only while holding: a restore still being retried is not a charge.
+    let holding = *state.dispatch_hold_state.lock().await
+        == crate::inverter::poll::DispatchHoldState::Holding;
     let now = Utc::now();
     let dispatches: Vec<Value> = current
         .dispatches
@@ -1018,6 +1048,111 @@ mod tests {
             assert!(!Settings::load().octopus_dispatch_hold);
             let (_, Json(body)) = get_dispatches(State(state.clone())).await;
             assert!(body["dispatches"].as_array().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_page_says_holding_only_while_the_hold_is_holding() {
+        use crate::inverter::poll::DispatchHoldState;
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            for (hold, expected) in [
+                (DispatchHoldState::Idle, false),
+                (DispatchHoldState::Holding, true),
+                // Releasing is the restore being retried: the charge has
+                // ended, so the page must not say the car is being held for.
+                (DispatchHoldState::Releasing, false),
+            ] {
+                *state.dispatch_hold_state.lock().await = hold.clone();
+                let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+                assert_eq!(body["holding"], expected, "{hold:?}");
+            }
+        })
+        .await;
+    }
+
+    // ---- A restart mid-hold (review of v0.94.0, finding 4) ----
+
+    #[test]
+    fn a_restart_keeps_holding_until_the_first_check_or_the_cap() {
+        let mut state = DispatchesState::default();
+        assert!(!state.holding_for_restart(utc(NOW)), "nothing pending");
+
+        state.hold_until_first_check(utc(NOW));
+        assert!(state.holding_for_restart(utc(NOW)));
+        assert!(state.holding_for_restart(utc("2026-10-17T12:04:00+00:00")));
+        // A check that never finishes (a stuck task) cannot hold the battery
+        // for ever.
+        assert!(!state.holding_for_restart(utc("2026-10-17T12:06:00+00:00")));
+        // A clock that stepped far back does not extend the hold either.
+        assert!(!state.holding_for_restart(utc("2026-10-17T10:00:00+00:00")));
+    }
+
+    #[test]
+    fn turning_the_hold_off_ends_the_restart_hold() {
+        let mut state = DispatchesState::default();
+        state.hold_until_first_check(utc(NOW));
+        state.reset();
+        assert!(!state.holding_for_restart(utc(NOW)));
+    }
+
+    #[tokio::test]
+    async fn a_good_check_ends_the_restart_hold() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            state
+                .octopus_dispatches
+                .lock()
+                .await
+                .hold_until_first_check(utc(NOW));
+            check_once(&state, utc(NOW)).await;
+            let current = state.octopus_dispatches.lock().await.clone();
+            assert!(!current.holding_for_restart(utc(NOW)));
+            assert!(current.hold_now(utc(NOW)), "the list now decides");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_also_ends_the_restart_hold() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            *mock.devices_body.lock().unwrap() =
+                json!({ "errors": [{ "message": "KT-CT-4340" }] }).to_string();
+            let state = configure(&mock, true).await;
+            state
+                .octopus_dispatches
+                .lock()
+                .await
+                .hold_until_first_check(utc(NOW));
+            check_once(&state, utc(NOW)).await;
+            let current = state.octopus_dispatches.lock().await.clone();
+            assert!(current.error.is_some(), "the check did fail");
+            assert!(!current.holding_for_restart(utc(NOW)));
+            assert!(!current.hold_now(utc(NOW)));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_hold_switched_off_does_not_wait_for_a_check() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, false).await;
+            state
+                .octopus_dispatches
+                .lock()
+                .await
+                .hold_until_first_check(utc(NOW));
+            check_once(&state, utc(NOW)).await;
+            assert!(!state
+                .octopus_dispatches
+                .lock()
+                .await
+                .holding_for_restart(utc(NOW)));
+            assert_eq!(mock.seen().len(), 0, "and no request is made");
         })
         .await;
     }

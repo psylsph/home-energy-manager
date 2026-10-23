@@ -506,6 +506,11 @@ fn build_status(
         "load_limiter",
         "Load protection active",
     );
+    condition(
+        s.dispatch_hold_active,
+        "dispatch_hold",
+        "Intelligent Octopus Go hold active",
+    );
     condition(charge_paused, "charge_pause", "Charging paused by schedule");
     condition(
         discharge_paused,
@@ -708,10 +713,10 @@ fn build_status(
     } else {
         ("inverter", "observed", mode_label(mode).into())
     };
-    if s.temperature_limiter_active || s.load_limiter_active {
+    if s.temperature_limiter_active || s.load_limiter_active || s.dispatch_hold_active {
         source = "safety";
         phase = "restricted";
-        // The limiters hold discharge; a Charge action is not itself
+        // The limiters and the dispatch hold hold discharge; a Charge action is not itself
         // restricted, so do not claim it is.
         title = match ctx.force.as_ref().map(|f| f.kind) {
             Some(ForceKind::Charge) => format!("Safety limit active ({title})"),
@@ -1484,6 +1489,36 @@ mod tests {
                 "active"
             );
         }
+    }
+
+    #[test]
+    fn the_dispatch_hold_is_reported_like_the_limiters_that_pause_discharge() {
+        // Intelligent Octopus Go hold (issue #394): the battery is paused by
+        // HEM, so the status must say so rather than show a plain mode.
+        let v = status(&InverterSnapshot {
+            dispatch_hold_active: true,
+            battery_mode: BatteryMode::EcoPaused,
+            ..snapshot()
+        });
+        assert!(
+            v["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["code"] == "dispatch_hold"),
+            "{v}"
+        );
+        assert_eq!(v["control_source"], "safety", "{v}");
+        let summary = v["summary"].as_str().unwrap();
+        assert!(summary.contains("Discharge restricted"), "{summary}");
+
+        // And nothing is claimed when it is not active.
+        let quiet = status(&snapshot());
+        assert!(!quiet["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "dispatch_hold"));
     }
 
     #[test]

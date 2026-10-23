@@ -265,11 +265,22 @@ async fn initialize_app_state(
         *limiter_state = crate::inverter::poll::TemperatureLimiterState::PausedFromRestart;
         tracing::info!("Restored temperature limiter state: PausedFromRestart (post-crash)");
     }
-    // A dispatch hold active at shutdown restores Eco on the first poll
-    // unless a fresh dispatch list shows the charge is still running.
+    // A dispatch hold active at shutdown restores Eco unless a fresh dispatch
+    // list shows the charge is still running. The list does not exist yet, so
+    // keep the hold until the first dispatch check has finished.
     if app_settings.dispatch_hold_active_persisted {
         *state.dispatch_hold_state.lock().await =
             crate::inverter::poll::DispatchHoldState::Releasing;
+        // Only while the hold is still wanted: with it switched off (or the
+        // account removed) there is no check to wait for, and the first poll
+        // restores Eco.
+        if octopus_dispatches::wanted(&app_settings) {
+            state
+                .octopus_dispatches
+                .lock()
+                .await
+                .hold_until_first_check(chrono::Utc::now());
+        }
         tracing::info!("Restored dispatch hold state: Releasing (post-restart)");
     }
 
@@ -1328,6 +1339,9 @@ mod tests {
             s.load_limiter_end_minute = 10;
             s.load_limiter_active_persisted = true;
             s.dispatch_hold_active_persisted = true;
+            s.octopus_dispatch_hold = true;
+            s.octopus_api_key = "sk_live_test".to_string();
+            s.octopus_account_number = "A-TEST1".to_string();
             s.auto_winter_saved_enable_target = Some(true);
             s.auto_winter_saved_target_soc = Some(77);
             s.alerts_config.enabled = true;
@@ -1393,6 +1407,12 @@ mod tests {
                 *state.dispatch_hold_state.lock().await,
                 crate::inverter::poll::DispatchHoldState::Releasing
             );
+            // ... and is kept until the first dispatch check has finished.
+            assert!(state
+                .octopus_dispatches
+                .lock()
+                .await
+                .holding_for_restart(chrono::Utc::now()));
 
             // Auto-winter saved register values
             {
@@ -1418,6 +1438,55 @@ mod tests {
                 state.history.lock().await.is_some(),
                 "history db should be opened"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_does_not_wait_for_a_dispatch_check_when_the_hold_is_off() {
+        with_isolated_config_dir_async(|| async {
+            let mut s = Settings::load();
+            s.dispatch_hold_active_persisted = true;
+            s.octopus_dispatch_hold = false;
+            s.octopus_api_key = "sk_live_test".to_string();
+            s.octopus_account_number = "A-TEST1".to_string();
+            s.save().expect("settings save");
+
+            let state = initialize_app_state(Settings::load(), Arc::new(LogRing::new(64)))
+                .await
+                .expect("state");
+
+            // Still released on the first poll...
+            assert_eq!(
+                *state.dispatch_hold_state.lock().await,
+                crate::inverter::poll::DispatchHoldState::Releasing
+            );
+            // ...but nothing is kept for a check that will never run.
+            assert!(!state
+                .octopus_dispatches
+                .lock()
+                .await
+                .holding_for_restart(chrono::Utc::now()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_does_not_wait_for_a_dispatch_check_without_an_account() {
+        with_isolated_config_dir_async(|| async {
+            let mut s = Settings::load();
+            s.dispatch_hold_active_persisted = true;
+            s.octopus_dispatch_hold = true;
+            s.save().expect("settings save");
+
+            let state = initialize_app_state(Settings::load(), Arc::new(LogRing::new(64)))
+                .await
+                .expect("state");
+            assert!(!state
+                .octopus_dispatches
+                .lock()
+                .await
+                .holding_for_restart(chrono::Utc::now()));
         })
         .await;
     }

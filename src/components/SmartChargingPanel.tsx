@@ -24,9 +24,11 @@ export default function SmartChargingPanel() {
     const load = async () => {
       try {
         const res = readDispatchesResponse(await apiGet('/api/octopus/dispatches'));
-        if (!cancelled) setData(res);
+        // An unusable answer is no better than a failure: keep what was good.
+        if (!cancelled && res) setData(res);
       } catch {
-        if (!cancelled) setData(null);
+        // Keep the last good data: one failed refresh must not take the
+        // switch away. If the first load fails there is nothing to show.
       }
     };
     void load();
@@ -44,6 +46,8 @@ export default function SmartChargingPanel() {
     setSaveError(null);
     try {
       await apiPost('/api/octopus/dispatches/hold', { enabled });
+      // Show the saved position even if the reload below fails.
+      setData((current) => current && { ...current, enabled });
       setReloadTick((tick) => tick + 1);
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause.message : 'Could not change the setting.');

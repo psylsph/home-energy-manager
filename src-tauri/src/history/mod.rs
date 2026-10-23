@@ -5,6 +5,7 @@
 //! history chart API.
 
 pub mod backup;
+pub mod battery_health;
 pub mod minute;
 
 use std::path::Path;
@@ -993,6 +994,25 @@ CREATE TABLE IF NOT EXISTS plan_snapshots (
     forecast_json TEXT NOT NULL,
     PRIMARY KEY (recorded_at, kind)
 );
+-- Daily battery health summary (issue #393): one row per module per local
+-- day (keyed by slot: BMS serials can read back corrupt), kept apart from
+-- `readings` (one row per minute, whole system).
+CREATE TABLE IF NOT EXISTS battery_health_daily (
+    day                TEXT NOT NULL,
+    module_index       INTEGER NOT NULL,
+    min_cell_v         REAL,
+    max_cell_v         REAL,
+    max_spread_mv      REAL,
+    full_spread_mv     REAL,
+    cycles             INTEGER,
+    max_temp_c         REAL,
+    capacity_ah        REAL,
+    design_capacity_ah REAL,
+    bms_firmware       INTEGER,
+    samples            INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (day, module_index)
+);
 CREATE TABLE IF NOT EXISTS forecast_values (
     timestamp  INTEGER NOT NULL,
     variable   TEXT NOT NULL,
@@ -1054,6 +1074,9 @@ pub struct HistoryDb {
     /// The rows this process inserted for recently written minutes. Only
     /// the writer touches it, while holding `conn`.
     owned_rows: Mutex<OwnedRows>,
+    /// Battery health polls awaiting a flush (issue #393). Lock order:
+    /// `conn` before `health`, never the reverse.
+    health: Mutex<battery_health::HealthAccumulator>,
 }
 
 /// How many recent minutes' own rows the writer remembers. A minute can only
@@ -1693,6 +1716,7 @@ impl HistoryDb {
             path: path.to_path_buf(),
             poll_rows: Mutex::new(minute::PollRows::new()),
             owned_rows: Mutex::new(OwnedRows::new()),
+            health: Mutex::new(battery_health::HealthAccumulator::default()),
         })
     }
 
@@ -1842,6 +1866,7 @@ impl HistoryDb {
             .unwrap_or_else(|e| e.into_inner())
             .close_open();
         self.flush_poll_rows();
+        self.flush_battery_health();
     }
 
     /// Write every queued poll row. Blocking (SQLite).

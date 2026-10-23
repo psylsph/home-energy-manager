@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import type { SavingSessionsResponse } from '../../src/lib/types';
 
 const apiGet = vi.fn();
@@ -159,6 +159,60 @@ describe('SavingSessionsPanel', () => {
     const second = render(<SavingSessionsPanel />);
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
     expect(second.container.querySelector('[data-testid="saving-sessions-panel"]')).toBeNull();
+  });
+
+  it('keeps the last good data when a later refresh fails', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiGet.mockResolvedValue(reply());
+      render(<SavingSessionsPanel />);
+      expect(await screen.findByRole('button', { name: 'Alert Only' })).toBeTruthy();
+
+      apiGet.mockRejectedValue(new Error('offline'));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(apiGet).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole('button', { name: 'Alert Only' })).toBeTruthy();
+
+      // An unusable answer is no better than a failure.
+      apiGet.mockResolvedValue({ ok: true, data: { something: 'else' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(apiGet).toHaveBeenCalledTimes(3);
+      expect(screen.getByRole('button', { name: 'Alert Only' })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the saved mode even if the reload after a save fails', async () => {
+    apiGet.mockResolvedValueOnce(reply({ mode: 'off' }));
+    apiPost.mockResolvedValue({ ok: true, mode: 'alert' });
+    render(<SavingSessionsPanel />);
+    const alertOnly = await screen.findByRole('button', { name: 'Alert Only' });
+    expect(alertOnly.getAttribute('aria-pressed')).toBe('false');
+
+    apiGet.mockRejectedValue(new Error('offline'));
+    fireEvent.click(alertOnly);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Alert Only' }).getAttribute('aria-pressed')).toBe('true'),
+    );
+  });
+
+  it('shows the saved join switch even if the reload after a save fails', async () => {
+    apiGet.mockResolvedValueOnce(reply({ mode: 'alert', auto_join: false }));
+    apiPost.mockResolvedValue({ ok: true, mode: 'alert' });
+    render(<SavingSessionsPanel />);
+    const join = await screen.findByRole('switch', { name: /join/i });
+    expect(join.getAttribute('aria-checked')).toBe('false');
+
+    apiGet.mockRejectedValue(new Error('offline'));
+    fireEvent.click(join);
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: /join/i }).getAttribute('aria-checked')).toBe('true'),
+    );
   });
 
   describe('Alert And Export', () => {

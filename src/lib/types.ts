@@ -562,3 +562,24 @@ export interface SmartChargingResponse {
   stale_after_minutes: number;
   dispatches: SmartChargeDispatch[];
 }
+
+/** One module's battery health summary for one local day (`GET /api/battery-health`, issue #393). */
+export interface BatteryHealthDay {
+  /** Local date, `YYYY-MM-DD`. */
+  day: string;
+  /** Module slot (0-based), as in the snapshot's `battery_modules`. */
+  module_index: number;
+  min_cell_v: number | null;
+  max_cell_v: number | null;
+  /** Largest max-minus-min cell voltage seen that day, mV. */
+  max_spread_mv: number | null;
+  /** Largest spread seen while the module was nearly full, mV. */
+  full_spread_mv: number | null;
+  cycles: number | null;
+  max_temp_c: number | null;
+  /** BMS-reported calibrated capacity, Ah. */
+  capacity_ah: number | null;
+  design_capacity_ah: number | null;
+  bms_firmware: number | null;
+  samples: number;
+}

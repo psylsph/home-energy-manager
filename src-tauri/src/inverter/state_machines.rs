@@ -1699,6 +1699,19 @@ pub(crate) fn check_dispatch_hold(
 ) -> Option<Vec<RegisterWrite>> {
     if in_dispatch {
         let starting = *state == DispatchHoldState::Idle;
+        // The hold ends by restoring plain Eco, so it only starts from plain
+        // Eco (where the battery would drain into the car outside the user's
+        // own schedules) or by joining a pause another HEM owner holds. A
+        // manual Pause, Timed Demand or Timed Export is the user's choice and
+        // is left alone: restoring Eco at the end would undo it.
+        if starting && !other_active && snap.battery_mode != BatteryMode::Eco {
+            // Per poll for the whole dispatch, so debug rather than info.
+            tracing::debug!(
+                mode = ?snap.battery_mode,
+                "Dispatch hold: smart charging running, but the battery is not in plain Eco; leaving it alone"
+            );
+            return None;
+        }
         *state = DispatchHoldState::Holding;
         if starting {
             // Capture the reserve only for the first owner of the pause; a
@@ -1708,9 +1721,10 @@ pub(crate) fn check_dispatch_hold(
                     reserve: snap.battery_reserve as u16,
                 });
             }
-            if other_active {
-                return None;
-            }
+            // An owner that is starting always writes the pause, even when
+            // another owner holds it: that owner may be restoring Eco in this
+            // same poll, and these writes follow its restore. They change
+            // nothing if the battery is already paused.
             tracing::info!("Dispatch hold: smart charging started, pausing battery discharge");
             return Some(discharge_pause_writes(snap.device_type, 100));
         }
@@ -1946,9 +1960,11 @@ pub(crate) fn check_load_limiter_at(
                             reserve: snap.battery_reserve as u16,
                         });
                     }
-                    if !other_active {
-                        return Some(discharge_pause_writes(snap.device_type, 100));
-                    }
+                    // Always write the pause, even when another owner holds
+                    // it: that owner may be restoring Eco in this same poll,
+                    // and this write follows its restore. It changes nothing
+                    // if the battery is already paused.
+                    return Some(discharge_pause_writes(snap.device_type, 100));
                 }
             } else {
                 tracing::info!(
@@ -9008,12 +9024,12 @@ mod tests {
 
     #[test]
     fn dispatch_hold_restores_the_minimum_reserve_when_none_was_saved() {
-        // A reserve of 100 is not a real baseline (it is what the pause
-        // writes), so it is never saved and release falls back to 4%.
+        // A reserve below the 4% minimum is not a real baseline, so it is
+        // never saved and release falls back to 4%.
         let mut state = DispatchHoldState::Idle;
         let mut saved = None;
         check_dispatch_hold(
-            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            &dispatch_snap(BatteryMode::Eco, 3),
             true,
             &mut state,
             &mut saved,
@@ -9034,11 +9050,13 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_hold_joins_an_existing_limiter_pause_without_writing() {
-        // The load limiter already paused the battery and saved 23%.
+    fn dispatch_hold_joining_an_existing_limiter_pause_rewrites_it() {
+        // The load limiter already paused the battery and saved 23%. The
+        // write is a no-op unless that limiter is restoring in this same
+        // poll, in which case it makes the battery end paused.
         let mut state = DispatchHoldState::Idle;
         let mut saved = Some(LoadLimiterSaved { reserve: 23 });
-        assert!(check_dispatch_hold(
+        let writes = check_dispatch_hold(
             &dispatch_snap(BatteryMode::EcoPaused, 100),
             true,
             &mut state,
@@ -9046,7 +9064,8 @@ mod tests {
             true,
             false,
         )
-        .is_none());
+        .expect("a starting owner always writes the pause");
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 100));
         assert_eq!(state, DispatchHoldState::Holding);
         assert_eq!(saved, Some(LoadLimiterSaved { reserve: 23 }));
     }
@@ -9187,9 +9206,13 @@ mod tests {
         owners.saved = Some(LoadLimiterSaved { reserve: 23 });
 
         // The house load has fallen, so the load limiter lets go just as the
-        // car's dispatch starts. The battery is already paused and stays so.
+        // car's dispatch starts. The battery is already paused and stays so:
+        // the starting hold re-writes the pause (a no-op here) and never a
+        // restore.
         let writes = owners.poll(&load_snap(BatteryMode::EcoPaused, 100, 500), true);
-        assert!(writes.is_empty(), "nothing to write: {writes:?}");
+        assert_eq!(last_value(&writes, HR_BATTERY_SOC_RESERVE), Some(100));
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(writes[0].0, "Dispatch hold");
         assert_eq!(owners.load_state, LoadLimiterState::Idle);
         assert_eq!(owners.dispatch_state, DispatchHoldState::Holding);
         assert_eq!(owners.saved, Some(LoadLimiterSaved { reserve: 23 }));
@@ -9250,5 +9273,152 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, "Dispatch hold");
         assert!(has_write(&writes[0].1, HR_BATTERY_SOC_RESERVE, 100));
+    }
+
+    // ---- Review of v0.94.0: what the hold may start from (finding 2) ----
+
+    #[test]
+    fn dispatch_hold_only_starts_from_plain_eco() {
+        // A user's own choice is never taken over: restoring "Eco" at the
+        // end would undo a manual Pause (reserve 100, nothing saved) or
+        // disarm Timed Demand / Timed Export.
+        for mode in [
+            BatteryMode::EcoPaused,
+            BatteryMode::TimedDemand,
+            BatteryMode::TimedExport,
+            BatteryMode::ExportPaused,
+            BatteryMode::Unknown,
+        ] {
+            let mut state = DispatchHoldState::Idle;
+            let mut saved = None;
+            let writes = check_dispatch_hold(
+                &dispatch_snap(mode, 100),
+                true,
+                &mut state,
+                &mut saved,
+                false,
+                false,
+            );
+            assert!(writes.is_none(), "{mode:?} must not start a hold");
+            assert_eq!(state, DispatchHoldState::Idle, "{mode:?}");
+            assert_eq!(saved, None, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_manual_pause_survives_a_dispatch_untouched() {
+        // The user paused the battery (reserve 100). A dispatch starts and
+        // ends: HEM writes nothing, so the pause is still the user's.
+        let mut owners = Owners::new();
+        owners.load_config.enabled = false;
+        let paused = load_snap(BatteryMode::EcoPaused, 100, 500);
+        assert!(owners.poll(&paused, true).is_empty());
+        assert!(owners.poll(&paused, true).is_empty());
+        assert!(owners.poll(&paused, false).is_empty());
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Idle);
+        assert!(!owners.dispatch_state.is_actively_pausing());
+    }
+
+    #[test]
+    fn timed_export_is_not_disarmed_by_a_dispatch() {
+        let mut owners = Owners::new();
+        owners.load_config.enabled = false;
+        let armed = load_snap(BatteryMode::TimedExport, 4, 500);
+        assert!(owners.poll(&armed, true).is_empty());
+        assert!(owners.poll(&armed, false).is_empty());
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Idle);
+    }
+
+    #[test]
+    fn dispatch_hold_joins_a_limiter_pause_whatever_the_mode_reads() {
+        // Another HEM limiter owns the pause, so Eco Paused is expected.
+        let mut state = DispatchHoldState::Idle;
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        let _ = check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            true,
+            &mut state,
+            &mut saved,
+            true,
+            false,
+        );
+        assert_eq!(state, DispatchHoldState::Holding);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 23 }));
+    }
+
+    // ---- Review of v0.94.0: one owner letting go as another starts (finding 3) ----
+
+    /// The last register write to `address` across a poll's writes, in order.
+    fn last_value(writes: &[(&'static str, Vec<RegisterWrite>)], address: u16) -> Option<u16> {
+        writes
+            .iter()
+            .flat_map(|(_, w)| w.iter())
+            .filter(|w| w.address == address)
+            .map(|w| w.value)
+            .next_back()
+    }
+
+    #[test]
+    fn a_dispatch_starting_as_the_temperature_limiter_restores_ends_paused() {
+        let mut owners = Owners::new();
+        owners.load_config.enabled = false;
+        owners.temperature_config = TemperatureLimiterConfig {
+            enabled: true,
+            confirmation_readings: 1,
+            ..Default::default()
+        };
+        owners.temperature_state = TemperatureLimiterState::Paused;
+        owners.saved = Some(LoadLimiterSaved { reserve: 23 });
+
+        // The inverter has cooled, so the temperature limiter writes its
+        // restore, in the same poll that the car's dispatch starts.
+        let mut snap = load_snap(BatteryMode::EcoPaused, 100, 500);
+        snap.inverter_temperature = 40.0;
+        let writes = owners.poll(&snap, true);
+
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Holding);
+        assert_eq!(
+            last_value(&writes, HR_BATTERY_SOC_RESERVE),
+            Some(100),
+            "the battery must end the poll paused, not restored: {writes:?}"
+        );
+        assert_eq!(last_value(&writes, HR_ENABLE_DISCHARGE), Some(0));
+        assert_eq!(owners.saved, Some(LoadLimiterSaved { reserve: 23 }));
+    }
+
+    #[test]
+    fn the_load_limiter_pausing_as_a_dispatch_releases_ends_paused() {
+        let mut owners = Owners::new();
+        owners.dispatch_state = DispatchHoldState::Holding;
+        owners.load_state = LoadLimiterState::HighLoadPending { consecutive: 0 };
+        owners.saved = Some(LoadLimiterSaved { reserve: 23 });
+
+        // The dispatch has just ended and the hold writes its restore, as the
+        // house load crosses the limiter's threshold.
+        let writes = owners.poll(&load_snap(BatteryMode::EcoPaused, 100, 7000), false);
+
+        assert_eq!(owners.load_state, LoadLimiterState::Paused);
+        assert_eq!(
+            last_value(&writes, HR_BATTERY_SOC_RESERVE),
+            Some(100),
+            "the battery must end the poll paused, not restored: {writes:?}"
+        );
+        assert_eq!(owners.saved, Some(LoadLimiterSaved { reserve: 23 }));
+    }
+
+    #[test]
+    fn the_baseline_survives_the_overlap_and_comes_back_at_the_end() {
+        // Dispatch ends while the load limiter takes over; later the load
+        // falls and the limiter restores the reserve the user had.
+        let mut owners = Owners::new();
+        owners.dispatch_state = DispatchHoldState::Holding;
+        owners.load_state = LoadLimiterState::HighLoadPending { consecutive: 0 };
+        owners.saved = Some(LoadLimiterSaved { reserve: 23 });
+        let _ = owners.poll(&load_snap(BatteryMode::EcoPaused, 100, 7000), false);
+        // Next poll: the pause was applied; the hold sees the limiter owns it.
+        let writes = owners.poll(&load_snap(BatteryMode::EcoPaused, 100, 7000), false);
+        assert!(writes.is_empty(), "{writes:?}");
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Idle);
+        assert_eq!(owners.saved, Some(LoadLimiterSaved { reserve: 23 }));
     }
 }

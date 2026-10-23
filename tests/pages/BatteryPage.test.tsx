@@ -20,6 +20,9 @@ vi.mock('../../src/components/BatteryPanel', () => ({
 vi.mock('../../src/components/BatterySocChart', () => ({
   default: () => <div data-testid="soc-chart">BatterySocChart</div>,
 }));
+vi.mock('../../src/components/BatteryHealthPanel', () => ({
+  default: () => <div data-testid="health-panel">BatteryHealthPanel</div>,
+}));
 vi.mock('../../src/components/AwaitingConnection', () => ({
   default: ({ showFaq }: { showFaq?: boolean }) => (
     <div data-testid="awaiting">AwaitingConnection faq={String(showFaq ?? false)}</div>
@@ -145,6 +148,18 @@ describe('BatteryPage', () => {
       expect(screen.getByTestId('soc-chart')).toBeDefined();
     });
 
+    it('puts the SOC trend chart above the modules section', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ battery_modules: [makeModule()] }),
+        connectionState: 'connected',
+        panelGraphsEnabled: true,
+      });
+      render(<BatteryPage />);
+      const chart = screen.getByTestId('soc-chart');
+      const modules = screen.getByText(/Modules \(1\)/);
+      expect(chart.compareDocumentPosition(modules) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
     it('hides the SOC trend chart when panel graphs are disabled', () => {
       useInverterStore.setState({
         snapshot: makeSnapshot(),
@@ -221,6 +236,48 @@ describe('BatteryPage', () => {
       expect(screen.getByText('Cell Voltages')).toBeDefined();
       fireEvent.click(header); // collapse
       expect(screen.queryByText('Cell Voltages')).toBeNull();
+    });
+
+    it('shows the live cell spread of an expanded module', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          battery_modules: [makeModule({ cell_voltages: [3.3, 3.32, 3.31] })],
+        }),
+        connectionState: 'connected',
+      });
+      render(<BatteryPage />);
+      fireEvent.click(screen.getByText('#1'));
+      expect(screen.getByText('Cell Spread')).toBeDefined();
+      expect(screen.getByText('20 mV')).toBeDefined();
+    });
+
+    it('hides the cell spread when a cell read failed', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          battery_modules: [makeModule({ cell_voltages: [3.3, 0, 3.31] })],
+        }),
+        connectionState: 'connected',
+      });
+      render(<BatteryPage />);
+      fireEvent.click(screen.getByText('#1'));
+      expect(screen.queryByText('Cell Spread')).toBeNull();
+    });
+
+    it('shows the battery health panel when there are modules, not for batteryless devices', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ battery_modules: [makeModule()] }),
+        connectionState: 'connected',
+      });
+      const { unmount } = render(<BatteryPage />);
+      expect(screen.getByTestId('health-panel')).toBeDefined();
+      unmount();
+
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ battery_modules: [] }),
+        connectionState: 'connected',
+      });
+      render(<BatteryPage />);
+      expect(screen.queryByTestId('health-panel')).toBeNull();
     });
 
     it('shows the developer BMS status registers only in developer mode', () => {

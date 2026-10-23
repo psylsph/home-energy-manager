@@ -2299,6 +2299,26 @@ async fn plan_history_endpoint_is_routed() {
 }
 
 // ====================================================================
+// GET /api/battery-health — issue #393
+// ====================================================================
+
+/// The route is wired: an empty state answers with no days, and an
+/// out-of-range window is rejected.
+#[tokio::test]
+async fn battery_health_endpoint_is_routed() {
+    let _config = IsolatedConfig::enter();
+    let router = create_router(Arc::new(AppState::new()));
+
+    let (status, body) = get_json(&router, "/api/battery-health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["days"], serde_json::json!([]));
+
+    let (status, _) = get_json(&router, "/api/battery-health?days=0").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ====================================================================
 // GET /api/forecast/plan — issue #283 Phase 2
 // ====================================================================
 

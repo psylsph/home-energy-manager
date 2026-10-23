@@ -11,7 +11,12 @@ Generates physically-consistent readings for a UK residential solar+battery syst
 
 Usage:
   python3 backfill-history.py [--db PATH] [--days N] [--interval SECS]
-                              [--timezone NAME] [--allow-live-db]
+                              [--timezone NAME] [--modules N] [--allow-live-db]
+
+Also fills the daily battery health summary (battery_health_daily, one row per
+module per day) for --modules simulated battery modules (default 2, 0 to skip).
+Module 1 is healthy; module 2 is a weakening one whose cell spread widens over
+time, so the Battery Health charts have a trend to show.
 
 The default database is protected by an explicit --allow-live-db opt-in;
 passing --db points the script at an isolated database explicitly.
@@ -78,6 +83,41 @@ READING_COLUMNS = (
 )
 
 
+# Same DDL as the app's schema (history/mod.rs); IF NOT EXISTS makes it safe
+# to run against a database the app has already migrated.
+BATTERY_HEALTH_DDL = '''
+CREATE TABLE IF NOT EXISTS battery_health_daily (
+    day                TEXT NOT NULL,
+    module_index       INTEGER NOT NULL,
+    min_cell_v         REAL,
+    max_cell_v         REAL,
+    max_spread_mv      REAL,
+    full_spread_mv     REAL,
+    cycles             INTEGER,
+    max_temp_c         REAL,
+    capacity_ah        REAL,
+    design_capacity_ah REAL,
+    bms_firmware       INTEGER,
+    samples            INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (day, module_index)
+)
+'''
+
+BATTERY_HEALTH_COLUMNS = (
+    'day', 'module_index', 'min_cell_v', 'max_cell_v',
+    'max_spread_mv', 'full_spread_mv', 'cycles', 'max_temp_c', 'capacity_ah',
+    'design_capacity_ah', 'bms_firmware', 'samples', 'updated_at',
+)
+
+# The simulated battery trends are functions of the calendar date, not of
+# --days, so a rerun with a different range agrees with rows already there.
+HEALTH_ANCHOR = datetime(2026, 8, 1).date()
+HEALTH_DESIGN_AH = 100.0
+HEALTH_FIRMWARE = 3015
+HEALTH_FULL_SOC = 95          # matches FULL_SOC_PERCENT in the app
+
+
 def default_db_path():
     """Return the current user's portable HEM history path."""
     return Path.home() / '.givenergy-local' / 'history.db'
@@ -117,6 +157,60 @@ def validate_database(path):
                 raise ValueError(f'missing columns in readings: {", ".join(missing)}')
     except sqlite3.Error as exc:
         raise ValueError(f'invalid SQLite database: {exc}') from exc
+
+
+def generate_battery_health(date_obj, day_rows, modules, interval_secs):
+    """
+    Daily battery health rows (one per module) for one day of generated readings.
+
+    Module 1 is healthy (spread ~10 mV, capacity ~98 Ah of 100). Module 2 is
+    weakening: its spread widens ~0.5 mV a day and its BMS-reported capacity
+    steps down every ~30 days, like a recalibration. Cycles grow ~0.8 a day.
+    A day only has a near-full spread when the battery reached 95% that day,
+    as in the app, and temperature follows the season.
+    """
+    if not day_rows or modules <= 0:
+        return []
+    days_since = (date_obj - HEALTH_ANCHOR).days
+    reached_full = max(r[11] for r in day_rows) >= HEALTH_FULL_SOC
+    max_soc_row_temp = max(r[14] for r in day_rows)   # battery_temperature
+    updated_at = day_rows[-1][0]
+    samples = len(day_rows)
+    out = []
+    for index in range(modules):
+        rng = random.Random(date_obj.toordinal() * 100 + index)
+        weak = index == 1
+        if weak:
+            spread = 20.0 + max(0, days_since) * 0.5 + rng.gauss(0, 2.5)
+            capacity = 96.0 - max(0, days_since // 30) * 1.2
+        else:
+            spread = 10.0 + rng.gauss(0, 2.0)
+            capacity = 98.0 - max(0, days_since // 90) * 0.3
+        spread = max(3.0, spread)
+        # The day's worst spread is seen at any charge level; the near-full
+        # one is a little smaller, and absent on days the battery never filled.
+        worst = spread * rng.uniform(1.2, 1.6)
+        full = spread if reached_full else None
+        mid = 3.30 + rng.uniform(0.0, 0.05)
+        max_cell = mid + worst / 2000.0
+        min_cell = mid - worst / 2000.0
+        cycles = max(1, 150 + int(days_since * 0.8)) - (7 * index)
+        out.append((
+            date_obj.strftime('%Y-%m-%d'),
+            index,
+            round(min_cell, 3),
+            round(max_cell, 3),
+            round(worst, 1),
+            round(full, 1) if full is not None else None,
+            cycles,
+            round(max_soc_row_temp + 1.5 + index * 0.8 + rng.gauss(0, 0.3), 1),
+            round(capacity, 1),
+            HEALTH_DESIGN_AH,
+            HEALTH_FIRMWARE,
+            samples,
+            updated_at,
+        ))
+    return out
 
 
 def solar_power_model(hour_utc, day_of_year, cloud_factor,
@@ -401,6 +495,9 @@ def main():
                         help='Interval between readings in seconds')
     parser.add_argument('--timezone', default=DEFAULT_TIMEZONE_NAME,
                         help=f'IANA timezone for local calendar days (default: {DEFAULT_TIMEZONE_NAME})')
+    parser.add_argument('--modules', type=int, default=2,
+                        help='Simulated battery modules for the daily battery health '
+                             'summary (default 2; 0 skips it)')
     parser.add_argument('--allow-live-db', action='store_true',
                         help='Allow the portable default database to be modified')
     args = parser.parse_args()
@@ -413,6 +510,8 @@ def main():
         parser.error('--days must not be negative')
     if args.interval <= 0:
         parser.error('--interval must be positive')
+    if args.modules < 0:
+        parser.error('--modules must not be negative')
 
     using_live_default = args.db is None
     db_path = default_db_path() if using_live_default else Path(args.db).expanduser()
@@ -449,12 +548,15 @@ def main():
 
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+    if args.modules > 0:
+        cur.execute(BATTERY_HEALTH_DDL)
 
     # Start with a reasonable overnight SOC
     state = {'soc': 45.0}
 
     total_inserted = 0
     total_skipped = 0
+    total_health_inserted = 0
 
     current = start_date
     while current <= today:
@@ -475,14 +577,27 @@ def main():
         sql = f"INSERT OR IGNORE INTO readings ({columns}) VALUES ({placeholders})"
 
         cur.executemany(sql, day_rows)
-        total_inserted += cur.rowcount
-        total_skipped += len(day_rows) - cur.rowcount
+        readings_inserted = cur.rowcount
+        total_inserted += readings_inserted
+        total_skipped += len(day_rows) - readings_inserted
+
+        health_inserted = 0
+        health_rows = generate_battery_health(current, day_rows, args.modules, args.interval)
+        if health_rows:
+            health_sql = (
+                f"INSERT OR IGNORE INTO battery_health_daily ({', '.join(BATTERY_HEALTH_COLUMNS)}) "
+                f"VALUES ({','.join(['?'] * len(BATTERY_HEALTH_COLUMNS))})"
+            )
+            cur.executemany(health_sql, health_rows)
+            health_inserted = cur.rowcount
+            total_health_inserted += health_inserted
 
         conn.commit()
 
         date_str = current.strftime('%Y-%m-%d')
-        print(f"  {date_str}: {len(day_rows)} rows generated, {cur.rowcount} inserted, "
-              f"{len(day_rows) - cur.rowcount} skipped (existing)")
+        health_note = f", {health_inserted} battery health" if args.modules > 0 else ''
+        print(f"  {date_str}: {len(day_rows)} rows generated, {readings_inserted} inserted, "
+              f"{len(day_rows) - readings_inserted} skipped (existing){health_note}")
 
         current += timedelta(days=1)
 
@@ -499,6 +614,10 @@ def main():
     print(f"\n{'='*60}")
     print(f"Done! Inserted {total_inserted:,} new rows, skipped {total_skipped:,} existing")
     print(f"Total rows in DB: {total:,}")
+    if args.modules > 0:
+        cur.execute("SELECT COUNT(*) FROM battery_health_daily")
+        print(f"Battery health: inserted {total_health_inserted:,} daily rows "
+              f"({cur.fetchone()[0]:,} in DB)")
     print(f"Date range: {min_text} to {max_text}")
 
     conn.close()

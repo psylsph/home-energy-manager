@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPercent, formatVoltage, formatTemp } from '../lib/format';
+import { cellSpreadMv } from '../lib/batteryHealth';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryPanel from '../components/BatteryPanel';
+import BatteryHealthPanel from '../components/BatteryHealthPanel';
 import BatterySocChart from '../components/BatterySocChart';
 import AwaitingConnection from '../components/AwaitingConnection';
 
@@ -36,6 +38,11 @@ export default function BatteryPage() {
       {/* SOC overview card */}
       <BatteryPanel snapshot={s} />
 
+      {/* SOC trend — replicates the History → Battery "SOC %" chart
+          so the Battery tab is self-contained (issue #81). Hidden when the
+          user disables the "Panel Graphs" toggle in Settings. */}
+      {panelGraphsEnabled && <BatterySocChart />}
+
       {/* Battery modules */}
       {s.battery_modules.length > 0 && (
         <section className="bg-bg-surface rounded-2xl p-6 space-y-4">
@@ -46,6 +53,7 @@ export default function BatteryPage() {
             {s.battery_modules.map((m) => {
               const isExpanded = expandedModule === m.index;
               const cellCount = m.cell_voltages?.length ?? 0;
+              const spreadMv = cellSpreadMv(m.cell_voltages);
               return (
                 <div key={m.index} className="flex flex-col">
                   {/* Module header row */}
@@ -94,6 +102,14 @@ export default function BatteryPage() {
                         )}
                         <span className="text-text-secondary">Cells</span>
                         <span className="text-text-primary font-mono text-right">{m.num_cells || cellCount}</span>
+                        {spreadMv !== null && (
+                          <>
+                            <span className="text-text-secondary">Cell Spread</span>
+                            <span className="text-text-primary font-mono text-right">
+                              {spreadMv.toFixed(0)} mV
+                            </span>
+                          </>
+                        )}
                         {m.num_cycles > 0 && (
                           <>
                             <span className="text-text-secondary">Cycles</span>
@@ -296,6 +312,8 @@ export default function BatteryPage() {
           </div>
         </section>
       )}
+      {/* Daily per-module health trend (issue #393). */}
+      {s.battery_modules.length > 0 && <BatteryHealthPanel />}
       {/* No battery modules — show explanation for batteryless devices */}
       {s.battery_modules.length === 0 && (
         <section className="bg-bg-surface rounded-2xl p-6">
@@ -311,11 +329,6 @@ export default function BatteryPage() {
           </div>
         </section>
       )}
-
-      {/* SOC trend — replicates the History → Battery "SOC %" chart
-          so the Battery tab is self-contained (issue #81). Hidden when the
-          user disables the "Panel Graphs" toggle in Settings. */}
-      {panelGraphsEnabled && <BatterySocChart />}
     </div>
   );
 }

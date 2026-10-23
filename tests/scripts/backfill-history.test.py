@@ -165,5 +165,119 @@ class BackfillHistoryTests(unittest.TestCase):
         self.assertEqual(pv1_counter[-1], solar_counter[-1])
 
 
+    # -- daily battery health (issue #393) ---------------------------------
+
+    def health_rows(self, path: Path) -> list[sqlite3.Row]:
+        with sqlite3.connect(path) as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(
+                "SELECT * FROM battery_health_daily ORDER BY day, module_index"
+            ).fetchall()
+
+    def test_battery_health_table_matches_the_apps_schema(self) -> None:
+        rust = (ROOT / "src-tauri" / "src" / "history" / "mod.rs").read_text()
+        block = rust.split("CREATE TABLE IF NOT EXISTS battery_health_daily (")[1].split(");")[0]
+        rust_columns = [
+            line.split()[0] for line in block.splitlines()
+            if line.strip() and not line.strip().startswith(("--", "PRIMARY"))
+        ]
+        self.assertEqual(rust_columns, list(backfill.BATTERY_HEALTH_COLUMNS))
+        with sqlite3.connect(":memory:") as conn:
+            conn.execute(backfill.BATTERY_HEALTH_DDL)
+            script_columns = [row[1] for row in conn.execute("PRAGMA table_info(battery_health_daily)")]
+        self.assertEqual(script_columns, rust_columns)
+
+    def test_backfill_writes_one_health_row_per_module_per_day(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+
+            result = self.run_script("--db", str(path), "--days", "9", "--interval", "3600")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = self.health_rows(path)
+            days = {row["day"] for row in rows}
+            self.assertEqual(len(rows), 2 * len(days))
+            self.assertEqual({row["module_index"] for row in rows}, {0, 1})
+            for row in rows:
+                self.assertLess(row["min_cell_v"], row["max_cell_v"])
+                self.assertGreaterEqual(row["max_spread_mv"], row["full_spread_mv"] or 0)
+                self.assertEqual(row["design_capacity_ah"], backfill.HEALTH_DESIGN_AH)
+                self.assertLess(row["capacity_ah"], row["design_capacity_ah"])
+                self.assertGreater(row["samples"], 0)
+            self.assertIn("Battery health:", result.stdout)
+
+    def test_health_rerun_adds_nothing_and_keeps_existing_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+            args = ("--db", str(path), "--days", "5", "--interval", "3600")
+            self.assertEqual(self.run_script(*args).returncode, 0)
+            first = [tuple(row) for row in self.health_rows(path)]
+            with sqlite3.connect(path) as conn:
+                conn.execute("UPDATE battery_health_daily SET cycles = 999999 WHERE module_index = 0")
+
+            self.assertEqual(self.run_script(*args).returncode, 0)
+
+            rows = self.health_rows(path)
+            self.assertEqual(len(rows), len(first))
+            self.assertTrue(all(row["cycles"] == 999999 for row in rows if row["module_index"] == 0))
+
+    def test_modules_zero_skips_battery_health_entirely(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+
+            result = self.run_script("--db", str(path), "--days", "2", "--interval", "3600", "--modules", "0")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with sqlite3.connect(path) as conn:
+                table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'battery_health_daily'"
+                ).fetchone()
+            self.assertIsNone(table)
+
+    def test_negative_modules_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+            result = self.run_script("--db", str(path), "--modules", "-1")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--modules", result.stderr)
+
+    def test_weak_module_spread_widens_while_the_healthy_one_stays_flat(self) -> None:
+        tz = ZoneInfo("Europe/London")
+
+        def spread(day: date, module: int) -> float:
+            rows = backfill.generate_day(day, 3600, {"soc": 100.0}, tz)
+            health = backfill.generate_battery_health(day, rows, 2, 3600)
+            return health[module][4]  # max_spread_mv
+
+        early, late = date(2026, 8, 5), date(2026, 12, 5)
+        self.assertGreater(spread(late, 1), spread(early, 1) + 30)
+        self.assertLess(abs(spread(late, 0) - spread(early, 0)), 15)
+
+    def test_near_full_spread_is_absent_on_days_the_battery_never_filled(self) -> None:
+        day = date(2026, 10, 1)
+        low = [(1_000_000 + i,) + (0,) * 10 + (60,) + (0, 0, 20.0) for i in range(3)]
+        full = [(1_000_000 + i,) + (0,) * 10 + (97,) + (0, 0, 20.0) for i in range(3)]
+        self.assertIsNone(backfill.generate_battery_health(day, low, 1, 60)[0][5])
+        self.assertIsNotNone(backfill.generate_battery_health(day, full, 1, 60)[0][5])
+
+    def test_health_is_deterministic_and_independent_of_the_days_range(self) -> None:
+        tz = ZoneInfo("Europe/London")
+        rows = backfill.generate_day(date(2026, 10, 1), 3600, {"soc": 45.0}, tz)
+        self.assertEqual(
+            backfill.generate_battery_health(date(2026, 10, 1), rows, 2, 3600),
+            backfill.generate_battery_health(date(2026, 10, 1), rows, 2, 3600),
+        )
+
+    def test_no_rows_or_no_modules_generate_no_health(self) -> None:
+        tz = ZoneInfo("Europe/London")
+        rows = backfill.generate_day(date(2026, 10, 1), 3600, {"soc": 45.0}, tz)
+        self.assertEqual(backfill.generate_battery_health(date(2026, 10, 1), [], 2, 3600), [])
+        self.assertEqual(backfill.generate_battery_health(date(2026, 10, 1), rows, 0, 3600), [])
+
+
 if __name__ == "__main__":
     unittest.main()

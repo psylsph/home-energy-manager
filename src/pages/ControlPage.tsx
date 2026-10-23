@@ -2824,7 +2824,10 @@ export default function ControlPage() {
   const cosyActive = snapshot?.cosy_active ?? false;
   const loadLimiterActive = snapshot?.load_limiter_active ?? false;
   const temperatureLimiterActive = snapshot?.temperature_limiter_active ?? false;
-  const automatedPauseActive = loadLimiterActive || temperatureLimiterActive;
+  // The Intelligent Octopus Go hold pauses discharge during a smart charge
+  // (issue #394). Resume turns it off, like the limiters.
+  const dispatchHoldActive = snapshot?.dispatch_hold_active ?? false;
+  const automatedPauseActive = loadLimiterActive || temperatureLimiterActive || dispatchHoldActive;
   const ecoEnabled = snapshot?.battery_power_mode != null
     ? snapshot.battery_power_mode === 1
     : currentMode === 'eco' || currentMode === 'eco_paused' || currentMode === 'timed_demand';
@@ -3728,9 +3731,13 @@ export default function ControlPage() {
                   : pauseDischargePending === 'resume'
                     ? 'Resuming Discharge…'
                     : automatedPauseActive
-                      ? loadLimiterActive && temperatureLimiterActive
-                        ? 'Disable Limiters & Resume Discharge'
-                        : 'Disable Limiter & Resume Discharge'
+                      ? dispatchHoldActive
+                        ? loadLimiterActive || temperatureLimiterActive
+                          ? 'Stop Automatic Pauses & Resume Discharge'
+                          : 'Turn Off Dispatch Hold & Resume Discharge'
+                        : loadLimiterActive && temperatureLimiterActive
+                          ? 'Disable Limiters & Resume Discharge'
+                          : 'Disable Limiter & Resume Discharge'
                       : currentMode === 'eco_paused' ? 'Resume Discharge' : 'Pause Discharge'}
               </span>
             </button>
@@ -3741,6 +3748,13 @@ export default function ControlPage() {
             path="/api/control/sync-clock"
           />
         </div>
+        {dispatchHoldActive && (
+          <p className="text-text-secondary text-xs" role="status" aria-label="Dispatch hold">
+            The Intelligent Octopus Go hold has paused battery discharge for a smart charge of your
+            car, and restores it by itself when the charge ends. Resuming now stops the hold;
+            switch it back on from the Octopus page if you want it for later charges.
+          </p>
+        )}
         {forceChargeError && (
           <p className="text-red-400 text-xs" role="alert">{forceChargeError}</p>
         )}

@@ -5428,7 +5428,10 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
 /// serve house load again. If a limiter captured a previous reserve, use it;
 /// otherwise fall back to the app's normal 4% reserve. A manual unpause while
 /// either limiter owns the pause disables all active pause limiters, making
-/// the override lasting instead of immediately starting another countdown.
+/// the override lasting instead of immediately starting another countdown. An
+/// active Intelligent Octopus Go dispatch hold is turned off the same way: left
+/// on, it would pause the battery again on the next poll, and the reserve
+/// taken here would be gone when the dispatch ends.
 pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     // See pause_battery: refuse while clearly offline so the caller gets an
     // immediate, precise error instead of a silent timeout. No side effects
@@ -5442,16 +5445,39 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         );
     }
     let device_type = latest_device_type(&state).await;
+    // Whether a smart charge is running (or being kept after a restart), read
+    // before the pause locks: only then would the hold start again, so only
+    // then does Resume switch the user's opt-in off.
+    let dispatch_running = {
+        let now = chrono::Utc::now();
+        let dispatches = state.octopus_dispatches.lock().await;
+        dispatches.hold_now(now) || dispatches.holding_for_restart(now)
+    };
+    // With a smart charge running and the hold opted in, Resume has to turn
+    // the opt-in off even if the hold never started (a manual pause made it
+    // stand aside): the Eco written below would otherwise start it on the
+    // next poll, and Resume would do nothing.
+    let hold_opted_in = dispatch_running
+        && crate::settings::Settings::load_async()
+            .await
+            .octopus_dispatch_hold;
     // Follow the poll loop's load config → load state → temperature config →
     // temperature state → shared saved reserve lock order.
-    let (restore_reserve, disabled_load_limiter, disabled_temperature_limiter) = {
+    let (
+        restore_reserve,
+        disabled_load_limiter,
+        disabled_temperature_limiter,
+        disabled_dispatch_hold,
+    ) = {
         let mut load_config = state.load_limiter_config.lock().await;
         let mut load_state = state.load_limiter_state.lock().await;
         let mut temperature_config = state.temperature_limiter_config.lock().await;
         let mut temperature_state = state.temperature_limiter_state.lock().await;
+        let mut dispatch_state = state.dispatch_hold_state.lock().await;
         let mut saved = state.load_limiter_saved.lock().await;
         let disabled_load_limiter = load_state.is_actively_pausing();
         let disabled_temperature_limiter = temperature_state.is_actively_pausing();
+        let disabled_dispatch_hold = dispatch_state.is_actively_pausing();
         if disabled_load_limiter {
             load_config.enabled = false;
         }
@@ -5460,15 +5486,19 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         }
         *load_state = crate::inverter::poll::LoadLimiterState::Idle;
         *temperature_state = crate::inverter::poll::TemperatureLimiterState::Idle;
+        *dispatch_state = crate::inverter::poll::DispatchHoldState::Idle;
         let restore_reserve = saved.take().map(|s| s.reserve).unwrap_or(4).clamp(4, 99);
         (
             restore_reserve,
             disabled_load_limiter,
             disabled_temperature_limiter,
+            disabled_dispatch_hold,
         )
     };
+    // The opt-in goes off only when the hold would otherwise start again.
+    let turn_off_dispatch_hold = dispatch_running && (disabled_dispatch_hold || hold_opted_in);
 
-    // Transactional save (review #1 follow-up): the five-field reset
+    // Transactional save (review #1 follow-up): the multi-field reset
     // happens under the settings lock so a concurrent writer can't
     // resurrect any of the flags between our read and our save.
     if let Err(e) = crate::settings::Settings::update_async(move |settings| {
@@ -5478,13 +5508,24 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         if disabled_temperature_limiter {
             settings.temperature_limiter_enabled = false;
         }
+        if turn_off_dispatch_hold {
+            settings.octopus_dispatch_hold = false;
+        }
         settings.load_limiter_active_persisted = false;
         settings.temperature_limiter_active_persisted = false;
+        settings.dispatch_hold_active_persisted = false;
         settings.load_limiter_saved_reserve = None;
     })
     .await
     {
         tracing::warn!("Failed to persist load limiter reset during manual unpause: {e}");
+    }
+    if turn_off_dispatch_hold {
+        // Forget the list so nothing holds on it and a later switch-on starts
+        // from a fresh read. Only now, with the setting saved: the woken loop
+        // reads it at once, and would otherwise fetch a list and hold again.
+        state.octopus_dispatches.lock().await.reset();
+        state.octopus_dispatches_wake.notify_one();
     }
 
     let mut writes = Vec::new();
@@ -5506,6 +5547,7 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         restore_reserve,
         disabled_load_limiter,
         disabled_temperature_limiter,
+        disabled_dispatch_hold,
         "UnpauseBattery encoded: {:?}",
         writes
     );
@@ -5516,8 +5558,11 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         Ok(()) => {}
         Err(msg) => {
             tracing::warn!("Resume discharge rejected: {msg}");
-            let detail = if disabled_load_limiter || disabled_temperature_limiter {
-                format!(" Active limiter(s) were disabled, but the inverter rejected the reserve restore ({msg}); please try again.")
+            let detail = if disabled_load_limiter
+                || disabled_temperature_limiter
+                || disabled_dispatch_hold
+            {
+                format!(" The active limiter(s) or dispatch hold were turned off, but the inverter rejected the reserve restore ({msg}); please try again.")
             } else {
                 format!(" The inverter rejected the reserve restore ({msg}); please try again.")
             };
@@ -5526,12 +5571,25 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
             ));
         }
     }
-    let message = if disabled_load_limiter || disabled_temperature_limiter {
-        format!(
-            "Active limiter(s) disabled and battery unpaused (reserve restored to {restore_reserve}%)"
-        )
-    } else {
+    let mut turned_off = Vec::new();
+    if disabled_load_limiter || disabled_temperature_limiter {
+        turned_off.push("Active limiter(s) disabled");
+    }
+    if disabled_dispatch_hold || turn_off_dispatch_hold {
+        let (first, later) = if turn_off_dispatch_hold {
+            ("Dispatch hold turned off", "dispatch hold turned off")
+        } else {
+            ("Dispatch hold released", "dispatch hold released")
+        };
+        turned_off.push(if turned_off.is_empty() { first } else { later });
+    }
+    let message = if turned_off.is_empty() {
         format!("Battery unpaused (reserve restored to {restore_reserve}%)")
+    } else {
+        format!(
+            "{} and battery unpaused (reserve restored to {restore_reserve}%)",
+            turned_off.join(", ")
+        )
     };
     ok_response(&message)
 }
@@ -8551,6 +8609,63 @@ pub(crate) async fn get_plan_history_at(
     (
         StatusCode::OK,
         Json(json!({ "ok": true, "data": { "snapshots": snapshots } })),
+    )
+}
+
+/// Query for `GET /api/battery-health` (issue #393): how many local days back
+/// to read, today included. Defaults to six months.
+#[derive(Debug, Deserialize)]
+pub struct BatteryHealthQuery {
+    pub days: Option<i64>,
+}
+
+const BATTERY_HEALTH_DEFAULT_DAYS: i64 = 180;
+/// Ten years: a battery's warranty life, and a few kilobytes per module-year.
+const BATTERY_HEALTH_MAX_DAYS: i64 = 3650;
+
+/// GET /api/battery-health — the daily per-module battery health summary
+/// (cell spread, cycles, temperature, BMS-reported capacity), oldest first.
+pub async fn get_battery_health(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<BatteryHealthQuery>,
+) -> (StatusCode, Json<Value>) {
+    get_battery_health_at(state, params, chrono::Local::now().date_naive()).await
+}
+
+/// [`get_battery_health`] with today passed in, so the range can be tested
+/// deterministically.
+pub(crate) async fn get_battery_health_at(
+    state: Arc<AppState>,
+    params: BatteryHealthQuery,
+    today: chrono::NaiveDate,
+) -> (StatusCode, Json<Value>) {
+    let days = params.days.unwrap_or(BATTERY_HEALTH_DEFAULT_DAYS);
+    if !(1..=BATTERY_HEALTH_MAX_DAYS).contains(&days) {
+        return error_response(&format!(
+            "'days' must be between 1 and {BATTERY_HEALTH_MAX_DAYS}"
+        ));
+    }
+    let since = today - chrono::Duration::days(days - 1);
+    let Some(db) = state.history.lock().await.clone() else {
+        return (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "data": { "days": [] } })),
+        );
+    };
+    let rows = match tokio::task::spawn_blocking(move || {
+        // Polls held for the next flush belong in today's answer.
+        db.flush_battery_health();
+        db.query_battery_health(since, today)
+    })
+    .await
+    {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => return server_error(&error),
+        Err(error) => return server_error(&format!("Battery health worker failed: {error}")),
+    };
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "data": { "days": rows } })),
     )
 }
 
@@ -14680,6 +14795,234 @@ pub(crate) mod tests {
             assert!(writes
                 .iter()
                 .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 23));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_turns_off_an_active_dispatch_hold() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::{DispatchHoldState, LoadLimiterSaved};
+            use crate::modbus::registers::HR_BATTERY_SOC_RESERVE;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            *state.load_limiter_saved.lock().await = Some(LoadLimiterSaved { reserve: 23 });
+            {
+                // A smart dispatch is running, as the hold saw it.
+                let mut dispatches = state.octopus_dispatches.lock().await;
+                dispatches.checked_at = Some(chrono::Utc::now());
+                dispatches.dispatches = vec![crate::octopus_dispatches::Dispatch {
+                    start: chrono::Utc::now() - chrono::Duration::minutes(10),
+                    end: chrono::Utc::now() + chrono::Duration::minutes(50),
+                    kind: Some("SMART".to_string()),
+                    energy_added_kwh: None,
+                }];
+            }
+            let mut settings = crate::settings::Settings::load();
+            settings.octopus_dispatch_hold = true;
+            settings.dispatch_hold_active_persisted = true;
+            settings.load_limiter_saved_reserve = Some(23);
+            settings.save().expect("seed dispatch hold settings");
+
+            let (status, Json(body)) = drive_unpause_battery_completion(&state).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            // The hold is off, so it cannot re-pause on the next poll...
+            assert_eq!(
+                *state.dispatch_hold_state.lock().await,
+                DispatchHoldState::Idle
+            );
+            let persisted = crate::settings::Settings::load();
+            assert!(!persisted.octopus_dispatch_hold);
+            assert!(!persisted.dispatch_hold_active_persisted);
+            assert!(persisted.load_limiter_saved_reserve.is_none());
+            // ... the dispatch list is forgotten, so nothing holds on stale data...
+            {
+                let dispatches = state.octopus_dispatches.lock().await;
+                assert!(dispatches.checked_at.is_none());
+                assert!(!dispatches.hold_now(chrono::Utc::now()));
+            }
+            // ... the real reserve is what comes back, not the 4% fallback...
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert!(writes
+                .iter()
+                .any(|w| w.address == HR_BATTERY_SOC_RESERVE && w.value == 23));
+            // ... and the reply says why the hold stopped.
+            let message = body["message"].as_str().unwrap_or_default().to_lowercase();
+            assert!(message.contains("dispatch hold"), "{message}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_leaves_a_hold_that_is_not_holding_alone() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            let mut settings = crate::settings::Settings::load();
+            settings.octopus_dispatch_hold = true;
+            settings.save().expect("seed settings");
+
+            let (status, Json(body)) = drive_unpause_battery_completion(&state).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                *state.dispatch_hold_state.lock().await,
+                DispatchHoldState::Idle
+            );
+            // The user only resumed a manual pause: the hold stays switched on
+            // for the next dispatch.
+            assert!(crate::settings::Settings::load().octopus_dispatch_hold);
+            let message = body["message"].as_str().unwrap_or_default().to_lowercase();
+            assert!(!message.contains("dispatch hold"), "{message}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_keeps_the_hold_switched_on_when_the_charge_has_ended() {
+        // Releasing is the restore being retried after a dispatch: resuming
+        // clears that in-flight state, but the user's opt-in is for every
+        // later dispatch too, so it must stay on.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Releasing;
+            let mut settings = crate::settings::Settings::load();
+            settings.octopus_dispatch_hold = true;
+            settings.dispatch_hold_active_persisted = true;
+            settings.save().expect("seed settings");
+
+            let (status, Json(body)) = drive_unpause_battery_completion(&state).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                *state.dispatch_hold_state.lock().await,
+                DispatchHoldState::Idle
+            );
+            let persisted = crate::settings::Settings::load();
+            assert!(persisted.octopus_dispatch_hold, "the opt-in stays on");
+            assert!(!persisted.dispatch_hold_active_persisted);
+            let message = body["message"].as_str().unwrap_or_default().to_lowercase();
+            assert!(message.contains("dispatch hold released"), "{message}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_during_a_smart_charge_turns_off_a_hold_that_never_started() {
+        // The user had paused the battery by hand, so the hold declined to
+        // start (Idle). Resume writes Eco, and with the opt-in still on the
+        // hold would start on the next poll and re-pause: Resume would do
+        // nothing. A running smart charge plus the opt-in means Resume wins.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            {
+                let mut dispatches = state.octopus_dispatches.lock().await;
+                dispatches.checked_at = Some(chrono::Utc::now());
+                dispatches.dispatches = vec![crate::octopus_dispatches::Dispatch {
+                    start: chrono::Utc::now() - chrono::Duration::minutes(10),
+                    end: chrono::Utc::now() + chrono::Duration::minutes(50),
+                    kind: Some("SMART".to_string()),
+                    energy_added_kwh: None,
+                }];
+            }
+            let mut settings = crate::settings::Settings::load();
+            settings.octopus_dispatch_hold = true;
+            settings.save().expect("seed settings");
+
+            let (status, Json(body)) = drive_unpause_battery_completion(&state).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                *state.dispatch_hold_state.lock().await,
+                DispatchHoldState::Idle
+            );
+            assert!(!crate::settings::Settings::load().octopus_dispatch_hold);
+            let message = body["message"].as_str().unwrap_or_default().to_lowercase();
+            assert!(message.contains("dispatch hold turned off"), "{message}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_turns_the_hold_off_when_a_restart_is_still_holding_a_dispatch() {
+        // Releasing after a restart while the charge is still running would
+        // become Holding again on the next poll, so the opt-in goes off.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Releasing;
+            state
+                .octopus_dispatches
+                .lock()
+                .await
+                .hold_until_first_check(chrono::Utc::now());
+            let mut settings = crate::settings::Settings::load();
+            settings.octopus_dispatch_hold = true;
+            settings.dispatch_hold_active_persisted = true;
+            settings.save().expect("seed settings");
+
+            let _ = drive_unpause_battery_completion(&state).await;
+            assert!(!crate::settings::Settings::load().octopus_dispatch_hold);
+            assert!(!state
+                .octopus_dispatches
+                .lock()
+                .await
+                .holding_for_restart(chrono::Utc::now()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_battery_wakes_the_dispatch_loop_only_after_the_hold_is_saved_off() {
+        // The woken loop reads the settings at once; if they still said "on"
+        // it would fetch a fresh list and the hold would start again.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            {
+                let mut dispatches = state.octopus_dispatches.lock().await;
+                dispatches.checked_at = Some(chrono::Utc::now());
+                dispatches.dispatches = vec![crate::octopus_dispatches::Dispatch {
+                    start: chrono::Utc::now() - chrono::Duration::minutes(10),
+                    end: chrono::Utc::now() + chrono::Duration::minutes(50),
+                    kind: Some("SMART".to_string()),
+                    energy_added_kwh: None,
+                }];
+            }
+            let mut settings = crate::settings::Settings::load();
+            settings.octopus_dispatch_hold = true;
+            settings.dispatch_hold_active_persisted = true;
+            settings.save().expect("seed settings");
+
+            let loop_task = tokio::spawn({
+                let state = state.clone();
+                async move {
+                    state.octopus_dispatches_wake.notified().await;
+                    // What check_once does first when woken.
+                    crate::settings::Settings::load_async()
+                        .await
+                        .octopus_dispatch_hold
+                }
+            });
+            // Let the loop reach its wait before the unpause runs.
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+
+            let _ = drive_unpause_battery_completion(&state).await;
+            let seen_by_loop = tokio::time::timeout(std::time::Duration::from_secs(2), loop_task)
+                .await
+                .expect("the loop is woken")
+                .unwrap();
+            assert!(!seen_by_loop, "the loop woke before the hold was saved off");
         })
         .await;
     }
@@ -24657,6 +25000,133 @@ pub(crate) mod tests {
                 body["data"]["snapshots"][0]["forecast"]["solar"][0]["kwh"],
                 0.5
             );
+        })
+        .await;
+    }
+
+    fn health_module(serial: &str, cells: &[f32]) -> crate::inverter::model::BatteryModule {
+        crate::inverter::model::BatteryModule {
+            index: 0,
+            soc: 60,
+            serial: serial.to_string(),
+            num_cycles: 50,
+            cell_voltages: cells.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn local_noon(y: i32, m: u32, d: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(y, m, d, 12, 0, 0)
+            .single()
+            .expect("unambiguous local time")
+    }
+
+    async fn state_with_battery_health(days: &[(u32, &[f32])]) -> Arc<AppState> {
+        let path = crate::test_util::make_unique_test_dir("api-battery-health").join("history.db");
+        let db = crate::history::HistoryDb::open(&path).expect("open db");
+        for (day, cells) in days {
+            let snap = crate::inverter::model::InverterSnapshot {
+                soc: 60,
+                battery_modules: vec![health_module("BAT1", cells)],
+                ..Default::default()
+            };
+            db.observe_battery_health(&snap, local_noon(2026, 10, *day));
+            db.flush_battery_health();
+        }
+        let state = test_state();
+        *state.history.lock().await = Some(Arc::new(db));
+        state
+    }
+
+    #[tokio::test]
+    async fn battery_health_returns_the_days_in_range_oldest_first() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_battery_health(&[
+                (3, &[3.30, 3.32]),
+                (9, &[3.30, 3.34]),
+                (10, &[3.30, 3.36]),
+            ])
+            .await;
+            let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+            // Two days: the 9th and the 10th; the 3rd is outside.
+            let (status, body) =
+                get_battery_health_at(state, BatteryHealthQuery { days: Some(2) }, today).await;
+            assert_eq!(status, StatusCode::OK);
+            let days = body["data"]["days"].as_array().expect("days");
+            assert_eq!(days.len(), 2, "{}", body.0);
+            assert_eq!(days[0]["day"], "2026-10-09");
+            assert_eq!(days[1]["day"], "2026-10-10");
+            assert_eq!(days[1]["module_index"], 0);
+            assert!(days[1].get("serial").is_none());
+            assert_eq!(days[1]["cycles"], 50);
+            assert!((days[1]["max_spread_mv"].as_f64().unwrap() - 60.0).abs() < 0.1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_health_defaults_to_six_months_and_includes_unflushed_polls() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_battery_health(&[(1, &[3.30, 3.31])]).await;
+            let db = state.history.lock().await.clone().unwrap();
+            // A poll still waiting for its flush shows up in today's answer.
+            let snap = crate::inverter::model::InverterSnapshot {
+                soc: 60,
+                battery_modules: vec![health_module("BAT1", &[3.30, 3.40])],
+                ..Default::default()
+            };
+            db.observe_battery_health(&snap, local_noon(2026, 10, 2));
+            let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+            let (status, body) =
+                get_battery_health_at(state, BatteryHealthQuery { days: None }, today).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["days"].as_array().unwrap().len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_health_rejects_out_of_range_days() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_battery_health(&[]).await;
+            let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+            for days in [i64::MIN, -1, 0, BATTERY_HEALTH_MAX_DAYS + 1, i64::MAX] {
+                let (status, _) = get_battery_health_at(
+                    state.clone(),
+                    BatteryHealthQuery { days: Some(days) },
+                    today,
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "days={days}");
+            }
+            let (status, _) = get_battery_health_at(
+                state,
+                BatteryHealthQuery {
+                    days: Some(BATTERY_HEALTH_MAX_DAYS),
+                },
+                today,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_health_without_a_history_db_is_empty_not_an_error() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            *state.history.lock().await = None;
+            let (status, body) = get_battery_health_at(
+                state,
+                BatteryHealthQuery { days: None },
+                chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["days"], serde_json::json!([]));
         })
         .await;
     }

@@ -152,6 +152,8 @@ fn create_router_at(
         )
         .route("/api/history", get(api::get_history))
         .route("/api/history/summary", get(api::get_history_summary))
+        // Daily per-module battery health summary (issue #393).
+        .route("/api/battery-health", get(api::get_battery_health))
         // Cost totals for the Power page Consumption Report (issue #131).
         // Accepts the same range/offset/explicit-window params as
         // /api/history but returns a flat JSON object with per-direction

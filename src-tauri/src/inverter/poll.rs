@@ -3141,10 +3141,20 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
         let db = db_guard.clone();
         drop(db_guard);
         if let Some(db) = db {
+            // Battery health is a daily summary, flushed on its own cadence.
+            let health_due = db.observe_battery_health(&snap, chrono::Local::now());
             // Most polls only fold into the open minute; spawn a writer only
             // when a row is ready.
-            if db.queue_poll_reading(snap) {
-                tokio::task::spawn_blocking(move || db.flush_poll_rows());
+            let rows_ready = db.queue_poll_reading(snap);
+            if rows_ready || health_due {
+                tokio::task::spawn_blocking(move || {
+                    if rows_ready {
+                        db.flush_poll_rows();
+                    }
+                    if health_due {
+                        db.flush_battery_health();
+                    }
+                });
             }
         }
     }
@@ -4315,11 +4325,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
                                 // Whether Intelligent Octopus Go is smart-charging the car
                                 // now, by a dispatch list fresh enough to trust (#394).
-                                let in_dispatch = state
-                                    .octopus_dispatches
-                                    .lock()
-                                    .await
-                                    .hold_now(chrono::Utc::now());
+                                let in_dispatch = {
+                                    let now = chrono::Utc::now();
+                                    let dispatches = state.octopus_dispatches.lock().await;
+                                    // After a restart mid-hold, the first check has not
+                                    // run yet: keep holding rather than restore Eco and
+                                    // re-pause when the list arrives.
+                                    dispatches.hold_now(now) || dispatches.holding_for_restart(now)
+                                };
                                 let safety_demand = {
                                     let load_config =
                                         state.load_limiter_config.lock().await.clone();
@@ -5160,9 +5173,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     let limiter_owns_discharge = limiter_writes.is_empty()
                                         || discharge_arbiter
                                             .request(DischargeControlOwner::Safety);
-                                    for (label, writes) in limiter_writes {
-                                        if limiter_owns_discharge {
-                                            {
+                                    if limiter_owns_discharge {
+                                        for (label, writes) in limiter_writes {
                                             for write in &writes {
                                                 match client
                                                     .write_register(write.address, write.value)
@@ -5178,9 +5190,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                         write.address
                                                     ),
                                                 }
-                                                tokio::time::sleep(write_gap)
-                                                    .await;
-                                            }
+                                                tokio::time::sleep(write_gap).await;
                                             }
                                         }
                                     }

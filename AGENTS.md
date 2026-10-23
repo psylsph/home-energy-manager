@@ -52,6 +52,7 @@ Every `@tauri-apps/plugin-*` npm package must share a major/minor release with i
 ## Prerequisites
 
 - Node.js + npm; Rust toolchain (stable); Tauri CLI (`cargo install tauri-cli`)
+- **Playwright's Firefox** for `npm run test:e2e` (it runs every project, including `e2e-firefox`, and fails at browser launch without it): `npx playwright install firefox` (on LMDE/Mint set `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=debian13-x64` for the install). CI doesn't run e2e.
 - **Linux desktop build deps** (Debian/Ubuntu/LMDE, matches CI): `sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev` (also `rpm` for RPMs; the appindicator pkg-config metadata is needed by Tauri's `tray-icon` feature)
 
 ## Commands

@@ -43,9 +43,11 @@ export default function SavingSessionsPanel() {
     const load = async () => {
       try {
         const res = readSessionsResponse(await apiGet('/api/octopus/sessions'));
-        if (!cancelled) setData(res);
+        // An unusable answer is no better than a failure: keep what was good.
+        if (!cancelled && res) setData(res);
       } catch {
-        if (!cancelled) setData(null);
+        // Keep the last good data: one failed refresh must not take the
+        // controls away. If the first load fails there is nothing to show.
       }
     };
     void load();
@@ -56,8 +58,8 @@ export default function SavingSessionsPanel() {
     };
   }, [reloadTick]);
 
-  // The backend answers an unreadable or failed request with nothing usable;
-  // offer no controls rather than guess at the current mode.
+  // Nothing usable has been read yet (the first request failed or was
+  // unreadable): offer no controls rather than guess at the current mode.
   if (!data) return null;
 
   async function post(
@@ -71,6 +73,15 @@ export default function SavingSessionsPanel() {
     try {
       const reply = await apiPost<ModeReply | undefined>(path, body);
       then?.(reply);
+      // Show what was saved even if the reload below fails.
+      const saved = reply?.mode;
+      setData((current) => {
+        if (!current) return current;
+        const next = { ...current };
+        if (saved) next.mode = saved;
+        if (typeof body.auto_join === 'boolean') next.auto_join = body.auto_join;
+        return next;
+      });
       setReloadTick((tick) => tick + 1);
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause.message : 'Could not change the setting.');
