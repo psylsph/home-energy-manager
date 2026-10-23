@@ -532,3 +532,31 @@ export interface SavingSessionJoinFailure {
   end: string;
   error: string;
 }
+
+/** A planned Intelligent Octopus Go charge for the car (UTC instants). */
+export interface SmartChargeDispatch {
+  start: string;
+  end: string;
+  /** Octopus's dispatch type, e.g. `SMART` or `BOOST`, when given. */
+  type: string | null;
+  energy_added_kwh: number | null;
+  /** Billed at the off-peak rate, so the battery is held during it. */
+  smart: boolean;
+}
+
+/** Response of `GET /api/octopus/dispatches`. */
+export interface SmartChargingResponse {
+  ok: boolean;
+  /** The user has turned the battery hold on. */
+  enabled: boolean;
+  configured: boolean;
+  checked_at: string | null;
+  error: string | null;
+  /** Smart-charging cars and chargers found on the account. */
+  devices: number;
+  /** The battery is being held for a charge right now. */
+  holding: boolean;
+  /** How old the dispatch list may be before HEM stops trusting it. */
+  stale_after_minutes: number;
+  dispatches: SmartChargeDispatch[];
+}

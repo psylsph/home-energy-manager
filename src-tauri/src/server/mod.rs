@@ -227,6 +227,14 @@ fn create_router_at(
             "/api/octopus/sessions/skip",
             post(crate::octopus_sessions::skip_session),
         )
+        .route(
+            "/api/octopus/dispatches",
+            get(crate::octopus_dispatches::get_dispatches),
+        )
+        .route(
+            "/api/octopus/dispatches/hold",
+            post(crate::octopus_dispatches::set_hold),
+        )
         .route("/api/octopus/history", get(crate::octopus::get_history))
         .route("/api/octopus/summary", get(crate::octopus::get_summary))
         .route(

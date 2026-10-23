@@ -1719,6 +1719,13 @@ pub struct Settings {
     /// fire the mutation twice for the same session.
     #[serde(default)]
     pub octopus_sessions_join_attempted: Vec<i64>,
+    /// Hold the battery while Intelligent Octopus Go smart-charges the car
+    /// (issue #394). Off unless the user opts in.
+    #[serde(default)]
+    pub octopus_dispatch_hold: bool,
+    /// Persisted active flag so a restart mid-dispatch restores Eco.
+    #[serde(default)]
+    pub dispatch_hold_active_persisted: bool,
 
     // -- Solar array capacities (issue #110) --
     /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
@@ -2142,6 +2149,8 @@ impl Default for Settings {
             octopus_sessions_booked: Vec::new(),
             octopus_sessions_auto_join: false,
             octopus_sessions_join_attempted: Vec::new(),
+            octopus_dispatch_hold: false,
+            dispatch_hold_active_persisted: false,
             // Issue #110: solar array capacities default to unset so a
             // fresh install (and every existing install on upgrade) sees
             // no behaviour change until the user opts in via Settings.
@@ -2823,6 +2832,8 @@ mod tests {
             octopus_sessions_booked: Vec::new(),
             octopus_sessions_auto_join: false,
             octopus_sessions_join_attempted: Vec::new(),
+            octopus_dispatch_hold: false,
+            dispatch_hold_active_persisted: false,
             // Issue #110: solar array capacities must round-trip exactly.
             pv1_rated_kw: 6.0,
             pv2_rated_kw: 4.2,
@@ -3561,6 +3572,8 @@ mod tests {
             octopus_sessions_booked: Vec::new(),
             octopus_sessions_auto_join: false,
             octopus_sessions_join_attempted: Vec::new(),
+            octopus_dispatch_hold: false,
+            dispatch_hold_active_persisted: false,
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),

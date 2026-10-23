@@ -79,8 +79,8 @@ use crate::inverter::state_machines::{
 };
 pub use crate::inverter::state_machines::{
     AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, DischargeFloorConfig,
-    DischargeFloorState, LoadLimiterConfig, LoadLimiterSaved, LoadLimiterState, PriceSlot,
-    TemperatureLimiterConfig, TemperatureLimiterState,
+    DischargeFloorState, DispatchHoldState, LoadLimiterConfig, LoadLimiterSaved, LoadLimiterState,
+    PriceSlot, TemperatureLimiterConfig, TemperatureLimiterState,
 };
 use crate::modbus::client::GatewayPollScope;
 use crate::modbus::client::ModbusClient;
@@ -555,6 +555,8 @@ pub struct AppState {
     pub temperature_limiter_config: Arc<Mutex<TemperatureLimiterConfig>>,
     /// Inverter-temperature discharge limiter runtime state.
     pub temperature_limiter_state: Arc<Mutex<TemperatureLimiterState>>,
+    /// Intelligent Octopus Go dispatch hold runtime state (issue #394).
+    pub dispatch_hold_state: Arc<Mutex<DispatchHoldState>>,
     /// Discharge floor guard configuration (developer mode only).
     pub discharge_floor_config: Arc<Mutex<DischargeFloorConfig>>,
     /// Discharge floor guard runtime state.
@@ -641,6 +643,10 @@ pub struct AppState {
     pub octopus_sessions: Arc<Mutex<crate::octopus_sessions::SessionsState>>,
     /// Wakes the Saving Sessions loop early (the mode was just changed).
     pub octopus_sessions_wake: Arc<tokio::sync::Notify>,
+    /// Intelligent Octopus Go dispatches found by the last check.
+    pub octopus_dispatches: Arc<Mutex<crate::octopus_dispatches::DispatchesState>>,
+    /// Wakes the dispatch loop early (the hold was just switched).
+    pub octopus_dispatches_wake: Arc<tokio::sync::Notify>,
     /// When a booked export last failed to apply or revert (inverter clock),
     /// so the next try waits a minute instead of hammering the dongle.
     pub export_once_backoff: Arc<Mutex<std::collections::HashMap<String, chrono::NaiveDateTime>>>,
@@ -760,6 +766,7 @@ impl AppState {
             load_limiter_saved: Arc::new(Mutex::new(None)),
             temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
             temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
+            dispatch_hold_state: Arc::new(Mutex::new(DispatchHoldState::default())),
             discharge_floor_config: Arc::new(Mutex::new({
                 let s = crate::settings::Settings::load();
                 DischargeFloorConfig {
@@ -843,6 +850,10 @@ impl AppState {
                 crate::octopus_sessions::SessionsState::default(),
             )),
             octopus_sessions_wake: Arc::new(tokio::sync::Notify::new()),
+            octopus_dispatches: Arc::new(Mutex::new(
+                crate::octopus_dispatches::DispatchesState::default(),
+            )),
+            octopus_dispatches_wake: Arc::new(tokio::sync::Notify::new()),
             export_once_backoff: Arc::new(Mutex::new(std::collections::HashMap::new())),
             update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
             backup: Arc::new(Mutex::new(crate::backup::BackupState::default())),

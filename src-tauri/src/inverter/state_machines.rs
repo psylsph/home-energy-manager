@@ -1658,6 +1658,48 @@ pub(crate) fn check_temperature_limiter_after_automation(
     None
 }
 
+// ===========================================================================
+// Intelligent Octopus Go dispatch hold (issue #394)
+// ===========================================================================
+
+/// Holds the battery (Eco Paused) while Octopus is smart-charging the car, so
+/// the battery does not discharge into it. Shares the pre-pause reserve with
+/// the load and temperature limiters; whichever owner clears last restores Eco.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DispatchHoldState {
+    /// No dispatch is being held.
+    #[default]
+    Idle,
+    /// A smart dispatch is running and the hold owns Eco Paused.
+    Holding,
+    /// The dispatch ended, or HEM restarted mid-hold. The restore is repeated
+    /// each poll until read-back shows Eco, so a failed write is retried.
+    Releasing,
+}
+
+impl DispatchHoldState {
+    /// Whether the hold currently owns an Eco Paused battery state.
+    pub(crate) fn is_actively_pausing(&self) -> bool {
+        matches!(self, Self::Holding | Self::Releasing)
+    }
+}
+
+/// Evaluate the dispatch hold. `in_dispatch` is true only while a smart
+/// dispatch is running and the dispatch list is fresh; anything unknown means
+/// normal behaviour. `other_active` is another limiter that owns the shared
+/// Eco Paused state; `reassert_pause` is set when a discharge command earlier
+/// in this poll may have overridden the pause.
+pub(crate) fn check_dispatch_hold(
+    _snap: &InverterSnapshot,
+    _in_dispatch: bool,
+    _state: &mut DispatchHoldState,
+    _saved: &mut Option<LoadLimiterSaved>,
+    _other_active: bool,
+    _reassert_pause: bool,
+) -> Option<Vec<RegisterWrite>> {
+    None
+}
+
 /// Check load discharge limiter and return register writes if the state
 /// machine transitions to Paused or back to Idle.
 ///
@@ -8729,5 +8771,235 @@ mod tests {
         );
         assert!(!arbiter.can_request(DischargeControlOwner::ExplicitPause));
         assert!(arbiter.can_request(DischargeControlOwner::Safety));
+    }
+
+    // ---- Dispatch hold (issue #394) ----
+
+    fn has_write(writes: &[RegisterWrite], address: u16, value: u16) -> bool {
+        writes
+            .iter()
+            .any(|write| write.address == address && write.value == value)
+    }
+
+    fn dispatch_snap(mode: BatteryMode, reserve: u8) -> InverterSnapshot {
+        InverterSnapshot {
+            battery_mode: mode,
+            battery_reserve: reserve,
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dispatch_hold_pauses_at_dispatch_start_and_saves_the_reserve() {
+        let mut state = DispatchHoldState::Idle;
+        let mut saved = None;
+        let writes = check_dispatch_hold(
+            &dispatch_snap(BatteryMode::Eco, 23),
+            true,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        )
+        .expect("a dispatch starting pauses discharge");
+        assert_eq!(state, DispatchHoldState::Holding);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 23 }));
+        assert!(has_write(&writes, HR_BATTERY_POWER_MODE, 1));
+        assert!(has_write(&writes, HR_ENABLE_DISCHARGE, 0));
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 100));
+    }
+
+    #[test]
+    fn dispatch_hold_stays_quiet_while_paused_and_reasserts_when_overridden() {
+        let mut state = DispatchHoldState::Holding;
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        assert!(check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            true,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        )
+        .is_none());
+
+        // Something else switched the battery back to Eco mid-dispatch.
+        let writes = check_dispatch_hold(
+            &dispatch_snap(BatteryMode::Eco, 4),
+            true,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        )
+        .expect("reasserts the pause");
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 100));
+        assert_eq!(
+            saved,
+            Some(LoadLimiterSaved { reserve: 23 }),
+            "the original reserve is kept, not the overridden one"
+        );
+
+        // A discharge command earlier in this poll is not visible in the
+        // snapshot yet, so the caller asks for the pause to be reasserted.
+        let writes = check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            true,
+            &mut state,
+            &mut saved,
+            false,
+            true,
+        )
+        .expect("reasserts after an in-poll override");
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 100));
+    }
+
+    #[test]
+    fn dispatch_hold_restores_the_reserve_and_retries_until_eco_is_read_back() {
+        let mut state = DispatchHoldState::Holding;
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        let paused = dispatch_snap(BatteryMode::EcoPaused, 100);
+
+        let writes = check_dispatch_hold(&paused, false, &mut state, &mut saved, false, false)
+            .expect("the dispatch ending restores Eco");
+        assert!(has_write(&writes, HR_BATTERY_POWER_MODE, 1));
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 23));
+        assert_eq!(state, DispatchHoldState::Releasing);
+        assert!(state.is_actively_pausing());
+
+        // The write failed: the next read still shows the pause, so retry.
+        let writes = check_dispatch_hold(&paused, false, &mut state, &mut saved, false, false)
+            .expect("retries the restore");
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 23));
+
+        // Read-back confirms Eco: done, and the saved reserve is consumed.
+        assert!(check_dispatch_hold(
+            &dispatch_snap(BatteryMode::Eco, 23),
+            false,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        )
+        .is_none());
+        assert_eq!(state, DispatchHoldState::Idle);
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn dispatch_hold_restores_the_minimum_reserve_when_none_was_saved() {
+        // A reserve of 100 is not a real baseline (it is what the pause
+        // writes), so it is never saved and release falls back to 4%.
+        let mut state = DispatchHoldState::Idle;
+        let mut saved = None;
+        check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            true,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        );
+        assert_eq!(saved, None);
+        let writes = check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            false,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        )
+        .expect("restores");
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 4));
+    }
+
+    #[test]
+    fn dispatch_hold_joins_an_existing_limiter_pause_without_writing() {
+        // The load limiter already paused the battery and saved 23%.
+        let mut state = DispatchHoldState::Idle;
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        assert!(check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            true,
+            &mut state,
+            &mut saved,
+            true,
+            false,
+        )
+        .is_none());
+        assert_eq!(state, DispatchHoldState::Holding);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 23 }));
+    }
+
+    #[test]
+    fn dispatch_hold_leaves_the_restore_to_a_limiter_still_pausing() {
+        let mut state = DispatchHoldState::Holding;
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        assert!(check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            false,
+            &mut state,
+            &mut saved,
+            true,
+            false,
+        )
+        .is_none());
+        assert_eq!(state, DispatchHoldState::Idle);
+        assert_eq!(
+            saved,
+            Some(LoadLimiterSaved { reserve: 23 }),
+            "the other limiter still needs the baseline"
+        );
+    }
+
+    #[test]
+    fn dispatch_hold_restarted_mid_hold_resumes_if_the_dispatch_is_still_running() {
+        let mut state = DispatchHoldState::Releasing;
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        assert!(check_dispatch_hold(
+            &dispatch_snap(BatteryMode::EcoPaused, 100),
+            true,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        )
+        .is_none());
+        assert_eq!(state, DispatchHoldState::Holding);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 23 }));
+    }
+
+    #[test]
+    fn dispatch_hold_idle_without_a_dispatch_does_nothing() {
+        let mut state = DispatchHoldState::Idle;
+        let mut saved = None;
+        assert!(check_dispatch_hold(
+            &dispatch_snap(BatteryMode::Eco, 23),
+            false,
+            &mut state,
+            &mut saved,
+            false,
+            false,
+        )
+        .is_none());
+        assert_eq!(state, DispatchHoldState::Idle);
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn dispatch_hold_pauses_three_phase_through_its_own_reserve_register() {
+        let mut state = DispatchHoldState::Idle;
+        let mut saved = None;
+        let snap = InverterSnapshot {
+            battery_mode: BatteryMode::Eco,
+            battery_reserve: 30,
+            device_type: DeviceType::ThreePhase,
+            ..Default::default()
+        };
+        let writes =
+            check_dispatch_hold(&snap, true, &mut state, &mut saved, false, false).expect("pauses");
+        assert!(has_write(&writes, HR_3PH_BATTERY_SOC_RESERVE, 100));
+        assert!(has_write(&writes, HR_3PH_FORCE_DISCHARGE_ENABLE, 0));
     }
 }

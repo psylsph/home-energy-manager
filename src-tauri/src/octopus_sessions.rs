@@ -335,7 +335,7 @@ pub struct SessionsState {
 
 /// Where the token exchange and the sessions query go. A configured
 /// `octopus_api_base_url` (used by tests) serves both.
-fn endpoints(settings: &Settings) -> (String, String) {
+pub(crate) fn endpoints(settings: &Settings) -> (String, String) {
     let base = settings.octopus_api_base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         (
@@ -348,7 +348,7 @@ fn endpoints(settings: &Settings) -> (String, String) {
     }
 }
 
-fn post_graphql(url: &str, token: Option<&str>, body: &Value) -> Result<Value, String> {
+pub(crate) fn post_graphql(url: &str, token: Option<&str>, body: &Value) -> Result<Value, String> {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(HTTP_TIMEOUT))
         .max_idle_connections(0)
@@ -370,7 +370,7 @@ fn post_graphql(url: &str, token: Option<&str>, body: &Value) -> Result<Value, S
 }
 
 /// Exchange the API key for a short-lived token.
-fn obtain_token(settings: &Settings) -> Result<String, String> {
+pub(crate) fn obtain_token(settings: &Settings) -> Result<String, String> {
     let (auth_url, _) = endpoints(settings);
     let key = settings.octopus_api_key.trim();
     let token_response = post_graphql(

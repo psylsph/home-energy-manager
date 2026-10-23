@@ -10,6 +10,7 @@ pub mod history;
 pub mod inverter;
 pub mod modbus;
 pub mod octopus;
+pub mod octopus_dispatches;
 pub mod octopus_sessions;
 pub mod pi_render;
 pub mod server;
