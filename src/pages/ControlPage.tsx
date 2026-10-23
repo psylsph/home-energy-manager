@@ -2128,7 +2128,7 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
     <div className="space-y-3">
       <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule Minimum SOC</h2>
       <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-text-primary">
-        Developer-only: while an inverter Discharge Schedule window is active,
+        While an inverter Discharge Schedule window is active, HEM
         temporarily raises the inverter&apos;s Minimum SOC reserve. The normal
         reserve is restored when the window ends. This does not change battery mode.
       </div>
