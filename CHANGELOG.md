@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.94.0] - 2026-10-23
+
+### Added
+
+- **Your battery no longer empties into your car on Intelligent Octopus Go.** Octopus can charge your car outside 23:30–05:30, and the battery would then cover the car's charging instead of the cheap grid. Turn on "Hold The Battery While Octopus Smart-Charges Your Car" on the Octopus page and HEM reads your planned charges from Octopus, pauses the battery while a smart charge runs, and puts it back to Eco with your usual reserve when the charge ends. The page lists upcoming charges and shows when the battery is being held. Boost charges are billed at the peak rate, so the battery still helps with those, and if HEM can't get your charges from Octopus the battery behaves as normal. It works alongside the Load Discharge Limiter (#394).
+
+### Changed
+
+- **Every on/off setting is now the same slide switch.** A few settings were tick boxes and the Control page drew its own switches in two sizes. They now all match, and screen readers can name every one of them, including the Auto Winter, Load Discharge Limiter and charging slot switches that previously had no name.
+
+### Fixed
+
+- **Turning off automatic plan applying straight after changing the lead time now sticks.** Changing the minutes on the Planner and then clicking "Apply charging plan automatically" could ignore the click, leaving it on.
+
 ## [0.93.1] - 2026-10-23
 
 ### Fixed
