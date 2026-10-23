@@ -146,7 +146,11 @@ pub(crate) async fn read_lv_batteries<R: RegisterReader>(
                         tracing::debug!("Battery #{} at addr 0x{:02X} (SOC={}%)", i + 2, addr, soc);
                     }
                 } else {
-                    tracing::debug!("Battery addr 0x{:02X}: SOC={} - not present", addr, soc);
+                    tracing::debug!(
+                        "No battery at addr 0x{:02X} (SOC={}) - end of scan",
+                        addr,
+                        soc
+                    );
                     // A known battery answering with invalid data counts as a
                     // failed read, only for addresses we have seen answer.
                     if known_battery_addrs.contains(&addr) {
