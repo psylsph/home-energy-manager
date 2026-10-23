@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.95.0] - 2026-10-23
+
+### Added
+
+- **Battery Health on the Battery page.** HEM now keeps a daily summary for each battery module: how far apart its cells are, charge cycles, the hottest cell temperature and the capacity the battery reports. The Battery page charts them over months, so a failing cell or a fading battery shows up as a trend you can spot yourself. Each module's live cell spread is shown in its details, and State of Health appears for batteries that report their own capacity (#393).
+
+### Changed
+
+- **The battery SOC graph now sits above the module list** on the Battery page.
+
+### Fixed
+
+- **Resume Discharge now works during an Intelligent Octopus Go smart charge.** It turns the hold off instead of the hold pausing the battery again a moment later, and your usual reserve comes back. The Control page now says when the hold is why the battery is paused.
+- **The Intelligent Octopus Go hold no longer undoes settings you chose.** It only starts when the battery is in plain Eco, so a manual Pause, Timed Demand or Timed Export is left alone.
+- **The battery no longer discharges for a moment when one protection hands over to another.** For example, when temperature protection ends just as a smart charge starts, the battery now stays paused.
+- **Restarting HEM in the middle of a smart charge keeps the battery held** until HEM has checked Octopus again, instead of letting it discharge for a few minutes.
+- **The Octopus page only says the battery is being held while it really is.**
+- **One failed refresh no longer hides the Intelligent Octopus Go and Saving Sessions settings.** They stay on screen with the last values until the next refresh works.
+
 ## [0.94.0] - 2026-10-23
 
 ### Added
