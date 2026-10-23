@@ -20,6 +20,7 @@ export default defineConfig({
     '**/websocket-stale-timeout.spec.ts',
     '**/charge-slot-target-soc.spec.ts',
     '**/forecast-past.spec.ts',
+    '**/forecast-plan-settings.spec.ts',
     '**/cosy-blocked.spec.ts',
   ],
   fullyParallel: false,

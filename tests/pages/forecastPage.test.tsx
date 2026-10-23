@@ -2041,3 +2041,270 @@ describe('ForecastPage battery efficiencies', () => {
     ).toBe(false);
   });
 });
+
+// Issue #391: the Plan Settings number fields only saved on blur, so a value
+// changed without the field losing focus (spin arrows, Enter, leaving the
+// page) was never sent and the page showed the old value on return. Every
+// edited field must save after a pause, on Enter, and when the page unmounts.
+describe('ForecastPage plan settings save without a blur (issue #391)', () => {
+  // Generous: comfortably longer than the save delay after the last edit.
+  const PAUSE_SAVE_TIMEOUT_MS = 3000;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  // `backend` reflects POSTed settings so refetches return what was saved,
+  // like the real resource. `postGate`, when set, holds settings POSTs open
+  // until the test releases them.
+  let backend: Record<string, unknown>;
+  let postGate: Promise<void> | null;
+  const mockLoad = () => {
+    backend = {
+      forecast_min_soc_pct: 7,
+      forecast_plan_auto_apply_enabled: true,
+      forecast_plan_auto_apply_lead_minutes: 30,
+      forecast_charge_efficiency: 0.9,
+      forecast_discharge_efficiency: 0.95,
+    };
+    postGate = null;
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') return { ok: true, data: { ...backend } };
+      return { ok: true, data: {} };
+    });
+    apiPostMocked.mockImplementation(async (path: string, body: unknown) => {
+      if (path === '/api/settings') {
+        if (postGate) await postGate;
+        Object.assign(backend, body);
+      }
+      return { ok: true };
+    });
+  };
+  const settingsPosts = () =>
+    apiPostMocked.mock.calls.filter((c) => c[0] === '/api/settings').map((c) => c[1]);
+  const renderLoaded = async () => {
+    const view = render(<ForecastPage />);
+    const minSoc = (await screen.findByTestId('forecast-min-soc-input')) as HTMLInputElement;
+    await waitFor(() => {
+      expect(minSoc.value).toBe('7');
+      expect(
+        (screen.getByTestId('forecast-auto-apply-toggle') as HTMLInputElement).checked,
+      ).toBe(true);
+      expect(minSoc.disabled).toBe(false);
+    });
+    apiPostMocked.mockClear();
+    return { view, minSoc };
+  };
+
+  it('saves an edited minimum battery level when the page unmounts before a blur', async () => {
+    mockLoad();
+    const { view, minSoc } = await renderLoaded();
+    fireEvent.change(minSoc, { target: { value: '25' } });
+    view.unmount();
+    expect(settingsPosts()).toEqual([{ forecast_min_soc_pct: 25 }]);
+  });
+
+  it('saves edited efficiencies when the page unmounts before a blur', async () => {
+    mockLoad();
+    const { view } = await renderLoaded();
+    fireEvent.change(screen.getByTestId('forecast-charge-eff-input'), {
+      target: { value: '85' },
+    });
+    view.unmount();
+    expect(settingsPosts()).toEqual([
+      { forecast_charge_efficiency: 0.85, forecast_discharge_efficiency: 0.95 },
+    ]);
+  });
+
+  it('saves an edited auto-apply lead time when the page unmounts before a blur', async () => {
+    mockLoad();
+    const { view } = await renderLoaded();
+    fireEvent.change(screen.getByTestId('forecast-auto-apply-lead'), {
+      target: { value: '60' },
+    });
+    view.unmount();
+    expect(settingsPosts()).toEqual([
+      {
+        forecast_plan_auto_apply_enabled: true,
+        forecast_plan_auto_apply_lead_minutes: 60,
+        forecast_plan_auto_refresh: false,
+      },
+    ]);
+  });
+
+  it('does not save on unmount when nothing was edited', async () => {
+    mockLoad();
+    const { view } = await renderLoaded();
+    view.unmount();
+    expect(settingsPosts()).toEqual([]);
+  });
+
+  it('saves once after typing pauses, with no blur', async () => {
+    mockLoad();
+    const { minSoc } = await renderLoaded();
+    fireEvent.change(minSoc, { target: { value: '2' } });
+    fireEvent.change(minSoc, { target: { value: '25' } });
+    await waitFor(() => expect(settingsPosts()).toEqual([{ forecast_min_soc_pct: 25 }]), {
+      timeout: PAUSE_SAVE_TIMEOUT_MS,
+    });
+    expect(minSoc.value).toBe('25');
+  });
+
+  it('saves the efficiencies and lead time after typing pauses, with no blur', async () => {
+    mockLoad();
+    await renderLoaded();
+    fireEvent.change(screen.getByTestId('forecast-discharge-eff-input'), {
+      target: { value: '92' },
+    });
+    fireEvent.change(screen.getByTestId('forecast-auto-apply-lead'), {
+      target: { value: '45' },
+    });
+    await waitFor(
+      () => {
+        expect(settingsPosts()).toContainEqual({
+          forecast_charge_efficiency: 0.9,
+          forecast_discharge_efficiency: 0.92,
+        });
+        expect(settingsPosts()).toContainEqual({
+          forecast_plan_auto_apply_enabled: true,
+          forecast_plan_auto_apply_lead_minutes: 45,
+          forecast_plan_auto_refresh: false,
+        });
+      },
+      { timeout: PAUSE_SAVE_TIMEOUT_MS },
+    );
+  });
+
+  it('saves straight away on Enter', async () => {
+    mockLoad();
+    const { minSoc } = await renderLoaded();
+    fireEvent.change(minSoc, { target: { value: '30' } });
+    fireEvent.keyDown(minSoc, { key: 'Enter' });
+    expect(settingsPosts()).toEqual([{ forecast_min_soc_pct: 30 }]);
+    await waitFor(() => expect(backend.forecast_min_soc_pct).toBe(30));
+  });
+
+  it('does not auto-save or complain about a field cleared mid-edit', async () => {
+    mockLoad();
+    const { minSoc } = await renderLoaded();
+    fireEvent.change(minSoc, { target: { value: '' } });
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(settingsPosts()).toEqual([]);
+    expect(screen.queryByTestId('forecast-min-soc-error')).toBeNull();
+    expect(minSoc.value).toBe('');
+    // Finishing the edit saves the new value.
+    fireEvent.change(minSoc, { target: { value: '15' } });
+    fireEvent.keyDown(minSoc, { key: 'Enter' });
+    expect(settingsPosts()).toEqual([{ forecast_min_soc_pct: 15 }]);
+  });
+
+  it('keeps the field editable while a save is in flight', async () => {
+    mockLoad();
+    const { minSoc } = await renderLoaded();
+    let release!: () => void;
+    postGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fireEvent.change(minSoc, { target: { value: '25' } });
+    fireEvent.keyDown(minSoc, { key: 'Enter' });
+    expect(settingsPosts()).toHaveLength(1);
+    // Disabling a focused input drops focus mid-typing, so keystrokes after
+    // a pause-save would go nowhere.
+    expect(minSoc.disabled).toBe(false);
+    await act(async () => release());
+  });
+
+  it('unticking auto-apply drops a pending lead save so it cannot switch the trigger back on', async () => {
+    mockLoad();
+    await renderLoaded();
+    fireEvent.change(screen.getByTestId('forecast-auto-apply-lead'), {
+      target: { value: '45' },
+    });
+    // Hold the untick's save open past the pause delay — the window in
+    // which a still-pending lead save would post the old enabled state.
+    let release!: () => void;
+    postGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fireEvent.click(screen.getByTestId('forecast-auto-apply-toggle'));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    postGate = null;
+    await act(async () => release());
+    await waitFor(() => expect(backend.forecast_plan_auto_apply_enabled).toBe(false));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(backend.forecast_plan_auto_apply_enabled).toBe(false);
+    expect(settingsPosts()).toEqual([
+      {
+        forecast_plan_auto_apply_enabled: false,
+        forecast_plan_auto_apply_lead_minutes: 45,
+        forecast_plan_auto_refresh: false,
+      },
+    ]);
+  });
+
+  it('locks the lead field while an auto-apply toggle is saving', async () => {
+    // A lead edit made then would save with the pre-toggle enabled state
+    // and could turn the trigger straight back on.
+    mockLoad();
+    await renderLoaded();
+    const lead = screen.getByTestId('forecast-auto-apply-lead') as HTMLInputElement;
+    let release!: () => void;
+    postGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fireEvent.click(screen.getByTestId('forecast-auto-apply-toggle'));
+    expect(lead.disabled).toBe(true);
+    postGate = null;
+    await act(async () => release());
+    await waitFor(() => expect(lead.disabled).toBe(false));
+  });
+
+  it('keeps the lead field editable while its own save is in flight', async () => {
+    mockLoad();
+    await renderLoaded();
+    const lead = screen.getByTestId('forecast-auto-apply-lead') as HTMLInputElement;
+    let release!: () => void;
+    postGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fireEvent.change(lead, { target: { value: '45' } });
+    fireEvent.keyDown(lead, { key: 'Enter' });
+    expect(settingsPosts()).toHaveLength(1);
+    expect(lead.disabled).toBe(false);
+    postGate = null;
+    await act(async () => release());
+  });
+
+  it('sends a second edit only after the first save finishes, so the latest value wins', async () => {
+    // Two overlapping POSTs can reach the backend in either order; the
+    // older value landing last would silently undo the newer edit.
+    mockLoad();
+    const { minSoc } = await renderLoaded();
+    let release!: () => void;
+    postGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    fireEvent.change(minSoc, { target: { value: '25' } });
+    fireEvent.keyDown(minSoc, { key: 'Enter' });
+    fireEvent.change(minSoc, { target: { value: '35' } });
+    fireEvent.keyDown(minSoc, { key: 'Enter' });
+    expect(settingsPosts()).toEqual([{ forecast_min_soc_pct: 25 }]);
+    postGate = null;
+    await act(async () => release());
+    await waitFor(() =>
+      expect(settingsPosts()).toEqual([
+        { forecast_min_soc_pct: 25 },
+        { forecast_min_soc_pct: 35 },
+      ]),
+    );
+    await waitFor(() => expect(backend.forecast_min_soc_pct).toBe(35));
+    expect(minSoc.value).toBe('35');
+  });
+});

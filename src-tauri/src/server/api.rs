@@ -22380,6 +22380,56 @@ pub(crate) mod tests {
         );
     }
 
+    /// Issue #391: the Forecast page's planner settings saved with
+    /// "Settings updated: (no fields in request body)", so a log could not
+    /// show whether a minimum-battery-level save ever reached the backend.
+    #[test]
+    fn settings_log_fields_reports_forecast_planner_fields() {
+        use crate::settings::{PlanStrategy, Settings};
+
+        let body = serde_json::json!({
+            "forecast_min_soc_pct": 25.0,
+            "forecast_plan_strategy": "cheapest",
+            "forecast_charge_efficiency": 0.9,
+            "forecast_discharge_efficiency": 0.95,
+            "forecast_plan_auto_apply_enabled": true,
+            "forecast_plan_auto_apply_lead_minutes": 60,
+            "forecast_plan_auto_refresh": false,
+        });
+        let persist = Settings {
+            forecast_min_soc_pct: 25.0,
+            forecast_plan_strategy: PlanStrategy::Cheapest,
+            forecast_charge_efficiency: 0.9,
+            forecast_discharge_efficiency: 0.95,
+            forecast_plan_auto_apply_enabled: true,
+            forecast_plan_auto_apply_lead_minutes: 60,
+            forecast_plan_auto_refresh: false,
+            ..Default::default()
+        };
+
+        let joined = settings_log_fields(&body, &persist).join(", ");
+        for expected in [
+            "forecast_min_soc=25%",
+            "forecast_plan_strategy=cheapest",
+            "forecast_efficiency=90%/95%",
+            "forecast_plan_auto_apply=true",
+            "forecast_plan_auto_apply_lead=60min",
+            "forecast_plan_auto_refresh=false",
+        ] {
+            assert!(
+                joined.contains(expected),
+                "expected {expected}, got: {joined}"
+            );
+        }
+
+        // Absent planner fields stay out of the log.
+        let only_min_soc = serde_json::json!({ "forecast_min_soc_pct": 25.0 });
+        assert_eq!(
+            settings_log_fields(&only_min_soc, &persist),
+            vec!["forecast_min_soc=25%".to_string()]
+        );
+    }
+
     #[test]
     fn settings_log_fields_redacts_api_key_plaintext() {
         use crate::settings::Settings;
