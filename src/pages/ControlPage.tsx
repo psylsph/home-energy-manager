@@ -32,6 +32,7 @@ import AwaitingConnection from '../components/AwaitingConnection';
 import CosyBlockedNotice from '../components/CosyBlockedNotice';
 import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import ExportOnceCard from '../components/ExportOnceCard';
+import Toggle from '../components/Toggle';
 import {
   LOGARITHMIC_RANGE_MAX,
   logarithmicPositionToValue,
@@ -554,8 +555,9 @@ function ScheduleSlotEditor({
       )}
       <div className="flex items-center justify-between">
         <span className="text-text-primary text-sm font-medium">Slot {slotIndex + 1}</span>
-        <button
-          onClick={() => setLocal((current) => ({
+        <Toggle
+          checked={local.enabled}
+          onChange={() => setLocal((current) => ({
             ...current,
             enabled: !current.enabled,
             target_soc: !current.enabled
@@ -565,16 +567,8 @@ function ScheduleSlotEditor({
               : current.target_soc,
           }))}
           disabled={saving}
-          aria-pressed={local.enabled}
-          aria-label={`Slot ${slotIndex + 1} ${local.enabled ? 'enabled' : 'disabled'}`}
-          className={`relative w-9 h-4 rounded-full transition ${local.enabled ? 'bg-accent' : 'bg-bg-elevated'
-            }`}
-        >
-          <span
-            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition ${local.enabled ? 'left-5' : 'left-0.5'
-              }`}
-          />
-        </button>
+          ariaLabel={`Slot ${slotIndex + 1}`}
+        />
       </div>
 
       {local.enabled && (
@@ -721,14 +715,7 @@ function AutoWinterSection() {
               Automatically charge battery when cold to warm cells
             </p>
           </div>
-          <button
-            onClick={() => setEnabled(!enabled)}
-            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
-          >
-            <span
-              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`}
-            />
-          </button>
+          <Toggle checked={enabled} onChange={setEnabled} ariaLabel="Enable Auto Winter Mode" />
         </div>
 
         {enabled && (
@@ -940,14 +927,14 @@ function AdaptiveChargeSection() {
           <div className="flex items-center justify-between gap-3">
             <span className="text-text-primary text-sm font-medium">Period {index + 1}</span>
             <div className="flex items-center gap-3">
-              <label className="text-text-secondary text-xs flex items-center gap-1.5">
-                <input
-                  type="checkbox"
+              <span className="text-text-secondary text-xs flex items-center gap-1.5">
+                <Toggle
                   checked={period.enabled}
-                  onChange={(event) => updatePeriod(index, { enabled: event.target.checked })}
+                  onChange={(enabled) => updatePeriod(index, { enabled })}
+                  ariaLabel={`Period ${index + 1} Enabled`}
                 />
                 Enabled
-              </label>
+              </span>
               {config.periods.length > 1 && (
                 <button
                   type="button"
@@ -965,14 +952,14 @@ function AdaptiveChargeSection() {
 
           {period.enabled && (
             <>
-              <label className="text-text-secondary text-xs flex items-center gap-1.5">
-                <input
-                  type="checkbox"
+              <span className="text-text-secondary text-xs flex items-center gap-1.5">
+                <Toggle
                   checked={period.all_day}
-                  onChange={(event) => updatePeriod(index, { all_day: event.target.checked })}
+                  onChange={(all_day) => updatePeriod(index, { all_day })}
+                  ariaLabel={`Period ${index + 1} All Day`}
                 />
                 All day
-              </label>
+              </span>
               {!period.all_day && (
                 <div className="flex flex-col sm:flex-row gap-3">
                   <div className="flex items-center gap-2">
@@ -1276,16 +1263,15 @@ function CosyChargingSection({
                     </span>
                   )}
                 </div>
-                <button
-                  onClick={() => {
+                <Toggle
+                  checked={slot.enabled}
+                  onChange={() => {
                     const next = [...slots];
                     next[i] = { ...next[i], enabled: !next[i].enabled };
                     setSlots(next);
                   }}
-                  className={`relative w-9 h-4 rounded-full transition ${slot.enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
-                >
-                  <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition ${slot.enabled ? 'left-5' : 'left-0.5'}`} />
-                </button>
+                  ariaLabel={`Slot ${i + 1}`}
+                />
               </div>
               {slot.enabled && (
                 <div className="space-y-2">
@@ -2135,16 +2121,15 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
       <div className="bg-bg-surface rounded-xl p-4 space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <label htmlFor="discharge-floor-enabled" className="text-text-secondary text-sm">
+            <span className="text-text-secondary text-sm">
               Hold Minimum SOC during schedule
-            </label>
+            </span>
             <p className="text-text-secondary/60 text-xs">Uses the inverter&apos;s configured discharge-slot times.</p>
           </div>
-          <input
-            id="discharge-floor-enabled"
-            type="checkbox"
+          <Toggle
             checked={enabled}
-            onChange={(event) => setEnabled(event.target.checked)}
+            onChange={setEnabled}
+            ariaLabel="Hold Minimum SOC during schedule"
           />
         </div>
         <div className="flex items-center gap-3">
@@ -2295,14 +2280,7 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
               Automatically pause battery discharge when home load is high
             </p>
           </div>
-          <button
-            onClick={() => setEnabled(!enabled)}
-            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
-          >
-            <span
-              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`}
-            />
-          </button>
+          <Toggle checked={enabled} onChange={setEnabled} ariaLabel="Enable Load Discharge Limiter" />
         </div>
 
         {enabled && (
@@ -2498,15 +2476,7 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
               Pause battery discharge when the inverter gets too hot
             </p>
           </div>
-          <button
-            type="button"
-            aria-label="Enable Inverter Temperature Limiter"
-            aria-pressed={enabled}
-            onClick={() => setEnabled(!enabled)}
-            className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-accent' : 'bg-bg-elevated'}`}
-          >
-            <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`} />
-          </button>
+          <Toggle checked={enabled} onChange={setEnabled} ariaLabel="Enable Inverter Temperature Limiter" />
         </div>
 
         {enabled && (
@@ -4203,18 +4173,12 @@ export default function ControlPage() {
                     Enable Backup Power During Grid Outages
                   </p>
                 </div>
-                <button
-                  type="button"
-                  aria-label="Emergency Power Supply"
-                  aria-pressed={epsEnabled}
+                <Toggle
+                  checked={epsEnabled}
+                  onChange={() => void handleEpsToggle()}
                   disabled={epsWaitingForSnapshot}
-                  onClick={handleEpsToggle}
-                  className={`relative w-10 h-5 rounded-full transition disabled:opacity-70 ${epsEnabled ? 'bg-accent' : 'bg-bg-elevated'}`}
-                >
-                  <span
-                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${epsEnabled ? 'left-5.5' : 'left-0.5'}`}
-                  />
-                </button>
+                  ariaLabel="Emergency Power Supply"
+                />
               </div>
               {epsWaitingForSnapshot && (
                 <p className="text-accent text-xs" role="status">Updating EPS…</p>

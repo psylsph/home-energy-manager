@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { apiGet, apiPost } from '../lib/api';
+import Toggle from './Toggle';
 import { exportStatusLabel, formatReward, formatSessionWindow, readSessionsResponse } from '../lib/savingSessions';
 import type { SavingSessionsMode, SavingSessionsResponse } from '../lib/types';
 
@@ -177,21 +178,12 @@ export default function SavingSessionsPanel() {
           <h4 id={joiningHeadingId} className="mb-2 text-xs font-medium text-text-secondary">
             Joining
           </h4>
-          <label className="flex items-start gap-2 text-sm text-text-primary">
-            <input
-              type="checkbox"
-              checked={data.auto_join}
-              disabled={saving}
-              onChange={(e) =>
-                void post('/api/octopus/sessions/mode', { auto_join: e.target.checked })
-              }
-              className="mt-0.5"
-            />
+          <div className="flex items-start justify-between gap-3 text-sm text-text-primary">
             <span>
               Join Sessions For Me
               <span className="mt-1 block text-xs text-text-secondary">
                 HEM asks Octopus to join each Saving Session on offer to your account that it has
-                not tried before, including any already on offer when you tick this. Each one is
+                not tried before, including any already on offer when you turn this on. Each one is
                 tried once, and only counts as joined after checking your account shows it.
                 This works the same whichever of Alert Only or Alert And Export is chosen. Your
                 account must already be signed up to Octoplus Saving Sessions; HEM will not sign
@@ -199,7 +191,15 @@ export default function SavingSessionsPanel() {
                 set up, and does not try that session again.
               </span>
             </span>
-          </label>
+            <div className="mt-0.5 shrink-0">
+              <Toggle
+                checked={data.auto_join}
+                disabled={saving}
+                onChange={(auto_join) => void post('/api/octopus/sessions/mode', { auto_join })}
+                ariaLabel="Join Sessions For Me"
+              />
+            </div>
+          </div>
           {!watching && data.auto_join && (
             <p role="status" className="mt-2 text-xs text-text-secondary">
               Joining is paused while Saving Sessions is Off. Choosing Alert Only or Alert And

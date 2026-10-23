@@ -1679,13 +1679,13 @@ export default function SettingsPage() {
         >
           Get your Octopus API key
         </button>
-        <label className="flex items-center justify-between gap-4 rounded-lg bg-bg-elevated px-4 py-3">
+        <div className="flex items-center justify-between gap-4 rounded-lg bg-bg-elevated px-4 py-3">
           <span>
             <span className="block text-sm font-medium text-text-primary">My Home Has Gas</span>
             <span className="block text-xs text-text-secondary">Switch off if you are electricity only. Gas readings are not fetched and gas is hidden from the Octopus page and its exports.</span>
           </span>
-          <input type="checkbox" checked={octopusGasEnabled} onChange={(e) => setOctopusGasEnabled(e.target.checked)} className="h-5 w-5 accent-accent" />
-        </label>
+          <Toggle checked={octopusGasEnabled} onChange={setOctopusGasEnabled} ariaLabel="My Home Has Gas" />
+        </div>
         {octopusGasEnabled && (
         <label className="block max-w-sm">
           <span className="mb-1 block text-xs font-medium text-text-secondary">Gas API Unit</span>

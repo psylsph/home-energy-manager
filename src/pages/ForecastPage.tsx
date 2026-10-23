@@ -17,6 +17,7 @@ import {
 import { apiGet, apiPost } from '../lib/api';
 import { openExternal } from '../lib/openExternal';
 import { useDeferredSave } from '../hooks/useDeferredSave';
+import Toggle from '../components/Toggle';
 import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
@@ -1275,16 +1276,14 @@ export default function ForecastPage() {
               turning the control off clears both. */}
           <div className="border-t border-white/10 pt-2 mt-1 flex flex-col gap-1">
             <div className="flex items-center gap-3 flex-wrap">
-              <label
-                htmlFor="forecast-auto-apply-toggle"
+              <span
                 title="Applies the calculated charging plan automatically before the cheap tariff window and notifies you"
                 className="text-text-primary text-xs font-sans font-medium"
               >
                 Apply charging plan automatically
-              </label>
-              <input
-                id="forecast-auto-apply-toggle"
-                type="checkbox"
+              </span>
+              <Toggle
+                ariaLabel="Apply charging plan automatically"
                 checked={planAutoHandling}
                 onChange={() => {
                   // This save carries the lead field too, so a pending lead
@@ -1301,8 +1300,7 @@ export default function ForecastPage() {
                     .finally(() => setPlanAutoToggleSaving(false));
                 }}
                 disabled={planAutoToggleSaving}
-                className="h-5 w-5 accent-accent"
-                data-testid="forecast-auto-apply-toggle"
+                testId="forecast-auto-apply-toggle"
               />
               <span className="text-text-secondary text-xs font-sans">Every Day</span>
               <input

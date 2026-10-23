@@ -9,11 +9,13 @@ export default function Toggle({
   onChange,
   ariaLabel,
   disabled,
+  testId,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   ariaLabel: string;
   disabled?: boolean;
+  testId?: string;
 }) {
   const flip = () => {
     if (!disabled) onChange(!checked);
@@ -25,6 +27,7 @@ export default function Toggle({
       aria-label={ariaLabel}
       aria-checked={checked}
       aria-disabled={disabled}
+      data-testid={testId}
       tabIndex={0}
       onClick={flip}
       onKeyDown={(e) => {
