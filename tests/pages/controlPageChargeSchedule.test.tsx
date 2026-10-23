@@ -316,7 +316,7 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     render(<ControlPage />);
 
     const section = await chargeScheduleSection();
-    fireEvent.click(within(section).getByLabelText('Slot 1 disabled'));
+    fireEvent.click(within(section).getByRole('switch', { name: 'Slot 1' }));
 
     expect(within(section).getByText('100%')).toBeDefined();
   });

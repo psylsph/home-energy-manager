@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act, within } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // SettingsPage already has SettingsPage.test.tsx (shell + hydration + alerts)
@@ -519,9 +519,10 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       render(<SettingsPage />);
       const section = await octopusSection();
       // The only switch left is the gas one; there is no import tick.
-      const boxes = section.querySelectorAll('input[type="checkbox"]');
-      expect(boxes).toHaveLength(1);
-      expect(section.textContent).toContain('My Home Has Gas');
+      const switches = within(section).getAllByRole('switch');
+      expect(switches).toHaveLength(1);
+      expect(switches[0].getAttribute('aria-label')).toBe('My Home Has Gas');
+      expect(section.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
       expect(screen.queryByText('Import Meter Readings')).toBeNull();
     });
 

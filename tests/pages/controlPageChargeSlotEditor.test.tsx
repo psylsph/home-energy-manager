@@ -154,10 +154,10 @@ describe('ControlPage Charge Schedule editor prop sync', () => {
         const chargeHeading = await screen.findByRole('heading', { name: 'Charge Schedule', exact: true });
         const chargeSection = chargeHeading.closest('section')!;
         expect(within(chargeSection).getByText('80%')).toBeDefined();
-        expect(within(chargeSection).getByRole('button', { name: 'Slot 1 enabled' })).toBeDefined();
+        expect(within(chargeSection).getByRole('switch', { name: 'Slot 1' })).toBeChecked();
 
         const exportHeading = await screen.findByRole('heading', { name: 'Timed Export', exact: true });
         const exportSection = exportHeading.closest('section')!;
-        expect(within(exportSection).getByRole('button', { name: 'Slot 1 enabled' })).toBeDefined();
+        expect(within(exportSection).getByRole('switch', { name: 'Slot 1' })).toBeChecked();
     });
 });

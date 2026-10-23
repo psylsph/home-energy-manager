@@ -269,9 +269,11 @@ describe('<ControlPage/> — Load Discharge Limiter status (issue #158)', () => 
     expect(within(winterSection).queryByText(/implemented locally within this app/i)).toBeNull();
     expect(within(winterSection).queryByText(/Winter mode active/)).toBeNull();
 
-    fireEvent.click(within(loadSection).getAllByRole('button')[0]);
-    fireEvent.click(within(temperatureSection).getAllByRole('button')[0]);
-    fireEvent.click(within(winterSection).getAllByRole('button')[0]);
+    fireEvent.click(within(loadSection).getByRole('switch', { name: 'Enable Load Discharge Limiter' }));
+    fireEvent.click(
+      within(temperatureSection).getByRole('switch', { name: 'Enable Inverter Temperature Limiter' }),
+    );
+    fireEvent.click(within(winterSection).getByRole('switch', { name: 'Enable Auto Winter Mode' }));
 
     expect(within(loadSection).getByText('Load Threshold')).toBeDefined();
     expect(within(loadSection).getByText(/Load limiter only operates in/)).toBeDefined();

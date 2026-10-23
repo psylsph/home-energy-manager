@@ -324,12 +324,12 @@ describe('<ControlPage/> — Force Charge and Force Discharge', () => {
 });
 
 describe('<ControlPage/> — EPS switch', () => {
-  const eps = () => screen.getByRole('button', { name: 'Emergency Power Supply' });
+  const eps = () => screen.getByRole('switch', { name: 'Emergency Power Supply' });
 
   it('is only offered on models that support it', () => {
     connect({ device_type_code: '2001' });
     render(<ControlPage />);
-    expect(screen.queryByRole('button', { name: 'Emergency Power Supply' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Emergency Power Supply' })).toBeNull();
   });
 
   it('reports a rejected request and frees the switch', async () => {
@@ -341,7 +341,7 @@ describe('<ControlPage/> — EPS switch', () => {
 
     await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('EPS write rejected'));
     expect(screen.queryByText('Updating EPS…')).toBeNull();
-    expect(eps()).toBeEnabled();
+    expect(eps().getAttribute('aria-disabled')).not.toBe('true');
   });
 
   it('uses a generic message when the rejection carries none', async () => {
@@ -359,7 +359,7 @@ describe('<ControlPage/> — EPS switch', () => {
 
     fireEvent.click(eps());
     await screen.findByText('Updating EPS…');
-    expect(eps()).toBeDisabled();
+    expect(eps().getAttribute('aria-disabled')).toBe('true');
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
@@ -414,6 +414,19 @@ describe('<ControlPage/> — Inverter Temperature Limiter', () => {
       recovery_threshold: 60,
       confirmation_readings: 3,
     });
+  });
+
+  it('turns off from its labelled switch and saves that', async () => {
+    connect();
+    render(<ControlPage />);
+    await waitFor(() => expect(within(block()).getAllByRole('slider').length).toBeGreaterThan(0));
+    const toggle = within(block()).getByRole('switch', { name: 'Enable Inverter Temperature Limiter' });
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    fireEvent.click(save());
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith('/api/temperature-limiter', expect.objectContaining({ enabled: false })),
+    );
   });
 
   it('never lets the recovery threshold sit above the high threshold', async () => {

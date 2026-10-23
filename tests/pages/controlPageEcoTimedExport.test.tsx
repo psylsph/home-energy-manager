@@ -501,7 +501,7 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             await waitFor(() => expect(timedExportGets).toBe(1));
             const section = await screen.findByRole('heading', { name: 'Timed Export', exact: true });
             const timedExportSection = section.closest('section')!;
-            fireEvent.click(within(timedExportSection).getByLabelText('Slot 1 disabled'));
+            fireEvent.click(within(timedExportSection).getByRole('switch', { name: 'Slot 1' }));
             fireEvent.click(within(timedExportSection).getAllByRole('button', { name: 'Save' })[0]);
 
             await waitFor(() => expect(apiPost).toHaveBeenCalledWith(

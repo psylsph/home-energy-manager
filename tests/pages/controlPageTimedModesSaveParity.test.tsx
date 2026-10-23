@@ -257,7 +257,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
     slotLabel: string,
     saveIndex = 0,
   ): Promise<void> {
-    fireEvent.click(within(section).getByLabelText(`${slotLabel} disabled`));
+    fireEvent.click(within(section).getByRole('switch', { name: slotLabel }));
     const saveButtons = within(section).getAllByRole('button', { name: 'Save' });
     fireEvent.click(saveButtons[saveIndex]);
   }
@@ -411,7 +411,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
 
     const section = await sectionByHeading('Timed Export');
     // Slot 2's editor is the second Save button in the section.
-    fireEvent.click(within(section).getByLabelText('Slot 2 disabled'));
+    fireEvent.click(within(section).getByRole('switch', { name: 'Slot 2' }));
     fireEvent.click(within(section).getAllByRole('button', { name: 'Save' })[1]);
 
     expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/api/control/discharge-slot', {
@@ -464,7 +464,7 @@ describe('<ControlPage/> — Timed Export / Timed Discharge save parity', () => 
 
     const section = await sectionByHeading('Timed Export');
     // Enable slot 1, then collapse the end time onto the start time.
-    fireEvent.click(within(section).getByLabelText('Slot 1 disabled'));
+    fireEvent.click(within(section).getByRole('switch', { name: 'Slot 1' }));
     const selects = within(section).getAllByRole('combobox');
     // Slot 1's editor renders Start (hour, minute) then End (hour, minute).
     fireEvent.change(selects[2], { target: { value: '16' } });

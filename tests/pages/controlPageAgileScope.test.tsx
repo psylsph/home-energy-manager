@@ -367,7 +367,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    const toggle = await screen.findByLabelText('Hold Minimum SOC during schedule');
+    const toggle = await screen.findByRole('switch', { name: 'Hold Minimum SOC during schedule' });
     expect(toggle).toBeDefined();
     fireEvent.click(toggle);
     const floor = screen.getByRole('slider', { name: /floor/i }) as HTMLInputElement;
@@ -627,26 +627,26 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    const epsToggle = await screen.findByRole('button', { name: 'Emergency Power Supply' });
-    expect(epsToggle.getAttribute('aria-pressed')).toBe('false');
+    const epsToggle = await screen.findByRole('switch', { name: 'Emergency Power Supply' });
+    expect(epsToggle.getAttribute('aria-checked')).toBe('false');
 
     fireEvent.click(epsToggle);
 
-    expect(epsToggle.getAttribute('aria-pressed')).toBe('true');
-    expect((epsToggle as HTMLButtonElement).disabled).toBe(true);
+    expect(epsToggle.getAttribute('aria-checked')).toBe('true');
+    expect(epsToggle.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(epsToggle);
     expect(apiPost).toHaveBeenCalledTimes(1);
     expect(apiPost).toHaveBeenCalledWith('/api/control/eps', { enabled: true });
 
     resolveEps();
     useInverterStore.setState({ snapshot: makeSnapshot({ ac_eps_enabled: true }) as never });
-    await waitFor(() => expect((epsToggle as HTMLButtonElement).disabled).toBe(false));
-    expect(epsToggle.getAttribute('aria-pressed')).toBe('true');
+    await waitFor(() => expect(epsToggle.getAttribute('aria-disabled')).not.toBe('true'));
+    expect(epsToggle.getAttribute('aria-checked')).toBe('true');
 
     useInverterStore.setState({ snapshot: makeSnapshot({ ac_eps_enabled: false }) as never });
     await waitFor(() => {
-      expect((epsToggle as HTMLButtonElement).disabled).toBe(false);
-      expect(epsToggle.getAttribute('aria-pressed')).toBe('false');
+      expect(epsToggle.getAttribute('aria-disabled')).not.toBe('true');
+      expect(epsToggle.getAttribute('aria-checked')).toBe('false');
     });
   });
 
@@ -655,7 +655,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    const epsToggle = await screen.findByRole('button', { name: 'Emergency Power Supply' });
+    const epsToggle = await screen.findByRole('switch', { name: 'Emergency Power Supply' });
     const epsCard = epsToggle.closest<HTMLElement>('div.bg-bg-surface');
     if (!epsCard) throw new Error('EPS card missing');
 

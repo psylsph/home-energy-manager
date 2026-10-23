@@ -173,8 +173,7 @@ describe('<ControlPage/> — Auto Winter save', () => {
     const winter = section('Auto Winter Mode');
     await waitFor(() => expect(save()).toBeEnabled());
 
-    // The first button in the section is the master Enable toggle.
-    fireEvent.click(within(winter).getAllByRole('button')[0]);
+    fireEvent.click(within(winter).getByRole('switch', { name: 'Enable Auto Winter Mode' }));
     expect(within(winter).getByText('Cold Threshold')).toBeInTheDocument();
     fireEvent.click(save());
 
@@ -221,6 +220,20 @@ describe('<ControlPage/> — Load Discharge Limiter save', () => {
 
     await waitFor(() => expect(save().textContent).toBe('✓ Saved'));
     expect(apiPost).toHaveBeenCalledWith('/api/load-limiter', state.limiter);
+  });
+
+  it('saves the enabled flag after its switch is turned on', async () => {
+    connect();
+    render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
+    const toggle = screen.getByRole('switch', { name: 'Enable Load Discharge Limiter' });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    fireEvent.click(save());
+
+    await waitFor(() => expect(calls('/api/load-limiter')).toHaveLength(1));
+    expect(calls('/api/load-limiter')[0][1]).toMatchObject({ enabled: true });
   });
 
   it('shows an error when the save is rejected', async () => {
@@ -287,7 +300,7 @@ describe('<ControlPage/> — Charging Mode', () => {
       const charging = section('Charging Mode');
 
       // Enable the first slot, then pull its target SOC down.
-      fireEvent.click(charging.querySelectorAll<HTMLButtonElement>('button[class*="w-9"]')[0]);
+      fireEvent.click(within(charging).getByRole('switch', { name: 'Slot 1' }));
       const targets = within(charging).getAllByRole('slider');
       fireEvent.change(targets[0], { target: { value: '60' } });
       fireEvent.click(saveSlots());
@@ -342,7 +355,7 @@ describe('<ControlPage/> — Adaptive Charge save', () => {
     connect({ adaptive_charge_enabled: true });
     render(<ControlPage />);
     // Wait for the saved (disabled) configuration to load.
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: /Enabled/ })).not.toBeChecked());
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Period 1 Enabled' })).not.toBeChecked());
 
     fireEvent.click(save());
 
@@ -355,7 +368,7 @@ describe('<ControlPage/> — Adaptive Charge save', () => {
     state.adaptive = { periods: [period({ low_soc: 40, recovery_soc: 40 })], confirmation_readings: 2 };
     connect({ adaptive_charge_enabled: true });
     render(<ControlPage />);
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: /Enabled/ })).toBeChecked());
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Period 1 Enabled' })).toBeChecked());
 
     fireEvent.click(save());
 

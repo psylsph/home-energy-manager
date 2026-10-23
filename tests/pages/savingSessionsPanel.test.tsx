@@ -377,24 +377,24 @@ describe('SavingSessionsPanel', () => {
     it('offers the switch off by default and says what it does', async () => {
       apiGet.mockResolvedValue(reply());
       render(<SavingSessionsPanel />);
-      const box = (await screen.findByRole('checkbox', {
+      const box = (await screen.findByRole('switch', {
         name: /Join Sessions For Me/,
-      })) as HTMLInputElement;
+      }));
       // Not "new": sessions already on offer are joined too.
       expect(screen.queryByText(/new sessions/i)).toBeNull();
-      expect(box.checked).toBe(false);
+      expect(box.getAttribute('aria-checked')).toBe('false');
       expect(screen.getByText(/HEM will not sign it up/)).toBeTruthy();
       expect(screen.getByText(/shows it here, messages you if an alert channel is set up/)).toBeTruthy();
       // auto_join() takes everything on offer it has not tried, not only
       // offers that arrive after the tick.
-      expect(screen.getByText(/including any already on offer when you tick this/)).toBeTruthy();
+      expect(screen.getByText(/including any already on offer when you turn this on/)).toBeTruthy();
     });
 
     it('turns it on without changing the mode, then reloads', async () => {
       apiGet.mockResolvedValue(reply({ mode: 'export' }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      fireEvent.click(await screen.findByRole('checkbox', { name: /Join Sessions For Me/ }));
+      fireEvent.click(await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
       await waitFor(() =>
         // The tick alone: a stale mode sent with it could switch the
         // feature and stop a running export.
@@ -407,8 +407,8 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ auto_join: true }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      const box = (await screen.findByRole('checkbox', { name: /Join Sessions For Me/ })) as HTMLInputElement;
-      expect(box.checked).toBe(true);
+      const box = (await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
+      expect(box.getAttribute('aria-checked')).toBe('true');
       fireEvent.click(box);
       await waitFor(() =>
         expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: false }),
@@ -421,8 +421,8 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ mode: 'off', auto_join: true }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      const box = (await screen.findByRole('checkbox', { name: /Join Sessions For Me/ })) as HTMLInputElement;
-      expect(box.checked).toBe(true);
+      const box = (await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
+      expect(box.getAttribute('aria-checked')).toBe('true');
       fireEvent.click(box);
       await waitFor(() =>
         expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: false }),
@@ -434,7 +434,7 @@ describe('SavingSessionsPanel', () => {
         apiGet.mockResolvedValue(reply({ mode, configured: false, auto_join: true }));
         const { unmount } = render(<SavingSessionsPanel />);
         await screen.findByRole('button', { name: 'Off' });
-        expect(screen.queryByRole('checkbox')).toBeNull();
+        expect(screen.queryByRole('switch')).toBeNull();
         // Nothing to promise about resuming without credentials.
         expect(screen.queryByText(/paused/)).toBeNull();
         unmount();
@@ -469,7 +469,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ mode: 'export' }));
       render(<SavingSessionsPanel />);
       const section = await screen.findByRole('group', { name: 'Joining' });
-      const box = screen.getByRole('checkbox', { name: /Join Sessions For Me/ });
+      const box = screen.getByRole('switch', { name: /Join Sessions For Me/ });
       expect(section.contains(box)).toBe(true);
       const exportText = screen.getByText(/will export from your battery/);
       expect(section.compareDocumentPosition(exportText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -481,7 +481,7 @@ describe('SavingSessionsPanel', () => {
         apiPost.mockReset();
         apiPost.mockResolvedValue({ ok: true });
         const { unmount } = render(<SavingSessionsPanel />);
-        fireEvent.click(await screen.findByRole('checkbox', { name: /Join Sessions For Me/ }));
+        fireEvent.click(await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
         expect(screen.getByText(/whichever of Alert Only or Alert And Export is chosen/)).toBeTruthy();
         await waitFor(() =>
           expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: true }),
@@ -583,7 +583,7 @@ describe('SavingSessionsPanel', () => {
         }],
       }));
       render(<SavingSessionsPanel />);
-      await screen.findByRole('checkbox', { name: /Join Sessions For Me/ });
+      await screen.findByRole('switch', { name: /Join Sessions For Me/ });
       expect(screen.queryByText(/Could not join/)).toBeNull();
     });
   });

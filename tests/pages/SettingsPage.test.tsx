@@ -438,16 +438,16 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     it('is on by default and shows the gas unit', async () => {
       mountApiMocks();
       render(<SettingsPage />);
-      const box = await screen.findByRole('checkbox', { name: /My Home Has Gas/ }) as HTMLInputElement;
-      expect(box.checked).toBe(true);
+      const box = await screen.findByRole('switch', { name: /My Home Has Gas/ });
+      expect(box.getAttribute('aria-checked')).toBe('true');
       expect(gasUnit()).not.toBeNull();
     });
 
     it('hides the gas unit for an electricity-only home, and saves the choice', async () => {
       mountApiMocks({ octopus_gas_enabled: false });
       render(<SettingsPage />);
-      const box = await screen.findByRole('checkbox', { name: /My Home Has Gas/ }) as HTMLInputElement;
-      expect(box.checked).toBe(false);
+      const box = await screen.findByRole('switch', { name: /My Home Has Gas/ });
+      expect(box.getAttribute('aria-checked')).toBe('false');
       expect(gasUnit()).toBeNull();
 
       fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
@@ -461,7 +461,7 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     it('toggling shows and hides the gas unit without losing the chosen unit', async () => {
       mountApiMocks({ octopus_gas_unit: 'm3' });
       render(<SettingsPage />);
-      const box = await screen.findByRole('checkbox', { name: /My Home Has Gas/ }) as HTMLInputElement;
+      const box = await screen.findByRole('switch', { name: /My Home Has Gas/ });
       fireEvent.click(box);
       expect(gasUnit()).toBeNull();
       fireEvent.click(box);

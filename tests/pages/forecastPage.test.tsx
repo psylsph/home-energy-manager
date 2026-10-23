@@ -221,9 +221,9 @@ import { apiGet, apiPost } from '../../src/lib/api';
 
 const apiGetMock = vi.mocked(apiGet);
 const apiPostMocked = vi.mocked(apiPost);
-// The auto-apply control's on and locked states.
-const isOn = (el: Element) => (el as HTMLInputElement).checked;
-const isLocked = (el: Element) => (el as HTMLInputElement).disabled;
+// The auto-apply control is a switch: its state is aria-checked/aria-disabled.
+const isOn = (el: Element) => el.getAttribute('aria-checked') === 'true';
+const isLocked = (el: Element) => el.getAttribute('aria-disabled') === 'true';
 
 describe('ForecastPage', () => {
   beforeEach(() => {
