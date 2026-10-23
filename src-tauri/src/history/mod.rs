@@ -4518,10 +4518,11 @@ mod tests {
     /// ramping 0 → `import_kwh` / `export_kwh` between 06:00 and 18:00 —
     /// the "normal mixed day" shape for the walk-matrix tests.
     fn insert_both_counters_day(db: &HistoryDb, day_offset: i64, import_kwh: f32, export_kwh: f32) {
-        let midnight = local_midnight_secs(day_offset);
         for step in 0..48i64 {
-            let ts = midnight + step * 1800;
             let min_of_day = step * 30;
+            let Some(ts) = local_day_secs(day_offset, min_of_day) else {
+                continue;
+            };
             let frac = if min_of_day <= 6 * 60 {
                 0.0
             } else if min_of_day >= 18 * 60 {
@@ -8073,6 +8074,21 @@ mod tests {
             .timestamp()
     }
 
+    /// Unix time `min_of_day` local wall-clock minutes into the local day
+    /// `day_offset` days from today. Built from wall time rather than
+    /// `midnight + offset` so a clock-change day (23 or 25 hours) still puts
+    /// each reading at its intended local time — the cost tests price by
+    /// local time-of-use, and three days from "today" cross a clock change
+    /// a few days a year. `None` for a wall time the spring-forward gap skips.
+    fn local_day_secs(day_offset: i64, min_of_day: i64) -> Option<i64> {
+        let date = Local::now().date_naive() + chrono::Duration::days(day_offset);
+        let wall = date.and_hms_opt((min_of_day / 60) as u32, (min_of_day % 60) as u32, 0)?;
+        Local
+            .from_local_datetime(&wall)
+            .earliest()
+            .map(|t| t.timestamp())
+    }
+
     /// Insert one local day of a daily-resetting export counter at 30-min
     /// resolution. The counter rises 0 → `daily_kwh` between `rise_start_min`
     /// and `rise_end_min` (local minutes-of-day) and plateaus after, so the
@@ -8085,10 +8101,11 @@ mod tests {
         rise_start_min: i64,
         rise_end_min: i64,
     ) {
-        let midnight = local_midnight_secs(day_offset);
         for step in 0..48i64 {
-            let ts = midnight + step * 1800;
             let min_of_day = step * 30;
+            let Some(ts) = local_day_secs(day_offset, min_of_day) else {
+                continue;
+            };
             let frac = if min_of_day <= rise_start_min {
                 0.0
             } else if min_of_day >= rise_end_min {
@@ -8114,10 +8131,11 @@ mod tests {
         rise_start_min: i64,
         rise_end_min: i64,
     ) {
-        let midnight = local_midnight_secs(day_offset);
         for step in 0..48i64 {
-            let ts = midnight + step * 1800;
             let min_of_day = step * 30;
+            let Some(ts) = local_day_secs(day_offset, min_of_day) else {
+                continue;
+            };
             let frac = if min_of_day <= rise_start_min {
                 0.0
             } else if min_of_day >= rise_end_min {
