@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.93.1] - 2026-10-23
+
+### Fixed
+
+- **Planner settings changed with the arrow buttons now save.** In Firefox, changing the Minimum Battery Level, the auto-apply lead time or the battery efficiencies on the Planner page with the little up/down arrows was never saved, so the old value came back as soon as you left the page. These settings now save a moment after you stop changing them, when you press Enter, and when you leave the page, in every browser (#391).
+
 ## [0.93.0] - 2026-10-22
 
 ### Added
