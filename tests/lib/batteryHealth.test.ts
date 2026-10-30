@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   capacityPercent,
   cellSpreadMv,
@@ -7,6 +7,8 @@ import {
   describeTrend,
   socEventDays,
   hasMetric,
+  formatHealthTick,
+  healthAxis,
   healthModules,
   latestPerModule,
   pivotHealth,
@@ -263,5 +265,128 @@ describe('latestPerModule', () => {
     expect(m.spreadMv).toBeNull();
     expect(m.spreadKind).toBeNull();
     expect(m.spreadDay).toBeNull();
+  });
+});
+
+describe('healthAxis', () => {
+  const days = (...ds: string[]) => ds.map(dayToMs);
+  const label = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const DAY = 86_400_000;
+
+  it('is empty without data', () => {
+    expect(healthAxis([]).ticks).toEqual([]);
+  });
+
+  it('labels a single day', () => {
+    expect(healthAxis(days('2026-10-01'))).toEqual({ ticks: days('2026-10-01'), unit: 'day' });
+  });
+
+  it('labels every day of a short range, including days without data', () => {
+    expect(healthAxis(days('2026-10-01', '2026-10-04')).ticks.map(label)).toEqual([
+      '2026-10-01',
+      '2026-10-02',
+      '2026-10-03',
+      '2026-10-04',
+    ]);
+  });
+
+  it('spaces a range of weeks evenly in whole days, ending on the newest day', () => {
+    const { ticks, unit } = healthAxis(days('2026-09-01', '2026-10-28'), 5);
+    expect(unit).toBe('day');
+    expect(ticks.length).toBeLessThanOrEqual(5);
+    expect(ticks.length).toBeGreaterThanOrEqual(4);
+    expect(label(ticks[ticks.length - 1])).toBe('2026-10-28');
+    expect(ticks[0]).toBeGreaterThanOrEqual(dayToMs('2026-09-01'));
+    const gaps = ticks.slice(1).map((t, i) => Math.round((t - ticks[i]) / DAY));
+    expect(new Set(gaps).size).toBe(1);
+  });
+
+  it('labels months for longer ranges, inside the data and within the limit', () => {
+    const { ticks, unit } = healthAxis(days('2026-04-10', '2026-10-28'), 5);
+    expect(unit).toBe('month');
+    expect(ticks.length).toBeLessThanOrEqual(5);
+    for (const t of ticks) {
+      expect(new Date(t).getDate()).toBe(1);
+      expect(t).toBeGreaterThanOrEqual(dayToMs('2026-04-10'));
+      expect(t).toBeLessThanOrEqual(dayToMs('2026-10-28'));
+    }
+    // Newest month is labelled.
+    expect(label(ticks[ticks.length - 1])).toBe('2026-10-01');
+  });
+
+  it('labels the 3m range on days, newest day included', () => {
+    const { ticks, unit } = healthAxis(days('2026-08-01', '2026-10-30'));
+    expect(unit).toBe('day');
+    expect(label(ticks[ticks.length - 1])).toBe('2026-10-30');
+    expect(ticks.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('spreads a year that starts mid-month over the full four labels', () => {
+    const { ticks, unit } = healthAxis(days('2025-10-15', '2026-10-30'));
+    expect(unit).toBe('month');
+    expect(ticks).toHaveLength(4);
+    expect(label(ticks[0]) <= '2026-01-01').toBe(true);
+  });
+
+  it('never repeats a label across a whole year', () => {
+    const { ticks, unit } = healthAxis(days('2025-10-28', '2026-10-28'), 5);
+    const labels = ticks.map((t) => formatHealthTick(t, unit));
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+
+  it('shows the year on month labels', () => {
+    expect(formatHealthTick(dayToMs('2026-10-01'), 'month')).toMatch(/2026/);
+    expect(formatHealthTick(dayToMs('2026-10-01'), 'day')).not.toMatch(/2026/);
+  });
+
+  it('spans years for the All range without crowding', () => {
+    const { ticks } = healthAxis(days('2017-01-05', '2026-10-28'), 5);
+    expect(ticks.length).toBeGreaterThanOrEqual(2);
+    expect(ticks.length).toBeLessThanOrEqual(5);
+  });
+
+  it('takes the range from unsorted input', () => {
+    expect(healthAxis(days('2026-10-03', '2026-10-01')).ticks.map(label)).toEqual([
+      '2026-10-01',
+      '2026-10-02',
+      '2026-10-03',
+    ]);
+  });
+
+  it('treats a limit below two as two, rather than looping or overshooting', () => {
+    expect(healthAxis(days('2026-10-01'), 0).ticks).toHaveLength(1);
+    expect(healthAxis(days('2026-10-01', '2026-10-11'), 1).ticks.length).toBeLessThanOrEqual(2);
+  });
+
+  it('fits a phone-width chart by default: at most four labels', () => {
+    for (const span of [days('2026-09-01', '2026-10-28'), days('2026-04-10', '2026-10-28'), days('2025-10-28', '2026-10-28')]) {
+      expect(healthAxis(span).ticks.length).toBeLessThanOrEqual(4);
+    }
+  });
+
+  it('ignores malformed days', () => {
+    expect(healthAxis([Number.NaN, dayToMs('2026-10-01')]).ticks).toEqual(days('2026-10-01'));
+  });
+
+  describe('across a clock change', () => {
+    const previous = process.env.TZ;
+    beforeAll(() => {
+      process.env.TZ = 'Europe/London';
+    });
+    afterAll(() => {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    });
+
+    it('keeps every day on local midday', () => {
+      // UK clocks go back on 25 Oct 2026, so this span is not a whole number of days.
+      expect(dayToMs('2026-10-30') - dayToMs('2026-10-20')).not.toBe(10 * DAY);
+      const { ticks } = healthAxis(days('2026-10-20', '2026-10-30'), 20);
+      expect(ticks).toHaveLength(11);
+      for (const t of ticks) expect(new Date(t).getHours()).toBe(12);
+    });
   });
 });

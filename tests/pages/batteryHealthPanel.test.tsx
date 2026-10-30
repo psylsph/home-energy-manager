@@ -17,8 +17,10 @@ vi.mock('../../src/lib/api', () => ({
 vi.mock('recharts', () => {
   return {
     ResponsiveContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-    LineChart: ({ data, children }: { data: unknown[]; children: ReactNode }) => (
-      <div data-testid="line-chart" data-points={data.length}>{children}</div>
+    LineChart: ({ data, margin, children }: { data: unknown[]; margin?: { right?: number }; children: ReactNode }) => (
+      <div data-testid="line-chart" data-points={data.length} data-margin-right={margin?.right}>
+        {children}
+      </div>
     ),
     Line: ({ dataKey }: { dataKey: string }) => <span data-testid="line">{dataKey}</span>,
     CartesianGrid: (props: Record<string, unknown>) => (
@@ -29,7 +31,9 @@ vi.mock('recharts', () => {
         data-horizontal={String(props.horizontal)}
       />
     ),
-    XAxis: () => null,
+    XAxis: (props: { ticks?: number[]; interval?: unknown }) => (
+      <i data-testid="x-axis" data-ticks={JSON.stringify(props.ticks ?? null)} data-interval={String(props.interval)} />
+    ),
     YAxis: () => null,
     Tooltip: () => null,
     Legend: () => null,
@@ -39,6 +43,7 @@ vi.mock('recharts', () => {
 import { useInverterStore } from '../../src/store/useInverterStore';
 import { getHistoryChartGridProps } from '../../src/lib/historyRangeConfig';
 import BatteryHealthPanel from '../../src/components/BatteryHealthPanel';
+import { dayToMs } from '../../src/lib/batteryHealth';
 
 function day(overrides: Partial<BatteryHealthDay> = {}): BatteryHealthDay {
   return {
@@ -127,6 +132,29 @@ describe('BatteryHealthPanel', () => {
       expect(grid.getAttribute('data-horizontal')).not.toBe('false');
     }
     useInverterStore.setState({ gridLineWeight: 'standard' });
+  });
+
+  it('labels every chart on whole days and never lets Recharts drop a label', async () => {
+    serve([day({ day: '2026-10-01' }), day({ day: '2026-10-03' })]);
+    render(<BatteryHealthPanel />);
+    await screen.findByText('Charge cycles');
+    const axes = screen.getAllByTestId('x-axis');
+    expect(axes).toHaveLength(4);
+    const expected = JSON.stringify(['2026-10-01', '2026-10-02', '2026-10-03'].map(dayToMs));
+    for (const axis of axes) {
+      expect(axis.getAttribute('data-ticks')).toBe(expected);
+      expect(axis.getAttribute('data-interval')).toBe('0');
+    }
+  });
+
+  it('leaves room for the newest day label, which sits on the right edge', async () => {
+    serve([day({ day: '2026-10-01' }), day({ day: '2026-10-30' })]);
+    render(<BatteryHealthPanel />);
+    await screen.findByText('Charge cycles');
+    // Half of a centred month label ("Oct 2026", 11px bold) is about 27px.
+    for (const chart of screen.getAllByTestId('line-chart')) {
+      expect(Number(chart.getAttribute('data-margin-right'))).toBeGreaterThanOrEqual(32);
+    }
   });
 
   it('says which spread the summary shows', async () => {
