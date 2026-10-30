@@ -582,4 +582,27 @@ export interface BatteryHealthDay {
   design_capacity_ah: number | null;
   bms_firmware: number | null;
   samples: number;
+  /** SOC jumps confirmed that day. */
+  soc_jumps: number;
+  /** Stuck-SOC episodes confirmed that day. */
+  soc_stuck: number;
+}
+
+/** A module's near-full cell spread trend (`GET /api/battery-health`, issue #393). */
+export interface BatteryHealthTrend {
+  module_index: number;
+  status: 'ok' | 'widening' | 'high' | 'insufficient';
+  /** Median near-full spread over the last 7 days, mV. */
+  recent_mv: number | null;
+  /** Median near-full spread 31–60 days ago, mV. */
+  baseline_mv: number | null;
+  /** Near-full days in the last 7. */
+  recent_days: number;
+  /** Near-full days the last 7 need before the trend counts. */
+  recent_min_days: number;
+}
+
+export interface BatteryHealth {
+  days: BatteryHealthDay[];
+  trend: BatteryHealthTrend[];
 }

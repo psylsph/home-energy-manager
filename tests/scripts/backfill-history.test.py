@@ -223,6 +223,44 @@ class BackfillHistoryTests(unittest.TestCase):
             self.assertEqual(len(rows), len(first))
             self.assertTrue(all(row["cycles"] == 999999 for row in rows if row["module_index"] == 0))
 
+    def test_only_the_weakening_module_has_soc_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+
+            result = self.run_script("--db", str(path), "--days", "120", "--interval", "3600")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = self.health_rows(path)
+            healthy = [row for row in rows if row["module_index"] == 0]
+            weak = [row for row in rows if row["module_index"] == 1]
+            self.assertTrue(all(row["soc_jumps"] == 0 and row["soc_stuck"] == 0 for row in healthy))
+            self.assertGreater(sum(row["soc_jumps"] for row in weak), 0)
+            self.assertGreater(sum(row["soc_stuck"] for row in weak), 0)
+
+    def test_an_older_health_table_gains_the_soc_columns_and_keeps_its_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+            old_ddl = backfill.BATTERY_HEALTH_DDL.replace(
+                "    soc_jumps          INTEGER NOT NULL DEFAULT 0,\n", ""
+            ).replace("    soc_stuck          INTEGER NOT NULL DEFAULT 0,\n", "")
+            self.assertNotIn("soc_jumps", old_ddl)
+            with sqlite3.connect(path) as conn:
+                conn.execute(old_ddl)
+                conn.execute(
+                    "INSERT INTO battery_health_daily (day, module_index, samples, updated_at) "
+                    "VALUES ('2000-01-01', 0, 1, 1)"
+                )
+
+            result = self.run_script("--db", str(path), "--days", "2", "--interval", "3600")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = self.health_rows(path)
+            self.assertEqual(rows[0]["day"], "2000-01-01")
+            self.assertEqual(rows[0]["soc_jumps"], 0)
+            self.assertGreater(len(rows), 1)
+
     def test_modules_zero_skips_battery_health_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "history.db"

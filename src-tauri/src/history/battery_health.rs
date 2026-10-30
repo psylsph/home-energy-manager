@@ -26,6 +26,7 @@ use serde::Serialize;
 
 use super::HistoryDb;
 use crate::inverter::model::{BatteryModule, InverterSnapshot};
+use crate::inverter::soc_watch::{SocEvent, SocEventKind, SocSource};
 
 /// Longest a fold waits before asking for a flush to SQLite.
 pub const FLUSH_INTERVAL_SECS: i64 = 300;
@@ -76,6 +77,10 @@ pub struct BatteryHealthRow {
     pub bms_firmware: Option<i64>,
     /// How many polls contributed.
     pub samples: i64,
+    /// SOC jumps confirmed that day (see `inverter::soc_watch`).
+    pub soc_jumps: i64,
+    /// Stuck-SOC episodes confirmed that day.
+    pub soc_stuck: i64,
 }
 
 impl BatteryHealthRow {
@@ -93,6 +98,8 @@ impl BatteryHealthRow {
             design_capacity_ah: None,
             bms_firmware: None,
             samples: 0,
+            soc_jumps: 0,
+            soc_stuck: 0,
         }
     }
 
@@ -124,6 +131,8 @@ impl BatteryHealthRow {
         self.design_capacity_ah = self.design_capacity_ah.or(earlier.design_capacity_ah);
         self.bms_firmware = self.bms_firmware.or(earlier.bms_firmware);
         self.samples += earlier.samples;
+        self.soc_jumps += earlier.soc_jumps;
+        self.soc_stuck += earlier.soc_stuck;
     }
 
     fn fold(&mut self, module: &BatteryModule, effective_soc: u8) {
@@ -218,6 +227,17 @@ impl HealthAccumulator {
         }
     }
 
+    fn count_soc_event(&mut self, day: &str, slot: i64, kind: &SocEventKind) {
+        let row = self
+            .rows
+            .entry((day.to_string(), slot))
+            .or_insert_with(|| BatteryHealthRow::new(day, slot));
+        match kind {
+            SocEventKind::Jump { .. } => row.soc_jumps += 1,
+            SocEventKind::Stuck { .. } => row.soc_stuck += 1,
+        }
+    }
+
     fn take(&mut self) -> Vec<BatteryHealthRow> {
         self.rows.drain().map(|(_, row)| row).collect()
     }
@@ -226,8 +246,9 @@ impl HealthAccumulator {
 const UPSERT_SQL: &str = "\
 INSERT INTO battery_health_daily \
  (day, module_index, min_cell_v, max_cell_v, max_spread_mv, full_spread_mv, \
-  cycles, max_temp_c, capacity_ah, design_capacity_ah, bms_firmware, samples, updated_at) \
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+  cycles, max_temp_c, capacity_ah, design_capacity_ah, bms_firmware, samples, updated_at, \
+  soc_jumps, soc_stuck) \
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
 ON CONFLICT(day, module_index) DO UPDATE SET \
  min_cell_v = MIN(COALESCE(min_cell_v, excluded.min_cell_v), COALESCE(excluded.min_cell_v, min_cell_v)), \
  max_cell_v = MAX(COALESCE(max_cell_v, excluded.max_cell_v), COALESCE(excluded.max_cell_v, max_cell_v)), \
@@ -239,6 +260,8 @@ ON CONFLICT(day, module_index) DO UPDATE SET \
  design_capacity_ah = COALESCE(excluded.design_capacity_ah, design_capacity_ah), \
  bms_firmware = COALESCE(excluded.bms_firmware, bms_firmware), \
  samples = samples + excluded.samples, \
+ soc_jumps = soc_jumps + excluded.soc_jumps, \
+ soc_stuck = soc_stuck + excluded.soc_stuck, \
  updated_at = excluded.updated_at";
 
 impl HistoryDb {
@@ -254,6 +277,18 @@ impl HistoryDb {
             .unwrap_or_else(|e| e.into_inner())
             .observe(snap, now)
     }
+
+    /// Count confirmed SOC jumps and stuck episodes on today's rows. A
+    /// system-SOC event (no module reports its own SOC) is about the whole
+    /// battery, so it counts once, on the lowest module slot in `snap`.
+    pub fn record_soc_events(
+        &self,
+        events: &[SocEvent],
+        snap: &InverterSnapshot,
+        now: DateTime<Local>,
+    ) {
+        let _ = (events, snap, now);
+}
 
     /// Merge the accumulated polls into `battery_health_daily`. Blocking
     /// (SQLite). The batch is one transaction, so a failure leaves the table
@@ -295,6 +330,8 @@ impl HistoryDb {
                         row.bms_firmware,
                         row.samples,
                         updated_at,
+                        row.soc_jumps,
+                        row.soc_stuck,
                     ])?;
                 }
             }
@@ -329,7 +366,7 @@ impl HistoryDb {
             .prepare(
                 "SELECT day, module_index, min_cell_v, max_cell_v, max_spread_mv, \
                  full_spread_mv, cycles, max_temp_c, capacity_ah, design_capacity_ah, \
-                 bms_firmware, samples \
+                 bms_firmware, samples, soc_jumps, soc_stuck \
                  FROM battery_health_daily WHERE day >= ?1 AND day <= ?2 \
                  ORDER BY day ASC, module_index ASC",
             )
@@ -354,6 +391,8 @@ impl HistoryDb {
                         design_capacity_ah: row.get(9)?,
                         bms_firmware: row.get(10)?,
                         samples: row.get(11)?,
+                        soc_jumps: row.get(12)?,
+                        soc_stuck: row.get(13)?,
                     })
                 },
             )
@@ -619,6 +658,176 @@ mod tests {
             rows[0]
         );
         assert_eq!(rows[0].samples, 3, "no sample lost or counted twice");
+    }
+
+    fn soc_jump(source: SocSource) -> SocEvent {
+        SocEvent {
+            source,
+            kind: SocEventKind::Jump { from: 60, to: 20 },
+        }
+    }
+
+    fn soc_stuck(source: SocSource) -> SocEvent {
+        SocEvent {
+            source,
+            kind: SocEventKind::Stuck {
+                soc: 60,
+                energy_kwh: 1.5,
+            },
+        }
+    }
+
+    fn counts(db: &HistoryDb) -> Vec<(String, i64, i64, i64)> {
+        all_rows(db)
+            .into_iter()
+            .map(|r| (r.day, r.module_index, r.soc_jumps, r.soc_stuck))
+            .collect()
+    }
+
+    #[test]
+    fn soc_events_are_counted_per_module() {
+        let db = test_db();
+        let now = at(2026, 10, 1, 12, 0);
+        let s = snap(vec![
+            module(0, &[3.3, 3.31], 60),
+            module(1, &[3.3, 3.31], 60),
+        ]);
+        db.observe_battery_health(&s, now);
+        db.record_soc_events(
+            &[
+                soc_jump(SocSource::Module(0)),
+                soc_jump(SocSource::Module(0)),
+                soc_stuck(SocSource::Module(1)),
+            ],
+            &s,
+            now,
+        );
+        db.flush_battery_health();
+        assert_eq!(
+            counts(&db),
+            vec![
+                ("2026-10-01".to_string(), 0, 2, 0),
+                ("2026-10-01".to_string(), 1, 0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_system_soc_event_counts_once_on_the_first_module() {
+        // One battery-level event must not read as one per module.
+        let db = test_db();
+        let now = at(2026, 10, 1, 12, 0);
+        let s = snap(vec![module(1, &[3.3, 3.31], 0), module(0, &[3.3, 3.31], 0)]);
+        db.observe_battery_health(&s, now);
+        db.record_soc_events(&[soc_stuck(SocSource::System)], &s, now);
+        db.flush_battery_health();
+        assert_eq!(
+            counts(&db),
+            vec![
+                ("2026-10-01".to_string(), 0, 0, 1),
+                ("2026-10-01".to_string(), 1, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_system_soc_event_without_modules_records_nothing() {
+        let db = test_db();
+        let now = at(2026, 10, 1, 12, 0);
+        db.record_soc_events(&[soc_jump(SocSource::System)], &snap(vec![]), now);
+        db.flush_battery_health();
+        assert!(all_rows(&db).is_empty());
+    }
+
+    #[test]
+    fn soc_event_counts_add_across_flushes_and_restarts() {
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-battery-health-soc-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = dir.join("h.db");
+        let now = at(2026, 10, 1, 9, 0);
+        let s = snap(vec![module(0, &[3.3, 3.31], 60)]);
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            db.observe_battery_health(&s, now);
+            db.record_soc_events(&[soc_jump(SocSource::Module(0))], &s, now);
+            db.flush_battery_health();
+            db.record_soc_events(&[soc_jump(SocSource::Module(0))], &s, now);
+            db.flush_battery_health();
+        }
+        let db = HistoryDb::open(&path).unwrap();
+        db.record_soc_events(&[soc_stuck(SocSource::Module(0))], &s, now);
+        db.flush_battery_health();
+        assert_eq!(counts(&db), vec![("2026-10-01".to_string(), 0, 2, 1)]);
+    }
+
+    #[test]
+    fn soc_events_survive_a_failed_flush() {
+        let db = test_db();
+        let now = at(2026, 10, 1, 12, 0);
+        let s = snap(vec![module(0, &[3.3, 3.31], 60)]);
+        db.observe_battery_health(&s, now);
+        db.record_soc_events(&[soc_jump(SocSource::Module(0))], &s, now);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE battery_health_daily RENAME TO parked")
+            .unwrap();
+        db.flush_battery_health();
+        db.record_soc_events(&[soc_jump(SocSource::Module(0))], &s, now);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE parked RENAME TO battery_health_daily")
+            .unwrap();
+        db.flush_battery_health();
+        assert_eq!(counts(&db), vec![("2026-10-01".to_string(), 0, 2, 0)]);
+    }
+
+    #[test]
+    fn a_database_from_before_soc_counts_gains_them_and_keeps_its_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-battery-health-legacy-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("h.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE battery_health_daily (
+                    day TEXT NOT NULL, module_index INTEGER NOT NULL,
+                    min_cell_v REAL, max_cell_v REAL, max_spread_mv REAL,
+                    full_spread_mv REAL, cycles INTEGER, max_temp_c REAL,
+                    capacity_ah REAL, design_capacity_ah REAL, bms_firmware INTEGER,
+                    samples INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (day, module_index));
+                 INSERT INTO battery_health_daily (day, module_index, max_spread_mv, cycles,
+                    samples, updated_at) VALUES ('2026-09-30', 0, 42.0, 300, 1440, 1);",
+            )
+            .unwrap();
+        }
+        let db = HistoryDb::open(&path).unwrap();
+        let old = &all_rows(&db)[0];
+        assert_eq!(old.max_spread_mv, Some(42.0));
+        assert_eq!(old.cycles, Some(300));
+        assert_eq!((old.soc_jumps, old.soc_stuck), (0, 0));
+
+        let now = at(2026, 10, 1, 12, 0);
+        let s = snap(vec![module(0, &[3.3, 3.31], 60)]);
+        db.observe_battery_health(&s, now);
+        db.record_soc_events(&[soc_jump(SocSource::Module(0))], &s, now);
+        db.flush_battery_health();
+        assert_eq!(
+            counts(&db),
+            vec![
+                ("2026-09-30".to_string(), 0, 0, 0),
+                ("2026-10-01".to_string(), 0, 1, 0),
+            ]
+        );
     }
 
     #[test]

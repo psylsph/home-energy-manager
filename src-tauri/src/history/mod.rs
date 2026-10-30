@@ -6,6 +6,7 @@
 
 pub mod backup;
 pub mod battery_health;
+pub mod battery_health_trend;
 pub mod minute;
 
 use std::path::Path;
@@ -1011,6 +1012,8 @@ CREATE TABLE IF NOT EXISTS battery_health_daily (
     bms_firmware       INTEGER,
     samples            INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL,
+    soc_jumps          INTEGER NOT NULL DEFAULT 0,
+    soc_stuck          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, module_index)
 );
 CREATE TABLE IF NOT EXISTS forecast_values (
@@ -1149,15 +1152,36 @@ pub(crate) fn verify_integrity(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn readings_has_column(conn: &Connection, column: &str) -> Result<bool, String> {
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
     conn.query_row(
-        "SELECT 1 FROM pragma_table_info('readings') WHERE name = ?1 LIMIT 1",
-        [column],
+        "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 LIMIT 1",
+        [table, column],
         |row| row.get::<_, i64>(0),
     )
     .optional()
     .map(|value| value.is_some())
-    .map_err(|e| format!("failed to inspect readings columns: {e}"))
+    .map_err(|e| format!("failed to inspect {table} columns: {e}"))
+}
+
+fn readings_has_column(conn: &Connection, column: &str) -> Result<bool, String> {
+    table_has_column(conn, "readings", column)
+}
+
+/// Add `column` to `table` if an older database lacks it. `table` and
+/// `definition` are fixed strings from this file, never user input.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    if table_has_column(conn, table, column)? {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
+    .map_err(|e| format!("failed to add {table} column {column}: {e}"))
 }
 
 fn add_readings_column_if_missing(
@@ -1165,13 +1189,7 @@ fn add_readings_column_if_missing(
     column: &str,
     definition: &str,
 ) -> Result<(), String> {
-    if readings_has_column(conn, column)? {
-        return Ok(());
-    }
-    conn.execute_batch(&format!(
-        "ALTER TABLE readings ADD COLUMN {column} {definition}"
-    ))
-    .map_err(|e| format!("failed to add readings column {column}: {e}"))
+    add_column_if_missing(conn, "readings", column, definition)
 }
 
 /// Write a minute row in place of the rows this process inserted for that
@@ -1369,6 +1387,20 @@ impl HistoryDb {
         // PV output as % of rated peak, stored for history charting).
         add_readings_column_if_missing(&conn, "pv1_pct", "REAL")?;
         add_readings_column_if_missing(&conn, "pv2_pct", "REAL")?;
+
+        // Migration: SOC jump / stuck counts per module-day (issue #393).
+        add_column_if_missing(
+            &conn,
+            "battery_health_daily",
+            "soc_jumps",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "battery_health_daily",
+            "soc_stuck",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         // One-time backfill: populate home_energy_today_kwh for historic rows
         // recorded before this column existed. Commit 5e1da32 renamed the

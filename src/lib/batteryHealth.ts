@@ -1,4 +1,4 @@
-import type { BatteryHealthDay } from './types';
+import type { BatteryHealthDay, BatteryHealthTrend } from './types';
 
 // Pure helpers for the Battery Health panel (issue #393): the live cell
 // spread, and the pivot from one-row-per-module-per-day into the
@@ -141,6 +141,40 @@ export function latestPerModule(rows: readonly BatteryHealthDay[]): ModuleHealth
       bmsFirmware: latestWith(mine, (r) => r.bms_firmware)?.value ?? null,
     };
   });
+}
+
+export interface TrendView {
+  tone: 'warn' | 'ok' | 'muted';
+  text: string;
+}
+
+/** One line on a module's cell spread trend, or null when the backend sent none for it. */
+export function describeTrend(trend: BatteryHealthTrend | undefined): TrendView | null {
+  void trend;
+  return null;
+}
+
+export interface SocEventDay {
+  day: string;
+  module_index: number;
+  jumps: number;
+  stuck: number;
+}
+
+/** Days with SOC jumps or stuck episodes, newest first, then by module slot. */
+export function socEventDays(rows: readonly BatteryHealthDay[]): SocEventDay[] {
+  void rows;
+  return [];
+}
+
+function times(n: number): string {
+  return n === 1 ? 'once' : n === 2 ? 'twice' : `${n} times`;
+}
+
+/** "SOC jumped twice and stuck once", for one {@link SocEventDay}. */
+export function describeSocEvents(event: Pick<SocEventDay, 'jumps' | 'stuck'>): string {
+  void event;
+  return '';
 }
 
 export const HEALTH_RANGES = [

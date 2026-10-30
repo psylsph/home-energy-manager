@@ -171,6 +171,27 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
     });
   });
 
+  it('saves the battery health switches, which start on (issue #393)', async () => {
+    mount({ alerts: { enabled: true } });
+    render(<SettingsPage />);
+    const s = await heading('Notifications');
+    await waitFor(() => expect(within(s).getByRole('button', { name: 'Save Notification Settings' })).toBeEnabled());
+
+    const spread = within(s).getByRole('switch', { name: 'Battery Cell Spread Widening' });
+    const soc = within(s).getByRole('switch', { name: 'Battery SOC Jumps or Sticks' });
+    expect(spread.getAttribute('aria-checked')).toBe('true');
+    expect(soc.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(spread);
+    fireEvent.click(soc);
+    fireEvent.click(within(s).getByRole('button', { name: 'Save Notification Settings' }));
+
+    await waitFor(() => expect(postsTo('/api/alerts')).toHaveLength(1));
+    expect(lastPost('/api/alerts')).toMatchObject({
+      cell_spread_alert_enabled: false,
+      soc_anomaly_alert_enabled: false,
+    });
+  });
+
   it('confirms switching alerts on and off', async () => {
     mount({ alerts: { enabled: false } });
     render(<SettingsPage />);

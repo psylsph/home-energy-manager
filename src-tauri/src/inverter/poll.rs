@@ -608,6 +608,9 @@ pub struct AppState {
     pub alert_debounce: Arc<Mutex<crate::alerts::AlertDebounce>>,
     /// Last date a daily consumption report was sent.
     pub last_report_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// Battery health alerts (issue #393): the live SOC watch and the daily
+    /// spread check's state. In-memory; the spread check persists its own.
+    pub battery_health_alerts: Arc<Mutex<crate::alerts::battery_health::BatteryHealthAlerts>>,
     /// Last date the Forecast plan's nightly auto-refresh fired. In-memory
     /// only: a restart inside the lead window re-runs the refresh, which is
     /// an idempotent rewrite of the same slot.
@@ -828,6 +831,7 @@ impl AppState {
             alert_config: Arc::new(Mutex::new(crate::settings::Settings::load().alerts_config)),
             alert_debounce: Arc::new(Mutex::new(crate::alerts::AlertDebounce::new())),
             last_report_date: Arc::new(Mutex::new(None)),
+            battery_health_alerts: Arc::new(Mutex::new(Default::default())),
             forecast_plan_refresh_date: Arc::new(Mutex::new(None)),
             forecast_plan_refresh_warned: Arc::new(Mutex::new(None)),
             forecast_plan_apply_date: Arc::new(Mutex::new(None)),
@@ -5296,6 +5300,55 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             .await;
                                         }
                                     }
+                                }
+
+                                // ---- Battery health (issue #393) ----
+                                // SOC jumps / stuck SOC on every poll (counted
+                                // always, announced when enabled), and the daily
+                                // cell spread check. Both are read-only.
+                                // `readings_since_connect` already counts this
+                                // poll, so above GRACE_READINGS means settled.
+                                let health_now = chrono::Local::now();
+                                crate::alerts::battery_health::run_soc_watch(
+                                    &state,
+                                    &snapshot,
+                                    health_now,
+                                    readings_since_connect > GRACE_READINGS,
+                                    poll_settings.poll_interval,
+                                    |config: crate::settings::AlertsConfig, text: String| async move {
+                                        crate::alerts::dispatch_alert_text(
+                                            &config,
+                                            &text,
+                                            "battery SOC",
+                                        )
+                                        .await
+                                    },
+                                )
+                                .await;
+                                if crate::alerts::battery_health::spread_check_pending(
+                                    &state, health_now,
+                                )
+                                .await
+                                {
+                                    // Spawned: the once-a-day send must not hold
+                                    // up the poll. The gate keeps other polls
+                                    // from spawning anything.
+                                    let state = state.clone();
+                                    tokio::spawn(async move {
+                                        crate::alerts::battery_health::run_spread_check(
+                                            &state,
+                                            health_now,
+                                            |config, text| async move {
+                                                crate::alerts::dispatch_alert_text(
+                                                    &config,
+                                                    &text,
+                                                    "battery spread",
+                                                )
+                                                .await
+                                            },
+                                        )
+                                        .await;
+                                    });
                                 }
 
                                 // ---- Daily consumption report ----

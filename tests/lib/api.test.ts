@@ -11,7 +11,7 @@ Object.defineProperty(window, 'location', {
 });
 
 // Import after mocks are set up
-const { apiGet, apiPost, apiPut, fetchHistory, fetchHistorySummary, getApiBase, getWsUrl } = await import('../../src/lib/api');
+const { apiGet, apiPost, apiPut, fetchBatteryHealth, fetchHistory, fetchHistorySummary, getApiBase, getWsUrl } = await import('../../src/lib/api');
 
 describe('api', () => {
   beforeEach(() => {
@@ -204,6 +204,26 @@ describe('api', () => {
       await fetchHistory('today', ['solar_power', 'grid_power']);
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain('fields=solar_power%2Cgrid_power');
+    });
+  });
+
+  describe('fetchBatteryHealth', () => {
+    it('returns the days and the spread trend', async () => {
+      const trend = [{ module_index: 0, status: 'widening', recent_mv: 72, baseline_mv: 30, recent_days: 7, recent_min_days: 4 }];
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ok: true, data: { days: [], trend } }),
+      });
+      await expect(fetchBatteryHealth(90)).resolves.toEqual({ days: [], trend });
+      expect(mockFetch.mock.calls[0][0] as string).toContain('/api/battery-health?days=90');
+    });
+
+    it('treats a missing trend as none', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ok: true, data: { days: [] } }),
+      });
+      await expect(fetchBatteryHealth(90)).resolves.toEqual({ days: [], trend: [] });
     });
   });
 

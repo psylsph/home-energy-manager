@@ -12,17 +12,22 @@ import {
 import { fetchBatteryHealth } from '../lib/api';
 import {
   HEALTH_RANGES,
+  dayToMs,
+  describeSocEvents,
+  describeTrend,
   hasMetric,
   healthModules,
   latestPerModule,
+  moduleKey,
   pivotHealth,
+  socEventDays,
   type HealthMetric,
   type HealthModule,
 } from '../lib/batteryHealth';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { getHistoryChartGridProps } from '../lib/historyRangeConfig';
 import { useInverterStore } from '../store/useInverterStore';
-import type { BatteryHealthDay } from '../lib/types';
+import type { BatteryHealth } from '../lib/types';
 
 // Battery Health (issue #393): the daily per-module summary the backend keeps
 // (cell spread, cycles, BMS-reported capacity, temperature) charted over
@@ -30,6 +35,15 @@ import type { BatteryHealthDay } from '../lib/types';
 // warranties are no longer honoured, so owners have to spot this themselves.
 
 const REFRESH_MS = 5 * 60_000;
+
+/** Most recent SOC warning days listed. */
+const SOC_EVENTS_SHOWN = 10;
+
+const TREND_TONE = {
+  warn: 'text-amber-400',
+  ok: 'text-text-secondary',
+  muted: 'text-text-secondary/60',
+} as const;
 
 const MODULE_COLORS = ['#6366F1', '#F59E0B', '#10B981', '#EF4444', '#06B6D4', '#A855F7'];
 
@@ -117,19 +131,19 @@ export default function BatteryHealthPanel() {
   const [spreadMode, setSpreadMode] = useState<SpreadMode>('full');
   // The result remembers which range it answers, so a range change reads as
   // loading without setting state inside the effect.
-  const [result, setResult] = useState<{ days: number; rows: BatteryHealthDay[] | null } | null>(null);
+  const [result, setResult] = useState<{ days: number; health: BatteryHealth | null } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       fetchBatteryHealth(days)
-        .then((rows) => {
-          if (!cancelled) setResult({ days, rows });
+        .then((health) => {
+          if (!cancelled) setResult({ days, health });
         })
         .catch(() => {
           // A failed refresh keeps what is shown; only a failed first load
           // for this range reports an error.
-          if (!cancelled) setResult((current) => (current?.days === days ? current : { days, rows: null }));
+          if (!cancelled) setResult((current) => (current?.days === days ? current : { days, health: null }));
         });
     };
     load();
@@ -142,10 +156,12 @@ export default function BatteryHealthPanel() {
   }, [days]);
 
   const loading = result === null || result.days !== days;
-  const failed = !loading && result.rows === null;
-  const rows = useMemo(() => (loading ? [] : (result.rows ?? [])), [loading, result]);
+  const failed = !loading && result.health === null;
+  const rows = useMemo(() => (loading ? [] : (result.health?.days ?? [])), [loading, result]);
+  const trends = useMemo(() => (loading ? [] : (result.health?.trend ?? [])), [loading, result]);
   const modules = useMemo(() => healthModules(rows), [rows]);
   const summaries = useMemo(() => latestPerModule(rows), [rows]);
+  const socEvents = useMemo(() => socEventDays(rows).slice(0, SOC_EVENTS_SHOWN), [rows]);
 
   // Spread near full charge is the like-for-like figure; fall back to the
   // day's worst when no module has been nearly full in the range.
@@ -194,32 +210,57 @@ export default function BatteryHealthPanel() {
       ) : (
         <>
           <div className="flex flex-col gap-2">
-            {summaries.map((m) => (
-              <div
-                key={m.key}
-                className="bg-bg-elevated rounded-xl px-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm"
-              >
-                <div>
-                  <div className="text-text-secondary text-xs">Module</div>
-                  <div className="text-text-primary font-mono">{m.label}</div>
-                </div>
-                <div>
-                  <div className="text-text-secondary text-xs">
-                    Cell spread{m.spreadKind ? (m.spreadKind === 'full' ? ' · near full' : " · day's worst") : ''}
+            {summaries.map((m) => {
+              const trend = describeTrend(trends.find((t) => moduleKey(t.module_index) === m.key));
+              return (
+                <div
+                  key={m.key}
+                  className="bg-bg-elevated rounded-xl px-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm"
+                >
+                  <div>
+                    <div className="text-text-secondary text-xs">Module</div>
+                    <div className="text-text-primary font-mono">{m.label}</div>
                   </div>
-                  <div className="text-text-primary font-mono">{fmt(m.spreadMv, 0, ' mV')}</div>
+                  <div>
+                    <div className="text-text-secondary text-xs">
+                      Cell spread{m.spreadKind ? (m.spreadKind === 'full' ? ' · near full' : " · day's worst") : ''}
+                    </div>
+                    <div className="text-text-primary font-mono">{fmt(m.spreadMv, 0, ' mV')}</div>
+                  </div>
+                  <div>
+                    <div className="text-text-secondary text-xs">State of Health</div>
+                    <div className="text-text-primary font-mono">{fmt(m.capacityPct, 0, '%')}</div>
+                  </div>
+                  <div>
+                    <div className="text-text-secondary text-xs">Cycles</div>
+                    <div className="text-text-primary font-mono">{fmt(m.cycles, 0, '')}</div>
+                  </div>
+                  {trend && (
+                    <div className={`col-span-full text-xs ${TREND_TONE[trend.tone]}`}>{trend.text}</div>
+                  )}
                 </div>
-                <div>
-                  <div className="text-text-secondary text-xs">State of Health</div>
-                  <div className="text-text-primary font-mono">{fmt(m.capacityPct, 0, '%')}</div>
-                </div>
-                <div>
-                  <div className="text-text-secondary text-xs">Cycles</div>
-                  <div className="text-text-primary font-mono">{fmt(m.cycles, 0, '')}</div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+
+          {socEvents.length > 0 && (
+            <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl px-4 py-3 space-y-1">
+              <div className="text-text-primary text-xs font-medium">SOC warnings</div>
+              <p className="text-text-secondary/80 text-[11px]">
+                Days the battery&apos;s own state of charge jumped in one step or stayed put while energy
+                flowed, the pattern of the GivEnergy BMS SOC bug. A full discharge and charge usually
+                corrects it: set the battery reserve to 4%, run Force Discharge until it stops, then Force
+                Charge to 100%, and put your reserve back afterwards.
+              </p>
+              <ul className="text-text-secondary text-xs space-y-0.5">
+                {socEvents.map((e) => (
+                  <li key={`${e.day}-${e.module_index}`}>
+                    {formatDay(dayToMs(e.day))} · Module #{e.module_index + 1} · {describeSocEvents(e)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <div className="space-y-4">
             {spreadData.length > 0 && (

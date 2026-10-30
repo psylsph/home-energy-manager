@@ -3,12 +3,15 @@ import {
   capacityPercent,
   cellSpreadMv,
   dayToMs,
+  describeSocEvents,
+  describeTrend,
+  socEventDays,
   hasMetric,
   healthModules,
   latestPerModule,
   pivotHealth,
 } from '../../src/lib/batteryHealth';
-import type { BatteryHealthDay } from '../../src/lib/types';
+import type { BatteryHealthDay, BatteryHealthTrend } from '../../src/lib/types';
 
 function row(overrides: Partial<BatteryHealthDay> = {}): BatteryHealthDay {
   return {
@@ -24,9 +27,85 @@ function row(overrides: Partial<BatteryHealthDay> = {}): BatteryHealthDay {
     design_capacity_ah: 100,
     bms_firmware: 3015,
     samples: 10,
+    soc_jumps: 0,
+    soc_stuck: 0,
     ...overrides,
   };
 }
+
+function trend(overrides: Partial<BatteryHealthTrend> = {}): BatteryHealthTrend {
+  return { module_index: 0, status: 'ok', recent_mv: 31, baseline_mv: 30, recent_days: 7, recent_min_days: 4, ...overrides };
+}
+
+describe('describeTrend', () => {
+  it('is null without a trend for the module', () => {
+    expect(describeTrend(undefined)).toBeNull();
+  });
+  it('warns of a widening spread with both figures', () => {
+    expect(describeTrend(trend({ status: 'widening', baseline_mv: 30.4, recent_mv: 71.6 }))).toEqual({
+      tone: 'warn',
+      text: 'Widening: 30 → 72 mV near full',
+    });
+  });
+  it('warns of a high spread without a baseline', () => {
+    expect(describeTrend(trend({ status: 'high', baseline_mv: null, recent_mv: 162 }))).toEqual({
+      tone: 'warn',
+      text: 'High: 162 mV near full',
+    });
+  });
+  it('reports a steady spread', () => {
+    expect(describeTrend(trend())).toEqual({ tone: 'ok', text: 'Steady: 31 mV near full' });
+  });
+  it('asks for more near-full days when the week has too few', () => {
+    expect(describeTrend(trend({ status: 'insufficient', recent_days: 2, recent_mv: 40 }))).toEqual({
+      tone: 'muted',
+      text: 'Needs more near-full days (2 of 4 this week)',
+    });
+  });
+  it('takes the near-full days needed from the backend', () => {
+    expect(describeTrend(trend({ status: 'insufficient', recent_days: 4, recent_min_days: 5 }))?.text).toBe(
+      'Needs more near-full days (4 of 5 this week)',
+    );
+  });
+  it('explains a baseline still being built', () => {
+    expect(describeTrend(trend({ status: 'insufficient', recent_days: 7, baseline_mv: null }))).toEqual({
+      tone: 'muted',
+      text: 'Building a baseline: about a month of near-full days',
+    });
+  });
+});
+
+describe('socEventDays', () => {
+  it('lists days with events, newest first then by module', () => {
+    const rows = [
+      row({ day: '2026-10-01', soc_jumps: 1 }),
+      row({ day: '2026-10-02' }),
+      row({ day: '2026-10-03', module_index: 1, soc_stuck: 1 }),
+      row({ day: '2026-10-03', module_index: 0, soc_jumps: 2 }),
+    ];
+    expect(socEventDays(rows)).toEqual([
+      { day: '2026-10-03', module_index: 0, jumps: 2, stuck: 0 },
+      { day: '2026-10-03', module_index: 1, jumps: 0, stuck: 1 },
+      { day: '2026-10-01', module_index: 0, jumps: 1, stuck: 0 },
+    ]);
+  });
+  it('treats missing counts (an older backend) as none', () => {
+    const old = row();
+    delete (old as Partial<BatteryHealthDay>).soc_jumps;
+    delete (old as Partial<BatteryHealthDay>).soc_stuck;
+    expect(socEventDays([old])).toEqual([]);
+  });
+});
+
+describe('describeSocEvents', () => {
+  it('counts in words', () => {
+    expect(describeSocEvents({ jumps: 1, stuck: 0 })).toBe('SOC jumped once');
+    expect(describeSocEvents({ jumps: 2, stuck: 0 })).toBe('SOC jumped twice');
+    expect(describeSocEvents({ jumps: 3, stuck: 0 })).toBe('SOC jumped 3 times');
+    expect(describeSocEvents({ jumps: 0, stuck: 1 })).toBe('SOC stuck once');
+    expect(describeSocEvents({ jumps: 2, stuck: 1 })).toBe('SOC jumped twice and stuck once');
+  });
+});
 
 describe('cellSpreadMv', () => {
   it('is the max minus min in mV', () => {

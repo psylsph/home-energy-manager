@@ -8649,13 +8649,16 @@ pub(crate) async fn get_battery_health_at(
     let Some(db) = state.history.lock().await.clone() else {
         return (
             StatusCode::OK,
-            Json(json!({ "ok": true, "data": { "days": [] } })),
+            Json(json!({ "ok": true, "data": { "days": [], "trend": [] } })),
         );
     };
-    let rows = match tokio::task::spawn_blocking(move || {
+    // The spread trend reaches further back than a short range does.
+    let trend_since = today
+        - chrono::Duration::days(crate::history::battery_health_trend::BASELINE_FROM_DAYS_AGO);
+    let mut rows = match tokio::task::spawn_blocking(move || {
         // Polls held for the next flush belong in today's answer.
         db.flush_battery_health();
-        db.query_battery_health(since, today)
+        db.query_battery_health(since.min(trend_since), today)
     })
     .await
     {
@@ -8663,9 +8666,12 @@ pub(crate) async fn get_battery_health_at(
         Ok(Err(error)) => return server_error(&error),
         Err(error) => return server_error(&format!("Battery health worker failed: {error}")),
     };
+    let trend = crate::history::battery_health_trend::spread_trend(&rows, today);
+    let since_day = since.format("%Y-%m-%d").to_string();
+    rows.retain(|row| row.day >= since_day);
     (
         StatusCode::OK,
-        Json(json!({ "ok": true, "data": { "days": rows } })),
+        Json(json!({ "ok": true, "data": { "days": rows, "trend": trend } })),
     )
 }
 
@@ -19781,6 +19787,38 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn set_alerts_persists_the_battery_health_toggles() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "cell_spread_alert_enabled": false,
+                "soc_anomaly_alert_enabled": false,
+            });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let cfg = state.alert_config.lock().await.clone();
+            assert!(!cfg.cell_spread_alert_enabled);
+            assert!(!cfg.soc_anomaly_alert_enabled);
+            let reloaded = crate::settings::Settings::load();
+            assert!(!reloaded.alerts_config.cell_spread_alert_enabled);
+            assert!(!reloaded.alerts_config.soc_anomaly_alert_enabled);
+
+            // And back on.
+            let body = serde_json::json!({ "soc_anomaly_alert_enabled": true });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let cfg = state.alert_config.lock().await.clone();
+            assert!(cfg.soc_anomaly_alert_enabled);
+            assert!(
+                !cfg.cell_spread_alert_enabled,
+                "an omitted field is left alone"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn set_alerts_persists_inverter_temperature_bounds() {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
@@ -25127,6 +25165,50 @@ pub(crate) mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["data"]["days"], serde_json::json!([]));
+            assert_eq!(body["data"]["trend"], serde_json::json!([]));
+        })
+        .await;
+    }
+
+    /// The spread trend needs two months of history, so it is judged on
+    /// that much even when the page asks for a shorter range.
+    #[tokio::test]
+    async fn battery_health_reports_the_spread_trend_beyond_the_requested_range() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_battery_health(&[]).await;
+            let db = state.history.lock().await.clone().unwrap();
+            let near_full = |cells: &[f32]| crate::inverter::model::InverterSnapshot {
+                soc: 98,
+                battery_modules: vec![crate::inverter::model::BatteryModule {
+                    soc: 98,
+                    ..health_module("BAT1", cells)
+                }],
+                ..Default::default()
+            };
+            for d in 1..=10 {
+                db.observe_battery_health(&near_full(&[3.40, 3.43]), local_noon(2026, 9, d));
+                db.flush_battery_health();
+            }
+            for d in 4..=10 {
+                db.observe_battery_health(&near_full(&[3.40, 3.48]), local_noon(2026, 10, d));
+                db.flush_battery_health();
+            }
+            let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+            let (status, body) =
+                get_battery_health_at(state, BatteryHealthQuery { days: Some(2) }, today).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["days"].as_array().unwrap().len(), 2);
+            let trend = body["data"]["trend"].as_array().expect("trend");
+            assert_eq!(trend.len(), 1, "{}", body.0);
+            assert_eq!(trend[0]["module_index"], 0);
+            assert_eq!(trend[0]["status"], "widening");
+            assert!((trend[0]["recent_mv"].as_f64().unwrap() - 80.0).abs() < 0.5);
+            assert!((trend[0]["baseline_mv"].as_f64().unwrap() - 30.0).abs() < 0.5);
+            assert_eq!(trend[0]["recent_days"], 7);
+            assert_eq!(
+                trend[0]["recent_min_days"],
+                crate::history::battery_health_trend::RECENT_MIN_DAYS
+            );
         })
         .await;
     }

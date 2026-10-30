@@ -2313,6 +2313,7 @@ async fn battery_health_endpoint_is_routed() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], Value::Bool(true));
     assert_eq!(body["data"]["days"], serde_json::json!([]));
+    assert_eq!(body["data"]["trend"], serde_json::json!([]));
 
     let (status, _) = get_json(&router, "/api/battery-health?days=0").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

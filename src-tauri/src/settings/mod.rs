@@ -1958,6 +1958,14 @@ pub struct AlertsConfig {
     /// Users typically set this around their inverter's rated AC output.
     #[serde(default)]
     pub solar_clipping_ceiling_w: u32,
+    /// Notify when a battery module's cell spread near full keeps widening
+    /// (issue #393). Checked once a day; on by default.
+    #[serde(default = "default_true")]
+    pub cell_spread_alert_enabled: bool,
+    /// Notify when a battery's SOC jumps in a step or sticks while energy
+    /// flows (issue #393, the BMS 3007-3022 SOC bug). On by default.
+    #[serde(default = "default_true")]
+    pub soc_anomaly_alert_enabled: bool,
 
     /// ntfy.sh (or self-hosted) topic for push notifications.
     #[serde(default)]
@@ -2035,6 +2043,8 @@ impl Default for AlertsConfig {
             battery_connection_lost_enabled: true,
             solar_clipping_enabled: false,
             solar_clipping_ceiling_w: 0,
+            cell_spread_alert_enabled: true,
+            soc_anomaly_alert_enabled: true,
             ntfy_topic: String::new(),
             ntfy_server: default_ntfy_server(),
             pushover_app_token: String::new(),
@@ -2990,6 +3000,22 @@ mod tests {
         assert_eq!(decoded.ntfy_server, "https://ntfy.sh");
         assert_eq!(decoded.inverter_temp_min, 8.0);
         assert_eq!(decoded.inverter_temp_max, 60.0);
+        // Battery health alerts (issue #393) default on for existing users.
+        assert!(decoded.cell_spread_alert_enabled);
+        assert!(decoded.soc_anomaly_alert_enabled);
+    }
+
+    #[test]
+    fn battery_health_alert_toggles_round_trip_when_off() {
+        let cfg = AlertsConfig {
+            cell_spread_alert_enabled: false,
+            soc_anomaly_alert_enabled: false,
+            ..AlertsConfig::default()
+        };
+        let decoded: AlertsConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(!decoded.cell_spread_alert_enabled);
+        assert!(!decoded.soc_anomaly_alert_enabled);
     }
 
     /// `settings.json` written before the weather feature shipped (no

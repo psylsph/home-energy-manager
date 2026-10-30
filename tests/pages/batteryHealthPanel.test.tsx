@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import type { BatteryHealthDay } from '../../src/lib/types';
+import type { BatteryHealthDay, BatteryHealthTrend } from '../../src/lib/types';
 
 const apiGet = vi.fn();
 vi.mock('../../src/lib/api', () => ({
   apiGet: (...args: unknown[]) => apiGet(...args),
   fetchBatteryHealth: async (days: number) => {
     const res = await apiGet(`/api/battery-health?days=${days}`);
-    return res.data.days;
+    return { days: res.data.days, trend: res.data.trend ?? [] };
   },
 }));
 
@@ -54,12 +54,14 @@ function day(overrides: Partial<BatteryHealthDay> = {}): BatteryHealthDay {
     design_capacity_ah: 100,
     bms_firmware: 3015,
     samples: 10,
+    soc_jumps: 0,
+    soc_stuck: 0,
     ...overrides,
   };
 }
 
-function serve(days: BatteryHealthDay[]) {
-  apiGet.mockImplementation(async () => ({ ok: true, data: { days } }));
+function serve(days: BatteryHealthDay[], trend: BatteryHealthTrend[] = []) {
+  apiGet.mockImplementation(async () => ({ ok: true, data: { days, trend } }));
 }
 
 describe('BatteryHealthPanel', () => {
@@ -214,6 +216,43 @@ describe('BatteryHealthPanel', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows each module's spread trend", async () => {
+    serve(
+      [day(), day({ module_index: 1 })],
+      [
+        { module_index: 0, status: 'ok', recent_mv: 25, baseline_mv: 24, recent_days: 7, recent_min_days: 4 },
+        { module_index: 1, status: 'widening', recent_mv: 72, baseline_mv: 30, recent_days: 7, recent_min_days: 4 },
+      ],
+    );
+    render(<BatteryHealthPanel />);
+    expect(await screen.findByText('Widening: 30 → 72 mV near full')).toBeTruthy();
+    expect(screen.getByText('Steady: 25 mV near full')).toBeTruthy();
+  });
+
+  it('lists days the SOC jumped or stuck', async () => {
+    serve([
+      day({ day: '2026-10-01', soc_jumps: 1 }),
+      day({ day: '2026-10-02', module_index: 1, soc_jumps: 2, soc_stuck: 1 }),
+    ]);
+    render(<BatteryHealthPanel />);
+    expect(await screen.findByText('SOC warnings')).toBeTruthy();
+    const items = screen.getAllByRole('listitem').map((li) => li.textContent);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toContain('Module #2');
+    expect(items[0]).toContain('SOC jumped twice and stuck once');
+    expect(items[1]).toContain('Module #1');
+    expect(items[1]).toContain('SOC jumped once');
+     // HEM has no calibration button for the affected firmware, so the note says how.
+    expect(screen.getByText(/set the battery reserve to 4%/)).toBeTruthy();
+  });
+
+  it('shows no SOC warnings when there were none', async () => {
+    serve([day()]);
+    render(<BatteryHealthPanel />);
+    await screen.findByText('Charge cycles');
+    expect(screen.queryByText('SOC warnings')).toBeNull();
   });
 
   it('explains an empty history', async () => {

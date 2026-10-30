@@ -5,6 +5,7 @@
 //!
 //! Also handles daily consumption report generation and sending.
 
+pub mod battery_health;
 pub mod report;
 
 use std::collections::HashMap;
@@ -2293,6 +2294,8 @@ mod tests {
             connection_lost_enabled: false,
             solar_clipping_enabled: false,
             solar_clipping_ceiling_w: 0,
+            cell_spread_alert_enabled: true,
+            soc_anomaly_alert_enabled: true,
             ntfy_topic: String::new(),
             ntfy_server: "https://ntfy.sh".to_string(),
             pushover_app_token: String::new(),

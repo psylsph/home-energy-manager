@@ -1,5 +1,5 @@
 import { getTodayBoundaryMs, getMonthBoundaryMs } from './historyRangeConfig';
-import type { BatteryHealthDay, HistorySummary } from './types';
+import type { BatteryHealth, BatteryHealthDay, BatteryHealthTrend, HistorySummary } from './types';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -152,11 +152,11 @@ export async function fetchHistorySummary(
 }
 
 /** Fetch the daily per-module battery health summary for the last `days` local days (issue #393). */
-export async function fetchBatteryHealth(days: number): Promise<BatteryHealthDay[]> {
-  const res = await apiGet<{ ok: boolean; data: { days: BatteryHealthDay[] } }>(
+export async function fetchBatteryHealth(days: number): Promise<BatteryHealth> {
+  const res = await apiGet<{ ok: boolean; data: { days: BatteryHealthDay[]; trend?: BatteryHealthTrend[] } }>(
     `/api/battery-health?days=${days}`,
   );
-  return res.data.days;
+  return { days: res.data.days, trend: [] };
 }
 
 export { isTauri, getServerPort };
