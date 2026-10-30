@@ -11,6 +11,7 @@ import {
 } from 'recharts';
 import { fetchHistory } from '../lib/api';
 import { removeSpikes } from '../lib/chartSeries';
+import { formatPower } from '../lib/format';
 import { solarChartNameplateCeilingFromArrays, SOLAR_PV1_COLOR as PV1_COLOR, SOLAR_PV2_COLOR as PV2_COLOR } from '../lib/solarArrays';
 import {
   getHistoryChartGridProps,
@@ -182,7 +183,7 @@ export default function SolarPowerChart() {
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={180}>
-          <AreaChart data={rows} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
+          <AreaChart data={rows} margin={{ top: 5, right: 5, left: -8, bottom: 0 }}>
             <defs>
               <linearGradient id="grad-solar-pv1" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={PV1_COLOR} stopOpacity={0.3} />
@@ -212,7 +213,7 @@ export default function SolarPowerChart() {
               tickLine={false}
               axisLine={false}
               domain={yDomain}
-              tickFormatter={(v: number) => `${Math.round(v)}`}
+              tickFormatter={(v: number) => formatPower(v)}
             />
             <Tooltip
               contentStyle={{

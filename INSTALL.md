@@ -860,6 +860,24 @@ If two instances share the same port, the second one will fail to start. Change 
 
 ---
 
+## Restoring a History Backup
+
+HEM takes a checked copy of `history.db` on a schedule (**Settings → History Backup**). Each copy is a single, self-contained file named `history-YYYYMMDD-HHMMSS.db` (the time is UTC), kept in the `backups` folder inside your config folder unless you chose another folder. Unlike copying `history.db` by hand, you don't need to worry about the `-wal` and `-shm` files with these.
+
+To go back to a backup, for example after a failed disk, a corrupted database or a move to a new machine:
+
+1. **Stop HEM.** Quit the desktop app, or stop the service or container (for example `sudo systemctl stop givenergy-local` or `docker compose stop`). Don't restore while HEM is running: it holds the database open and would overwrite your restore.
+2. **Keep the current database, if there is one.** Rename `history.db` in the config folder to something like `history.db.old` so you can go back if you picked the wrong backup. If the current file is the problem you can delete it instead.
+3. **Delete `history.db-wal` and `history.db-shm`** from the config folder if they exist. They belong to the database you just moved aside, and left behind they can hide or corrupt the restored history. On Windows they're hidden in Explorer by default, so turn on "Show hidden files" in File Explorer Options.
+4. **Copy the backup you want into the config folder and name it `history.db`.** The newest `history-*.db` is usually the one you want. Copy it rather than moving it, so the backup is still there if something goes wrong.
+5. **Start HEM.** Your charts, costs and planner profile pick up from the backup. Anything recorded after that backup was taken isn't in it. If HEM kept recording after the data was lost, the newer readings are in the file you set aside in step 2.
+
+The config folder is `%USERPROFILE%\.givenergy-local\` on Windows and `~/.givenergy-local/` on Linux and macOS. To restore onto a different machine, run HEM there once first so it creates the folder, quit it, then follow the steps above.
+
+If you ticked the option to include `settings.json` in your backups, the copy is named `settings-YYYYMMDD-HHMMSS.json`. Restore it the same way, with HEM stopped, by copying it over `settings.json` in the config folder. It contains your Octopus key and alert tokens, so keep the backup folder private.
+
+---
+
 ## Copying Settings to Another PC
 
 All app configuration lives in a single folder. You can copy it to a second machine to avoid setting everything up from scratch — useful when moving to a new PC, or running a spare machine at home to keep charge schedules active while you're away.
@@ -878,7 +896,7 @@ Everything the app needs is in one directory:
 | `history.db` | Optional | Stored graph history (energy totals, power readings over time). Copy it if you want charts to pick up where they left off; skip it to start fresh on the new machine |
 | `history.db-wal`, `history.db-shm` | **Never copy** | SQLite write-ahead log and shared-memory index that only exist while HEM is running. The `-shm` file in particular is transient shared memory, not database content — copying it can make the new machine trust a stale index and read empty history. Delete both on the destination before copying `history.db` over. See step 2. |
 
-You do **not** need `logs/` or `backup/` — those are runtime log files and internal backups.
+You do **not** need `logs/` or `backup/` — those are runtime log files and internal backups. The `backups/` folder holds your scheduled history backups: leave it behind, or see [Restoring a History Backup](#restoring-a-history-backup) to use one.
 
 ### Steps
 
@@ -887,7 +905,7 @@ You do **not** need `logs/` or `backup/` — those are runtime log files and int
 
    **If you are copying `history.db` to bring your chart history across:** HEM must be stopped on the source PC when you copy it — a database copied while HEM is running is not a consistent snapshot, even if you also copy the `-wal` and `-shm` files alongside it. On the destination, delete any existing `history.db-wal` and `history.db-shm` first (they belong to whatever database was there before and will hide or corrupt your copied data), then copy `history.db` over on its own. The next HEM launch recreates the `-wal` and `-shm` files for the new session. Never copy `history.db-shm` itself: it is transient shared memory, not database content, and a stale copy can make the new machine read empty history even though the database file is fine. On Windows, `history.db-wal` and `history.db-shm` are hidden in Explorer by default — turn on "Show hidden files" in File Explorer Options if you need to see and delete them.
 
-   The same caution applies to scheduled backups: a backup script that rsyncs or copies the config folder while HEM is running produces sets that can be internally inconsistent. If your backup copies are meant to restore history onto another machine, either stop HEM before the backup runs, or have the script take a consistent snapshot with `sqlite3 ~/.givenergy-local/history.db ".backup /path/to/backup/history.db"` (works even while HEM is running) and copy only that file.
+   The same caution applies to scheduled backups: a backup script that rsyncs or copies the config folder while HEM is running produces sets that can be internally inconsistent. If your backup copies are meant to restore history onto another machine, either stop HEM before the backup runs, or have the script take a consistent snapshot with `sqlite3 ~/.givenergy-local/history.db ".backup /path/to/backup/history.db"` (works even while HEM is running) and copy only that file. HEM's own scheduled backups (Settings → History Backup) are already consistent single files, so copying the newest `history-*.db` is the simplest option.
 3. Launch the app on the second PC — your charge schedules, tariff rates, and all other settings will be there.
 
 ### If both PCs will run at the same time
