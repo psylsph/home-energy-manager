@@ -6,21 +6,21 @@ The order weighs three things: whether users are affected today, whether a later
 
 ## Tier 1: finish what has already shipped
 
-These need little or no new code. Closing them off keeps the list honest.
+The code is done for both. They stay open only until the reporters reply, so closing them off keeps the list honest.
 
 | # | Issue | Effort | What is left |
 |---|---|---|---|
-| [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). The reporter's last question is how to restore one, and the docs don't say. Add restore steps to `INSTALL.md` (stop HEM, replace `history.db`, remove stale `-wal`/`-shm`), then close. |
-| [359](https://github.com/psylsph/home-energy-manager/issues/359) | Automatic planning options | S | All three strategies shipped (Keep a minimum, Hold through the cheap window, Cheapest overall). Two things remain: the reporter's question about the planner's solar chart showing kWh rather than kW, and their feedback on Cheapest overall. Answer the first, then close once the second arrives. |
+| [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps are now in `INSTALL.md` and posted on the issue (30 Oct). Waiting for the reporter to confirm a restore works, then close. |
+| [359](https://github.com/psylsph/home-energy-manager/issues/359) | Automatic planning options | S | All three strategies shipped (Keep a minimum, Hold through the cheap window, Cheapest overall). The solar chart question is answered (the Planner chart has been in kW since v0.89.0). Waiting on the reporter's feedback on Cheapest overall, asked for again on 30 Oct. Close once it arrives, or if there's no reply after a few weeks. |
 
 ## Tier 2: user-facing gaps and groundwork
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
-| 1 | [132](https://github.com/psylsph/home-energy-manager/issues/132) | Energy Tariffs: don't hard-code 00:00/23:59 | M | The oldest open issue (June) and it affects every user with a real supplier tariff. The editor locks the first start and last end and forces filler windows, which makes History costs easy to get wrong. A base rate plus override windows, and windows that cross midnight, fix it. Presets (Flux, Cosy, Go, Economy 7) are a natural follow-on. |
-| 2 | [393](https://github.com/psylsph/home-energy-manager/issues/393) | Battery health tracking | M | The daily summary and the Battery page chart shipped in v0.95.0. Still to do: alerts when cell spread keeps widening or SOC jumps or sticks (the BMS 3007–3022 "SOC bug"), and the guided calibration cycle. Warranties are no longer honoured, so early warning matters. Close the issue once the alerts land and split calibration into its own ticket if it slips. |
-| 3 | [400](https://github.com/psylsph/home-energy-manager/issues/400) | Leave EV charging out of the consumption profile | S–M | Marked low priority, but I'd move it up. It makes the planner over-charge today on days the car wasn't plugged in, and #406 builds directly on it. Use the GivEnergy EV charger's power where HEM has it, with a "load above X kW" threshold otherwise. |
-| 4 | [402](https://github.com/psylsph/home-energy-manager/issues/402) | Break up the Settings page | L | A pure refactor, but `SettingsPage.tsx` is about 2,900 lines and the save-without-blur bugs (#391) came from copied save logic. Do it before #397 and #396 each add another Settings section. Work in the order the issue suggests (Panel Controls and Notifications first), with the test suite green after each step. Do the section components and the shared save hook first, and the navigation rail after. |
+| 1 | [418](https://github.com/psylsph/home-energy-manager/issues/418) | Guided battery calibration cycle | M–L | Split from #393, whose battery health tracking and alerts shipped in v0.96.0. The SOC warning currently tells owners to calibrate by hand, because the inverter's own HR 29 calibration is hidden for BMS firmware 3000 and up, exactly the firmware with the SOC bug. HEM-driven: export to 4%, charge to 100%, hold to balance, restore the schedule. It writes registers and must outrank Cosy, Agile, Adaptive Charge, the dispatch hold and plan auto-apply while it runs, so it needs its own persisted state machine and a careful test plan. |
+| 2 | [400](https://github.com/psylsph/home-energy-manager/issues/400) | Leave EV charging out of the consumption profile | S–M | Marked low priority, but I'd move it up. It makes the planner over-charge today on days the car wasn't plugged in, and #406 builds directly on it. Use the GivEnergy EV charger's power where HEM has it, with a "load above X kW" threshold otherwise. |
+| 3 | [402](https://github.com/psylsph/home-energy-manager/issues/402) | Break up the Settings page | L | A pure refactor, but `SettingsPage.tsx` is about 2,900 lines and the save-without-blur bugs (#391) came from copied save logic. Do it before #397 and #396 each add another Settings section. Work in the order the issue suggests (Panel Controls and Notifications first), with the test suite green after each step. Do the section components and the shared save hook first, and the navigation rail after. |
+| 4 | [417](https://github.com/psylsph/home-energy-manager/issues/417) | Alert formatting in ntfy and Pushover | S | `<b>` tags show as literal text in ntfy and Pushover messages. Every existing HEM alert does this, so it's better fixed for all of them as a separate change. Telegram is sent with HTML parse mode and is fine. |
 
 ## Tier 3: smarter planning around Intelligent Octopus Go
 
@@ -45,14 +45,14 @@ These come from #403, where Brian and Stuart split the original discussion into 
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
-| 1 | [398](https://github.com/psylsph/home-energy-manager/issues/398) | Tariff comparison: what would last year have cost? | L | A popular question, and it depends on #132 for faithful tariff definitions. Start by re-pricing actual import and export, then re-run the planner's simulation per tariff. |
+| 1 | [398](https://github.com/psylsph/home-energy-manager/issues/398) | Tariff comparison: what would last year have cost? | L | A popular question. It no longer waits on #132: it prices against the public Octopus product rates, with the existing tariff editor supplying the "what I actually paid" baseline. Start by re-pricing actual import and export, then re-run the planner's simulation per tariff. |
 | 2 | [392](https://github.com/psylsph/home-energy-manager/issues/392) | Import history from the GivEnergy Cloud | L | Needs a GivEnergy Premium subscription, and the 402 for a free key hasn't been confirmed. The cloud's future is uncertain, so it may become impossible, but it is only worth building after someone confirms it works with a real key. |
 | 3 | [401](https://github.com/psylsph/home-energy-manager/issues/401) | Show grid carbon intensity | S–M | Nice to have, and nobody has asked for it. A display-only version (current and forecast intensity) is cheap. Letting the planner prefer greener hours should wait until the planner changes above settle. |
+| 4 | [132](https://github.com/psylsph/home-energy-manager/issues/132) | Energy Tariffs: don't hard-code 00:00/23:59 | M | Moved to the bottom on purpose. Only one person has asked for it, and it changes how tariffs are stored and validated, which feeds History costs, the planner and the tariff automations, so a mistake could break existing installs. If it is picked up, keep it additive: existing saved tariffs must load and price exactly as before, new options such as a base rate with override windows or windows that cross midnight must be opt-in, and the old and new forms need tests that compare costs side by side. Revisit if more people ask. |
 
 ## Dependencies at a glance
 
 ```text
-#132 tariff editor ──────────────► #398 tariff comparison
 #400 EV out of profile ─► #406 dispatch as load ─► #404 re-plan on moved slot
                                        └─────────► #405 export surplus ◄── #407 back-stop
 #402 Settings split ─────► #397 reset detection + checklist, #396 MQTT
