@@ -150,8 +150,23 @@ export interface TrendView {
 
 /** One line on a module's cell spread trend, or null when the backend sent none for it. */
 export function describeTrend(trend: BatteryHealthTrend | undefined): TrendView | null {
-  void trend;
-  return null;
+  if (!trend) return null;
+  const mv = (v: number | null) => (v === null ? '—' : Math.round(v).toString());
+  switch (trend.status) {
+    case 'widening':
+      return { tone: 'warn', text: `Widening: ${mv(trend.baseline_mv)} → ${mv(trend.recent_mv)} mV near full` };
+    case 'high':
+      return { tone: 'warn', text: `High: ${mv(trend.recent_mv)} mV near full` };
+    case 'ok':
+      return { tone: 'ok', text: `Steady: ${mv(trend.recent_mv)} mV near full` };
+    default:
+      return trend.recent_days < trend.recent_min_days
+        ? {
+            tone: 'muted',
+            text: `Needs more near-full days (${trend.recent_days} of ${trend.recent_min_days} this week)`,
+          }
+        : { tone: 'muted', text: 'Building a baseline: about a month of near-full days' };
+  }
 }
 
 export interface SocEventDay {
@@ -163,8 +178,15 @@ export interface SocEventDay {
 
 /** Days with SOC jumps or stuck episodes, newest first, then by module slot. */
 export function socEventDays(rows: readonly BatteryHealthDay[]): SocEventDay[] {
-  void rows;
-  return [];
+  return rows
+    .map((row) => ({
+      day: row.day,
+      module_index: row.module_index,
+      jumps: row.soc_jumps ?? 0,
+      stuck: row.soc_stuck ?? 0,
+    }))
+    .filter((e) => e.jumps > 0 || e.stuck > 0)
+    .sort((a, b) => b.day.localeCompare(a.day) || a.module_index - b.module_index);
 }
 
 function times(n: number): string {
@@ -173,8 +195,10 @@ function times(n: number): string {
 
 /** "SOC jumped twice and stuck once", for one {@link SocEventDay}. */
 export function describeSocEvents(event: Pick<SocEventDay, 'jumps' | 'stuck'>): string {
-  void event;
-  return '';
+  const parts = [];
+  if (event.jumps > 0) parts.push(`jumped ${times(event.jumps)}`);
+  if (event.stuck > 0) parts.push(`stuck ${times(event.stuck)}`);
+  return `SOC ${parts.join(' and ')}`;
 }
 
 export const HEALTH_RANGES = [

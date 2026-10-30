@@ -156,7 +156,7 @@ export async function fetchBatteryHealth(days: number): Promise<BatteryHealth> {
   const res = await apiGet<{ ok: boolean; data: { days: BatteryHealthDay[]; trend?: BatteryHealthTrend[] } }>(
     `/api/battery-health?days=${days}`,
   );
-  return { days: res.data.days, trend: [] };
+  return { days: res.data.days, trend: res.data.trend ?? [] };
 }
 
 export { isTauri, getServerPort };

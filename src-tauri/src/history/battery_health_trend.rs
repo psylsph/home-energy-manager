@@ -65,8 +65,54 @@ pub struct SpreadTrend {
 /// Each module's spread trend as of `today`, in slot order. Every module slot
 /// present in `rows` gets an entry, even one with only old data.
 pub fn spread_trend(rows: &[BatteryHealthRow], today: NaiveDate) -> Vec<SpreadTrend> {
-    let _ = (rows, today);
-    Vec::new()
+    let recent_from = today - Duration::days(RECENT_DAYS - 1);
+    let baseline_from = today - Duration::days(BASELINE_FROM_DAYS_AGO);
+    let baseline_to = today - Duration::days(BASELINE_TO_DAYS_AGO);
+
+    // Slot -> (recent spreads, baseline spreads).
+    let mut modules: BTreeMap<i64, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
+    for row in rows {
+        let windows = modules.entry(row.module_index).or_default();
+        let Some(spread) = row.full_spread_mv.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let Ok(day) = NaiveDate::parse_from_str(&row.day, "%Y-%m-%d") else {
+            continue;
+        };
+        if (recent_from..=today).contains(&day) {
+            windows.0.push(spread);
+        } else if (baseline_from..=baseline_to).contains(&day) {
+            windows.1.push(spread);
+        }
+    }
+
+    modules
+        .into_iter()
+        .map(|(module_index, (recent, baseline))| {
+            let recent_mv = median(recent.clone());
+            let baseline_mv = (baseline.len() >= BASELINE_MIN_DAYS)
+                .then(|| median(baseline))
+                .flatten();
+            let status = match (recent.len() >= RECENT_MIN_DAYS, recent_mv, baseline_mv) {
+                (true, Some(r), _) if r >= HIGH_SPREAD_MV => SpreadStatus::High,
+                (true, Some(r), Some(b))
+                    if r >= WIDENING_FLOOR_MV && r - b >= WIDENING_DELTA_MV =>
+                {
+                    SpreadStatus::Widening
+                }
+                (true, Some(_), Some(_)) => SpreadStatus::Ok,
+                _ => SpreadStatus::Insufficient,
+            };
+            SpreadTrend {
+                module_index,
+                status,
+                recent_mv,
+                baseline_mv,
+                recent_days: recent.len(),
+                recent_min_days: RECENT_MIN_DAYS,
+            }
+        })
+        .collect()
 }
 
 fn median(mut values: Vec<f64>) -> Option<f64> {

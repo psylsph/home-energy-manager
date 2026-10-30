@@ -2405,6 +2405,32 @@ export default function SettingsPage() {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-text-primary text-sm font-sans">
+                  Battery Cell Spread Widening
+                  <span className="block text-text-secondary text-xs font-sans">
+                    Checked once a day: notify when the gap between a battery&apos;s highest and lowest cell near full charge keeps growing, an early sign of a weakening cell
+                  </span>
+                </span>
+                <Toggle
+                  checked={alertsConfig.cell_spread_alert_enabled}
+                  ariaLabel="Battery Cell Spread Widening"
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, cell_spread_alert_enabled: v }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">
+                  Battery SOC Jumps or Sticks
+                  <span className="block text-text-secondary text-xs font-sans">
+                    Notify when a battery&apos;s state of charge jumps in one step or stays put while it charges or discharges (the BMS SOC bug)
+                  </span>
+                </span>
+                <Toggle
+                  checked={alertsConfig.soc_anomaly_alert_enabled}
+                  ariaLabel="Battery SOC Jumps or Sticks"
+                  onChange={(v) => setAlertsConfig((p) => ({ ...p, soc_anomaly_alert_enabled: v }))}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-sans">
                   Connection Lost
                   <span className="block text-text-secondary text-xs font-sans">
                     Notify when contact with the inverter is dropped and restored

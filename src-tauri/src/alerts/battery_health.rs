@@ -62,9 +62,24 @@ impl BatteryHealthAlerts {
     /// sooner than [`JUMP_NOTIFY_INTERVAL_SECS`] after the last one for the
     /// same battery. Marks the jumps it returns as sent.
     pub fn soc_events_to_announce(&mut self, events: &[SocEvent], now_ts: i64) -> Vec<SocEvent> {
-        let _ = (events, now_ts);
-        Vec::new()
-}
+        let mut announce = Vec::new();
+        for event in events {
+            if matches!(event.kind, SocEventKind::Jump { .. }) {
+                // A last-sent time in the future means the clock moved back;
+                // it must not silence this battery until the clock catches up.
+                let quiet = self
+                    .jump_last_sent
+                    .get(&event.source)
+                    .is_some_and(|&sent| (0..JUMP_NOTIFY_INTERVAL_SECS).contains(&(now_ts - sent)));
+                if quiet {
+                    continue;
+                }
+                self.jump_last_sent.insert(event.source, now_ts);
+            }
+            announce.push(event.clone());
+        }
+        announce
+    }
 }
 
 /// Gap between attempts to resend an undelivered SOC message.
@@ -86,16 +101,31 @@ pub struct SocOutbox {
 impl SocOutbox {
     /// Hold `messages` (each with when it first failed) for a resend.
     pub fn add_failed(&mut self, messages: Vec<(i64, String)>, now_ts: i64) {
-        let _ = (messages, now_ts);
-}
+        if messages.is_empty() {
+            return;
+        }
+        self.failed.extend(messages);
+        self.failed.sort_by_key(|(failed_at, _)| *failed_at);
+        self.retry_at = Some(now_ts + SOC_RESEND_SECS);
+    }
 
     /// The held messages due for a resend now, taken out of the box (put
     /// them back with [`Self::add_failed`] if the resend fails). Messages
     /// past their age limit are dropped.
     pub fn take_due(&mut self, now_ts: i64) -> Vec<(i64, String)> {
-        let _ = now_ts;
-        Vec::new()
-}
+        if self.failed.is_empty()
+            || self
+                .retry_at
+                .is_some_and(|at| (1..=SOC_RESEND_SECS).contains(&(at - now_ts)))
+        {
+            return Vec::new();
+        }
+        // A failure time in the future means the clock moved back: keep it.
+        self.failed
+            .retain(|(failed_at, _)| now_ts - failed_at <= SOC_RESEND_MAX_AGE_SECS);
+        self.retry_at = None;
+        std::mem::take(&mut self.failed)
+    }
 }
 
 /// How long the spread check waits before trying again after it could not
@@ -105,8 +135,7 @@ pub const SPREAD_RETRY_SECS: i64 = 600;
 /// Whether the spread check is still waiting out a retry delay that ends at
 /// `retry_at`. A clock moved back past the delay does not extend it.
 pub fn retry_waiting(retry_at: Option<i64>, now_ts: i64) -> bool {
-    let _ = (retry_at, now_ts);
-    false
+    retry_at.is_some_and(|at| (1..=SPREAD_RETRY_SECS).contains(&(at - now_ts)))
 }
 
 /// What was last announced about one module's spread.
@@ -127,8 +156,7 @@ pub struct SpreadAlertState {
 
 /// Whether the daily spread check should run now.
 pub fn spread_check_due(now: DateTime<Local>, last_checked: Option<NaiveDate>) -> bool {
-    let _ = (now, last_checked);
-    false
+    now.hour() >= SPREAD_CHECK_HOUR && last_checked != Some(now.date_naive())
 }
 
 /// The flagged modules worth a message today.
@@ -137,8 +165,21 @@ pub fn spread_alerts_due(
     state: &SpreadAlertState,
     today: NaiveDate,
 ) -> Vec<SpreadTrend> {
-    let _ = (trends, state, today);
-    Vec::new()
+    trends
+        .iter()
+        .filter(|t| t.status.is_alert())
+        .filter(
+            |t| match (state.alerted.get(&t.module_index), t.recent_mv) {
+                (None, _) => true,
+                (Some(last), Some(recent)) => {
+                    recent >= last.mv + SPREAD_REALERT_GROWTH_MV
+                        || (today - last.day).num_days() >= SPREAD_REALERT_DAYS
+                }
+                (Some(_), None) => false,
+            },
+        )
+        .cloned()
+        .collect()
 }
 
 /// The state to store after a check on `today` that announced `sent`.
@@ -152,8 +193,25 @@ pub fn spread_state_after(
     delivered: bool,
     today: NaiveDate,
 ) -> SpreadAlertState {
-    let _ = (trends, sent, delivered, today);
-    state.clone()
+    let mut next = state.clone();
+    // The day is done once there was nothing to say or it was said.
+    if sent.is_empty() || delivered {
+        next.last_checked_day = Some(today);
+    }
+    for t in trends {
+        if t.status == SpreadStatus::Ok {
+            next.alerted.remove(&t.module_index);
+        }
+    }
+    if delivered {
+        for t in sent {
+            if let Some(mv) = t.recent_mv {
+                next.alerted
+                    .insert(t.module_index, SpreadAlerted { mv, day: today });
+            }
+        }
+    }
+    next
 }
 
 fn battery_label(source: SocSource) -> String {
@@ -169,14 +227,72 @@ pub fn build_soc_events_message(
     snap: &InverterSnapshot,
     now: DateTime<Local>,
 ) -> String {
-    let _ = (events, snap, now);
-    String::new()
+    let mut msg = format!(
+        "🔋 HEM Battery SOC Warning — {}\n",
+        now.format("%Y-%m-%d %H:%M")
+    );
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    for event in events {
+        let who = battery_label(event.source);
+        match &event.kind {
+            SocEventKind::Jump { from, to } => msg.push_str(&format!(
+                "{who}'s state of charge jumped from <b>{from}%</b> to <b>{to}%</b> in one step.\n"
+            )),
+            SocEventKind::Stuck { soc, energy_kwh } => {
+                let direction = if *energy_kwh < 0.0 {
+                    "charged"
+                } else {
+                    "discharged"
+                };
+                msg.push_str(&format!(
+                    "{who}'s state of charge has stayed at <b>{soc}%</b> while {:.1} kWh was {direction}.\n",
+                    energy_kwh.abs()
+                ));
+            }
+        }
+        if let SocSource::Module(index) = event.source {
+            if let Some(fw) = snap
+                .battery_modules
+                .iter()
+                .find(|m| m.index == index && m.bms_firmware > 0)
+                .map(|m| m.bms_firmware)
+            {
+                msg.push_str(&format!("BMS firmware {fw}.\n"));
+            }
+        }
+    }
+    msg.push_str(
+        "The battery's own SOC estimate looks wrong, the pattern of the GivEnergy \
+         BMS SOC bug. A full discharge and charge usually corrects it: set the \
+         battery reserve to 4%, run Force Discharge until it stops, then Force \
+         Charge to 100%, and put your reserve back afterwards.",
+    );
+    msg
 }
 
 /// Notification text for modules whose cell spread is widening or high.
 pub fn build_spread_message(trends: &[SpreadTrend], now: DateTime<Local>) -> String {
-    let _ = (trends, now);
-    String::new()
+    let mut msg = format!(
+        "🔋 HEM Battery Cell Spread — {}\n",
+        now.format("%Y-%m-%d %H:%M")
+    );
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    for t in trends {
+        let who = format!("Battery #{}", t.module_index + 1);
+        let recent = t.recent_mv.unwrap_or_default();
+        match t.baseline_mv {
+            Some(base) => msg.push_str(&format!(
+                "{who}: cells near full are <b>{recent:.0} mV</b> apart, up from {base:.0} mV a month or two ago.\n"
+            )),
+            None => msg.push_str(&format!(
+                "{who}: cells near full are <b>{recent:.0} mV</b> apart.\n"
+            )),
+        }
+    }
+    msg.push_str(
+        "A spread that keeps growing can mean a weakening cell. The Battery page charts it over time.",
+    );
+    msg
 }
 
 fn soc_alerts_on(config: &AlertsConfig) -> bool {
@@ -206,15 +322,79 @@ where
     F: Fn(AlertsConfig, String) -> Fut,
     Fut: Future<Output = bool> + Send + 'static,
 {
-    let _ = (state, snap, now, settled, poll_interval_secs, send);
-    Vec::new()
+    let now_ts = now.timestamp();
+    let (events, resend, announce) = {
+        let mut alerts = state.battery_health_alerts.lock().await;
+        alerts.soc_watch.set_poll_interval(poll_interval_secs);
+        let events = alerts.soc_watch.observe(snap, now_ts, settled);
+        let resend = alerts.soc_outbox.take_due(now_ts);
+        if events.is_empty() && resend.is_empty() {
+            return Vec::new();
+        }
+        let config = state.alert_config.lock().await.clone();
+        if soc_alerts_on(&config) {
+            let to_send = alerts.soc_events_to_announce(&events, now_ts);
+            (events, resend, Some((to_send, config)))
+        } else {
+            // Switched off (or no channel left): held messages are dropped.
+            (events, Vec::new(), None)
+        }
+    };
+    if !events.is_empty() {
+        tracing::warn!("Battery SOC watch: {events:?}");
+        if let Some(db) = state.history.lock().await.clone() {
+            // In memory only; the next battery health flush writes it.
+            db.record_soc_events(&events, snap, now);
+        }
+    }
+    let Some((to_send, config)) = announce else {
+        return Vec::new();
+    };
+
+    // Each message is delivered on its own task; an undelivered one goes
+    // into the outbox for a resend (with when it first failed).
+    let mut handles = Vec::new();
+    let mut deliver = |messages: Vec<(i64, String)>| {
+        let text = messages
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let delivery = send(config.clone(), text);
+        let state = state.clone();
+        handles.push(tokio::spawn(async move {
+            if !delivery.await {
+                tracing::warn!("Battery SOC message not delivered, will resend");
+                state
+                    .battery_health_alerts
+                    .lock()
+                    .await
+                    .soc_outbox
+                    .add_failed(messages, now_ts);
+            }
+        }));
+    };
+    if !resend.is_empty() {
+        deliver(resend);
+    }
+    if !to_send.is_empty() {
+        deliver(vec![(
+            now_ts,
+            build_soc_events_message(&to_send, snap, now),
+        )]);
+    }
+    handles
 }
 
 /// Cheap in-memory test the poll loop makes before spawning
 /// [`run_spread_check`], so most polls spawn nothing.
 pub(crate) async fn spread_check_pending(state: &Arc<AppState>, now: DateTime<Local>) -> bool {
-    let _ = (state, now);
-    false
+    if !spread_alerts_on(&*state.alert_config.lock().await) {
+        return false;
+    }
+    let alerts = state.battery_health_alerts.lock().await;
+    spread_check_due(now, alerts.spread_checked_day)
+        && !retry_waiting(alerts.spread_retry_at, now.timestamp())
 }
 
 /// The daily spread check: due once a day after [`SPREAD_CHECK_HOUR`] while
@@ -226,7 +406,93 @@ where
     F: FnOnce(AlertsConfig, String) -> Fut,
     Fut: Future<Output = bool>,
 {
-    let _ = (state, now, send);
+    let config = state.alert_config.lock().await.clone();
+    if !spread_alerts_on(&config) {
+        return;
+    }
+    let today = now.date_naive();
+    let previous = {
+        // Claim today's check before any await, so overlapping callers
+        // cannot both run it.
+        let mut alerts = state.battery_health_alerts.lock().await;
+        if !spread_check_due(now, alerts.spread_checked_day)
+            || retry_waiting(alerts.spread_retry_at, now.timestamp())
+        {
+            return;
+        }
+        alerts.spread_checked_day.replace(today)
+    };
+    // Hand the claim back when the check could not finish (the database may
+    // still be opening, or the message did not go), and try again after
+    // SPREAD_RETRY_SECS rather than on every poll.
+    let release = || async {
+        let mut alerts = state.battery_health_alerts.lock().await;
+        if alerts.spread_checked_day == Some(today) {
+            alerts.spread_checked_day = previous;
+        }
+        alerts.spread_retry_at = Some(now.timestamp() + SPREAD_RETRY_SECS);
+    };
+    let Some(db) = state.history.lock().await.clone() else {
+        release().await;
+        return;
+    };
+
+    // The trend's baseline is the furthest back it looks.
+    let since = today - chrono::Duration::days(BASELINE_FROM_DAYS_AGO);
+    let read_db = db.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        read_db.flush_battery_health();
+        let rows = read_db.query_battery_health(since, today)?;
+        let stored = read_db
+            .get_meta_value(SPREAD_ALERT_META_KEY)
+            .and_then(|raw| serde_json::from_str::<SpreadAlertState>(&raw).ok())
+            .unwrap_or_default();
+        Ok::<_, String>((rows, stored))
+    })
+    .await
+    .map_err(|e| format!("battery health worker failed: {e}"))
+    .and_then(|r| r);
+    let (rows, stored) = match loaded {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            tracing::warn!("Battery spread check failed, will retry: {e}");
+            release().await;
+            return;
+        }
+    };
+    // Already done today by an earlier run of this process or a previous one.
+    if stored.last_checked_day == Some(today) {
+        return;
+    }
+
+    let trends = spread_trend(&rows, today);
+    let due = spread_alerts_due(&trends, &stored, today);
+    let delivered = if due.is_empty() {
+        false
+    } else {
+        tracing::warn!("Battery cell spread alert: {due:?}");
+        send(config, build_spread_message(&due, now)).await
+    };
+    let next = spread_state_after(&stored, &trends, &due, delivered, today);
+    let raw = match serde_json::to_string(&next) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!("Failed to encode battery spread alert state: {e}");
+            return;
+        }
+    };
+    match tokio::task::spawn_blocking(move || db.set_meta_value(SPREAD_ALERT_META_KEY, &raw)).await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("Failed to store battery spread alert state: {e}"),
+        Err(e) => tracing::warn!("Battery spread alert state worker failed: {e}"),
+    }
+    if due.is_empty() || delivered {
+        state.battery_health_alerts.lock().await.spread_retry_at = None;
+    } else {
+        tracing::warn!("Battery cell spread alert not delivered, will retry");
+        release().await;
+    }
 }
 
 #[cfg(test)]

@@ -287,8 +287,21 @@ impl HistoryDb {
         snap: &InverterSnapshot,
         now: DateTime<Local>,
     ) {
-        let _ = (events, snap, now);
-}
+        if events.is_empty() {
+            return;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        for event in events {
+            let slot = match event.source {
+                SocSource::Module(index) => Some(index as i64),
+                SocSource::System => snap.battery_modules.iter().map(|m| m.index as i64).min(),
+            };
+            if let Some(slot) = slot {
+                health.count_soc_event(&today, slot, &event.kind);
+            }
+        }
+    }
 
     /// Merge the accumulated polls into `battery_health_daily`. Blocking
     /// (SQLite). The batch is one transaction, so a failure leaves the table

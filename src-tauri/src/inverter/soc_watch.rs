@@ -294,9 +294,47 @@ impl SocWatch {
         now_ts: i64,
         settled: bool,
     ) -> Vec<SocEvent> {
-        let _ = (snap, now_ts, settled);
-        Vec::new()
-}
+        // An HR 29 calibration drives the SOC to its limits on purpose.
+        let calibrating =
+            snap.supports_battery_calibration && (1..=6).contains(&snap.battery_calibration_stage);
+        if !settled || calibrating {
+            self.tracks.clear();
+            self.last_fingerprints.clear();
+            return Vec::new();
+        }
+
+        // A module SOC of 0 is a failed read (the BMS never reports a flat
+        // module as 0 while it is answering), so it is skipped.
+        let mut readings: Vec<(SocSource, u8)> = snap
+            .battery_modules
+            .iter()
+            .filter(|m| (1..=100).contains(&m.soc))
+            .map(|m| (SocSource::Module(m.index), m.soc))
+            .collect();
+        if readings.is_empty() && snap.soc <= 100 {
+            readings.push((SocSource::System, snap.soc));
+        }
+
+        let mut events = Vec::new();
+        let max_gap = self.max_gap_secs();
+        for (source, soc) in readings {
+            let fp = fingerprint(snap, source);
+            let repeat = self.last_fingerprints.get(&source) == Some(&fp);
+            self.last_fingerprints.insert(source, fp);
+            match self.tracks.get_mut(&source) {
+                Some(track) => events.extend(
+                    track
+                        .step(soc, now_ts, snap, repeat, max_gap)
+                        .into_iter()
+                        .map(|kind| SocEvent { source, kind }),
+                ),
+                None => {
+                    self.tracks.insert(source, Track::new(soc, now_ts));
+                }
+            }
+        }
+        events
+    }
 }
 
 #[cfg(test)]

@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS battery_health_daily (
     bms_firmware       INTEGER,
     samples            INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL,
+    soc_jumps          INTEGER NOT NULL DEFAULT 0,
+    soc_stuck          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, module_index)
 )
 '''
@@ -108,6 +110,14 @@ BATTERY_HEALTH_COLUMNS = (
     'day', 'module_index', 'min_cell_v', 'max_cell_v',
     'max_spread_mv', 'full_spread_mv', 'cycles', 'max_temp_c', 'capacity_ah',
     'design_capacity_ah', 'bms_firmware', 'samples', 'updated_at',
+    'soc_jumps', 'soc_stuck',
+)
+
+# Columns added to battery_health_daily after it first shipped, as the app's
+# migration adds them to an older database.
+BATTERY_HEALTH_ADDED_COLUMNS = (
+    ('soc_jumps', 'INTEGER NOT NULL DEFAULT 0'),
+    ('soc_stuck', 'INTEGER NOT NULL DEFAULT 0'),
 )
 
 # The simulated battery trends are functions of the calendar date, not of
@@ -165,7 +175,8 @@ def generate_battery_health(date_obj, day_rows, modules, interval_secs):
 
     Module 1 is healthy (spread ~10 mV, capacity ~98 Ah of 100). Module 2 is
     weakening: its spread widens ~0.5 mV a day and its BMS-reported capacity
-    steps down every ~30 days, like a recalibration. Cycles grow ~0.8 a day.
+    steps down every ~30 days, like a recalibration, and its SOC occasionally
+    jumps or sticks (the BMS SOC bug). Cycles grow ~0.8 a day.
     A day only has a near-full spread when the battery reached 95% that day,
     as in the app, and temperature follows the season.
     """
@@ -195,6 +206,8 @@ def generate_battery_health(date_obj, day_rows, modules, interval_secs):
         max_cell = mid + worst / 2000.0
         min_cell = mid - worst / 2000.0
         cycles = max(1, 150 + int(days_since * 0.8)) - (7 * index)
+        soc_jumps = (1 if rng.random() < 0.08 else 0) if weak else 0
+        soc_stuck = (1 if rng.random() < 0.04 else 0) if weak else 0
         out.append((
             date_obj.strftime('%Y-%m-%d'),
             index,
@@ -209,6 +222,8 @@ def generate_battery_health(date_obj, day_rows, modules, interval_secs):
             HEALTH_FIRMWARE,
             samples,
             updated_at,
+            soc_jumps,
+            soc_stuck,
         ))
     return out
 
@@ -550,6 +565,10 @@ def main():
     cur = conn.cursor()
     if args.modules > 0:
         cur.execute(BATTERY_HEALTH_DDL)
+        existing = {row[1] for row in cur.execute("PRAGMA table_info(battery_health_daily)")}
+        for column, definition in BATTERY_HEALTH_ADDED_COLUMNS:
+            if column not in existing:
+                cur.execute(f"ALTER TABLE battery_health_daily ADD COLUMN {column} {definition}")
 
     # Start with a reasonable overnight SOC
     state = {'soc': 45.0}

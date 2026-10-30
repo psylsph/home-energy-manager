@@ -7127,6 +7127,18 @@ pub async fn set_alerts(
         candidate.solar_clipping_enabled = v;
     }
     if let Some(v) = body
+        .get("cell_spread_alert_enabled")
+        .and_then(|v| v.as_bool())
+    {
+        candidate.cell_spread_alert_enabled = v;
+    }
+    if let Some(v) = body
+        .get("soc_anomaly_alert_enabled")
+        .and_then(|v| v.as_bool())
+    {
+        candidate.soc_anomaly_alert_enabled = v;
+    }
+    if let Some(v) = body
         .get("solar_clipping_ceiling_w")
         .and_then(|v| v.as_u64())
     {
