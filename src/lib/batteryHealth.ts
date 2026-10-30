@@ -60,6 +60,63 @@ export function dayToMs(day: string): number {
   return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12).getTime();
 }
 
+const DAY_MS = 86_400_000;
+
+/** Longest span, in days, labelled on whole days rather than months: covers the 3m range. */
+const DAY_TICKS_MAX_SPAN = 100;
+
+export type HealthTickUnit = 'day' | 'month';
+
+/**
+ * X-axis ticks for a daily health chart. Up to about three months they fall on
+ * local midday (as `dayToMs`) of whole days, every day while that fits in
+ * `maxTicks`, otherwise an even step counted back so the newest day is always
+ * labelled. Longer spans use month starts, labelled with the year, so a year
+ * or more never repeats a label. Charts pass these with `interval={0}` so no
+ * label is dropped.
+ */
+export function healthAxis(
+  times: readonly number[],
+  maxTicks = 4,
+): { ticks: number[]; unit: HealthTickUnit } {
+  const limit = Math.max(2, Math.floor(maxTicks));
+  const valid = times.filter((t) => Number.isFinite(t));
+  if (valid.length === 0) return { ticks: [], unit: 'day' };
+  const first = Math.min(...valid);
+  const lastMs = Math.max(...valid);
+  const last = new Date(lastMs);
+  // Rounded, so a clock change (a 23 or 25 hour day) still counts as one day.
+  const spanDays = Math.round((lastMs - first) / DAY_MS);
+  const ticks: number[] = [];
+
+  if (spanDays <= DAY_TICKS_MAX_SPAN) {
+    const step = spanDays < limit ? 1 : Math.ceil(spanDays / (limit - 1));
+    for (let back = 0; back <= spanDays; back += step) {
+      ticks.push(new Date(last.getFullYear(), last.getMonth(), last.getDate() - back, 12).getTime());
+    }
+    return { ticks: ticks.reverse(), unit: 'day' };
+  }
+
+  // Month starts inside the data, counted back from the newest one. A first
+  // day after the 1st starts the count at the next month, so the step is
+  // sized to the labels that can actually be drawn.
+  const firstDate = new Date(first);
+  const firstMonth = firstDate.getFullYear() * 12 + firstDate.getMonth() + (firstDate.getDate() > 1 ? 1 : 0);
+  const months = last.getFullYear() * 12 + last.getMonth() - firstMonth;
+  const step = Math.ceil((months + 1) / limit);
+  for (let back = 0; back <= months; back += step) {
+    ticks.push(new Date(last.getFullYear(), last.getMonth() - back, 1, 12).getTime());
+  }
+  return { ticks: ticks.reverse(), unit: 'month' };
+}
+
+/** Axis label for a tick from `healthAxis`. */
+export function formatHealthTick(ms: number, unit: HealthTickUnit): string {
+  return unit === 'month'
+    ? new Date(ms).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
+    : new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
 /** Pivot daily rows into chart rows for `metric`, oldest day first; days with no value for any module are dropped. */
 export function pivotHealth(rows: readonly BatteryHealthDay[], metric: HealthMetric): HealthChartRow[] {
   const byDay = new Map<string, HealthChartRow>();

@@ -16,6 +16,8 @@ import {
   describeSocEvents,
   describeTrend,
   hasMetric,
+  formatHealthTick,
+  healthAxis,
   healthModules,
   latestPerModule,
   moduleKey,
@@ -54,8 +56,9 @@ const SPREAD_METRIC: Record<SpreadMode, HealthMetric> = {
   worst: 'max_spread_mv',
 };
 
+/** Same wording as the axis, so tooltip and SOC list dates match its labels. */
 function formatDay(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  return formatHealthTick(ms, 'day');
 }
 
 interface ChartProps {
@@ -70,24 +73,28 @@ interface ChartProps {
 function HealthLineChart({ title, hint, data, modules, unit, digits }: ChartProps) {
   // Same grid as every other chart, including the user's grid-line weight.
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
+  const axis = useMemo(() => healthAxis(data.map((row) => row.t)), [data]);
   return (
     <div className="space-y-1">
       <div className="text-text-secondary text-xs">{title}</div>
       {hint && <div className="text-text-secondary/60 text-[11px]">{hint}</div>}
       <ResponsiveContainer width="100%" height={180}>
-        <LineChart data={data} margin={{ top: 5, right: 5, left: -15, bottom: 0 }}>
+        {/* The newest day (or month) label can sit centred on the right
+            edge, so the right margin holds half of the widest label. */}
+        <LineChart data={data} margin={{ top: 5, right: 32, left: -15, bottom: 0 }}>
           <CartesianGrid {...getHistoryChartGridProps(gridLineWeight)} />
           <XAxis
             dataKey="t"
             type="number"
             scale="time"
             domain={['dataMin', 'dataMax']}
-            tickFormatter={formatDay}
+            ticks={axis.ticks}
+            interval={0}
+            tickFormatter={(ms: number) => formatHealthTick(ms, axis.unit)}
             stroke="#8B949E"
             tick={{ fontSize: 11, style: { fontWeight: 700 } }}
             tickLine={false}
             axisLine={false}
-            minTickGap={40}
           />
           <YAxis
             stroke="#8B949E"
