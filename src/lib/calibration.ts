@@ -35,24 +35,55 @@ export interface CalibrationStatus {
 }
 
 export function describePhase(view: CalibrationView, floorSoc: number): string {
-    void view; void floorSoc; return '';
+  switch (view.phase) {
+    case 'discharging':
+      return `Exporting down to ${floorSoc}%`;
+    case 'charging':
+      return 'Charging to 100%';
+    case 'holding':
+      return 'Holding at 100% while the cells balance';
+    case 'restoring':
+      return view.outcome?.result === 'cancelled'
+        ? 'Cancelling: putting your settings back'
+        : 'Putting your settings back';
+  }
 }
 
 /** Minutes left of the hold at 100%, or null outside the hold. */
 export function holdRemainingMinutes(view: CalibrationView, nowMs: number): number | null {
-    void view; void nowMs; return null;
+  if (view.phase !== 'holding' || view.since_ms == null) return null;
+  const leftMs = view.since_ms + view.hold_minutes * 60_000 - nowMs;
+  return Math.max(0, Math.ceil(leftMs / 60_000));
 }
 
 /** Day and time, e.g. "30 Oct, 18:00". */
 export function formatCalibrationTime(ms: number): string {
-    void ms; return '';
+  return new Date(ms).toLocaleString([], {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 }
 
 export function describeLastCalibration(record: CalibrationRecord | null): string {
-    void record; return '';
+  if (!record) return '';
+  const when = formatCalibrationTime(record.finished_at_ms);
+  switch (record.outcome.result) {
+    case 'completed':
+      return `Last calibration finished ${when}.`;
+    case 'cancelled':
+      return `Last calibration was cancelled ${when}.`;
+    case 'failed':
+      return `Last calibration stopped ${when}: ${record.outcome.reason}`;
+  }
 }
 
 /** A hold typed in hours, as minutes, or null when it isn't a number of hours within the limits. */
 export function parseHoldHours(text: string, minMinutes: number, maxMinutes: number): number | null {
-    void text; void minMinutes; void maxMinutes; return null;
+  const trimmed = text.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return null;
+  const minutes = Math.round(Number(trimmed) * 60);
+  return minutes >= minMinutes && minutes <= maxMinutes ? minutes : null;
 }

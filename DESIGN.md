@@ -537,23 +537,28 @@ owner stay queued until that owner wins a later cycle.
 From highest to lowest priority:
 
 1. **Safety**: the load or temperature limiter is holding discharge.
-2. **Manual Force**: a Force Charge or Force Discharge is running. It may
+2. **Calibration**: a guided battery calibration cycle is running (issue
+   #418). It waits, writing nothing, while a Safety owner holds. While it
+   runs, the Intelligent Octopus Go dispatch hold, auto-winter, Adaptive
+   Charge, plan auto-refresh/apply and the floor guard also sit out, and
+   Force, pause and a second cycle are refused.
+3. **Manual Force**: a Force Charge or Force Discharge is running. It may
    lift an HR318 pause for its window, but only after capturing HR318-320,
    and it restores them when it ends.
-3. **Explicit pause**: HR318 is blocking discharge right now, the inverter
+4. **Explicit pause**: HR318 is blocking discharge right now, the inverter
    reports Eco Paused or Export Paused, or a native battery pause has been
    requested through the API.
-4. **Manual mode**: the inverter is in Timed Demand (HR27=1 with discharge
+5. **Manual mode**: the inverter is in Timed Demand (HR27=1 with discharge
    enabled) and neither Cosy nor Agile set it, so it is treated as a mode
    the user chose, whether in HEM or elsewhere.
-5. **Timed Export**: an enabled HEM-managed export schedule is inside its
+6. **Timed Export**: an enabled HEM-managed export schedule is inside its
    window or still in transition. There is one exception: when the managed
    schedule is enabled, Timed Export may override a register-derived Manual
    mode claim. That Timed Demand shape is exactly what re-arming firmware
    leaves behind (see [Firmware that re-arms HR59](#firmware-that-re-arms-hr59)),
    and the reconciler has to be able to repair it.
-6. **Timed Charge**: the Cosy / scheduled charge automation.
-7. **Agile**: the price-driven Agile automation.
+7. **Timed Charge**: the Cosy / scheduled charge automation.
+8. **Agile**: the price-driven Agile automation.
 
 An automation that is outranked goes on hold rather than failing. The
 Control page shows why (`deferral_reason` in `inverter/cosy.rs`,

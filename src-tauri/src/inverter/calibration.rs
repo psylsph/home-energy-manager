@@ -168,8 +168,16 @@ pub struct CalibrationStep {
 /// a low-voltage battery (Gen 1–3 hybrids and AC-coupled). The All-in-Ones
 /// use the HV battery protocol and are left out until someone can test one.
 pub fn supports(device_type: DeviceType) -> bool {
-    let _ = device_type;
-    false
+    matches!(
+        device_type,
+        DeviceType::Gen1Hybrid
+            | DeviceType::Gen2Hybrid
+            | DeviceType::Gen3Hybrid
+            | DeviceType::Gen3PlusHybrid
+            | DeviceType::PolarHybrid
+            | DeviceType::ACCoupled
+            | DeviceType::ACCoupledMk2
+    )
 }
 
 /// Validate a requested hold time.
@@ -245,8 +253,116 @@ fn persisted(writes: &[RegisterWrite]) -> Vec<CalibrationWrite> {
 /// Refuses when anything the cycle changes could not be written back as it
 /// was, so a cycle never starts that it could not undo.
 pub fn build_plan(snapshot: &InverterSnapshot) -> Result<CalibrationPlan, String> {
-    let _ = snapshot;
-    Err("not implemented".to_string())
+    if snapshot.inverter_serial.is_empty() {
+        return Err("The inverter hasn't reported its identity yet; try again shortly".to_string());
+    }
+    let device = snapshot.device_type;
+    if !supports(device) {
+        return Err(format!(
+            "The calibration cycle isn't available for this inverter ({})",
+            device.display_name()
+        ));
+    }
+    let charge_revert = force_charge_revert_from_snapshot(snapshot, device)
+        .ok_or_else(|| "Couldn't read the current charge settings".to_string())?;
+    let discharge_revert = force_discharge_revert_from_snapshot(snapshot, device)
+        .ok_or_else(|| "Couldn't read the current discharge settings".to_string())?;
+
+    let bank = device.power_limit_bank();
+    let reserve_back = encode(ControlCommand::SetBatterySocReserve {
+        reserve: snapshot.battery_reserve as u16,
+    })
+    .map_err(|e| format!("The current reserve couldn't be put back afterwards: {e}"))?;
+    let rates_back = rate_writes(
+        bank,
+        Some(snapshot.charge_rate as u16),
+        Some(snapshot.discharge_rate as u16),
+    )
+    .map_err(|e| format!("The current battery rates couldn't be put back afterwards: {e}"))?;
+    let (full_charge, full_discharge) = full_rates(bank);
+
+    // A native battery pause would stop the cycle; lift it as Force
+    // Discharge does, and the restore puts it back.
+    let lift_pause = if force_discharge_pause_mode_supported(&discharge_revert)
+        && discharge_revert
+            .battery_pause_mode_raw
+            .is_some_and(|mode| mode != 0)
+    {
+        vec![RegisterWrite {
+            address: HR_BATTERY_PAUSE_MODE,
+            value: 0,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    // Discharge: reserve and rate first, then an all-day export slot, and
+    // only then arm export (the slot must exist before discharge is enabled).
+    let mut discharge = encode(ControlCommand::SetBatterySocReserve {
+        reserve: FLOOR_SOC as u16,
+    })?;
+    discharge.extend(rate_writes(bank, None, Some(full_discharge))?);
+    discharge.extend(lift_pause.iter().cloned());
+    discharge.extend(encode(ControlCommand::SetDischargeSlot1 {
+        start: 0,
+        end: 2359,
+    })?);
+    discharge.extend(encode(ControlCommand::SetDischargeSlot2 {
+        start: 0,
+        end: 0,
+    })?);
+    discharge.extend(
+        encode(ControlCommand::ForceDischarge)?
+            .into_iter()
+            .filter(|w| {
+                !matches!(
+                    w.address,
+                    HR_DISCHARGE_SLOT_1_START
+                        | HR_DISCHARGE_SLOT_1_END
+                        | HR_DISCHARGE_SLOT_2_START
+                        | HR_DISCHARGE_SLOT_2_END
+                )
+            }),
+    );
+
+    // Charge: full rate and an all-day charge slot to 100%.
+    let mut charge = rate_writes(bank, Some(full_charge), None)?;
+    charge.extend(lift_pause);
+    charge.extend(encode(ControlCommand::SetChargeSlot1 {
+        start: 0,
+        end: 2359,
+    })?);
+    charge.extend(encode(ControlCommand::ForceCharge { target_soc: 100 })?);
+    // 10-slot models stop at the lower of the global and slot 1's own
+    // target; raise a lower slot 1 target (the restore puts it back).
+    if device.uses_extended_schedule_slots()
+        && charge_revert
+            .charge_slot_1_target_soc
+            .is_some_and(|target| target < 100)
+    {
+        charge.extend(encode(ControlCommand::SetChargeTargetSocSlot {
+            slot: 1,
+            soc: 100,
+        })?);
+    }
+
+    let mut restore =
+        build_force_discharge_stop_writes(device, &snapshot.firmware_version, &discharge_revert);
+    if restore.is_empty() {
+        return Err(
+            "The current battery pause setting couldn't be put back afterwards".to_string(),
+        );
+    }
+    restore.extend(build_force_charge_stop_writes(device, &charge_revert));
+    let mut restore = last_write_per_register(restore);
+    restore.extend(reserve_back);
+    restore.extend(rates_back);
+
+    Ok(CalibrationPlan {
+        discharge: persisted(&discharge),
+        charge: persisted(&charge),
+        restore: persisted(&restore),
+    })
 }
 
 /// Start a run from a plan.
@@ -278,8 +394,115 @@ pub fn step(
     now_ms: i64,
     safety_holding: bool,
 ) -> CalibrationStep {
-    let _ = (run, snapshot, now_ms, safety_holding);
-    CalibrationStep::default()
+    let mut out = CalibrationStep::default();
+    // Not identified yet (just reconnected): wait for a full read.
+    if snapshot.inverter_serial.is_empty() || matches!(snapshot.device_type, DeviceType::Unknown(_))
+    {
+        return out;
+    }
+    // Identity is the serial plus the register bank the writes target; a
+    // same-serial model refinement (Gen 2 → Gen 3) is the same inverter.
+    if snapshot.inverter_serial != run.inverter_serial
+        || snapshot.device_type.power_limit_bank() != run.device_type.power_limit_bank()
+    {
+        out.finished = Some(CalibrationOutcome::Failed {
+            reason: "A different inverter answered, so HEM stopped without changing it. \
+                     Check the original inverter's settings on the Control page."
+                .to_string(),
+        });
+        return out;
+    }
+    // A thermal or load limiter holds discharge: write nothing until it
+    // releases. Its own restore puts back what the cycle had set, which the
+    // next poll then re-applies.
+    if safety_holding {
+        return out;
+    }
+
+    let in_phase_ms = now_ms - run.phase_started_at_ms;
+    match run.phase.clone() {
+        CalibrationPhase::Discharging => {
+            if in_phase_ms >= PHASE_TIMEOUT_MS {
+                begin_restore(
+                    run,
+                    failed(format!(
+                        "The battery did not reach {FLOOR_SOC}% within 24 hours, so your settings were put back"
+                    )),
+                    now_ms,
+                );
+                out.changed = true;
+            } else if snapshot.soc <= FLOOR_SOC
+                || stalled_near_floor(run, snapshot, now_ms, &mut out)
+            {
+                enter(run, CalibrationPhase::Charging, now_ms);
+                out.changed = true;
+            }
+        }
+        CalibrationPhase::Charging => {
+            if in_phase_ms >= PHASE_TIMEOUT_MS {
+                begin_restore(
+                    run,
+                    failed(
+                        "The battery did not reach 100% within 24 hours, so your settings were put back"
+                            .to_string(),
+                    ),
+                    now_ms,
+                );
+                out.changed = true;
+            } else if snapshot.soc >= 100 {
+                // The charge settings stay as they are for the hold.
+                run.phase = CalibrationPhase::Holding { since_ms: now_ms };
+                run.phase_started_at_ms = now_ms;
+                out.changed = true;
+            }
+        }
+        CalibrationPhase::Holding { since_ms } => {
+            if now_ms - since_ms >= i64::from(run.hold_minutes) * 60_000 {
+                begin_restore(run, CalibrationOutcome::Completed, now_ms);
+                out.changed = true;
+            }
+        }
+        CalibrationPhase::Restoring { .. } => {}
+    }
+
+    // Make the phase's writes true on the inverter.
+    let due = run
+        .last_applied_ms
+        .is_none_or(|at| now_ms - at >= REAPPLY_AFTER_MS);
+    if let CalibrationPhase::Restoring { outcome, attempts } = &mut run.phase {
+        let writes = registers(&run.restore_writes);
+        // Only a read taken after the last restore write proves it.
+        let fresh = run
+            .last_applied_ms
+            .is_none_or(|at| snapshot.timestamp.saturating_mul(1000) > at);
+        if fresh && snapshot_matches_writes(snapshot, &writes) {
+            out.finished = Some(outcome.clone());
+        } else if due {
+            if *attempts >= RESTORE_ATTEMPTS {
+                out.finished = Some(failed(
+                    "HEM wrote your settings back but couldn't confirm them. \
+                     Check them on the Control page."
+                        .to_string(),
+                ));
+            } else {
+                *attempts += 1;
+                run.last_applied_ms = Some(now_ms);
+                out.writes = writes;
+                out.changed = true;
+            }
+        }
+        return out;
+    }
+    let writes = registers(match run.phase {
+        CalibrationPhase::Discharging => &run.discharge_writes,
+        _ => &run.charge_writes,
+    });
+    if due && !snapshot_matches_writes(snapshot, &writes) {
+        run.last_applied_ms = Some(now_ms);
+        out.writes = writes;
+        out.changed = true;
+    }
+    out
 }
 
 fn registers(writes: &[CalibrationWrite]) -> Vec<RegisterWrite> {
@@ -339,8 +562,11 @@ fn stalled_near_floor(
 /// Ask a running cycle to stop and restore. Returns false when it is
 /// already restoring.
 pub fn cancel(run: &mut CalibrationRun, now_ms: i64) -> bool {
-    let _ = (run, now_ms);
-    false
+    if matches!(run.phase, CalibrationPhase::Restoring { .. }) {
+        return false;
+    }
+    begin_restore(run, CalibrationOutcome::Cancelled, now_ms);
+    true
 }
 
 /// Run one poll's step for the cycle in `state`, if any: persist the run
