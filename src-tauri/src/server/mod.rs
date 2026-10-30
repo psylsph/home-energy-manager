@@ -6,6 +6,7 @@
 pub mod api;
 pub mod audit;
 pub mod authenticated_lifecycle;
+pub(crate) mod calibration;
 pub(crate) mod control_status;
 pub mod export_once;
 pub mod external_commands;
@@ -154,6 +155,14 @@ fn create_router_at(
         .route("/api/history/summary", get(api::get_history_summary))
         // Daily per-module battery health summary (issue #393).
         .route("/api/battery-health", get(api::get_battery_health))
+        .route(
+            "/api/battery/calibration",
+            get(calibration::get_calibration).post(calibration::start_calibration),
+        )
+        .route(
+            "/api/battery/calibration/cancel",
+            post(calibration::cancel_calibration),
+        )
         // Cost totals for the Power page Consumption Report (issue #131).
         // Accepts the same range/offset/explicit-window params as
         // /api/history but returns a flat JSON object with per-direction

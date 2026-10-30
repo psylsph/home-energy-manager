@@ -8,6 +8,7 @@ describe('agileBlockedMessage', () => {
     expect(agileBlockedMessage('pause', true)).toMatch(/battery pause/i);
     expect(agileBlockedMessage('force', true)).toMatch(/Force Charge or Force Discharge/);
     expect(agileBlockedMessage('safety', true)).toMatch(/safety limit/i);
+    expect(agileBlockedMessage('calibration', true)).toMatch(/battery calibration/i);
   });
 
   it('says what Agile is not doing and that it will carry on by itself', () => {

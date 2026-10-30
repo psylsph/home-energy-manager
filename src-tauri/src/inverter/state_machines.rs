@@ -56,6 +56,10 @@ pub enum DischargeControlOwner {
     /// may temporarily clear an HR318 discharge pause after capturing it for
     /// restoration.
     ManualForce,
+    /// The guided battery calibration cycle (issue #418). It outranks every
+    /// automation and manual action but still yields to the thermal and load
+    /// limiters, waiting until they release.
+    Calibration,
     /// Thermal, load, or other hardware safety protection.
     Safety,
 }
@@ -82,6 +86,7 @@ impl DischargeControlOwner {
             Self::ManualMode => "manual_mode",
             Self::ExplicitPause => "pause",
             Self::ManualForce => "force",
+            Self::Calibration => "calibration",
             Self::Safety => "safety",
         }
     }
@@ -8906,6 +8911,30 @@ mod tests {
         );
         assert!(!arbiter.can_request(DischargeControlOwner::ExplicitPause));
         assert!(arbiter.can_request(DischargeControlOwner::Safety));
+    }
+
+    #[test]
+    fn calibration_outranks_every_action_but_the_safety_limiters() {
+        let mut arbiter = DischargeControlArbiter::default();
+        assert!(arbiter.request(DischargeControlOwner::ManualForce));
+        assert!(arbiter.request(DischargeControlOwner::Calibration));
+        for lower in [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+            DischargeControlOwner::ManualForce,
+        ] {
+            assert!(!arbiter.can_request(lower), "{lower:?}");
+        }
+        assert!(arbiter.request(DischargeControlOwner::Safety));
+        assert!(!arbiter.can_request(DischargeControlOwner::Calibration));
+        assert_eq!(DischargeControlOwner::Calibration.code(), "calibration");
+        // Cosy treats it as a hard override and can say why it waits.
+        assert!(crate::inverter::cosy::is_hard_override(
+            DischargeControlOwner::Calibration
+        ));
     }
 
     // ---- Dispatch hold (issue #394) ----

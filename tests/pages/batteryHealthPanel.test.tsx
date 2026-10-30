@@ -272,7 +272,8 @@ describe('BatteryHealthPanel', () => {
     expect(items[0]).toContain('SOC jumped twice and stuck once');
     expect(items[1]).toContain('Module #1');
     expect(items[1]).toContain('SOC jumped once');
-     // HEM has no calibration button for the affected firmware, so the note says how.
+    // HEM can run the cycle itself; the note points there and still says how by hand.
+    expect(screen.getByText(/Battery calibration cycle on the Control page/)).toBeTruthy();
     expect(screen.getByText(/set the battery reserve to 4%/)).toBeTruthy();
   });
 

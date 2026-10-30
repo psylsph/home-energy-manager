@@ -120,7 +120,7 @@ use crate::modbus::registers::{
 // ---------------------------------------------------------------------------
 
 /// A single holding-register write (address, value).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterWrite {
     pub address: u16,
     pub value: u16,

@@ -284,6 +284,13 @@ async fn initialize_app_state(
         tracing::info!("Restored dispatch hold state: Releasing (post-restart)");
     }
 
+    // A battery calibration cycle carries on where it left off (issue #418):
+    // the poll loop re-applies whatever its phase needs.
+    if let Some(run) = app_settings.battery_calibration_run.clone() {
+        tracing::info!(phase = ?run.phase, "Resuming battery calibration");
+        *state.calibration_run.lock().await = Some(run);
+    }
+
     // Restore the shared limiter reserve so the exact previous
     // reserve is written back (not a hardcoded default).
     if let Some(reserve) = app_settings.load_limiter_saved_reserve {
@@ -1487,6 +1494,29 @@ mod tests {
                 .lock()
                 .await
                 .holding_for_restart(chrono::Utc::now()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_resumes_a_battery_calibration() {
+        with_isolated_config_dir_async(|| async {
+            let snapshot = crate::inverter::model::InverterSnapshot {
+                device_type: crate::inverter::model::DeviceType::Gen2Hybrid,
+                inverter_serial: "SN1".to_string(),
+                ..Default::default()
+            };
+            let plan = crate::inverter::calibration::build_plan(&snapshot).expect("plan");
+            let mut run = crate::inverter::calibration::new_run(&snapshot, plan, 120, 1_000);
+            run.phase = crate::inverter::calibration::CalibrationPhase::Charging;
+            let mut s = Settings::load();
+            s.battery_calibration_run = Some(run.clone());
+            s.save().expect("settings save");
+
+            let state = initialize_app_state(Settings::load(), Arc::new(LogRing::new(64)))
+                .await
+                .expect("state");
+            assert_eq!(*state.calibration_run.lock().await, Some(run));
         })
         .await;
     }

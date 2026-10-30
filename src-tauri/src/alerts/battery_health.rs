@@ -263,10 +263,19 @@ pub fn build_soc_events_message(
     }
     msg.push_str(
         "The battery's own SOC estimate looks wrong, the pattern of the GivEnergy \
-         BMS SOC bug. A full discharge and charge usually corrects it: set the \
-         battery reserve to 4%, run Force Discharge until it stops, then Force \
-         Charge to 100%, and put your reserve back afterwards.",
+         BMS SOC bug. A full discharge and charge usually corrects it: ",
     );
+    if crate::inverter::calibration::supports(snap.device_type) {
+        msg.push_str(
+            "start the Battery calibration cycle on the Control page and HEM will run \
+             it, then put your settings back.",
+        );
+    } else {
+        msg.push_str(
+            "set the battery reserve to 4%, run Force Discharge until it stops, then \
+             Force Charge to 100%, and put your reserve back afterwards.",
+        );
+    }
     msg
 }
 
@@ -689,12 +698,25 @@ mod tests {
         assert!(text.contains("The battery"), "{text}");
         assert!(text.contains("47%") && text.contains("1.6 kWh"), "{text}");
         assert!(text.contains("discharged"), "{text}");
-        // HEM has no calibration button for this firmware, so say how.
+        // HEM can't run the cycle on an unknown model, so say how by hand.
         assert!(text.contains("reserve to 4%"), "{text}");
         assert!(
             text.contains("Force Discharge") && text.contains("Force Charge"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn soc_message_points_to_the_calibration_cycle_where_hem_can_run_it() {
+        let snap = InverterSnapshot {
+            device_type: crate::inverter::model::DeviceType::Gen2Hybrid,
+            ..InverterSnapshot::default()
+        };
+        let text =
+            build_soc_events_message(&[jump(SocSource::System)], &snap, at(2026, 10, 30, 9, 15));
+        assert!(text.contains("Battery calibration"), "{text}");
+        assert!(text.contains("Control page"), "{text}");
+        assert!(!text.contains("reserve to 4%"), "{text}");
     }
 
     #[test]

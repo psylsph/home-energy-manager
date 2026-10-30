@@ -531,6 +531,7 @@ pub(crate) fn deferral_reason(owner: DischargeControlOwner) -> &'static str {
         }
         DischargeControlOwner::ExplicitPause => "a Pause Discharge / battery-pause is in effect",
         DischargeControlOwner::ManualForce => "a manual Force Charge / Force Discharge is running",
+        DischargeControlOwner::Calibration => "a battery calibration cycle is running",
         DischargeControlOwner::Safety => {
             "a safety limiter (load or temperature) is holding discharge"
         }

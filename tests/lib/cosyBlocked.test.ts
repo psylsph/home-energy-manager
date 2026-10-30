@@ -6,6 +6,7 @@ describe('cosyBlockedMessage', () => {
     expect(cosyBlockedMessage('pause', true)).toMatch(/battery pause/i);
     expect(cosyBlockedMessage('force', true)).toMatch(/Force Charge or Force Discharge/);
     expect(cosyBlockedMessage('safety', true)).toMatch(/safety limit/i);
+    expect(cosyBlockedMessage('calibration', true)).toMatch(/battery calibration/i);
   });
 
   it('says what Cosy is not doing and that it will carry on by itself', () => {

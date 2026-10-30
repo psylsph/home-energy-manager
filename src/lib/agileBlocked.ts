@@ -3,6 +3,7 @@ const REASONS: Record<string, string> = {
   manual_mode: 'the inverter is in a manually chosen mode (Timed Demand)',
   pause: 'a battery pause is active',
   force: 'a manual Force Charge or Force Discharge is running',
+  calibration: 'a battery calibration cycle is running',
   safety: 'a safety limit (high load or temperature) is holding the battery',
 };
 

@@ -648,6 +648,13 @@ async fn run_pause_start(
     minutes: u64,
 ) -> Response {
     let _action_guard = state.force_action_lock.lock().await;
+    if crate::server::calibration::calibration_running(&state).await {
+        return capability_error(
+            StatusCode::CONFLICT,
+            "calibration_running",
+            crate::server::calibration::CALIBRATION_RUNNING,
+        );
+    }
     if let Err(response) = require_operation_capability(&state, mode.operation()).await {
         return *response;
     }

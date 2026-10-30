@@ -1177,6 +1177,15 @@ pub(crate) fn snapshot_matches_writes(
         HR_BATTERY_PAUSE_MODE => snapshot.battery_pause_mode_raw == Some(write.value),
         HR_BATTERY_PAUSE_SLOT_1_START => snapshot.battery_pause_slot_start_raw == Some(write.value),
         HR_BATTERY_PAUSE_SLOT_1_END => snapshot.battery_pause_slot_end_raw == Some(write.value),
+        HR_BATTERY_SOC_RESERVE => snapshot.battery_reserve as u16 == write.value,
+        // A model reads its rates from one bank only; a write to another
+        // bank is never proven.
+        address if address == snapshot.device_type.power_limit_bank().charge_register() => {
+            snapshot.charge_rate as u16 == write.value
+        }
+        address if address == snapshot.device_type.power_limit_bank().discharge_register() => {
+            snapshot.discharge_rate as u16 == write.value
+        }
         _ => false,
     })
 }
@@ -1192,9 +1201,16 @@ async fn capture_force_charge_revert(
     state: &Arc<AppState>,
     device_type: DeviceType,
 ) -> Option<ForceChargeRevert> {
-    let snap_arc = state.latest_snapshot.clone();
-    let snap = snap_arc.lock().await;
-    let snap = snap.as_ref()?;
+    let snap = state.latest_snapshot.lock().await;
+    force_charge_revert_from_snapshot(snap.as_ref()?, device_type)
+}
+
+/// The Force Charge restore baseline for `snap`, or `None` without a known
+/// inverter identity. Shared with the calibration cycle (issue #418).
+pub(crate) fn force_charge_revert_from_snapshot(
+    snap: &InverterSnapshot,
+    device_type: DeviceType,
+) -> Option<ForceChargeRevert> {
     if snap.inverter_serial.is_empty() {
         return None;
     }
@@ -1425,7 +1441,15 @@ async fn capture_force_discharge_revert(
     device_type: DeviceType,
 ) -> Option<ForceDischargeRevert> {
     let snap = state.latest_snapshot.lock().await;
-    let snap = snap.as_ref()?;
+    force_discharge_revert_from_snapshot(snap.as_ref()?, device_type)
+}
+
+/// The Force Discharge restore baseline for `snap`, or `None` without a known
+/// inverter identity. Shared with the calibration cycle (issue #418).
+pub(crate) fn force_discharge_revert_from_snapshot(
+    snap: &InverterSnapshot,
+    device_type: DeviceType,
+) -> Option<ForceDischargeRevert> {
     if snap.inverter_serial.is_empty() {
         return None;
     }
@@ -1496,7 +1520,7 @@ async fn capture_force_discharge_revert(
 /// Discharge. Legacy AC3 has a mode-only pause path, so its `pause_registers`+
 /// flag is false even though HR318 itself must be cleared while discharge is
 /// running and restored when it stops.
-fn force_discharge_pause_mode_supported(revert: &ForceDischargeRevert) -> bool {
+pub(crate) fn force_discharge_pause_mode_supported(revert: &ForceDischargeRevert) -> bool {
     revert.pause_registers_supported
         || revert
             .device_type
@@ -5354,6 +5378,12 @@ pub async fn set_export_limit(
 /// remain available. Keep this deliberately small: it should not clear the
 /// user's charge/discharge schedules or other slots.
 pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    if crate::server::calibration::calibration_running(&state).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "error": crate::server::calibration::CALIBRATION_RUNNING})),
+        );
+    }
     // Refuse to pause while clearly offline. Writes queued while Disconnected
     // would sit idle until the next reconnect (and likely time out the
     // frontend's confirmation), so surface a precise error immediately
@@ -5763,6 +5793,12 @@ pub(crate) async fn force_charge_at_unlocked(
     now: DateTime<Local>,
     command_id: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
+    if crate::server::calibration::calibration_running(&state).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "error": crate::server::calibration::CALIBRATION_RUNNING})),
+        );
+    }
     if state.force_discharge_revert.lock().await.is_some() {
         return error_response("Stop Force Discharge before starting Force Charge");
     }
@@ -6044,6 +6080,12 @@ pub(crate) async fn force_discharge_at_unlocked(
     now: DateTime<Local>,
     command_id: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
+    if crate::server::calibration::calibration_running(&state).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "error": crate::server::calibration::CALIBRATION_RUNNING})),
+        );
+    }
     if state.force_charge_revert.lock().await.is_some() {
         return error_response("Stop Force Charge before starting Force Discharge");
     }
@@ -9973,6 +10015,14 @@ pub(crate) mod tests {
                     set_slot(&mut snap.discharge_slots[1], write.value, end);
                 }
                 HR_CHARGE_TARGET_SOC_1 => snap.raw_charge_slot_1_target_soc = Some(write.value),
+                HR_BATTERY_SOC_RESERVE => snap.battery_reserve = write.value.clamp(4, 100) as u8,
+                // Each model reads its rates from one bank only.
+                address if address == snap.device_type.power_limit_bank().charge_register() => {
+                    snap.charge_rate = write.value as u8
+                }
+                address if address == snap.device_type.power_limit_bank().discharge_register() => {
+                    snap.discharge_rate = write.value as u8
+                }
                 HR_BATTERY_PAUSE_MODE => pause_mode = Some(write.value),
                 HR_BATTERY_PAUSE_SLOT_1_START => pause_start = Some(write.value),
                 HR_BATTERY_PAUSE_SLOT_1_END => pause_end = Some(write.value),
@@ -17771,6 +17821,60 @@ pub(crate) mod tests {
             assert!(state.force_charge_restoration.lock().await.is_none());
         })
         .await;
+    }
+
+    #[test]
+    fn snapshot_matches_writes_checks_the_reserve_and_the_model_s_own_rate_bank() {
+        use crate::modbus::registers::{
+            HR_AC_BATTERY_CHARGE_LIMIT, HR_AC_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_CHARGE_LIMIT,
+            HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_SOC_RESERVE,
+        };
+        let w = |address, value| RegisterWrite { address, value };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen2Hybrid,
+            battery_reserve: 20,
+            charge_rate: 25,
+            discharge_rate: 30,
+            ..Default::default()
+        };
+        assert!(snapshot_matches_writes(
+            &snap,
+            &[
+                w(HR_BATTERY_SOC_RESERVE, 20),
+                w(HR_BATTERY_CHARGE_LIMIT, 25),
+                w(HR_BATTERY_DISCHARGE_LIMIT, 30),
+            ]
+        ));
+        assert!(!snapshot_matches_writes(
+            &snap,
+            &[w(HR_BATTERY_SOC_RESERVE, 4)]
+        ));
+        assert!(!snapshot_matches_writes(
+            &snap,
+            &[w(HR_BATTERY_CHARGE_LIMIT, 50)]
+        ));
+        assert!(!snapshot_matches_writes(
+            &snap,
+            &[w(HR_BATTERY_DISCHARGE_LIMIT, 50)]
+        ));
+        // A DC hybrid does not read its rate from the AC bank.
+        assert!(!snapshot_matches_writes(
+            &snap,
+            &[w(HR_AC_BATTERY_CHARGE_LIMIT, 25)]
+        ));
+
+        snap.device_type = DeviceType::ACCoupled;
+        assert!(snapshot_matches_writes(
+            &snap,
+            &[
+                w(HR_AC_BATTERY_CHARGE_LIMIT, 25),
+                w(HR_AC_BATTERY_DISCHARGE_LIMIT, 30)
+            ]
+        ));
+        assert!(!snapshot_matches_writes(
+            &snap,
+            &[w(HR_BATTERY_DISCHARGE_LIMIT, 30)]
+        ));
     }
 
     #[test]

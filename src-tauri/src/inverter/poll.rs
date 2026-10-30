@@ -557,6 +557,9 @@ pub struct AppState {
     pub temperature_limiter_state: Arc<Mutex<TemperatureLimiterState>>,
     /// Intelligent Octopus Go dispatch hold runtime state (issue #394).
     pub dispatch_hold_state: Arc<Mutex<DispatchHoldState>>,
+    /// Guided battery calibration cycle (issue #418); mirrors
+    /// `Settings::battery_calibration_run`.
+    pub calibration_run: Arc<Mutex<Option<crate::inverter::calibration::CalibrationRun>>>,
     /// Discharge floor guard configuration (developer mode only).
     pub discharge_floor_config: Arc<Mutex<DischargeFloorConfig>>,
     /// Discharge floor guard runtime state.
@@ -770,6 +773,7 @@ impl AppState {
             temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
             temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
             dispatch_hold_state: Arc::new(Mutex::new(DispatchHoldState::default())),
+            calibration_run: Arc::new(Mutex::new(None)),
             discharge_floor_config: Arc::new(Mutex::new({
                 let s = crate::settings::Settings::load();
                 DischargeFloorConfig {
@@ -2587,6 +2591,9 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
     if load_paused || temperature_paused || dispatch_paused {
         arbiter.request(DischargeControlOwner::Safety);
     }
+    if state.calibration_run.lock().await.is_some() {
+        arbiter.request(DischargeControlOwner::Calibration);
+    }
     if snapshot.as_ref().is_some_and(|s| {
         crate::inverter::state_machines::hr318_blocks_discharge(s, timed_export_minute)
             || matches!(
@@ -4092,18 +4099,31 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     );
                                     inverter_clock_skew_logged = true;
                                 }
+                                // A battery calibration cycle (issue #418) owns the
+                                // charge target, rates, reserve and schedule until it
+                                // has put them back: the automations that write those
+                                // directly (auto-winter, Adaptive Charge, plan
+                                // auto-refresh/apply, the floor guard, the dispatch
+                                // hold) sit out while it runs. Cosy, Agile and Timed
+                                // Export defer to its arbiter claim.
+                                let calibrating = state.calibration_run.lock().await.is_some();
+
                                 // ---- Auto winter mode ----
                                 {
                                     let config = state.auto_winter_config.lock().await;
                                     let mut aw_state = state.auto_winter_state.lock().await;
                                     let mut saved = state.auto_winter_saved.lock().await;
-                                    let writes = check_auto_winter_with_outcome(
-                                        &snapshot,
-                                        &config,
-                                        &mut aw_state,
-                                        &mut saved,
-                                        last_auto_winter_write_outcome,
-                                    );
+                                    let writes = if calibrating {
+                                        None
+                                    } else {
+                                        check_auto_winter_with_outcome(
+                                            &snapshot,
+                                            &config,
+                                            &mut aw_state,
+                                            &mut saved,
+                                            last_auto_winter_write_outcome,
+                                        )
+                                    };
 
                                     // Tag the snapshot so the frontend knows
                                     // whether winter mode was triggered by
@@ -4179,14 +4199,21 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     let mut adaptive_saved =
                                         state.adaptive_charge_saved.lock().await;
                                     let saved_before = adaptive_saved.clone();
-                                    let outcome = check_adaptive_charge(
-                                        &snapshot,
-                                        &poll_settings.adaptive_charge_config,
-                                        poll_settings.adaptive_charge_enabled,
-                                        &mut adaptive_state,
-                                        &mut adaptive_saved,
-                                        inverter_minute,
-                                    );
+                                    let outcome = if calibrating {
+                                        crate::inverter::state_machines::AdaptiveChargeOutcome {
+                                            write: None,
+                                            desired_rate_percent: None,
+                                        }
+                                    } else {
+                                        check_adaptive_charge(
+                                            &snapshot,
+                                            &poll_settings.adaptive_charge_config,
+                                            poll_settings.adaptive_charge_enabled,
+                                            &mut adaptive_state,
+                                            &mut adaptive_saved,
+                                            inverter_minute,
+                                        )
+                                    };
 
                                     snapshot.charging_mode =
                                         crate::settings::charging_mode_for_settings(&poll_settings);
@@ -4247,20 +4274,22 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // the plan-to-writes translation and the once-a-day
                                 // Adaptive Charge warnings are in `forecast_plan`.
                                 let plan_now = chrono::Local::now();
-                                crate::inverter::forecast_plan::run_plan_refresh(
-                                    &state,
-                                    &poll_settings,
-                                    &snapshot,
-                                    plan_now,
-                                )
-                                .await;
-                                crate::inverter::forecast_plan::run_plan_auto_apply(
-                                    &state,
-                                    &poll_settings,
-                                    &snapshot,
-                                    plan_now,
-                                )
-                                .await;
+                                if !calibrating {
+                                    crate::inverter::forecast_plan::run_plan_refresh(
+                                        &state,
+                                        &poll_settings,
+                                        &snapshot,
+                                        plan_now,
+                                    )
+                                    .await;
+                                    crate::inverter::forecast_plan::run_plan_auto_apply(
+                                        &state,
+                                        &poll_settings,
+                                        &snapshot,
+                                        plan_now,
+                                    )
+                                    .await;
+                                }
                                 // Record the Planner's decision shortly before the
                                 // cheap window for the plan history (issue #361),
                                 // unless an automation above already did today.
@@ -4335,7 +4364,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // After a restart mid-hold, the first check has not
                                     // run yet: keep holding rather than restore Eco and
                                     // re-pause when the list arrives.
-                                    dispatches.hold_now(now) || dispatches.holding_for_restart(now)
+                                    (dispatches.hold_now(now) || dispatches.holding_for_restart(now))
+                                        && !calibrating
                                 };
                                 let safety_demand = {
                                     let load_config =
@@ -4394,6 +4424,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 if force_charge_in_progress || force_discharge_in_progress {
                                     discharge_arbiter.request(DischargeControlOwner::ManualForce);
                                 }
+                                if calibrating {
+                                    discharge_arbiter.request(DischargeControlOwner::Calibration);
+                                }
 
                                 let timed_export_candidate = {
                                     let config = state.timed_export_config.lock().await.clone();
@@ -4449,6 +4482,32 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 .await
                                 {
                                     discharge_control_may_override_pause = may_override;
+                                }
+
+                                // ---- Battery calibration cycle (issue #418) ----
+                                // Waits (writes nothing) while a thermal or load
+                                // limiter outranks it; otherwise applies whatever of
+                                // its current phase has not read back.
+                                if calibrating {
+                                    let may_write = discharge_arbiter
+                                        .request(DischargeControlOwner::Calibration);
+                                    let writes = crate::inverter::calibration::advance(
+                                        &state,
+                                        &snapshot,
+                                        chrono::Utc::now().timestamp_millis(),
+                                        !may_write,
+                                    )
+                                    .await;
+                                    if !writes.is_empty() {
+                                        discharge_control_may_override_pause = true;
+                                        write_registers_fail_fast_with_gap(
+                                            &mut client,
+                                            &writes,
+                                            "Battery calibration",
+                                            write_gap,
+                                        )
+                                        .await;
+                                    }
                                 }
 
                                 // ---- Timed Export state machine ----
@@ -4716,7 +4775,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // and fail-fast; no need to duplicate them).
                                 if !timed_export_owns_discharge {
                                     let force_discharge_in_progress =
-                                        state.force_discharge_revert.lock().await.is_some();
+                                        state.force_discharge_revert.lock().await.is_some()
+                                            || calibrating;
                                     let invalid_timed_export = should_repair_timed_export(
                                         snapshot.enable_discharge,
                                         &snapshot.discharge_slots,
@@ -5207,10 +5267,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // Runs after the limiters so their pause
                                 // writes land first; the guard never touches
                                 // mode registers so it cannot fight them.
-                                if let Some(writes) =
-                                    evaluate_discharge_floor(&state, &snapshot, inverter_minute)
-                                        .await
-                                {
+                                let floor_writes = if calibrating {
+                                    None
+                                } else {
+                                    evaluate_discharge_floor(&state, &snapshot, inverter_minute).await
+                                };
+                                if let Some(writes) = floor_writes {
                                     if discharge_arbiter.request(DischargeControlOwner::Safety) {
                                         for write in &writes {
                                             match client
@@ -10728,6 +10790,39 @@ mod tests {
             assert_eq!(
                 super::current_discharge_control_owner(&state).await,
                 Some(DischargeControlOwner::TimedExport)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn current_owner_is_calibration_while_a_cycle_runs() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let snapshot = InverterSnapshot {
+                device_type: crate::inverter::model::DeviceType::Gen2Hybrid,
+                inverter_serial: "SN1".into(),
+                battery_mode: BatteryMode::TimedDemand,
+                battery_power_mode: 1,
+                enable_discharge: true,
+                inverter_time: "2026-08-30 22:00:00".into(),
+                ..Default::default()
+            };
+            *state.latest_snapshot.lock().await = Some(snapshot.clone());
+            *state.cosy_active.lock().await = true;
+            let plan = crate::inverter::calibration::build_plan(&snapshot).expect("plan");
+            *state.calibration_run.lock().await = Some(crate::inverter::calibration::new_run(
+                &snapshot, plan, 120, 0,
+            ));
+            assert_eq!(
+                super::current_discharge_control_owner(&state).await,
+                Some(DischargeControlOwner::Calibration)
+            );
+            // The thermal and load limiters still win.
+            *state.load_limiter_state.lock().await = LoadLimiterState::Paused;
+            assert_eq!(
+                super::current_discharge_control_owner(&state).await,
+                Some(DischargeControlOwner::Safety)
             );
         })
         .await;

@@ -1727,6 +1727,15 @@ pub struct Settings {
     #[serde(default)]
     pub dispatch_hold_active_persisted: bool,
 
+    // -- Guided battery calibration (issue #418) --
+    /// The running calibration cycle, owned by the poll loop and persisted
+    /// after every change so a restart carries on where it left off.
+    #[serde(default)]
+    pub battery_calibration_run: Option<crate::inverter::calibration::CalibrationRun>,
+    /// How the last cycle ended, for the Control page.
+    #[serde(default)]
+    pub battery_calibration_last: Option<crate::inverter::calibration::CalibrationRecord>,
+
     // -- Solar array capacities (issue #110) --
     /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
     /// DC-coupled inverter. 0 (default) = not configured, in which case
@@ -2161,6 +2170,8 @@ impl Default for Settings {
             octopus_sessions_join_attempted: Vec::new(),
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
+            battery_calibration_run: None,
+            battery_calibration_last: None,
             // Issue #110: solar array capacities default to unset so a
             // fresh install (and every existing install on upgrade) sees
             // no behaviour change until the user opts in via Settings.
@@ -2844,6 +2855,8 @@ mod tests {
             octopus_sessions_join_attempted: Vec::new(),
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
+            battery_calibration_run: None,
+            battery_calibration_last: None,
             // Issue #110: solar array capacities must round-trip exactly.
             pv1_rated_kw: 6.0,
             pv2_rated_kw: 4.2,
@@ -3600,6 +3613,8 @@ mod tests {
             octopus_sessions_join_attempted: Vec::new(),
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
+            battery_calibration_run: None,
+            battery_calibration_last: None,
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),

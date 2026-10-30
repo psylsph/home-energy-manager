@@ -256,8 +256,9 @@ export default function BatteryHealthPanel() {
               <p className="text-text-secondary/80 text-[11px]">
                 Days the battery&apos;s own state of charge jumped in one step or stayed put while energy
                 flowed, the pattern of the GivEnergy BMS SOC bug. A full discharge and charge usually
-                corrects it: set the battery reserve to 4%, run Force Discharge until it stops, then Force
-                Charge to 100%, and put your reserve back afterwards.
+                corrects it. HEM can run one for you from Battery calibration cycle on the Control page; by
+                hand, set the battery reserve to 4%, run Force Discharge until it stops, then Force Charge to
+                100%, and put your reserve back afterwards.
               </p>
               <ul className="text-text-secondary text-xs space-y-0.5">
                 {socEvents.map((e) => (

@@ -51,6 +51,7 @@ import {
   sliderPositionToDuration,
 } from './forceDuration';
 
+import BatteryCalibrationCycle from '../components/BatteryCalibrationCycle';
 import {
   deriveTimedExportButton,
   deriveEcoState,
@@ -4410,6 +4411,8 @@ export default function ControlPage() {
         <TemperatureLimiterSection refreshKey={loadLimiterRefreshKey} />
         {/* Auto Winter Mode */}
         <AutoWinterSection />
+        {/* Guided battery calibration cycle (issue #418) */}
+        <BatteryCalibrationCycle />
         {/* Developer Controls (dev mode only) */}
         {developerMode && (
           <section className="space-y-4 border-t border-bg-elevated pt-4 mt-4">
