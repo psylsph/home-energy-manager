@@ -73,7 +73,7 @@ local-ip-address = "0.6"
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 
 # Efficient mutex for log ring
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 # TCP socket options (keepalive)
 socket2 = { version = "0.6.4", features = ["all"] }
