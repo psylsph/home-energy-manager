@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.96.0] - 2026-10-30
+
+### Added
+
+- **HEM now tells you when a battery cell starts to drift.** Once a day it compares how far apart each module's cells are near full charge with a month or two ago, and sends a notification if the gap keeps growing or is already large. The Battery Health section on the Battery page shows each module's trend, or how many more near-full days it needs before it can judge (#393).
+- **A warning when your battery's charge reading goes wrong.** Some GivEnergy BMS firmware (3007–3022 in reports) can make the state of charge jump many points at once, or freeze while the battery keeps charging or discharging. HEM now spots both, sends a notification and lists the days it happened under Battery Health, so you know when the battery needs a full discharge and charge to correct itself (#393).
+- **Both battery warnings are on by default** and have their own switches under Settings → Notifications. They only send when you have Telegram, ntfy or Pushover set up.
+
+### Changed
+
+- **The SOC warning says how to recalibrate by hand.** Until HEM can run a calibration for you (#418), the warning and the Battery page explain how: set the reserve to 4%, Force Discharge until it stops, Force Charge to 100%, then put your reserve back.
+- **INSTALL.md now explains how to restore a history backup** made by the scheduled backups (#378).
+
+### Fixed
+
+- **The Solar page's power chart shows its unit.** The axis now reads in W or kW instead of bare numbers.
+
 ## [0.95.0] - 2026-10-23
 
 ### Added
