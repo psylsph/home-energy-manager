@@ -38,13 +38,13 @@ test.describe('PV2 daily energy after sunset', () => {
     await resetModbus();
 
     // Model the report in issue #165: after sunset PV2 voltage/current are 0,
-    // but the daily PV2 register still contains the day's total and the
-    // aggregate PV daily register corroborates PV1+PV2.
+    // but the daily PV2 register still contains the day's total. IR(44) is
+    // inverter output (#419) and is set low so it cannot be what keeps PV2.
     await setInputReg(2, 0); // PV2 voltage
     await setInputReg(9, 0); // PV2 current
     await setInputReg(17, 150); // PV1 today = 15.0 kWh
     await setInputReg(19, 147); // PV2 today = 14.7 kWh
-    await setInputReg(44, 300); // aggregate today ~= 30.0 kWh
+    await setInputReg(44, 100); // inverter output today 10.0 kWh, below PV1+PV2
 
     // The cumulative-counter sanitizer rejects a multi-kWh jump outside its
     // post-connect grace window, so force a reconnect cycle: the grace

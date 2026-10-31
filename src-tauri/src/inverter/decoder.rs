@@ -784,51 +784,24 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // The post-decode `check_energy_field!` macro is a second line of
     // defence for the combined value.
     //
-    // For the second string (IR(19)), do not use *instantaneous* PV2 voltage
-    // as the sole presence test. At dusk PV2 voltage legitimately falls to 0
-    // while the daily-energy register still contains the day's total; forcing
-    // it to 0 creates a false pre-midnight reset in history. A live PV2 voltage
-    // still opens the gate immediately. After sunset, accept a plausible IR(19)
-    // value only when the aggregate daily PV register corroborates the PV1+PV2
-    // sum; that keeps no-PV2 systems from displaying stale IR(19) garbage.
-    const PV_AGGREGATE_CORROBORATION_MARGIN_TENTHS: u16 = 20; // 2 kWh tolerance between registers
-    let ir44_raw = get_reg(data, 44);
-    let pv1_raw = get_reg(data, 17);
-    let pv1_today = if pv1_raw <= MAX_DAILY_KWH_TENTHS {
-        pv1_raw as f32
-    } else {
-        // Corrupted IR(17) — exclude this string from the sum.
-        0.0
+    // IR(19) is taken whenever it is plausible, as GivTCP does
+    // (`e_pv1_day + e_pv2_day`). It used to be gated on a live PV2 voltage
+    // or, after dark, on IR(44) "corroborating" PV1+PV2. That gate could not
+    // stop stale IR(19) in daylight, when an unconnected input floats at some
+    // voltage, and IR(44) is inverter output (#419), so after dark it either
+    // passed regardless or dropped a real PV2 total at dusk, a false
+    // mid-evening reset (#165). Corruption is handled like PV1: the range
+    // check here, then the sanitizer's checks on the combined total.
+    let plausible_tenths = |raw: u16| {
+        if raw <= MAX_DAILY_KWH_TENTHS {
+            raw as f32
+        } else {
+            // Corrupted per-string register — exclude this string from the sum.
+            0.0
+        }
     };
-    let pv2_raw = get_reg(data, 19);
-    let pv2_plausible = pv2_raw <= MAX_DAILY_KWH_TENTHS;
-    let pv2_live = snap.pv2_voltage > 0.0 || snap.pv2_current > 0.0;
-    // After sunset (PV2 voltage/current both 0) accept IR(19) only when the
-    // aggregate daily-PV register IR(44) corroborates the per-string sum. The
-    // leading `ir44_raw <= MAX_DAILY_KWH_TENTHS` guard is load-bearing: a
-    // 0xFFFF "fingerprint" corruption of IR(44) would saturate-add the margin
-    // to 65535 and trivially satisfy `>=`, vouching for any garbage IR(19).
-    //
-    // Residual weakness: if IR(19) AND IR(44) glitch in concert such that
-    // IR(44) >= IR(17) + IR(19), the gate passes and a corrupt IR(19)
-    // survives decode. Two colluding registers cannot be told apart from a
-    // genuine two-string reading here — there is no independent third signal
-    // available once PV2 has gone dark (a cheap decode-time guard would just
-    // false-positive on real two-string systems). The backstop is the
-    // sanitizer's rate-limit delta check on the COMBINED `today_solar_kwh`:
-    // a no-PV2 system tracks PV1 (not 0), so a sudden collusion-driven jump
-    // in the combined total is flagged as too-fast growth. Only steady-state,
-    // all-day consistent cross-register corruption is undetectable, which is
-    // implausibly coordinated for a dumb dongle glitch. See the
-    // `single_phase_pv2_corroboration_*` / `..._collusion_*` tests.
-    let pv2_corroborated_after_dark = ir44_raw <= MAX_DAILY_KWH_TENTHS
-        && ir44_raw.saturating_add(PV_AGGREGATE_CORROBORATION_MARGIN_TENTHS)
-            >= pv1_raw.saturating_add(pv2_raw);
-    let pv2_today = if pv2_plausible && (pv2_live || pv2_corroborated_after_dark) {
-        pv2_raw as f32
-    } else {
-        0.0
-    };
+    let pv1_today = plausible_tenths(get_reg(data, 17));
+    let pv2_today = plausible_tenths(get_reg(data, 19));
     // Issue #108: surface the individual strings for per-card display and
     // the History solar-energy chart.
     snap.today_pv1_kwh = pv1_today * 0.1;
@@ -5186,8 +5159,8 @@ mod tests {
     fn gen3_hybrid_uses_available_strings_even_when_ir44_is_unreliable() {
         // Model correction must also work when the holding block arrives
         // first, without a configured solar location and after sunset.
-        // PV2-only dawn is significant: IR(19) requires IR(44) corroboration
-        // when the string is dark, but IR(44) must never become the total.
+        // PV2-only dawn is significant: PV2 is first to tick while PV1 is
+        // still zero, and IR(44) must never become the total.
         let cases = [
             (0, 0, 5, 0.0),        // False aggregate before either string ticks.
             (0, 1, 5, 0.1),        // PV2 is first to generate.
@@ -5403,43 +5376,6 @@ mod tests {
     }
 
     #[test]
-    fn single_phase_per_string_zero_when_pv2_voltage_zero_and_aggregate_does_not_corroborate() {
-        // No PV2 string (pv2_voltage == 0) with an aggregate that only matches
-        // PV1 → IR(19) is stale garbage and must be ignored.
-        let mut snap = InverterSnapshot::default();
-        let mut data = vec![0u16; 60];
-        data[2] = 0; // pv2_voltage = 0 — no live second string
-        data[17] = 120; // PV1 12.0 kWh
-        data[19] = 999; // IR(19) stale garbage — must be ignored
-        data[44] = 122; // aggregate corroborates PV1 only, not PV1+PV2
-        decode_input_0_59(&data, &mut snap);
-        assert!((snap.today_pv1_kwh - 12.0).abs() < 0.01);
-        assert_eq!(
-            snap.today_pv2_kwh, 0.0,
-            "uncorroborated PV2 must be ignored"
-        );
-        assert!((snap.today_solar_kwh - 12.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn single_phase_per_string_pv2_survives_after_sunset_when_aggregate_corroborates() {
-        // At dusk PV2 voltage can fall to zero before midnight while IR(19)
-        // still holds the day's PV2 total. If the aggregate daily PV register
-        // corroborates PV1+PV2, keep IR(19) instead of forcing a false zero.
-        let mut snap = InverterSnapshot::default();
-        let mut data = vec![0u16; 60];
-        data[2] = 0; // pv2_voltage = 0 after sunset
-        data[9] = 0; // pv2_current = 0 after sunset
-        data[17] = 150; // PV1 15.0 kWh
-        data[19] = 147; // PV2 14.7 kWh
-        data[44] = 300; // aggregate ~30.0 kWh corroborates PV1+PV2
-        decode_input_0_59(&data, &mut snap);
-        assert!((snap.today_pv1_kwh - 15.0).abs() < 0.01);
-        assert!((snap.today_pv2_kwh - 14.7).abs() < 0.01);
-        assert!((snap.today_solar_kwh - 29.7).abs() < 0.01);
-    }
-
-    #[test]
     fn single_phase_pv2_survives_after_sunset_whatever_the_inverter_output() {
         // IR(44) is inverter-output-today (#419), not a PV aggregate, so it
         // cannot vouch for IR(19). On a day when most PV went into the battery
@@ -5464,88 +5400,6 @@ mod tests {
     }
 
     #[test]
-    fn single_phase_pv2_corroboration_rejects_fingerprint_aggregate() {
-        // A 0xFFFF "fingerprint" corruption of the aggregate IR(44) must NOT
-        // corroborate IR(19) on a no-PV2 system. Without the leading
-        // `ir44_raw <= MAX_DAILY_KWH_TENTHS` guard the saturating add would
-        // turn 0xFFFF into 65535 and let it satisfy `>=`, vouching for stale
-        // IR(19) garbage. This test pins that guard in place.
-        let mut snap = InverterSnapshot::default();
-        let mut data = vec![0u16; 60];
-        data[2] = 0; // pv2_voltage = 0 — no live second string
-        data[9] = 0; // pv2_current = 0
-        data[17] = 120; // PV1 12.0 kWh (real)
-        data[19] = 300; // IR(19) stale 30.0 kWh — must be ignored
-        data[44] = 0xFFFF; // aggregate corrupted to the fingerprint value
-        decode_input_0_59(&data, &mut snap);
-        assert!((snap.today_pv1_kwh - 12.0).abs() < 0.01);
-        assert_eq!(
-            snap.today_pv2_kwh, 0.0,
-            "a 0xFFFF aggregate must not corroborate IR(19)"
-        );
-        assert!((snap.today_solar_kwh - 12.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn single_phase_pv2_corroboration_wrapping_rhs_does_not_vouch_for_pv2() {
-        // The corroboration comparison uses u16 `saturating_add` on BOTH
-        // operands:
-        //   ir44_raw.saturating_add(MARGIN) >= pv1_raw.saturating_add(pv2_raw)
-        // A plain wrapping `+` on the rhs would be unsafe: when a corrupted
-        // IR(17) pushes pv1_raw + pv2_raw past u16::MAX the sum wraps to a
-        // SMALL value (e.g. 65000 + 1000 -> 464), and a plausible IR(44)
-        // inside the `ir44_raw <= MAX_DAILY_KWH_TENTHS` guard could then
-        // satisfy `>=`, falsely vouching for stale PV2 after dark.
-        // `saturating_add` clamps the rhs to 65535 instead, so the lhs (capped
-        // at 2000 + 20 = 2020 by the guard) can never reach it and the gate
-        // correctly fails. This test pins that subtle correctness.
-        let mut snap = InverterSnapshot::default();
-        let mut data = vec![0u16; 60];
-        data[2] = 0; // pv2_voltage = 0 — no live second string
-        data[9] = 0; // pv2_current = 0
-        data[17] = 65_000; // PV1 corrupted (6500 kWh) — would wrap pv1+pv2 past u16::MAX
-        data[19] = 1_000; // IR(19) stale 100.0 kWh — must NOT survive
-        data[44] = 2_000; // IR(44) at the guard ceiling (200.0 kWh) — plausible
-        decode_input_0_59(&data, &mut snap);
-        // rhs = 65000.saturating_add(1000) = 65535 (a wrapping add would give 464);
-        // lhs = 2000.saturating_add(20) = 2020 < 65535 -> corroboration fails.
-        assert_eq!(snap.today_pv1_kwh, 0.0, "corrupted PV1 is dropped");
-        assert_eq!(
-            snap.today_pv2_kwh, 0.0,
-            "a wrapping rhs must not corroborate stale PV2"
-        );
-        // Both per-string values dropped -> no solar; IR(44) is not PV (#419).
-        assert_eq!(snap.today_solar_kwh, 0.0);
-    }
-
-    #[test]
-    fn single_phase_pv2_two_register_collusion_is_accepted_limitation() {
-        // KNOWN LIMITATION, pinned here so the behaviour is an intentional
-        // boundary rather than an oversight. When IR(19) AND the aggregate
-        // IR(44) are both corrupted so that IR(44) >= IR(17) + IR(19), the
-        // decode-time corroboration gate passes and the corrupt IR(19)
-        // survives. Two colluding registers cannot be distinguished from a
-        // genuine two-string reading at decode time; the sanitizer's
-        // rate-limit delta check on the combined `today_solar_kwh` is the
-        // backstop for sudden-onset inflation (see the comment on
-        // `pv2_corroborated_after_dark`).
-        let mut snap = InverterSnapshot::default();
-        let mut data = vec![0u16; 60];
-        data[2] = 0; // pv2_voltage = 0 — no live second string
-        data[9] = 0; // pv2_current = 0
-        data[17] = 500; // PV1 50.0 kWh (real)
-        data[19] = 300; // IR(19) corrupt 30.0 kWh
-        data[44] = 820; // IR(44) corrupt 82.0 kWh — corroborates 50 + 30 = 80
-        decode_input_0_59(&data, &mut snap);
-        // Corrupt PV2 survives decode by design (documented limitation).
-        assert!(
-            (snap.today_pv2_kwh - 30.0).abs() < 0.01,
-            "two-register collusion defeats the decode-time gate by design"
-        );
-        assert!((snap.today_solar_kwh - 80.0).abs() < 0.01);
-    }
-
-    #[test]
     fn single_phase_per_string_individually_sanitised_against_corruption() {
         // A single corrupted per-string register is dropped without
         // contaminating the other string. Total uses the surviving string
@@ -5564,6 +5418,18 @@ mod tests {
             "total must use surviving string only; got {}",
             snap.today_solar_kwh
         );
+
+        // The same holds the other way round, with PV2 dark: a corrupted
+        // IR(19) is dropped and PV1 stands alone.
+        let mut snap = InverterSnapshot::default();
+        let mut data = vec![0u16; 60];
+        data[17] = 120; // PV1: 12.0 kWh — valid
+        data[19] = 5_000; // PV2: 500 kWh — corrupted
+        data[44] = 0xFFFF;
+        decode_input_0_59(&data, &mut snap);
+        assert!((snap.today_pv1_kwh - 12.0).abs() < 0.01);
+        assert_eq!(snap.today_pv2_kwh, 0.0, "corrupted PV2 must be 0");
+        assert!((snap.today_solar_kwh - 12.0).abs() < 0.01);
     }
 
     #[test]
