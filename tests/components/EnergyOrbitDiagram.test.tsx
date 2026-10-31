@@ -260,6 +260,19 @@ describe('EnergyOrbitDiagram', () => {
     expect(impValues).toContain('Importing');
   });
 
+  it('shows battery voltage and current between its power and status labels', () => {
+    useInverterStore.setState({ showFlowStatusWords: true });
+    const { container } = render(
+      <EnergyOrbitDiagram snapshot={makeSnapshot({
+        battery_power: 1300,
+        battery_state: 'discharging',
+        battery_voltage: 51.2,
+        battery_current: 25.4,
+      })} />,
+    );
+    expect(container.querySelector('[data-testid="battery-sublabel"]')?.textContent).toBe('51.2V/25.4A');
+  });
+
   it('hides node status words by default and shows them when enabled', () => {
     // resetStore() in beforeEach forces showFlowStatusWords=false so this
     // test exercises the OFF path. The default in the live app is ON (see

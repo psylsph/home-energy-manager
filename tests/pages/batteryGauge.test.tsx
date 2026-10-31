@@ -40,6 +40,25 @@ describe('BatteryGauge', () => {
     expect(highH).toBeGreaterThan(lowH);
   });
 
+  it('keeps the full-charge fill inside the body outline on every edge', () => {
+    const { container } = render(<BatteryGauge soc={100} />);
+    const body = container.querySelectorAll('rect')[1]!;
+    const fill = container.querySelector('rect[style]')!;
+    const bodyX = Number(body.getAttribute('x'));
+    const bodyY = Number(body.getAttribute('y'));
+    const bodyW = Number(body.getAttribute('width'));
+    const bodyH = Number(body.getAttribute('height'));
+    const fillX = Number(fill.getAttribute('x'));
+    const fillY = Number(fill.getAttribute('y'));
+    const fillW = Number(fill.getAttribute('width'));
+    const fillH = Number(fill.getAttribute('height'));
+
+    expect(fillX).toBeGreaterThan(bodyX);
+    expect(fillY).toBeGreaterThan(bodyY);
+    expect(fillX + fillW).toBeLessThan(bodyX + bodyW);
+    expect(fillY + fillH).toBeLessThan(bodyY + bodyH);
+  });
+
   it('supports a horizontal mobile orientation with left-to-right fill', () => {
     const { container: low } = render(<BatteryGauge soc={25} orientation="horizontal" width={128} />);
     const { container: high } = render(<BatteryGauge soc={90} orientation="horizontal" width={128} />);

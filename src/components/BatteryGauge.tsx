@@ -39,6 +39,12 @@ const BODY_TOP = 10; // below the terminal nub
 const BODY_BOTTOM = VB_H - 4;
 const BODY_H = BODY_BOTTOM - BODY_TOP;
 const BODY_RX = 5;
+const FILL_INSET = 3;
+const FILL_X = BODY_X + FILL_INSET;
+const FILL_Y_TOP = BODY_TOP + FILL_INSET;
+const FILL_Y_BOTTOM = BODY_BOTTOM - FILL_INSET;
+const FILL_W = BODY_W - FILL_INSET * 2;
+const FILL_H = FILL_Y_BOTTOM - FILL_Y_TOP;
 const NUB_W = 16;
 const NUB_H = 6;
 const NUB_X = (VB_W - NUB_W) / 2;
@@ -48,8 +54,8 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
   const frac = batteryFillFraction(soc);
   const horizontal = orientation === 'horizontal';
   // Vertical fill grows from bottom up. Horizontal fill grows left to right.
-  const fillH = frac * BODY_H;
-  const fillY = BODY_BOTTOM - fillH;
+  const fillH = frac * FILL_H;
+  const fillY = FILL_Y_BOTTOM - fillH;
   const labelVisible = showLabel && width >= 72;
   // Label colour always follows the app theme (light text in dark mode,
   // dark in light mode). We deliberately do NOT flip to a dark ink when the
@@ -162,10 +168,10 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
       {/* SOC fill */}
       {frac > 0 && (
         <rect
-          x={BODY_X + 2}
+          x={FILL_X}
           y={fillY}
-          width={BODY_W - 4}
-          height={Math.max(0, fillH - 2)}
+          width={FILL_W}
+          height={fillH}
           rx={BODY_RX - 2}
           fill={color}
           // Ease the fill transition when SOC ticks so it doesn't snap.

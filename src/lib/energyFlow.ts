@@ -668,6 +668,9 @@ export function buildEnergyFlows(
   const gridUnit = gridAmps != null
     ? `${formatVoltage(s.grid_voltage)}/${formatCurrent(gridAmps)}`
     : `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`;
+  const batteryMeasurements = Number.isFinite(s.battery_voltage) && Number.isFinite(s.battery_current)
+    ? `${formatVoltage(s.battery_voltage)}/${formatCurrent(s.battery_current)}`
+    : undefined;
 
   // --- Nodes (pre-formatted strings; renderer is dumb) ---
   const nodes: FlowNode[] = [
@@ -716,6 +719,7 @@ export function buildEnergyFlows(
       // label made it look like a bug.
       value: formatVisualPower(absBattery, noise),
       unit: `${formatPercent(s.soc)} · ${modeLabel}`,
+      subLabel: batteryMeasurements,
       color: batteryColor,
       ringPercent: s.soc,
       active: isCharging || isDischarging,
