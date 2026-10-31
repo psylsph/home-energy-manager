@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.99.0] - 2026-10-31
+
+### Changed
+
+- **The Settings page is easier to find your way around.** Settings are grouped into Connection, Energy & Cost, Alerts, Display and App, with a menu down the side that jumps to each section and shows where you are. On a phone the groups sit in a row of tabs under the header, with no sideways scrolling (#402).
+- **Rarely changed settings are tucked under Advanced.** The refresh interval, HTTP port, authenticated API listen address and browser origins, and chart grid line weight now sit behind an Advanced button in their sections, so the everyday settings are easier to spot.
+
+### Fixed
+
+- **A new API key message no longer vanishes early.** The "copy it now" notice for a freshly generated key could be cleared by the timer of an earlier message; it now stays until the next message replaces it.
+- **Switches no longer show a setting that didn't save.** If saving Auto-Discovery, Enable Alerts or Enable Weather fails, the switch moves back.
+- **The default ntfy topic follows a newly saved serial.** After you change the inverter serial and Connect, the generated `hem-<serial>` topic uses the new serial straight away rather than the one the page opened with.
+
 ## [0.98.0] - 2026-10-31
 
 ### Added
