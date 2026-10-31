@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 31 October 2026 (v0.96.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 31 October 2026 (v0.98.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 The order weighs three things: whether users are affected today, whether a later item depends on it, and how much it costs. Where it differs from the issue's own label, the reason is given.
 
@@ -10,9 +10,8 @@ The code is done for all of these. They stay open only until a release or a repl
 
 | # | Issue | Effort | What is left |
 |---|---|---|---|
-| [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps are now in `INSTALL.md` and posted on the issue (30 Oct). Waiting for the reporter to confirm a restore works, then close. |
-| [359](https://github.com/psylsph/home-energy-manager/issues/359) | Automatic planning options | S | All three strategies shipped (Keep a minimum, Hold through the cheap window, Cheapest overall). The solar chart question is answered (the Planner chart has been in kW since v0.89.0). The reporter replied on 30 Oct that Cheapest overall has been working really well for them. Ready to close. |
-| [419](https://github.com/psylsph/home-energy-manager/issues/419) | Solar Graph puzzle | S | Fixed in v0.97.0. The overnight climb was the inverter's output counter standing in for solar while the panel counters read zero, not a clock problem; solar now comes only from the panel counters, so the drop at sunrise and the inflated Generated total are gone. Days already recorded keep their old values. Reply to the reporter, then close. |
+| [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps were posted on the issue (30 Oct) and are now in `INSTALL.md`, linked from the issue (31 Oct). Waiting for the reporter to confirm a restore works, then close. |
+| [419](https://github.com/psylsph/home-energy-manager/issues/419) | Solar Graph puzzle | S | Fixed in v0.97.0. The overnight climb was the inverter's output counter standing in for solar while the panel counters read zero, not a clock problem; solar now comes only from the panel counters, so the drop at sunrise and the inflated Generated total are gone. Days already recorded keep their old values. Explained on the issue (31 Oct); waiting for the reporter to confirm on v0.97.0, then close. |
 
 ## Tier 2: user-facing gaps and groundwork
 
@@ -23,7 +22,7 @@ The code is done for all of these. They stay open only until a release or a repl
 
 ## Tier 3: smarter planning around Intelligent Octopus Go
 
-These come from #403, where Brian and Stuart split the original discussion into separate tickets. They share one theme (the planner should know what the car and the Octopus dispatch list are doing), so they are best done in this order.
+These come from #403 (now closed), where Brian and Stuart split the original discussion into separate tickets. They share one theme (the planner should know what the car and the Octopus dispatch list are doing), so they are best done in this order.
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
@@ -31,7 +30,6 @@ These come from #403, where Brian and Stuart split the original discussion into 
 | 2 | [404](https://github.com/psylsph/home-energy-manager/issues/404) | Re-plan and notify when Octopus moves a dispatch slot | M | Octopus keeps moving slots through the evening, so a plan sized against an old slot goes stale. It reuses #406's dispatch-as-load handling and the existing "what the automatic plan did" reporting. The ownership rules for the shared Eco Paused state must keep winning over a running smart charge. |
 | 3 | [407](https://github.com/psylsph/home-energy-manager/issues/407) | Planner minimum battery level as an overridable floor | M | The reporter has now said what they meant: a back-stop that stops optimised exporting from emptying the battery before the cheap window, tightened as HEM learns the household's evening discharge rate. That is a guard for #405 rather than a change to the existing floor, so design it with #405 and don't ship it alone. |
 | 4 | [405](https://github.com/psylsph/home-energy-manager/issues/405) | Export surplus charge before the cheap window | L | The riskiest item here. It needs #406 and #407 first (#400 is done), and cannot export while the car is charging. Start as Planner advice (as the other export advice is) and consider acting on its own only after real-world use. |
-| — | [403](https://github.com/psylsph/home-energy-manager/issues/403) | Features, Docs, Road map | — | Discussion issue. Its asks are now #404–#407, so it can be closed once Stuart is happy that nothing is lost. |
 
 ## Tier 4: protecting users and widening reach
 
