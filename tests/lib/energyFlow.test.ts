@@ -429,21 +429,46 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     }
   });
 
-  it('preserves charging and discharging signs in the battery measurements', () => {
-    const charging = buildEnergyFlows(snap({
-      battery_power: -1300,
-      battery_state: 'charging',
-      battery_voltage: 51.2,
-      battery_current: -25.4,
-    }));
-    const discharging = buildEnergyFlows(snap({
-      battery_power: 1300,
-      battery_state: 'discharging',
-      battery_voltage: 51.2,
-      battery_current: 25.4,
-    }));
-    expect(charging.nodes.find((node) => node.id === 'battery')?.subLabel).toBe('51.2V/-25.4A');
-    expect(discharging.nodes.find((node) => node.id === 'battery')?.subLabel).toBe('51.2V/25.4A');
+  // Battery voltage/current sub-label (PR #421). The current is a magnitude
+  // like the battery power value: direction lives in the status word, and the
+  // Battery / Inverter pages show the same reading unsigned.
+  const batterySubLabel = (over: Partial<InverterSnapshot>) =>
+    buildEnergyFlows(snap(over)).nodes.find((n) => n.id === 'battery')?.subLabel;
+
+  it('shows the battery current as a magnitude whichever way it flows', () => {
+    expect(batterySubLabel({
+      battery_power: -1300, battery_state: 'charging', battery_voltage: 51.2, battery_current: -25.4,
+    })).toBe('51.2V/25.4A');
+    expect(batterySubLabel({
+      battery_power: 1300, battery_state: 'discharging', battery_voltage: 51.2, battery_current: 25.4,
+    })).toBe('51.2V/25.4A');
+  });
+
+  it('never shows a negative zero current on an idle battery', () => {
+    expect(batterySubLabel({
+      battery_power: 0, battery_state: 'idle', battery_voltage: 51.2, battery_current: -0.04,
+    })).toBe('51.2V/0.0A');
+  });
+
+  it('shows zero current while battery power is within the noise floor, matching the 0W value', () => {
+    // 15 W is below the default 20 W floor, so the value reads "0W" / Idle.
+    expect(batterySubLabel({
+      battery_power: 15, battery_state: 'idle', battery_voltage: 51.2, battery_current: -0.3,
+    })).toBe('51.2V/0.0A');
+  });
+
+  it('hides the battery measurements when the voltage is zero (rejected or not yet read)', () => {
+    expect(batterySubLabel({
+      battery_power: 1300, battery_state: 'discharging', battery_voltage: 0, battery_current: 25.4,
+    })).toBeUndefined();
+  });
+
+  it('hides the battery measurements when either reading is missing (Gateway null / NaN)', () => {
+    const missing = [null as unknown as number, NaN];
+    for (const m of missing) {
+      expect(batterySubLabel({ battery_voltage: m, battery_current: 10 })).toBeUndefined();
+      expect(batterySubLabel({ battery_voltage: 51.2, battery_current: m })).toBeUndefined();
+    }
   });
 });
 

@@ -40,23 +40,41 @@ describe('BatteryGauge', () => {
     expect(highH).toBeGreaterThan(lowH);
   });
 
-  it('keeps the full-charge fill inside the body outline on every edge', () => {
-    const { container } = render(<BatteryGauge soc={100} />);
-    const body = container.querySelectorAll('rect')[1]!;
-    const fill = container.querySelector('rect[style]')!;
-    const bodyX = Number(body.getAttribute('x'));
-    const bodyY = Number(body.getAttribute('y'));
-    const bodyW = Number(body.getAttribute('width'));
-    const bodyH = Number(body.getAttribute('height'));
-    const fillX = Number(fill.getAttribute('x'));
-    const fillY = Number(fill.getAttribute('y'));
-    const fillW = Number(fill.getAttribute('width'));
-    const fillH = Number(fill.getAttribute('height'));
+  // A full fill must leave the same visible gap inside the outline's stroke
+  // on every edge, in both orientations (PR #421).
+  function gapsInsideStroke(container: HTMLElement): number[] {
+    const body = container.querySelector('[data-testid="battery-gauge-body"]')!;
+    const fill = container.querySelector('[data-testid="battery-gauge-fill"]')!;
+    const n = (el: Element, a: string) => Number(el.getAttribute(a));
+    const half = n(body, 'stroke-width') / 2;
+    const inner = {
+      left: n(body, 'x') + half,
+      top: n(body, 'y') + half,
+      right: n(body, 'x') + n(body, 'width') - half,
+      bottom: n(body, 'y') + n(body, 'height') - half,
+    };
+    return [
+      n(fill, 'x') - inner.left,
+      n(fill, 'y') - inner.top,
+      inner.right - (n(fill, 'x') + n(fill, 'width')),
+      inner.bottom - (n(fill, 'y') + n(fill, 'height')),
+    ];
+  }
 
-    expect(fillX).toBeGreaterThan(bodyX);
-    expect(fillY).toBeGreaterThan(bodyY);
-    expect(fillX + fillW).toBeLessThan(bodyX + bodyW);
-    expect(fillY + fillH).toBeLessThan(bodyY + bodyH);
+  it.each(['vertical', 'horizontal'] as const)(
+    'keeps the %s full-charge fill clear of the outline stroke on every edge',
+    (orientation) => {
+      const { container } = render(<BatteryGauge soc={100} orientation={orientation} width={128} />);
+      const gaps = gapsInsideStroke(container);
+      for (const gap of gaps) expect(gap).toBeGreaterThan(0);
+      expect(new Set(gaps).size, `uneven gaps ${gaps.join(',')}`).toBe(1);
+    },
+  );
+
+  it('uses the same fill gap in both orientations', () => {
+    const v = gapsInsideStroke(render(<BatteryGauge soc={100} />).container);
+    const h = gapsInsideStroke(render(<BatteryGauge soc={100} orientation="horizontal" width={128} />).container);
+    expect(h[0]).toBe(v[0]);
   });
 
   it('supports a horizontal mobile orientation with left-to-right fill', () => {
