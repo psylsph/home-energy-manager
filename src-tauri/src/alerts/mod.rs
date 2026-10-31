@@ -1557,6 +1557,11 @@ fn send_pushover_message_via(
     }
 }
 
+/// Convert a Telegram-HTML alert into plain text for ntfy (issue #417).
+pub(crate) fn telegram_html_to_plain(text: &str) -> String {
+    text.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Telegram command polling (e.g., /status)
 // ---------------------------------------------------------------------------
@@ -4047,6 +4052,97 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "send must be bounded by the agent timeout, took {elapsed:?}"
         );
+    }
+
+    // ================================================================
+    // Telegram HTML on ntfy and Pushover (issue #417): every alert is built
+    // as Telegram HTML. ntfy has no HTML, so it gets plain text; Pushover
+    // renders the same tags when sent with html=1.
+    // ================================================================
+
+    #[test]
+    fn telegram_html_to_plain_strips_formatting_tags() {
+        assert_eq!(
+            telegram_html_to_plain("Lost contact with inverter at <b>192.168.1.50</b>."),
+            "Lost contact with inverter at 192.168.1.50."
+        );
+        assert_eq!(
+            telegram_html_to_plain(
+                "<i>note</i> <code>SN1</code> <B>x</B> <a href=\"https://e.x/\">link</a>"
+            ),
+            "note SN1 x link"
+        );
+    }
+
+    #[test]
+    fn telegram_html_to_plain_unescapes_entities_once() {
+        assert_eq!(
+            telegram_html_to_plain("A &amp; B &lt;tag&gt; &quot;q&quot; it&#39;s"),
+            "A & B <tag> \"q\" it's"
+        );
+        // A value that itself contained "&lt;" was escaped to "&amp;lt;";
+        // it must come back as the literal text, not as "<".
+        assert_eq!(telegram_html_to_plain("&amp;lt;"), "&lt;");
+        // An escaped tag is user text, not formatting, and survives.
+        assert_eq!(
+            telegram_html_to_plain(&crate::alerts::report::escape_html("<b>")),
+            "<b>"
+        );
+    }
+
+    #[test]
+    fn telegram_html_to_plain_keeps_text_that_is_not_a_tag() {
+        assert_eq!(telegram_html_to_plain("SOC <5% and > 2"), "SOC <5% and > 2");
+        assert_eq!(telegram_html_to_plain("a < b"), "a < b");
+        assert_eq!(telegram_html_to_plain("unclosed <b"), "unclosed <b");
+        assert_eq!(
+            telegram_html_to_plain("✅ Test\n\nLine two"),
+            "✅ Test\n\nLine two"
+        );
+        assert_eq!(telegram_html_to_plain(""), "");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_ntfy_message_sends_plain_text_without_tags_or_entities() {
+        let mock = MockNtfy::spawn(axum::http::StatusCode::OK).await;
+        let text = build_connection_lost_message("inv&<1>");
+        assert!(
+            text.contains("<b>inv&amp;&lt;1&gt;</b>"),
+            "precondition: {text}"
+        );
+        send_ntfy_message("hem-alerts", &mock.base_url, &text).expect("send");
+        let body = mock.received_body().expect("body");
+        assert!(
+            body.contains("Lost contact with inverter at inv&<1>."),
+            "ntfy body should be plain text, got: {body}"
+        );
+        assert!(
+            !body.contains("<b>") && !body.contains("&amp;"),
+            "got: {body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_pushover_message_enables_html_and_keeps_tags() {
+        let mock = MockNtfy::spawn(axum::http::StatusCode::OK).await;
+        let text = build_connection_lost_message("192.168.1.50");
+        send_pushover_message_via(
+            notify_agent(),
+            &format!("{}/1/messages.json", mock.base_url),
+            "app-token",
+            "user-key",
+            &text,
+        )
+        .expect("send");
+        let body: serde_json::Value =
+            serde_json::from_str(&mock.received_body().expect("body")).expect("json");
+        assert_eq!(
+            body["html"], 1,
+            "Pushover must be told the message is HTML: {body}"
+        );
+        assert_eq!(body["message"], text, "message must go through unchanged");
+        assert_eq!(body["token"], "app-token");
+        assert_eq!(body["user"], "user-key");
     }
 
     // ================================================================
