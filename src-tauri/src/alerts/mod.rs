@@ -1455,6 +1455,8 @@ pub fn send_telegram_document(
 /// Send a notification via ntfy.sh (or a self-hosted ntfy server).
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
+/// `text` is Telegram HTML like every alert; it is sent as plain text
+/// (see [`telegram_html_to_plain`]).
 pub fn send_ntfy_message(topic: &str, server: &str, text: &str) -> Result<(), String> {
     send_ntfy_message_via(notify_agent(), topic, server, text)
 }
@@ -1473,7 +1475,7 @@ fn send_ntfy_message_via(
     let resp = match agent
         .post(&url)
         .content_type("text/plain")
-        .send(text.to_string())
+        .send(telegram_html_to_plain(text))
     {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(code)) => {
@@ -1498,9 +1500,11 @@ fn send_ntfy_message_via(
 /// a user key — two credentials, similar in spirit to Telegram's bot-token +
 /// chat-id pair.
 ///
-/// The message is sent as plain text (no `html=1`). Pushover uses the app
-/// name (set at registration) as the notification title, so the alert
-/// messages' built-in headers (`⚡ HEM Alert — …`) carry through as the body.
+/// `text` is Telegram HTML like every alert, so it is sent with `html=1`:
+/// Pushover renders the same `<b>`/`<i>` tags and decodes the entities
+/// (issue #417). Pushover uses the app name (set at registration) as the
+/// notification title, so the alert messages' built-in headers
+/// (`⚡ HEM Alert — …`) carry through as the body.
 /// Priority defaults to `0` (normal) to match the flat priority of the
 /// existing Telegram/ntfy channels.
 ///
@@ -1530,6 +1534,7 @@ fn send_pushover_message_via(
         "token": app_token,
         "user": user_key,
         "message": text,
+        "html": 1,
     });
 
     let body = serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
@@ -1557,9 +1562,65 @@ fn send_pushover_message_via(
     }
 }
 
+/// Tags Telegram's HTML parse mode accepts. Only these are stripped, so text
+/// that merely looks tag-like ("SOC <5%") is left alone.
+const TELEGRAM_HTML_TAGS: &[&str] = &[
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "ins",
+    "s",
+    "strike",
+    "del",
+    "code",
+    "pre",
+    "a",
+    "span",
+    "tg-spoiler",
+    "tg-emoji",
+    "blockquote",
+];
+
 /// Convert a Telegram-HTML alert into plain text for ntfy (issue #417).
+///
+/// Every alert is built once as Telegram HTML; ntfy has no HTML, so the
+/// formatting tags are dropped and the entities `escape_html` produces are
+/// decoded. Tags are stripped before entities are decoded, so an escaped
+/// `&lt;b&gt;` in a value comes through as the literal text `<b>`, and `&amp;`
+/// is decoded last so `&amp;lt;` becomes `&lt;`, not `<`.
 pub(crate) fn telegram_html_to_plain(text: &str) -> String {
-    text.to_string()
+    let mut stripped = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        stripped.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let tag_len = after
+            .find(['>', '<'])
+            .filter(|&end| after[end..].starts_with('>'));
+        let is_tag = tag_len.is_some_and(|end| {
+            let name = after[..end].strip_prefix('/').unwrap_or(&after[..end]);
+            let name = name.split_whitespace().next().unwrap_or("");
+            TELEGRAM_HTML_TAGS
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(name))
+        });
+        match tag_len {
+            Some(end) if is_tag => rest = &after[end + 1..],
+            _ => {
+                stripped.push('<');
+                rest = after;
+            }
+        }
+    }
+    stripped.push_str(rest);
+    stripped
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 // ---------------------------------------------------------------------------
