@@ -39,6 +39,9 @@ const BODY_TOP = 10; // below the terminal nub
 const BODY_BOTTOM = VB_H - 4;
 const BODY_H = BODY_BOTTOM - BODY_TOP;
 const BODY_RX = 5;
+// Fill inset from the body rect: the 2-unit stroke covers 1 unit inside the
+// rect, leaving a 2-unit visible gap between outline and fill on every edge.
+// Shared by both orientations.
 const FILL_INSET = 3;
 const FILL_X = BODY_X + FILL_INSET;
 const FILL_Y_TOP = BODY_TOP + FILL_INSET;
@@ -74,7 +77,7 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
     const hBodyY = 6;
     const hBodyW = 68;
     const hBodyH = 28;
-    const hFillW = Math.max(0, frac * (hBodyW - 4));
+    const hFillW = Math.max(0, frac * (hBodyW - FILL_INSET * 2));
     return (
       <svg
         data-orientation="horizontal"
@@ -86,6 +89,7 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
         style={{ display: 'block' }}
       >
         <rect
+          data-testid="battery-gauge-body"
           x={hBodyX}
           y={hBodyY}
           width={hBodyW}
@@ -107,10 +111,11 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
         />
         {frac > 0 && (
           <rect
-            x={hBodyX + 2}
-            y={hBodyY + 2}
+            data-testid="battery-gauge-fill"
+            x={hBodyX + FILL_INSET}
+            y={hBodyY + FILL_INSET}
             width={hFillW}
-            height={hBodyH - 4}
+            height={hBodyH - FILL_INSET * 2}
             rx={3}
             fill={color}
             style={{ transition: 'width 0.6s ease' }}
@@ -156,6 +161,7 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
       />
       {/* Body outline */}
       <rect
+        data-testid="battery-gauge-body"
         x={BODY_X}
         y={BODY_TOP}
         width={BODY_W}
@@ -168,6 +174,7 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
       {/* SOC fill */}
       {frac > 0 && (
         <rect
+          data-testid="battery-gauge-fill"
           x={FILL_X}
           y={fillY}
           width={FILL_W}

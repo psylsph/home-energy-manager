@@ -668,8 +668,15 @@ export function buildEnergyFlows(
   const gridUnit = gridAmps != null
     ? `${formatVoltage(s.grid_voltage)}/${formatCurrent(gridAmps)}`
     : `${formatVoltage(s.grid_voltage)}/${formatFrequency(s.grid_frequency)}`;
-  const batteryMeasurements = Number.isFinite(s.battery_voltage) && Number.isFinite(s.battery_current)
-    ? `${formatVoltage(s.battery_voltage)}/${formatCurrent(s.battery_current)}`
+  // Battery V/A under the power value. The current is a magnitude, like the
+  // power value and the Battery / Inverter pages; direction lives in the
+  // status word. It reads 0 while the power is within the noise floor so it
+  // agrees with the "0W" value (as gridAmps does above). Hidden when either
+  // reading is missing (Gateway sends null) or the voltage is 0 — a battery
+  // never reads 0V, so that's the sanitizer rejecting it or no BMS data yet.
+  const batteryMeasurements = s.battery_voltage > 0 && Number.isFinite(s.battery_voltage)
+    && Number.isFinite(s.battery_current)
+    ? `${formatVoltage(s.battery_voltage)}/${formatCurrent(absBattery > noise ? Math.abs(s.battery_current) : 0)}`
     : undefined;
 
   // --- Nodes (pre-formatted strings; renderer is dumb) ---
