@@ -428,6 +428,11 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
       expect(batteryValue, `${c.name} battery value must not start with - or +`).not.toMatch(/^[+-]/);
     }
   });
+
+  it('puts the battery voltage and current in the supporting node label', () => {
+    const vm = buildEnergyFlows(snap({ battery_voltage: 51.2, battery_current: -25.4 }));
+    expect(vm.nodes.find((node) => node.id === 'battery')?.subLabel).toBe('51.2V/-25.4A');
+  });
 });
 
 // ---------------------------------------------------------------------------
