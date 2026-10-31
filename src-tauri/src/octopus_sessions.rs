@@ -1627,13 +1627,24 @@ mod tests {
         body: String,
     }
 
+    type SessionsHold = Arc<
+        std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                tokio::sync::oneshot::Receiver<()>,
+            )>,
+        >,
+    >;
+
     struct MockOctopus {
         base: String,
         seen: Arc<std::sync::Mutex<Vec<Seen>>>,
         token_body: Arc<std::sync::Mutex<String>>,
         sessions_body: Arc<std::sync::Mutex<String>>,
-        /// Milliseconds the sessions query waits before answering.
-        sessions_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+        /// If set, the next sessions query signals the first channel when it
+        /// arrives and does not answer until the second one fires (or its
+        /// sender is dropped). See `hold_sessions_answer`.
+        sessions_hold: SessionsHold,
         /// What the join mutation answers.
         join_body: Arc<std::sync::Mutex<String>>,
         /// If set: the sessions answer to switch to once a join has been seen,
@@ -1665,7 +1676,7 @@ mod tests {
                 json!({ "data": { "obtainKrakenToken": { "token": "jwt-abc" } } }).to_string(),
             ));
             let sessions_body = Arc::new(std::sync::Mutex::new(sessions.to_string()));
-            let sessions_delay_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let sessions_hold: SessionsHold = Arc::new(std::sync::Mutex::new(None));
             let join_body = Arc::new(std::sync::Mutex::new(
                 json!({ "data": { "joinSavingSessionsEvent": { "joinedEventCodes": [] } } })
                     .to_string(),
@@ -1676,7 +1687,7 @@ mod tests {
                 seen.clone(),
                 token_body.clone(),
                 sessions_body.clone(),
-                sessions_delay_ms.clone(),
+                sessions_hold.clone(),
                 join_body.clone(),
                 after_join.clone(),
             );
@@ -1732,9 +1743,10 @@ mod tests {
                                 }
                             }
                         }
-                        let delay = d2.load(std::sync::atomic::Ordering::Relaxed);
-                        if delay > 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        let hold = d2.lock().unwrap().take();
+                        if let Some((arrived, release)) = hold {
+                            let _ = arrived.send(());
+                            let _ = release.await;
                         }
                         (StatusCode::OK, b2.lock().unwrap().clone())
                     } else if path == "/hem" {
@@ -1757,7 +1769,7 @@ mod tests {
                 seen,
                 token_body,
                 sessions_body,
-                sessions_delay_ms,
+                sessions_hold,
                 join_body,
                 after_join,
                 _shutdown: Some(tx),
@@ -1781,6 +1793,23 @@ mod tests {
                 .into_iter()
                 .filter(|s| s.body.contains("joinSavingSessionsEvent"))
                 .collect()
+        }
+
+        /// Hold the next sessions answer. Await the returned receiver to know
+        /// the query has reached Octopus (the check is now waiting on it);
+        /// send on the returned sender to let it answer. Ordering the test by
+        /// these signals, not by sleeps, keeps it deterministic on a loaded
+        /// CI runner.
+        fn hold_sessions_answer(
+            &self,
+        ) -> (
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            *self.sessions_hold.lock().unwrap() = Some((arrived_tx, release_rx));
+            (arrived_rx, release_tx)
         }
 
         fn set_sessions(&self, body: Value) {
@@ -2439,16 +2468,20 @@ mod tests {
     async fn switching_off_while_octopus_is_answering_stops_the_booking() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(one_session_response()).await;
-            mock.sessions_delay_ms
-                .store(400, std::sync::atomic::Ordering::Relaxed);
+            let (arrived, release) = mock.hold_sessions_answer();
             let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
 
             let checking = {
                 let state = state.clone();
                 tokio::spawn(async move { check_once(&state, utc(EXPORT_NOW)).await })
             };
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            // Octopus has the query and is "still answering".
+            tokio::time::timeout(std::time::Duration::from_secs(30), arrived)
+                .await
+                .expect("the check never asked Octopus for sessions")
+                .unwrap();
             Settings::update(|s| s.octopus_sessions_mode = SessionsMode::Off).unwrap();
+            release.send(()).unwrap();
             checking.await.unwrap();
             assert!(
                 session_events().is_empty(),
@@ -2462,21 +2495,25 @@ mod tests {
     async fn skipping_while_octopus_is_answering_stops_that_booking() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(one_session_response()).await;
-            mock.sessions_delay_ms
-                .store(400, std::sync::atomic::Ordering::Relaxed);
+            let (arrived, release) = mock.hold_sessions_answer();
             let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
 
             let checking = {
                 let state = state.clone();
                 tokio::spawn(async move { check_once(&state, utc(EXPORT_NOW)).await })
             };
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            // Octopus has the query and is "still answering".
+            tokio::time::timeout(std::time::Duration::from_secs(30), arrived)
+                .await
+                .expect("the check never asked Octopus for sessions")
+                .unwrap();
             let (status, _) = skip_session(
                 State(state.clone()),
                 Json(SkipRequest { id: 9, skip: true }),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
+            release.send(()).unwrap();
             checking.await.unwrap();
             assert!(
                 session_events().is_empty(),
