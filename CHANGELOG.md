@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1] - 2026-10-31
+
+### Fixed
+
+- **ntfy and Pushover alerts no longer show raw `<b>` tags.** ntfy now gets clean plain text, and Pushover shows the important figures in bold the way Telegram does. Characters such as `&` in an inverter's host name also come through as written instead of as `&amp;`.
+
 ## [1.0.0] - 2026-10-31
 
 ### Changed
