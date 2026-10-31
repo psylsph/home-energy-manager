@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.98.0] - 2026-10-31
+
+### Added
+
+- **Battery voltage and current on the Status page.** The battery in the energy flow diagram now shows its voltage and current under the power reading, the same way solar and grid do. Thanks to @mikemonkers for the contribution (#421).
+
+### Fixed
+
+- **The battery gauge fill sits neatly inside its outline.** At high charge the fill no longer runs into the gauge's border, on desktop and mobile.
+
 ## [0.97.0] - 2026-10-31
 
 ### Added
