@@ -4992,6 +4992,211 @@ mod tests {
     }
 
     #[test]
+    fn single_phase_overnight_ir44_is_never_solar_on_any_model() {
+        // Issue #419: IR(44) is inverter-output-today (GivTCP
+        // `e_inverter_out_day`), not PV. On a hybrid with no Meteo location it
+        // climbed from midnight to 4.0 kWh with overnight battery throughput
+        // while PV1/PV2 stayed at zero, then dropped to 0 at the first PV1
+        // tick. GivTCP reports PV today as PV1+PV2 on every single-phase
+        // model; so must HEM, with or without a solar position.
+        let models: [(u16, u16, DeviceType); 11] = [
+            (0x2001, 0, DeviceType::Gen1Hybrid),
+            (0x2001, 800, DeviceType::Gen2Hybrid),
+            (0x2001, 300, DeviceType::Gen3Hybrid),
+            (0x2101, 0, DeviceType::PolarHybrid),
+            (0x2201, 0, DeviceType::Gen3PlusHybrid),
+            (0x2301, 0, DeviceType::PvInverter),
+            (0x8001, 0, DeviceType::AllInOne6kW),
+            (0x8301, 0, DeviceType::Gen4Hybrid),
+            (0x3001, 0, DeviceType::ACCoupled),
+            (0x3002, 0, DeviceType::ACCoupledMk2),
+            (0x9999, 0, DeviceType::Unknown(0x9999)),
+        ];
+        let cases = [
+            (0, 0, 40, 0.0), // Overnight: 4.0 kWh of inverter output, no PV.
+            (1, 0, 41, 0.1), // First PV1 tick.
+            (0, 0, u16::MAX, 0.0),
+        ];
+        for (dtc, arm_fw, expected_type) in models {
+            for position in [
+                None,
+                Some(SolarPosition {
+                    elevation_deg: -20.0,
+                    hour_angle_deg: 120.0, // after sunset
+                }),
+                Some(SolarPosition {
+                    elevation_deg: 2.0,
+                    hour_angle_deg: -80.0, // just after sunrise
+                }),
+            ] {
+                for (pv1, pv2, ir44, expected) in cases {
+                    let mut input = vec![0u16; 60];
+                    input[17] = pv1;
+                    input[19] = pv2;
+                    input[26] = 10; // 1.0 kWh import
+                    input[44] = ir44;
+                    let mut holding = vec![0u16; 60];
+                    holding[0] = dtc;
+                    holding[21] = arm_fw;
+                    let snap = decode_snapshot_with_solar_position(
+                        &[
+                            make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+                            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding),
+                        ],
+                        position,
+                    );
+                    assert_eq!(snap.device_type, expected_type);
+                    assert!(
+                        (snap.today_solar_kwh - expected).abs() < 0.01,
+                        "{expected_type:?} PV1={pv1} PV2={pv2} IR44={ir44} \
+                         position={position:?}: got {}",
+                        snap.today_solar_kwh
+                    );
+                    assert!((snap.home_energy_today_kwh - (1.0 + expected)).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn own_block_solar_survives_a_zero_string_ir0_59_bank() {
+        // Three-phase, a Hybrid HV Gen3 with a live 1000-range bank and the
+        // Gateway decode solar from their own blocks. IR 0-59 arriving with
+        // zero string counters and a large IR(44) must not replace it.
+        let ir0_59 = || {
+            let mut input = vec![0u16; 60];
+            input[44] = 40;
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input)
+        };
+        let holding = |dtc: u16| {
+            let mut holding = vec![0u16; 60];
+            holding[0] = dtc;
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding)
+        };
+        let three_phase_energy = || {
+            let mut energy = vec![0u16; 54];
+            energy[53] = 55; // IR(1412-1413) e_pv_today 5.5 kWh, strings zero
+            make_block(RegisterType::Input, 1360, 54, "input_1360_1413", energy)
+        };
+        let live_three_phase_ac = || {
+            let mut ac = vec![0u16; 60];
+            ac[1] = 2300; // IR(1061) v_ac1 230 V
+            ac[7] = 5000; // IR(1067) f_ac1 50 Hz
+            make_block(RegisterType::Input, 1060, 60, "input_1060_1119", ac)
+        };
+        let mut gateway_energy = vec![0u16; 60];
+        gateway_energy[43] = 55; // IR(1643) e_pv_today 5.5 kWh
+
+        for (blocks, expected_type) in [
+            (
+                vec![ir0_59(), holding(0x4001), three_phase_energy()],
+                DeviceType::ThreePhase,
+            ),
+            (
+                vec![
+                    ir0_59(),
+                    holding(0x8101),
+                    live_three_phase_ac(),
+                    three_phase_energy(),
+                ],
+                DeviceType::HybridHvGen3,
+            ),
+            (
+                vec![
+                    ir0_59(),
+                    holding(0x7001),
+                    make_block(
+                        RegisterType::Input,
+                        1600,
+                        60,
+                        "input_1600_1659",
+                        gateway_energy.clone(),
+                    ),
+                ],
+                DeviceType::Gateway,
+            ),
+        ] {
+            let snap = decode_snapshot(&blocks);
+            assert_eq!(snap.device_type, expected_type);
+            assert!(
+                (snap.today_solar_kwh - 5.5).abs() < 0.01,
+                "{expected_type:?}: got {}",
+                snap.today_solar_kwh
+            );
+        }
+    }
+
+    #[test]
+    fn hybrid_hv_gen3_on_single_phase_telemetry_ignores_ir44() {
+        // Some 0x81xx firmware publishes live telemetry in IR 0-59 and leaves
+        // the 1000-range bank empty; solar then comes from the single-phase
+        // decode and the #419 rule applies to it too.
+        let mut input = vec![0u16; 60];
+        input[5] = 2300; // v_ac1 230 V — single-phase bank live
+        input[13] = 5000; // f_ac1 50 Hz
+        input[44] = 40;
+        let mut holding = vec![0u16; 60];
+        holding[0] = 0x8101;
+        let snap = decode_snapshot(&[
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding),
+            make_block(
+                RegisterType::Input,
+                1060,
+                60,
+                "input_1060_1119",
+                vec![0; 60],
+            ),
+        ]);
+        assert_eq!(snap.device_type, DeviceType::HybridHvGen3);
+        assert_eq!(snap.today_solar_kwh, 0.0);
+    }
+
+    #[test]
+    fn hybrid_hv_gen3_missing_energy_block_does_not_leak_ir44() {
+        // A live 1000-range bank whose energy block (IR 1360-1413) failed this
+        // poll leaves today_solar_kwh to IR 0-59, which must still never
+        // publish IR(44) inverter output as solar.
+        let mut input = vec![0u16; 60];
+        input[44] = 40;
+        let mut holding = vec![0u16; 60];
+        holding[0] = 0x8101;
+        let mut ac = vec![0u16; 60];
+        ac[1] = 2300; // IR(1061) v_ac1 230 V — three-phase bank live
+        ac[7] = 5000; // IR(1067) f_ac1 50 Hz
+        let snap = decode_snapshot(&[
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding),
+            make_block(RegisterType::Input, 1060, 60, "input_1060_1119", ac),
+        ]);
+        assert_eq!(snap.device_type, DeviceType::HybridHvGen3);
+        assert_eq!(snap.today_solar_kwh, 0.0);
+    }
+
+    #[test]
+    fn ems_keeps_ir44_plant_generation_as_solar() {
+        // EMS has no PV string counters; IR(44) is its plant generation
+        // (GivTCP `ems.py` `e_generation_day`), so it stays the solar source.
+        // A value past the 200 kWh ceiling is corruption and reads as zero.
+        for (ir44, expected) in [(37, 3.7), (2_000, 200.0), (2_001, 0.0), (u16::MAX, 0.0)] {
+            let mut input = vec![0u16; 60];
+            input[44] = ir44;
+            let mut holding = vec![0u16; 60];
+            holding[0] = 0x5001;
+            let snap = decode_snapshot(&[
+                make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding),
+            ]);
+            assert_eq!(snap.device_type, DeviceType::Ems);
+            assert!(
+                (snap.today_solar_kwh - expected).abs() < 0.01,
+                "IR44={ir44}: got {}",
+                snap.today_solar_kwh
+            );
+        }
+    }
+
+    #[test]
     fn gen3_hybrid_uses_available_strings_even_when_ir44_is_unreliable() {
         // Model correction must also work when the holding block arrives
         // first, without a configured solar location and after sunset.

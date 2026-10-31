@@ -5286,8 +5286,26 @@ mod tests {
 
     #[test]
     fn gen3_dawn_decode_sanitize_and_history_agree_on_pv_generation() {
-        use crate::inverter::decoder::decode_snapshot;
+        assert_dawn_decode_sanitize_and_history_agree(
+            300,
+            crate::inverter::model::DeviceType::Gen3Hybrid,
+        );
+    }
+
+    #[test]
+    fn gen1_and_gen2_dawn_history_does_not_count_inverter_output_as_pv() {
+        // Issue #419: the same IR(44) ramp on hybrids outside the #338 fix
+        // inflated the period's Generated total by the overnight ramp.
         use crate::inverter::model::DeviceType;
+        assert_dawn_decode_sanitize_and_history_agree(0, DeviceType::Gen1Hybrid);
+        assert_dawn_decode_sanitize_and_history_agree(800, DeviceType::Gen2Hybrid);
+    }
+
+    fn assert_dawn_decode_sanitize_and_history_agree(
+        arm_fw: u16,
+        expected_type: crate::inverter::model::DeviceType,
+    ) {
+        use crate::inverter::decoder::decode_snapshot;
         use crate::inverter::sanitizer::{
             sanitize_snapshot, ConsecutiveSuspectCounts, DeltaCorrectionCounts, RateReleaseCounts,
         };
@@ -5324,7 +5342,7 @@ mod tests {
             input[59] = 50;
             let mut holding = vec![0u16; 60];
             holding[0] = 0x2001;
-            holding[21] = 300; // Gen3 hybrid ARM firmware.
+            holding[21] = arm_fw; // ARM firmware picks the hybrid generation.
             let input_block = Box::leak(Box::new(RegisterBlock {
                 start: 0,
                 count: 60,
@@ -5348,7 +5366,7 @@ mod tests {
                 },
             ]);
             snap.timestamp = start + offset;
-            assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+            assert_eq!(snap.device_type, expected_type);
             sanitize_snapshot(
                 &mut snap,
                 previous.as_ref(),
