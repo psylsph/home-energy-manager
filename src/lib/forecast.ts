@@ -696,12 +696,21 @@ export const LOAD_ABOVE_MAX_KW = 25;
 export function parseLoadAboveKw(
   text: string,
 ): { ok: true; kw: number | null } | { ok: false; error: string } {
-  void text;
-  return { ok: true, kw: null };
+  const trimmed = text.trim();
+  if (trimmed === '') return { ok: true, kw: null };
+  const kw = Number(trimmed);
+  if (!Number.isFinite(kw) || kw < LOAD_ABOVE_MIN_KW || kw > LOAD_ABOVE_MAX_KW) {
+    return {
+      ok: false,
+      error: `Enter between ${LOAD_ABOVE_MIN_KW} and ${LOAD_ABOVE_MAX_KW} kW, or leave it empty`,
+    };
+  }
+  return { ok: true, kw };
 }
 
 /** How much EV charging the prediction left out, or null for none. */
 export function consumptionExclusionNote(data: ForecastData): string | null {
-  void data;
-  return null;
+  const kwh = (data.consumption_excluded_ev_kwh ?? 0) + (data.consumption_excluded_above_kwh ?? 0);
+  if (!(kwh >= 0.05)) return null;
+  return `${kwh.toFixed(1)} kWh of EV charging left out of the last ${CONSUMPTION_WINDOW_DAYS} days`;
 }

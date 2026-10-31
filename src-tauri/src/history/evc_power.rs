@@ -38,23 +38,69 @@ impl EvcMinuteAccumulator {
     /// Add a poll. Returns the previous minute once a poll lands in another
     /// one; a reading out of range is ignored.
     pub fn push(&mut self, timestamp: i64, power_w: i32) -> Option<EvcMinuteRow> {
-    let _ = (timestamp, power_w, &mut self.open, BUCKET_SECS);
-        None
-}
+        if !(0..=MAX_CHARGER_POWER_W).contains(&power_w) {
+            return None;
+        }
+        let minute = timestamp.div_euclid(BUCKET_SECS) * BUCKET_SECS;
+        match self.open.as_mut() {
+            Some(open) if open.timestamp == minute => {
+                let n = open.samples as f64;
+                open.power_w = (open.power_w * n + power_w as f64) / (n + 1.0);
+                open.samples += 1;
+                None
+            }
+            _ => self.open.replace(EvcMinuteRow {
+                timestamp: minute,
+                power_w: power_w as f64,
+                samples: 1,
+            }),
+        }
+    }
 }
 
 impl HistoryDb {
     /// Store a finished minute, merging with a row already stored for it.
     pub fn record_evc_power_minute(&self, row: &EvcMinuteRow) -> Result<(), String> {
-    let _ = row;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.execute(
+            "INSERT INTO evc_power_minutes (timestamp, power_w, samples) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(timestamp) DO UPDATE SET \
+               power_w = (power_w * samples + excluded.power_w * excluded.samples) \
+                         / (samples + excluded.samples), \
+               samples = samples + excluded.samples",
+            params![row.timestamp, row.power_w, row.samples],
+        )
+        .map_err(|e| format!("Failed to store EV charger power: {e}"))?;
         Ok(())
-}
+    }
 
     /// Charger minutes starting at or after `since_ts`, oldest first.
     pub fn evc_power_minutes_since(&self, since_ts: i64) -> Result<Vec<EvPowerMinute>, String> {
-    let _ = since_ts;
-        Ok(Vec::new())
-}
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, power_w FROM evc_power_minutes \
+                 WHERE timestamp >= ?1 ORDER BY timestamp ASC",
+            )
+            .map_err(|e| format!("Failed to prepare EV charger power query: {e}"))?;
+        let rows = stmt
+            .query_map(params![since_ts], |row| {
+                Ok(EvPowerMinute {
+                    timestamp: row.get(0)?,
+                    power_w: row.get(1)?,
+                })
+            })
+            .map_err(|e| format!("EV charger power query failed: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("Failed to read EV charger power: {e}"))?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]

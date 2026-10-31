@@ -636,7 +636,18 @@ async fn publish_evc_cached(state: &Arc<AppState>, snapshot: EvcSnapshot) {
 /// Fold a poll's power into the current minute and store the minute before
 /// it once it ends (issue #400). Storing runs on the blocking pool.
 async fn record_evc_power(state: &Arc<AppState>, now_ts: i64, power_w: i32) {
-    let _ = (state, now_ts, power_w);
+    let Some(row) = state.evc_power_minute.lock().await.push(now_ts, power_w) else {
+        return;
+    };
+    let Some(db) = state.history.lock().await.clone() else {
+        return;
+    };
+    let stored = tokio::task::spawn_blocking(move || db.record_evc_power_minute(&row)).await;
+    match stored {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("EVC: {e}"),
+        Err(e) => tracing::warn!("EVC: storing charger power panicked: {e}"),
+    }
 }
 
 fn carry_forward_evc_block2(

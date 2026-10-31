@@ -166,8 +166,16 @@ fn percentile_sorted(sorted: &[f64], pct: f64) -> f64 {
 /// Charger energy (kWh) over `[start_ts, end_ts)` and how many of its
 /// seconds a recorded charger minute covers.
 fn ev_energy_kwh(minutes: &[EvPowerMinute], start_ts: i64, end_ts: i64) -> (f64, i64) {
-    let _ = (minutes, start_ts, end_ts);
-    (0.0, 0)
+    let first = minutes.partition_point(|m| m.timestamp + 60 <= start_ts);
+    let (mut kwh, mut covered) = (0.0, 0);
+    for m in minutes[first..].iter().take_while(|m| m.timestamp < end_ts) {
+        let overlap = (m.timestamp + 60).min(end_ts) - m.timestamp.max(start_ts);
+        if overlap > 0 {
+            kwh += m.power_w * overlap as f64 / 3_600_000.0;
+            covered += overlap;
+        }
+    }
+    (kwh, covered)
 }
 
 /// One local hour of one day, before EV charging is taken out.
@@ -201,8 +209,22 @@ fn household_kwh(
     exclusions: &ConsumptionExclusions,
     excluded: &mut Excluded,
 ) -> f64 {
-    let _ = (exclusions, excluded);
-    sum.home_kwh
+    let removed = sum.ev_kwh.clamp(0.0, sum.home_kwh);
+    excluded.ev_kwh += removed;
+    let mut kwh = sum.home_kwh - removed;
+    let limit_kw = exclusions
+        .load_above_kw
+        .filter(|kw| kw.is_finite() && *kw > 0.0);
+    if let Some(limit_kw) = limit_kw {
+        if sum.ev_secs < sum.secs {
+            let cap = limit_kw * sum.secs as f64 / 3600.0;
+            if kwh > cap {
+                excluded.above_kwh += kwh - cap;
+                kwh = cap;
+            }
+        }
+    }
+    kwh
 }
 
 fn add_delta_at_midpoint(
