@@ -415,7 +415,7 @@ pub(crate) fn decode_snapshot_with_solar_position(
     // Device type is only known after the holding block has been decoded, so
     // model-aware solar corrections must run after the block loop but before
     // the home/consumption energy balances are derived.
-    apply_model_and_solar_corrections(&mut snap, solar_position);
+    apply_model_and_solar_corrections(&mut snap, blocks, solar_position);
 
     // Compute home power.
     // Internal sign conventions (match givenergy-modbus / GivTCP references):
@@ -596,27 +596,30 @@ fn suppress_dark_string_noise(power: i32, voltage: f32) -> i32 {
     }
 }
 
+/// Ceiling for a single-phase daily energy register: 200 kWh in tenths, the
+/// same as the sanitizer's absolute range check.
+const MAX_DAILY_KWH_TENTHS: u16 = 2_000;
+
 /// Apply corrections that need the final decoded device type and, when
 /// configured, the site's solar position.
 fn apply_model_and_solar_corrections(
     snap: &mut InverterSnapshot,
+    blocks: &[BlockRead],
     solar_position: Option<SolarPosition>,
 ) {
     let per_string_today = snap.today_pv1_kwh + snap.today_pv2_kwh;
 
-    // DTC 3001 field data shows IR(44) rising almost exactly with battery
-    // discharge after the charge lock ends; under heavy grid-fed EV/immersion
-    // load it can also creep while both PV counters remain zero. On AC-coupled
-    // firmware it is inverter-output-today, not PV-generation-today. Gen3
-    // hybrid field data (#338) likewise shows IR(44) rising at dawn before
-    // either per-string energy counter moves, then dropping when we switch
-    // sources at the first PV1 tick. Both families have working per-string
-    // counters; leave the IR(44) fallback for older hybrids that need it.
-    if matches!(
-        snap.device_type,
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::Gen3Hybrid
-    ) {
-        snap.today_solar_kwh = per_string_today;
+    // The EMS has no PV string counters; its IR(44) is plant generation
+    // (GivTCP `ems.py` `e_generation_day`). On every other model IR(44) is
+    // inverter-output-today, so `decode_input_0_59` never uses it (#419).
+    if snap.device_type == DeviceType::Ems && per_string_today == 0.0 {
+        if let Some(ir44) = find_block(blocks, "input_0_59").map(|data| get_reg(data, 44)) {
+            snap.today_solar_kwh = if ir44 <= MAX_DAILY_KWH_TENTHS {
+                ir44 as f32 * 0.1
+            } else {
+                0.0
+            };
+        }
     }
 
     let Some(position) = solar_position else {
@@ -640,10 +643,10 @@ fn apply_model_and_solar_corrections(
         snap.solar_power = snap.solar_power.saturating_sub(suppressed_w);
     }
 
-    // Hybrid firmware may expose phantom/stale IR(44) energy before sunrise
-    // while both authoritative per-string daily counters are still zero. Only
-    // suppress the fallback pre-dawn: after sunset IR(44) may be the sole valid
-    // full-day total on early firmware and must remain visible until midnight.
+    // An aggregate daily PV register (EMS IR(44), three-phase/Gateway
+    // e_pv_today) may hold phantom/stale energy before sunrise while no
+    // per-string counter has moved. Only suppress it pre-dawn: after sunset
+    // the aggregate is the day's total and must remain visible until midnight.
     if position.is_pre_dawn_dark() && per_string_today == 0.0 {
         snap.today_solar_kwh = 0.0;
     }
@@ -767,12 +770,13 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
 
     // -- Energy totals (all in /10 kWh) --
-    // Prefer the per-string daily registers IR(17) and IR(19) for
-    // `today_solar_kwh`. These give a value 5–10% lower than IR(44)
-    // (e_pv_generation_today), which matches what the GivEnergy app,
-    // Android inverter monitor, BBC Inverter Utility and other third
-    // parties agree on (issue #99). Fall back to IR(44) when the
-    // per-string registers are unavailable (early firmware or zero).
+    // `today_solar_kwh` is the per-string daily registers IR(17) + IR(19),
+    // as in GivTCP and what the GivEnergy app, Android inverter monitor, BBC
+    // Inverter Utility and other third parties agree on (issue #99). IR(44)
+    // is inverter-output-today, not PV: it climbed overnight with battery
+    // throughput and at dawn before either string moved (#261, #338, #419),
+    // so it is never solar here. Only the EMS, which has no string counters,
+    // uses it as plant generation (`apply_model_and_solar_corrections`).
     //
     // Each per-string register is sanitised individually against the same
     // 200 kWh absolute range the post-decode check uses, so a corrupted
@@ -787,7 +791,6 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // still opens the gate immediately. After sunset, accept a plausible IR(19)
     // value only when the aggregate daily PV register corroborates the PV1+PV2
     // sum; that keeps no-PV2 systems from displaying stale IR(19) garbage.
-    const MAX_DAILY_KWH_TENTHS: u16 = 2_000; // 200 kWh × 10 — same ceiling as the sanitizer
     const PV_AGGREGATE_CORROBORATION_MARGIN_TENTHS: u16 = 20; // 2 kWh tolerance between registers
     let ir44_raw = get_reg(data, 44);
     let pv1_raw = get_reg(data, 17);
@@ -827,24 +830,10 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
         0.0
     };
     // Issue #108: surface the individual strings for per-card display and
-    // the History solar-energy chart. We assign *before* the IR(44) fallback
-    // so the per-string values reflect the actual panel-side measurement,
-    // even if the IR(44) aggregate is later used for today_solar_kwh.
+    // the History solar-energy chart.
     snap.today_pv1_kwh = pv1_today * 0.1;
     snap.today_pv2_kwh = pv2_today * 0.1;
-    let per_string_today = pv1_today + pv2_today;
-    if per_string_today > 0.0 {
-        snap.today_solar_kwh = per_string_today * 0.1; // IR(17)+IR(19)
-    } else {
-        // Fallback to the aggregate register when the per-string data
-        // is unavailable (returns the higher value — known to be 5–10%
-        // above the per-string sum). Sanitise IR(44) the same way.
-        snap.today_solar_kwh = if ir44_raw <= MAX_DAILY_KWH_TENTHS {
-            ir44_raw as f32 * 0.1
-        } else {
-            0.0
-        };
-    }
+    snap.today_solar_kwh = (pv1_today + pv2_today) * 0.1; // IR(17)+IR(19)
     snap.today_import_kwh = get_reg(data, 26) as f32 * 0.1; // IR(26): e_grid_in_day
     snap.today_export_kwh = get_reg(data, 25) as f32 * 0.1; // IR(25): e_grid_out_day
     snap.today_charge_kwh = get_reg(data, 36) as f32 * 0.1; // IR(36): e_battery_charge_day
@@ -4912,20 +4901,18 @@ mod tests {
     }
 
     #[test]
-    fn single_phase_daily_solar_uses_ir17_ir19_with_ir44_fallback() {
-        // Verify the IR(17)+IR(19) priority over IR(44) for today_solar_kwh
-        // (issue #99: IR(44) reads ~5–10% high, matching third-party tools
-        // requires using the per-string registers when available). When
-        // the per-string registers are zero, IR(44) is used as fallback.
+    fn single_phase_daily_solar_ignores_ir44_when_strings_are_zero() {
+        // IR(17)+IR(19) is the only hybrid solar source (issues #99, #419):
+        // IR(44) is inverter output, so zero strings mean zero solar.
         let mut input_data = vec![0u16; 60];
         input_data[11] = 3;
         input_data[12] = 4641; // lifetime PV total — should be ignored for daily value
-        input_data[17] = 0; // per-string PV1 zero → triggers fallback
+        input_data[17] = 0; // per-string PV1 zero
         input_data[19] = 0; // per-string PV2 zero
         input_data[25] = 10; // export today 1.0 kWh
         input_data[26] = 20; // import today 2.0 kWh
         input_data[35] = 5; // AC charge today 0.5 kWh
-        input_data[44] = 37; // PV generation today 3.7 kWh (used as fallback)
+        input_data[44] = 37; // inverter output today 3.7 kWh — not solar
 
         let mut holding_data = vec![0u16; 60];
         holding_data[0] = 0x2001; // Gen1 Hybrid until ARM firmware refines it
@@ -4938,13 +4925,12 @@ mod tests {
         let snap = decode_snapshot(&blocks);
 
         assert_eq!(snap.device_type, DeviceType::Gen1Hybrid);
-        // Hybrid fallback path: IR(17)=IR(19)=0 → use IR(44) = 3.7 kWh.
-        assert!((snap.today_solar_kwh - 3.7).abs() < 0.01);
+        assert_eq!(snap.today_solar_kwh, 0.0);
         // Consumption formula at the home level: solar + import + discharge - export - charge.
         // No charge/discharge registers set → both are 0, so the term collapses
-        // to the GE app's formula: solar(3.7) + import(2.0) - export(1.0) = 4.7 kWh.
-        assert!((snap.today_consumption_kwh - 4.7).abs() < 0.01);
-        assert!((snap.home_energy_today_kwh - 4.7).abs() < 0.01);
+        // to the GE app's formula: solar(0) + import(2.0) - export(1.0) = 1.0 kWh.
+        assert!((snap.today_consumption_kwh - 1.0).abs() < 0.01);
+        assert!((snap.home_energy_today_kwh - 1.0).abs() < 0.01);
         assert!((snap.today_ac_charge_kwh - 0.5).abs() < 0.01);
     }
 
@@ -5059,6 +5045,32 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_hv_gen3_on_single_phase_telemetry_ignores_ir44() {
+        // Some 0x81xx firmware publishes live telemetry in IR 0-59 and leaves
+        // the 1000-range bank empty; solar then comes from the single-phase
+        // decode and the #419 rule applies to it too.
+        let mut input = vec![0u16; 60];
+        input[5] = 2300; // v_ac1 230 V — single-phase bank live
+        input[13] = 5000; // f_ac1 50 Hz
+        input[44] = 40;
+        let mut holding = vec![0u16; 60];
+        holding[0] = 0x8101;
+        let snap = decode_snapshot(&[
+            make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding),
+            make_block(
+                RegisterType::Input,
+                1060,
+                60,
+                "input_1060_1119",
+                vec![0; 60],
+            ),
+        ]);
+        assert_eq!(snap.device_type, DeviceType::HybridHvGen3);
+        assert_eq!(snap.today_solar_kwh, 0.0);
+    }
+
+    #[test]
     fn own_block_solar_survives_a_zero_string_ir0_59_bank() {
         // Three-phase, a Hybrid HV Gen3 with a live 1000-range bank and the
         // Gateway decode solar from their own blocks. IR 0-59 arriving with
@@ -5124,32 +5136,6 @@ mod tests {
                 snap.today_solar_kwh
             );
         }
-    }
-
-    #[test]
-    fn hybrid_hv_gen3_on_single_phase_telemetry_ignores_ir44() {
-        // Some 0x81xx firmware publishes live telemetry in IR 0-59 and leaves
-        // the 1000-range bank empty; solar then comes from the single-phase
-        // decode and the #419 rule applies to it too.
-        let mut input = vec![0u16; 60];
-        input[5] = 2300; // v_ac1 230 V — single-phase bank live
-        input[13] = 5000; // f_ac1 50 Hz
-        input[44] = 40;
-        let mut holding = vec![0u16; 60];
-        holding[0] = 0x8101;
-        let snap = decode_snapshot(&[
-            make_block(RegisterType::Input, 0, 60, "input_0_59", input),
-            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding),
-            make_block(
-                RegisterType::Input,
-                1060,
-                60,
-                "input_1060_1119",
-                vec![0; 60],
-            ),
-        ]);
-        assert_eq!(snap.device_type, DeviceType::HybridHvGen3);
-        assert_eq!(snap.today_solar_kwh, 0.0);
     }
 
     #[test]
@@ -5308,27 +5294,25 @@ mod tests {
     #[test]
     fn single_phase_ir17_corruption_dropped() {
         // Corrupted IR(17) (above the 200 kWh daily ceiling) is dropped
-        // before contributing to the sum, falling back to IR(44) if
-        // IR(19) is also unavailable.
+        // before contributing to the sum; IR(44) never stands in for it.
         let mut input_data = vec![0u16; 60];
         input_data[17] = 5_000; // IR(17): 500 kWh — corrupted, must be excluded
         input_data[19] = 0;
         input_data[25] = 0;
         input_data[26] = 0;
-        input_data[44] = 30; // IR(44): 3.0 kWh (valid fallback)
+        input_data[44] = 30; // IR(44): 3.0 kWh inverter output
         let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x2101; // Polar Hybrid keeps the hybrid fallback
+        holding_data[0] = 0x2101; // Polar Hybrid
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
             make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
         ];
         let snap = decode_snapshot(&blocks);
-        // IR(17) excluded → per-string sum is 0 → fall back to IR(44)=3.0 kWh.
-        assert!(
-            (snap.today_solar_kwh - 3.0).abs() < 0.01,
-            "corrupted IR(17) must be excluded, falling back to IR(44); got {}",
-            snap.today_solar_kwh
+        // IR(17) excluded → per-string sum is 0 → no solar.
+        assert_eq!(
+            snap.today_solar_kwh, 0.0,
+            "corrupted IR(17) must be excluded without falling back to IR(44)"
         );
     }
 
@@ -5359,10 +5343,9 @@ mod tests {
     }
 
     #[test]
-    fn single_phase_consumption_formula_with_ir44_fallback() {
-        // Gen3 hybrid where IR(17)/IR(19) are zero (per-string registers
-        // unavailable), forcing fallback to IR(44) for today_solar_kwh.
-        // Verifies consumption computation when IR(44) is the source.
+    fn ems_consumption_formula_uses_ir44_plant_generation() {
+        // EMS has no per-string registers, so IR(44) (plant generation) is
+        // its today_solar_kwh. Verifies consumption when IR(44) is the source.
         let mut input_data = vec![0u16; 60];
         input_data[25] = 50; // export today 5.0 kWh
         input_data[26] = 80; // import today 8.0 kWh
@@ -5371,7 +5354,7 @@ mod tests {
         input_data[59] = 50; // SOC
 
         let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x2101; // PolarHybrid (fixed, no ARM refinement needed)
+        holding_data[0] = 0x5001; // EMS
         holding_data[59] = 1; // enable_discharge = true
 
         let blocks = vec![
@@ -5381,7 +5364,7 @@ mod tests {
         ];
         let snap = decode_snapshot(&blocks);
 
-        assert_eq!(snap.device_type, DeviceType::PolarHybrid);
+        assert_eq!(snap.device_type, DeviceType::Ems);
         assert!((snap.today_solar_kwh - 10.0).abs() < 0.01);
         assert!((snap.today_import_kwh - 8.0).abs() < 0.01);
         assert!((snap.today_export_kwh - 5.0).abs() < 0.01);
@@ -5507,12 +5490,8 @@ mod tests {
             snap.today_pv2_kwh, 0.0,
             "a wrapping rhs must not corroborate stale PV2"
         );
-        // Both per-string values dropped -> total falls back to IR(44).
-        assert!(
-            (snap.today_solar_kwh - 200.0).abs() < 0.01,
-            "total must use IR(44) fallback; got {}",
-            snap.today_solar_kwh
-        );
+        // Both per-string values dropped -> no solar; IR(44) is not PV (#419).
+        assert_eq!(snap.today_solar_kwh, 0.0);
     }
 
     #[test]
@@ -5564,25 +5543,20 @@ mod tests {
     }
 
     #[test]
-    fn single_phase_per_string_zero_falls_back_to_ir44_but_fields_stay_zero() {
-        // Per-string corruption → IR(44) fallback for total, but
-        // today_pv1_kwh / today_pv2_kwh stay 0 (the per-string readings
-        // are corrupted, not just missing). Honest representation on UI:
-        // Total reads IR(44), but per-string rows show 0.
+    fn single_phase_both_strings_corrupt_is_zero_not_ir44() {
+        // Both per-string registers corrupted → no solar this poll; IR(44)
+        // inverter output never stands in (#419). The sanitizer carries the
+        // previous good total over the dropped reading.
         let mut snap = InverterSnapshot::default();
         let mut data = vec![0u16; 60];
         data[2] = 380; // PV2 present
         data[17] = 5_000; // corrupted
         data[19] = 5_000; // corrupted
-        data[44] = 100; // valid fallback 10.0 kWh
+        data[44] = 100; // 10.0 kWh inverter output — not solar
         decode_input_0_59(&data, &mut snap);
         assert_eq!(snap.today_pv1_kwh, 0.0);
         assert_eq!(snap.today_pv2_kwh, 0.0);
-        assert!(
-            (snap.today_solar_kwh - 10.0).abs() < 0.01,
-            "total must use IR(44) fallback; got {}",
-            snap.today_solar_kwh
-        );
+        assert_eq!(snap.today_solar_kwh, 0.0);
     }
 
     #[test]
@@ -5794,11 +5768,11 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_ir44_fallback_is_suppressed_pre_dawn_but_preserved_after_sunset() {
+    fn ems_ir44_fallback_is_suppressed_pre_dawn_but_preserved_after_sunset() {
         let mut input_data = vec![0u16; 60];
         input_data[44] = 4; // phantom/stale aggregate while both strings are zero
         let mut holding_data = vec![0u16; 60];
-        holding_data[0] = 0x2001;
+        holding_data[0] = 0x5001; // EMS: the one IR 0-59 model still using IR(44)
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", input_data),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
