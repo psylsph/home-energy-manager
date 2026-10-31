@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-10-31
+
+### Changed
+
+- **Long explanations fold away behind an ⓘ.** Controls on the Settings, Control, Planner, Octopus, Battery and Inverter pages now carry a one-line hint, with the full explanation one hover, tab or tap away on the ⓘ beside them, so the controls sit closer together. Warnings before something you can't undo stay on the page, just shorter.
+- **Titles and labels are capitalised consistently.** Chart titles, legends, field labels and buttons across the app now use the same Title Case, including the Battery Health charts.
+
 ## [0.99.0] - 2026-10-31
 
 ### Changed
