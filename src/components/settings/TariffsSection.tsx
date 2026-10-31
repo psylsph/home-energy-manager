@@ -62,7 +62,8 @@ export default function TariffsSection({
     <SettingsSection
       id={id}
       title="Energy Tariffs"
-      description="Configure your electricity tariff time windows and rates. Add multiple windows for time-of-use tariffs like Octopus Flux, Cosy, or Eco7. Used for cost calculations on the History page."
+      description="Your tariff windows and rates, for the History page costs."
+      help="Configure your electricity tariff time windows and rates. Add multiple windows for time-of-use tariffs like Octopus Flux, Cosy, or Eco7. Used for cost calculations on the History page."
     >
       <TariffSlotEditor label="Import" config={importCfg} onChange={setImportCfg} />
       <TariffSlotEditor label="Export" config={exportCfg} onChange={setExportCfg} />
@@ -82,7 +83,7 @@ export default function TariffsSection({
             value={standingCharge}
             placeholder="e.g. 54.86"
             onChange={(e) => setStandingCharge(e.target.value)}
-            aria-label="Import Standing Charge in Pence Per Day"
+            aria-label="Import Standing Charge in Pence per Day"
             className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
           />
           <span className="text-text-secondary text-xs font-sans">

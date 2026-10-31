@@ -57,7 +57,7 @@ test.describe.serial('Adaptive Charge', () => {
 
     await expect(page.getByText('Preferred Charge Rate').first()).toBeVisible();
     await expect(page.getByText('Recovery Charge Rate').first()).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Add period' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add Period' })).toBeVisible();
 
     await page.getByLabel('Low SOC period 1').fill('90');
     await page.getByLabel('Recovery SOC period 1').fill('80');

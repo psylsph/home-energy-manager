@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { apiPost } from '../lib/api';
 import { useDeferredSave } from '../hooks/useDeferredSave';
 import { parseLoadAboveKw } from '../lib/forecast';
+import HelpTip from './HelpTip';
 
 interface Props {
   /** The saved threshold in kW, or null when off. Read once: remount (key)
@@ -14,7 +15,7 @@ interface Props {
 }
 
 /**
- * "Leave out load above" (issue #400): home load above this is treated as EV
+ * "Leave Out Load Above" (issue #400): home load above this is treated as EV
  * charging and left out of the consumption prediction. Empty turns it off.
  * A text field, not a number one: a number input reports a mistyped entry
  * ("3,5") as empty, which would read as "off" instead of an error.
@@ -46,7 +47,7 @@ export default function LoadAboveSetting({ savedKw, disabled, onSaved }: Props) 
           htmlFor="forecast-load-above-input"
           className="text-text-primary text-xs font-sans font-medium"
         >
-          Leave out load above
+          Leave Out Load Above
         </label>
         <input
           id="forecast-load-above-input"
@@ -77,10 +78,13 @@ export default function LoadAboveSetting({ savedKw, disabled, onSaved }: Props) 
         )}
       </div>
       <p className="text-[11px] text-text-secondary font-sans">
-        Treats home load above this as EV charging and leaves it out of the consumption
-        prediction, so an evening the car charged doesn't make the planner charge more every
-        night. Leave it empty to keep all load. While HEM is connected to a GivEnergy EV
-        charger it takes out the charger's own power instead.
+        Load above this counts as EV charging, unless HEM reads your GivEnergy charger.{' '}
+        <HelpTip label="Leave Out Load Above">
+          Treats home load above this as EV charging and leaves it out of the consumption
+          prediction, so an evening the car charged doesn't make the planner charge more every
+          night. Leave it empty to keep all load. While HEM is connected to a GivEnergy EV
+          charger it takes out the charger's own power instead.
+        </HelpTip>
       </p>
     </div>
   );

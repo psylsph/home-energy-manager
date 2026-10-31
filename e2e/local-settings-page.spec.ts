@@ -125,9 +125,9 @@ test.describe('Settings Page - Energy Tariffs', () => {
     await expect(page.locator('text=Save Tariffs')).toBeVisible({ timeout: 10_000 });
   });
 
-  test('should show Add window button for time-of-use tariffs', async ({ page }) => {
+  test('should show Add Window button for time-of-use tariffs', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Add window').first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('text=Add Window').first()).toBeVisible({ timeout: 10_000 });
   });
 
   test('should save tariff settings via API', async ({ baseUrl }) => {

@@ -745,7 +745,7 @@ async fn auto_join(
 }
 
 /// Whether to check for sessions at all. Also enforces that nothing booked for
-/// a session outlives Alert And Export (or the Octopus credentials it needs),
+/// a session outlives Alert and Export (or the Octopus credentials it needs),
 /// however the setting was changed, and clears what the page shows when the
 /// feature is off.
 async fn session_checks_wanted(state: &Arc<AppState>, settings: &Settings) -> bool {
@@ -2175,7 +2175,7 @@ mod tests {
         .await;
     }
 
-    // ---- Alert And Export (phase 3) ----
+    // ---- Alert and Export (phase 3) ----
 
     use crate::inverter::export_once::{list_events, ExportOnceState};
     use crate::inverter::model::{DeviceType, InverterSnapshot};

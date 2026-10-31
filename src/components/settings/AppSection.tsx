@@ -4,6 +4,7 @@ import { clampInterval, VALID_INTERVALS } from '../../lib/settingsForm';
 import Toggle from '../Toggle';
 import { AdvancedSettings, SettingsRow, SettingsSection } from './SettingsSection';
 import { useSettingsSave, useSettingToggle, type Flash } from './useSettingsSave';
+import HelpTip from '../HelpTip';
 
 const TRAY_TEXT = {
   on: 'Closing the window will now hide it to the tray',
@@ -23,16 +24,18 @@ const HINT = 'text-text-secondary text-xs font-sans';
 function SettingsToggle({
   label,
   hint,
+  help,
   checked,
   onChange,
 }: {
   label: string;
   hint: string;
+  help?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
 }) {
   return (
-    <SettingsRow label={label} hint={hint} strong>
+    <SettingsRow label={label} hint={hint} help={help} strong>
       <Toggle checked={checked} ariaLabel={label} onChange={onChange} />
     </SettingsRow>
   );
@@ -136,19 +139,22 @@ export default function AppSection({
         <>
           <SettingsToggle
             label="Start on Login"
-            hint="Launch the app automatically when you log in. On Windows this adds an entry to the Startup apps list; on macOS a LaunchAgent; on Linux a desktop autostart file."
+            hint="Launch the app automatically when you log in."
+            help="On Windows this adds an entry to the Startup apps list; on macOS a LaunchAgent; on Linux a desktop autostart file."
             checked={autostartEnabled}
             onChange={(v) => void handleAutostartToggle(v)}
           />
           <SettingsToggle
             label="Minimise to Tray"
-            hint="Keep the app running in the background. Closing the window hides it to the system tray instead of quitting — reopen it from the tray icon."
+            hint="Closing the window hides it to the tray instead of quitting."
+            help="Keep the app running in the background. Closing the window hides it to the system tray instead of quitting — reopen it from the tray icon."
             checked={minimiseToTray}
             onChange={(v) => void setMinimiseToTray(v)}
           />
           <SettingsToggle
             label="Start Hidden in Tray"
-            hint="Launch with the window already hidden in the tray. Handy alongside Start on Login so the app boots quietly in the background."
+            hint="Launch with the window already hidden in the tray."
+            help="Handy alongside Start on Login so the app boots quietly in the background."
             checked={startMinimised}
             onChange={(v) => void setStartMinimised(v)}
           />
@@ -159,10 +165,12 @@ export default function AppSection({
       <AdvancedSettings>
           <div className="flex flex-col gap-2">
             <span className={ROW_LABEL}>Refresh Interval</span>
-            <p className={HINT}>How often the app polls the inverter for fresh data.</p>
             <p className={HINT}>
-              Each poll also reaches the GivEnergy cloud through the WiFi dongle, which stores it as a
-              data point, so a short interval makes your cloud history much larger.
+              How often the app polls the inverter for fresh data.{' '}
+              <HelpTip label="Refresh Interval">
+                Each poll also reaches the GivEnergy cloud through the WiFi dongle, which stores it as a
+                data point, so a short interval makes your cloud history much larger.
+              </HelpTip>
             </p>
             <div className="flex gap-2">
               {VALID_INTERVALS.map((s) => (

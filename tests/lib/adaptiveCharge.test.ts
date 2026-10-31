@@ -77,7 +77,7 @@ describe('adaptiveSocFieldCaption', () => {
 describe('adaptiveStateLabel', () => {
   it('returns human-readable runtime labels', () => {
     expect(adaptiveStateLabel('recovery')).toBe('Low-SOC Recovery Active');
-    expect(adaptiveStateLabel('suspended_auto_winter')).toBe('Suspended By Auto Winter');
+    expect(adaptiveStateLabel('suspended_auto_winter')).toBe('Suspended by Auto Winter');
     expect(adaptiveStateLabel(undefined)).toBe('Inactive');
   });
 });

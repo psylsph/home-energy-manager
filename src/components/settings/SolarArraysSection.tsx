@@ -13,7 +13,7 @@ function KwpInput({ n, value, onChange, placeholder }: { n: 1 | 2; value: string
   return (
     <div className="flex flex-col gap-1.5">
       <label htmlFor={`pv${n}-rated-kw`} className="text-text-primary text-sm font-sans font-medium">
-        PV{n} rated capacity (kWp)
+        PV{n} Rated Capacity (kWp)
       </label>
       <div className="flex items-center gap-2">
         <input
@@ -82,7 +82,8 @@ export default function SolarArraysSection({
     <SettingsSection
       id={id}
       title="Solar Arrays"
-      description="Enter each solar array's rated peak capacity (kWp) so the Solar page can show output as a percentage of maximum. For hybrid / DC-coupled inverters, enter the kWp of each PV string below. For AC-coupled systems whose panels feed a separate inverter, label the CT clamp that measures that inverter (meter addresses 0x01–0x08 appear on the Meters page) and enter its array's kWp."
+      description="Each array's peak capacity, so the Solar page can show output as a percentage."
+      help="Enter each solar array's rated peak capacity (kWp) so the Solar page can show output as a percentage of maximum. For hybrid / DC-coupled inverters, enter the kWp of each PV string below. For AC-coupled systems whose panels feed a separate inverter, label the CT clamp that measures that inverter (meter addresses 0x01–0x08 appear on the Meters page) and enter its array's kWp."
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <KwpInput n={1} value={pv1} onChange={setPv1} placeholder="e.g. 6" />
@@ -103,7 +104,7 @@ export default function SolarArraysSection({
             className="bg-bg-elevated text-text-primary text-xs font-sans px-3 py-1.5 rounded-lg hover:bg-bg-elevated/80 transition-colors"
             data-testid="solar-array-add"
           >
-            + Add array
+            + Add Array
           </button>
         </div>
         {ctArrays.length === 0 ? (

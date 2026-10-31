@@ -8,6 +8,7 @@ import {
 } from '../lib/backup';
 import type { BackupForm, BackupStatusResponse, HistoryBackupConfig } from '../lib/backup';
 import Toggle from './Toggle';
+import HelpTip, { HeadingWithHelp } from './HelpTip';
 
 type Status = BackupStatusResponse['data'];
 
@@ -146,13 +147,19 @@ export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
   return (
     <section id={id} className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4 scroll-mt-32 md:scroll-mt-24" aria-labelledby="history-backup-heading">
       <div>
-        <h2 id="history-backup-heading" className="text-text-primary text-lg font-semibold font-sans">
-          History Backup
-        </h2>
-        <p className="text-text-secondary text-sm mt-1">
-          HEM saves a checked copy of its history database on a schedule. Copies are safe to take while HEM is running,
-          unlike copying <span className="font-mono">history.db</span> yourself.
-        </p>
+        <HeadingWithHelp
+          as="h2"
+          id="history-backup-heading"
+          className="text-text-primary text-lg font-semibold font-sans"
+          title="History Backup"
+          help={
+            <>
+              HEM saves a checked copy of its history database on a schedule. Copies are safe to take while HEM is
+              running, unlike copying <span className="font-mono">history.db</span> yourself.
+            </>
+          }
+        />
+        <p className="text-text-secondary text-sm mt-1">Scheduled, checked copies of your history.</p>
       </div>
 
       {loadFailed && !status && (
@@ -175,7 +182,7 @@ export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
 
           <div className="flex flex-col gap-1">
             <label htmlFor="history-backup-folder" className="text-text-primary text-sm font-sans">
-              Backup folder
+              Backup Folder
             </label>
             <input
               id="history-backup-folder"
@@ -186,16 +193,22 @@ export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
               aria-describedby="history-backup-folder-hint"
               onChange={(e) => setForm({ ...form, destination: e.target.value })}
             />
-            <span id="history-backup-folder-hint" className="text-text-secondary text-xs font-sans">
-              Leave blank for the default. A folder you choose, such as a NAS share, must already exist; if it is
-              missing the backup fails and you are told, rather than filling the local disk. Use a separate folder for
-              each HEM install: older backups in the folder are deleted to keep the count.
+            <span className="text-text-secondary text-xs font-sans">
+              <span id="history-backup-folder-hint">
+                Blank for the default. It must already exist. Use one folder per HEM install: older
+                backups in it are deleted.
+              </span>{' '}
+              <HelpTip label="Backup Folder">
+                Leave blank for the default. A folder you choose, such as a NAS share, must already exist; if it is
+                missing the backup fails and you are told, rather than filling the local disk. Use a separate folder for
+                each HEM install: older backups in the folder are deleted to keep the count.
+              </HelpTip>
             </span>
           </div>
 
           <div className="flex flex-wrap gap-4">
             <label className="flex flex-col gap-1">
-              <span className="text-text-primary text-sm font-sans">Every (hours)</span>
+              <span className="text-text-primary text-sm font-sans">Every (Hours)</span>
               <input
                 type="number"
                 min={1}
@@ -205,7 +218,7 @@ export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-text-primary text-sm font-sans">Backups to keep</span>
+              <span className="text-text-primary text-sm font-sans">Backups to Keep</span>
               <input
                 type="number"
                 min={1}
@@ -218,10 +231,15 @@ export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
 
           <div className="flex items-start justify-between gap-3">
             <div className="flex flex-col gap-0.5">
-              <span className="text-text-primary text-sm font-sans font-medium">Include settings.json</span>
+              <span className="text-text-primary text-sm font-sans font-medium">
+                Include settings.json{' '}
+                <HelpTip label="Include settings.json">
+                  Useful for a full restore, but settings.json holds your Octopus API key and alert tokens in plain
+                  text. Only turn this on if the backup folder is private.
+                </HelpTip>
+              </span>
               <span className="text-text-secondary text-xs font-sans">
-                Useful for a full restore, but settings.json holds your Octopus API key and alert tokens in plain text.
-                Only turn this on if the backup folder is private.
+                Holds your keys in plain text. Only for a private folder.
               </span>
             </div>
             <div className="shrink-0 mt-1">

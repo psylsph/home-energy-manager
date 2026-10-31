@@ -5,6 +5,7 @@ import Toggle from '../Toggle';
 import { AdvancedSettings, SettingsSection } from './SettingsSection';
 import { TEXT_INPUT as INPUT } from './styles';
 import { useSettingsSave, useSettingToggle, type Flash } from './useSettingsSave';
+import HelpTip, { HeadingWithHelp } from '../HelpTip';
 
 const URL_CODE =
   'bg-bg-elevated text-accent rounded-lg px-4 py-2 text-sm font-mono flex-1 min-w-0 select-all overflow-hidden text-ellipsis whitespace-nowrap';
@@ -128,7 +129,7 @@ export default function RemoteAccessSection({
       setGeneratedApiKey(secret);
       setApiKeyConfigured(true);
       setApiKeyLast4(secret.slice(-4));
-      return 'New API key generated. Copy it now — it will not be shown again. Key changes apply immediately to a running API server; starting it or changing its port requires an app restart.';
+      return 'New API key generated. Copy it now — it will not be shown again. Starting the API server or changing its port needs a restart.';
     }, 'Failed to generate API key', STICKY);
   };
 
@@ -171,18 +172,29 @@ export default function RemoteAccessSection({
 
         <UrlRow url={miniPageUrl} onCopy={copyUrl} className="mt-2" />
         <p className={HINT}>
-          Apple Watch / mini display — open this URL in a browser for a tiny glance view (or fetch /api/mini/status from a Shortcut; see INSTALL.md)
+          Apple Watch / mini display — a tiny glance view.{' '}
+          <HelpTip label="the mini display URL">
+            Open this URL in a browser for a tiny glance view, or fetch /api/mini/status from a Shortcut; see
+            INSTALL.md.
+          </HelpTip>
         </p>
       </div>
 
       <div className="flex flex-col gap-3 pt-3 border-t border-bg-elevated">
-        <h3 className="text-text-primary text-sm font-semibold">Authenticated API</h3>
-        <p className={HINT}>
-          External integrations (e.g. SolarWatch) use a separate API port with Bearer-token authentication,
-          not the dashboard port above. GET /api/snapshot and GET /api/control/status are read-only.
-          Battery Quick Actions require the permission below. Starting this server or changing its port requires a restart.
-          These settings can only be changed from this machine.
-        </p>
+        <HeadingWithHelp
+          as="h3"
+          className="text-text-primary text-sm font-semibold"
+          title="Authenticated API"
+          help={
+            <>
+              External integrations (e.g. SolarWatch) use a separate API port with Bearer-token authentication,
+              not the dashboard port above. GET /api/snapshot and GET /api/control/status are read-only.
+              Battery Quick Actions require the permission below. Starting this server or changing its port requires a
+              restart. These settings can only be changed from this machine.
+            </>
+          }
+        />
+        <p className={HINT}>A separate, key-protected port for integrations such as SolarWatch.</p>
         <p className={HINT}>
           {apiKeyConfigured
             ? `Key configured${apiKeyLast4 ? ` (ends ${apiKeyLast4})` : ''}. Generating a new key replaces the old one immediately.`
@@ -214,9 +226,12 @@ export default function RemoteAccessSection({
         </label>
         {apiKeyConfigured && apiBindAddress.trim() === '' && (
           <p className="text-amber-300 text-xs font-sans">
-            This server currently accepts connections on every network interface. Set a listen
-            address under Advanced (127.0.0.1 keeps it local-only) if you only need machine-local
-            or VPN/proxy access.
+            Accepting connections on every network interface.{' '}
+            <HelpTip label="the listen address">
+              This server currently accepts connections on every network interface. Set a listen
+              address under Advanced (127.0.0.1 keeps it local-only) if you only need machine-local
+              or VPN/proxy access.
+            </HelpTip>
           </p>
         )}
         <AdvancedSettings>
@@ -231,7 +246,7 @@ export default function RemoteAccessSection({
             />
           </label>
           <label className="flex flex-col gap-1">
-            <span className={HINT}>Allowed browser origins (CORS, comma-separated)</span>
+            <span className={HINT}>Allowed Browser Origins (CORS, Comma-Separated)</span>
             <input
               type="text"
               value={apiAllowedOrigins}
@@ -253,8 +268,11 @@ export default function RemoteAccessSection({
           />
         </div>
         <p className={HINT}>
-          Off by default and applied immediately when toggled. When enabled, anyone with this API key can use Force Charge,
-          Force Discharge and their Stop actions. Turning it off does not stop an action already accepted.
+          Lets anyone with the key Force Charge or Force Discharge.{' '}
+          <HelpTip label="battery control through the API">
+            Off by default and applied immediately when toggled. When enabled, anyone with this API key can use Force
+            Charge, Force Discharge and their Stop actions. Turning it off does not stop an action already accepted.
+          </HelpTip>
         </p>
         <div className="flex items-center gap-3">
           <button onClick={() => void handleApiKeyGenerate()} disabled={keySave.busy} className={PRIMARY_BUTTON}>
@@ -272,7 +290,7 @@ export default function RemoteAccessSection({
 
       {clients.length > 0 && (
         <div className="flex flex-col gap-1.5">
-          <span className={HINT}>Connected clients ({clients.length})</span>
+          <span className={HINT}>Connected Clients ({clients.length})</span>
           {clients.map((addr, i) => {
             const ip = addr.replace(/:.*$/, '');
             const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === lanIp;

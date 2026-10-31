@@ -553,7 +553,7 @@ export function formatTimedExportState(state: TimedExportPresentationState): str
         case 'active_now':
             return 'Timed Export — Exporting Now';
         case 'blocked_by_pause':
-            return 'Timed Export — Blocked By Pause Discharge';
+            return 'Timed Export — Blocked by Pause Discharge';
         case 'error':
             return 'Timed Export — Error';
     }

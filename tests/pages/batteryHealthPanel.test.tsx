@@ -78,7 +78,7 @@ describe('BatteryHealthPanel', () => {
   it('asks for six months by default', async () => {
     serve([day()]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
     expect(apiGet).toHaveBeenCalledWith('/api/battery-health?days=180');
   });
 
@@ -102,16 +102,25 @@ describe('BatteryHealthPanel', () => {
       day({ module_index: 1 }),
     ]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
     // spread, capacity, cycles, temperature × two modules
     expect(screen.getAllByTestId('line-chart')).toHaveLength(4);
     expect(screen.getAllByTestId('line')).toHaveLength(8);
   });
 
+  it('titles every chart in Title Case', async () => {
+    serve([day()]);
+    render(<BatteryHealthPanel />);
+    await screen.findByText('Charge Cycles');
+    expect(screen.getByText('Cell Spread (Highest − Lowest Cell)')).toBeTruthy();
+    expect(screen.getAllByText('State of Health').length).toBeGreaterThan(0);
+    expect(screen.getByText('Hottest Cell Temperature (Daily Max)')).toBeTruthy();
+  });
+
   it('labels capacity as State of Health, as the module details do', async () => {
     serve([day({ capacity_ah: 90, design_capacity_ah: 100 })]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
     // Summary heading and chart title.
     expect(screen.getAllByText('State of Health')).toHaveLength(2);
     expect(screen.queryByText('Capacity')).toBeNull();
@@ -122,7 +131,7 @@ describe('BatteryHealthPanel', () => {
     serve([day()]);
     useInverterStore.setState({ gridLineWeight: 'subtle' });
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
     const grids = screen.getAllByTestId('grid');
     expect(grids).toHaveLength(4);
     for (const grid of grids) {
@@ -137,7 +146,7 @@ describe('BatteryHealthPanel', () => {
   it('labels every chart on whole days and never lets Recharts drop a label', async () => {
     serve([day({ day: '2026-10-01' }), day({ day: '2026-10-03' })]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
     const axes = screen.getAllByTestId('x-axis');
     expect(axes).toHaveLength(4);
     const expected = JSON.stringify(['2026-10-01', '2026-10-02', '2026-10-03'].map(dayToMs));
@@ -150,7 +159,7 @@ describe('BatteryHealthPanel', () => {
   it('leaves room for the newest day label, which sits on the right edge', async () => {
     serve([day({ day: '2026-10-01' }), day({ day: '2026-10-30' })]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
     // Half of a centred month label ("Oct 2026", 11px bold) is about 27px.
     for (const chart of screen.getAllByTestId('line-chart')) {
       expect(Number(chart.getAttribute('data-margin-right'))).toBeGreaterThanOrEqual(32);
@@ -160,20 +169,20 @@ describe('BatteryHealthPanel', () => {
   it('says which spread the summary shows', async () => {
     serve([day({ full_spread_mv: 25, max_spread_mv: 40 })]);
     const first = render(<BatteryHealthPanel />);
-    expect(await screen.findByText('Cell spread · near full')).toBeTruthy();
+    expect(await screen.findByText('Cell Spread · Near Full')).toBeTruthy();
     first.unmount();
 
     serve([day({ full_spread_mv: null, max_spread_mv: 40 })]);
     render(<BatteryHealthPanel />);
-    expect(await screen.findByText("Cell spread · day's worst")).toBeTruthy();
+    expect(await screen.findByText("Cell Spread · Day's Worst")).toBeTruthy();
   });
 
   it('switches the spread chart between near-full and the days worst', async () => {
     serve([day({ full_spread_mv: 25, max_spread_mv: 40 })]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
-    const nearFull = screen.getByRole('button', { name: 'Near full' });
-    const worst = screen.getByRole('button', { name: "Day's worst" });
+    await screen.findByText('Charge Cycles');
+    const nearFull = screen.getByRole('button', { name: 'Near Full' });
+    const worst = screen.getByRole('button', { name: "Day's Worst" });
     expect(nearFull.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(worst);
     expect(worst.getAttribute('aria-pressed')).toBe('true');
@@ -183,9 +192,9 @@ describe('BatteryHealthPanel', () => {
   it('falls back to the days worst when no module has been nearly full', async () => {
     serve([day({ full_spread_mv: null, max_spread_mv: 40 })]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
-    expect(screen.queryByRole('button', { name: 'Near full' })).toBeNull();
-    expect(screen.getByRole('button', { name: "Day's worst" }).getAttribute('aria-pressed')).toBe('true');
+    await screen.findByText('Charge Cycles');
+    expect(screen.queryByRole('button', { name: 'Near Full' })).toBeNull();
+    expect(screen.getByRole('button', { name: "Day's Worst" }).getAttribute('aria-pressed')).toBe('true');
     // The summary falls back too.
     expect(screen.getByText('40 mV')).toBeTruthy();
   });
@@ -194,8 +203,8 @@ describe('BatteryHealthPanel', () => {
     // HV stacks have no cycle count or capacity.
     serve([day({ cycles: null, capacity_ah: null, design_capacity_ah: null })]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Hottest cell temperature (daily max)');
-    expect(screen.queryByText('Charge cycles')).toBeNull();
+    await screen.findByText('Hottest Cell Temperature (Daily Max)');
+    expect(screen.queryByText('Charge Cycles')).toBeNull();
     // Only the summary heading remains; the chart is gone.
     expect(screen.getAllByText('State of Health')).toHaveLength(1);
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
@@ -204,11 +213,11 @@ describe('BatteryHealthPanel', () => {
   it('refetches when the range changes', async () => {
     serve([day()]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
     fireEvent.click(screen.getByRole('button', { name: '1y' }));
     await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/battery-health?days=365'));
     expect(screen.getByRole('button', { name: '1y' }).getAttribute('aria-pressed')).toBe('true');
-    await screen.findByText('Charge cycles');
+    await screen.findByText('Charge Cycles');
   });
 
   it("refreshes while open, so today's row keeps up", async () => {
@@ -265,7 +274,7 @@ describe('BatteryHealthPanel', () => {
       day({ day: '2026-10-02', module_index: 1, soc_jumps: 2, soc_stuck: 1 }),
     ]);
     render(<BatteryHealthPanel />);
-    expect(await screen.findByText('SOC warnings')).toBeTruthy();
+    expect(await screen.findByText('SOC Warnings')).toBeTruthy();
     const items = screen.getAllByRole('listitem').map((li) => li.textContent);
     expect(items).toHaveLength(2);
     expect(items[0]).toContain('Module #2');
@@ -273,15 +282,15 @@ describe('BatteryHealthPanel', () => {
     expect(items[1]).toContain('Module #1');
     expect(items[1]).toContain('SOC jumped once');
     // HEM can run the cycle itself; the note points there and still says how by hand.
-    expect(screen.getByText(/Battery calibration cycle on the Control page/)).toBeTruthy();
+    expect(screen.getByText(/Battery Calibration Cycle on the Control page/)).toBeTruthy();
     expect(screen.getByText(/set the battery reserve to 4%/)).toBeTruthy();
   });
 
   it('shows no SOC warnings when there were none', async () => {
     serve([day()]);
     render(<BatteryHealthPanel />);
-    await screen.findByText('Charge cycles');
-    expect(screen.queryByText('SOC warnings')).toBeNull();
+    await screen.findByText('Charge Cycles');
+    expect(screen.queryByText('SOC Warnings')).toBeNull();
   });
 
   it('explains an empty history', async () => {

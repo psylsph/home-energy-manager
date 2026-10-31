@@ -193,7 +193,7 @@ describe('<ControlPage/> — Auto Winter save', () => {
 
 describe('<ControlPage/> — Load Discharge Limiter save', () => {
   // This component's root is a div, not a section, so scope to the heading's
-  // own container rather than the enclosing "Battery And Power Controls" one.
+  // own container rather than the enclosing "Battery and Power Controls" one.
   const save = () =>
     within(screen.getByRole('heading', { name: 'Load Discharge Limiter' }).parentElement as HTMLElement).getByRole(
       'button',

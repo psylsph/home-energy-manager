@@ -106,7 +106,7 @@ export default function NotificationsSection({
           onClick={() => openExternal('https://github.com/psylsph/home-energy-manager/blob/master/NOTIFICATIONS.md')}
           className="text-accent text-xs font-sans underline hover:opacity-80 transition-opacity"
         >
-          Setup guide ↗
+          Setup Guide ↗
         </button>
       }
     >

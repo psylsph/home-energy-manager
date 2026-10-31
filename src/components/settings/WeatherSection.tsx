@@ -123,7 +123,8 @@ export default function WeatherSection({ id, flash }: { id?: string; flash: Flas
           Open-Meteo ↗
         </button>
       }
-      description="Fetch the local outdoor temperature from the free Open-Meteo API and overlay it on the History page temperature charts. No API key required. Enter your postcode to resolve your location automatically, or enter latitude/longitude manually (useful outside the UK or for self-hosted Open-Meteo instances). The saved location also lets HEM suppress low phantom PV readings when the sun is down."
+      description="Outdoor temperature on the History charts, from the free Open-Meteo API."
+      help="Fetch the local outdoor temperature from the free Open-Meteo API and overlay it on the History page temperature charts. No API key required. Enter your postcode to resolve your location automatically, or enter latitude/longitude manually (useful outside the UK or for self-hosted Open-Meteo instances). The saved location also lets HEM suppress low phantom PV readings when the sun is down."
     >
       <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
         <div className="flex items-center justify-between">

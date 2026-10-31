@@ -725,8 +725,8 @@ describe('ForecastPage plan card', () => {
     await waitFor(() => {
       expect(screen.getAllByTestId('forecast-charge-marker')).toHaveLength(2);
     });
-    expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge start/);
-    expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge end/);
+    expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge Start/);
+    expect(screen.getByTestId('forecast-charge-legend').textContent).toMatch(/Charge End/);
     // Marker keys live in the card FOOTER — small and away from the
     // graph — not in the under-chart line legend.
     expect(
@@ -1526,7 +1526,7 @@ describe('ForecastPage plan settings edits survive background refetches', () => 
 
   it('preserves unsaved edits across a SOC-triggered refetch (review H17)', async () => {
     // Review H17: every background refetch rewrote the Plan settings form
-    // from /api/settings — typing a new value into "Minimum battery level"
+    // from /api/settings — typing a new value into "Minimum Battery Level"
     // snapped back mid-edit whenever the SOC moved by a point and the page
     // refetched.
     apiGetMock.mockImplementation(async (path: string) => {

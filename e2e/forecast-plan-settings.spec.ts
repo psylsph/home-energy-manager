@@ -79,7 +79,7 @@ test.describe('Planner settings (issue #391)', () => {
     await request.post('/api/settings', { data: DEFAULTS });
   });
 
-  test.describe('Minimum battery level', () => {
+  test.describe('Minimum Battery Level', () => {
     test('survives leaving the page without a blur', async ({ page, request }) => {
       const minSoc = await openPlanSettings(page);
       await expect(minSoc).toHaveValue('20');

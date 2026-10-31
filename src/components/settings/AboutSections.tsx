@@ -5,6 +5,7 @@ import { useInverterStore } from '../../store/useInverterStore';
 import Toggle from '../Toggle';
 import { SettingsSection } from './SettingsSection';
 import { useSettingToggle, type Flash } from './useSettingsSave';
+import HelpTip from '../HelpTip';
 
 const UPDATE_TEXT = {
   on: 'Will check for new releases',
@@ -36,7 +37,8 @@ export function UpdatesSection({
     <SettingsSection
       id={id}
       title="Updates"
-      description="The app checks GitHub for new releases and shows a dismissible banner when one is available. It doesn’t install anything automatically — clicking the banner opens the release page where you can download the update."
+      description="Shows a banner when a new release is out. Nothing installs itself."
+      help="The app checks GitHub for new releases and shows a dismissible banner when one is available. It doesn’t install anything automatically — clicking the banner opens the release page where you can download the update."
     >
       <div className="text-sm font-sans text-text-secondary flex flex-wrap items-center gap-x-2 gap-y-1">
         <span>
@@ -64,9 +66,15 @@ export function UpdatesSection({
       </div>
       <div className="flex items-start justify-between gap-3">
         <div className="flex flex-col gap-0.5">
-          <span className="text-text-primary text-sm font-sans font-medium">Check for New Releases</span>
+          <span className="text-text-primary text-sm font-sans font-medium">
+            Check for New Releases{' '}
+            <HelpTip label="Check for New Releases">
+              When on, the app contacts GitHub once every few hours to look for a newer version. The only information
+              sent is your IP address — no usage data. Turn this off if you’d rather the app never reach out.
+            </HelpTip>
+          </span>
           <span className="text-text-secondary text-xs font-sans">
-            When on, the app contacts GitHub once every few hours to look for a newer version. The only information sent is your IP address — no usage data. Turn this off if you’d rather the app never reach out.
+            Asks GitHub every few hours. Only your IP address is sent.
           </span>
         </div>
         <div className="shrink-0 mt-1">

@@ -71,7 +71,7 @@ export default function TariffSlotEditor({
             onClick={() => onChange(addTariffSlot(config, 0.15))}
             className="text-accent text-xs font-sans hover:opacity-80 transition-opacity"
           >
-            + Add window
+            + Add Window
           </button>
         )}
       </div>
@@ -169,7 +169,7 @@ export default function TariffSlotEditor({
             onClick={() => onChange(flatTariffConfig(config.slots[0]?.rate ?? 0.15))}
             className="text-accent text-xs font-sans hover:opacity-80 transition-opacity whitespace-nowrap"
           >
-            Reset to flat rate
+            Reset to Flat Rate
           </button>
         </div>
       )}

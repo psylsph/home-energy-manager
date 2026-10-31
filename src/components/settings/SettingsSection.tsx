@@ -1,4 +1,5 @@
 import { useId, useState, type ReactNode } from 'react';
+import HelpTip, { HeadingWithHelp } from '../HelpTip';
 
 const H2 = 'text-text-primary text-lg font-semibold font-sans';
 const H3 = 'text-text-primary text-sm font-sans font-medium';
@@ -9,6 +10,7 @@ export function SettingsSection({
   title,
   action,
   description,
+  help,
   inert,
   children,
 }: {
@@ -17,7 +19,10 @@ export function SettingsSection({
   title: string;
   /** Shown at the right of the header, e.g. a "Setup guide ↗" link. */
   action?: ReactNode;
+  /** One line under the title; keep it short and put the detail in `help`. */
   description?: ReactNode;
+  /** The full explanation, behind an ⓘ next to the title. */
+  help?: ReactNode;
   inert?: boolean;
   children?: ReactNode;
 }) {
@@ -29,11 +34,11 @@ export function SettingsSection({
     >
       {action ? (
         <div className="flex items-center justify-between gap-3">
-          <h2 className={H2}>{title}</h2>
+          <HeadingWithHelp as="h2" className={H2} title={title} help={help} />
           {action}
         </div>
       ) : (
-        <h2 className={H2}>{title}</h2>
+        <HeadingWithHelp as="h2" className={H2} title={title} help={help} />
       )}
       {description && <p className="text-text-secondary text-xs font-sans -mt-2">{description}</p>}
       {children}
@@ -46,22 +51,29 @@ export function SettingsGroup({
   title,
   action,
   description,
+  help,
+  helpLabel,
   children,
 }: {
   title: ReactNode;
   action?: ReactNode;
+  /** One line under the title; keep it short and put the detail in `help`. */
   description?: ReactNode;
+  /** The full explanation, behind an ⓘ next to the title. */
+  help?: ReactNode;
+  /** Names the ⓘ when `title` isn't plain text. */
+  helpLabel?: string;
   children?: ReactNode;
 }) {
   return (
     <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
       {action ? (
         <div className="flex items-center justify-between">
-          <h3 className={H3}>{title}</h3>
+          <HeadingWithHelp as="h3" className={H3} title={title} help={help} helpLabel={helpLabel} />
           {action}
         </div>
       ) : (
-        <h3 className={H3}>{title}</h3>
+        <HeadingWithHelp as="h3" className={H3} title={title} help={help} helpLabel={helpLabel} />
       )}
       {description && <p className="text-text-secondary text-xs font-sans">{description}</p>}
       {children}
@@ -73,11 +85,18 @@ export function SettingsGroup({
 export function SettingsRow({
   label,
   hint,
+  help,
+  helpLabel,
   strong,
   children,
 }: {
   label: ReactNode;
+  /** One line under the label; keep it short and put the detail in `help`. */
   hint?: ReactNode;
+  /** The full explanation, behind an ⓘ next to the label. */
+  help?: ReactNode;
+  /** Names the ⓘ when `label` isn't plain text. */
+  helpLabel?: string;
   /** Bolder label, for a row that stands alone rather than in a list. */
   strong?: boolean;
   children: ReactNode;
@@ -86,6 +105,12 @@ export function SettingsRow({
     <div className="flex items-center justify-between gap-3">
       <span className={`text-text-primary text-sm font-sans${strong ? ' font-medium' : ''}`}>
         {label}
+        {help && (
+          <>
+            {' '}
+            <HelpTip label={helpLabel ?? (typeof label === 'string' ? label : 'this setting')}>{help}</HelpTip>
+          </>
+        )}
         {hint && <span className="block text-text-secondary text-xs font-sans">{hint}</span>}
       </span>
       <div className="shrink-0">{children}</div>

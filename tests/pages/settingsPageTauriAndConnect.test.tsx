@@ -278,7 +278,7 @@ describe('<SettingsPage/> — saving the inverter connection', () => {
     expect(apiPostMock).toHaveBeenCalledWith('/api/settings', { host: '192.168.1.10', port: 8899, serial: 'SA12345678' });
     expect(localStorage.getItem('saved_host')).toBe('192.168.1.10');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Got It' }));
     await screen.findByText('Connection saved. Restart required.');
     expect(screen.queryByText('Restart Required')).toBeNull();
   });

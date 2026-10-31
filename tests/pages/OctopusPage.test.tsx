@@ -178,7 +178,7 @@ describe('OctopusPage', () => {
     expect(revokeObjectUrlMock).toHaveBeenCalledWith('blob:octopus-summary');
     expect(screen.getByRole('status').textContent).toContain('CSV downloaded');
 
-    fireEvent.click(screen.getByRole('button', { name: 'PDF report' }));
+    fireEvent.click(screen.getByRole('button', { name: 'PDF Report' }));
     await waitFor(() => expect(pdfDownloadMock).toHaveBeenCalledWith(
       expect.objectContaining({ rangeLabel: '30 Days' }),
       expect.stringMatching(/givenergy_octopus_summary_30d_.*\.pdf/),
@@ -189,7 +189,7 @@ describe('OctopusPage', () => {
   it('shows a useful error when direct PDF generation fails', async () => {
     pdfDownloadMock.mockRejectedValueOnce(new Error('PDF generation failed'));
     render(<OctopusPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'PDF report' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'PDF Report' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('PDF generation failed'));
   });
 
@@ -249,7 +249,7 @@ describe('OctopusPage', () => {
       const blob = createObjectUrlMock.mock.calls[0][0] as unknown as Blob;
       expect(await blob.text()).not.toMatch(/gas/i);
 
-      fireEvent.click(screen.getByRole('button', { name: 'PDF report' }));
+      fireEvent.click(screen.getByRole('button', { name: 'PDF Report' }));
       await waitFor(() => expect(pdfDownloadMock).toHaveBeenCalledWith(
         expect.objectContaining({ includeGas: false }),
         expect.any(String),
@@ -259,7 +259,7 @@ describe('OctopusPage', () => {
     it('passes includeGas through as true for a household with gas', async () => {
       serveWithGas(true);
       render(<OctopusPage />);
-      fireEvent.click(await screen.findByRole('button', { name: 'PDF report' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'PDF Report' }));
       await waitFor(() => expect(pdfDownloadMock).toHaveBeenCalledWith(
         expect.objectContaining({ includeGas: true }),
         expect.any(String),

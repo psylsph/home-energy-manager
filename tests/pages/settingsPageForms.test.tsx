@@ -124,9 +124,9 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
     set('Bot Token (from @BotFather)', 'tok-123');
     set('Chat ID (from @userinfobot)', '555');
     set(/^Topic \(Subscribe to This in the ntfy App\)/, 'my-topic');
-    set('Server (optional, default: ntfy.sh)', 'https://ntfy.example');
+    set('Server (Optional, Default: ntfy.sh)', 'https://ntfy.example');
     set('App API Token (from pushover.net/apps/build)', 'po-app');
-    set('User Key (from your Pushover account)', 'po-user');
+    set('User Key (from Your Pushover Account)', 'po-user');
     set('Battery Temp Below °C', '2.5');
     set('Battery Temp Above °C', '48');
     set('SOC Below %', '15');
@@ -231,7 +231,7 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
     const s = await loadedNotifications();
     const open = (name: string | RegExp) => fireEvent.click(within(s).getByRole('button', { name }));
 
-    open('Setup guide ↗');
+    open('Setup Guide ↗');
     open('@BotFather');
     open('@userinfobot');
     open('ntfy.sh');
@@ -263,7 +263,7 @@ describe('<SettingsPage/> — tariff window editor', () => {
     render(<SettingsPage />);
     const imp = await editor('Import');
 
-    fireEvent.click(within(imp).getByRole('button', { name: '+ Add window' }));
+    fireEvent.click(within(imp).getByRole('button', { name: '+ Add Window' }));
 
     await waitFor(() => expect(within(imp).getAllByText('Start')).toHaveLength(2));
     const s = await heading('Energy Tariffs');
@@ -336,7 +336,7 @@ describe('<SettingsPage/> — tariff window editor', () => {
     // At least one inline error is shown against a window.
     expect(imp.querySelectorAll('ul li').length).toBeGreaterThan(0);
 
-    fireEvent.click(within(imp).getByRole('button', { name: 'Reset to flat rate' }));
+    fireEvent.click(within(imp).getByRole('button', { name: 'Reset to Flat Rate' }));
 
     await waitFor(() => expect(within(imp).queryByText(/Tariff configuration is invalid/)).toBeNull());
     expect(within(imp).getAllByLabelText('Rate (p/kWh)')).toHaveLength(1);
@@ -539,7 +539,7 @@ describe('<SettingsPage/> — connection and EV charger fields', () => {
     await openAdvanced();
     const apply = await screen.findByRole('button', { name: 'Apply Network Settings' });
     fireEvent.change(screen.getByLabelText('Listen Address'), { target: { value: '0.0.0.0' } });
-    fireEvent.change(screen.getByLabelText('Allowed browser origins (CORS, comma-separated)'), {
+    fireEvent.change(screen.getByLabelText('Allowed Browser Origins (CORS, Comma-Separated)'), {
       target: { value: 'https://a.example, https://b.example' },
     });
     fireEvent.click(apply);
@@ -569,7 +569,7 @@ describe('<SettingsPage/> — network access list and links', () => {
   it('lists connected clients and marks this device', async () => {
     mount({ status: { clients: ['127.0.0.1:50001', '192.168.1.99:50002', '192.168.1.50:50003', '[::1]:50004'], client_count: 4 } });
     render(<SettingsPage />);
-    await screen.findByText('Connected clients (4)');
+    await screen.findByText('Connected Clients (4)');
     // Loopback, IPv6 loopback (as seen without a port) and the LAN address count as this device.
     expect(screen.getAllByText('This Device')).toHaveLength(2);
     expect(screen.getByText('192.168.1.50:50003').parentElement!.textContent).not.toMatch(/This Device/);

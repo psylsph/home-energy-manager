@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import HelpTip, { HeadingWithHelp } from './HelpTip';
 import { apiGet, apiPost } from '../lib/api';
 import {
   describeLastCalibration,
@@ -111,13 +112,22 @@ export default function BatteryCalibrationCycle() {
 
   return (
     <div className="space-y-3">
-      <h3 className="text-text-primary font-medium text-base">Battery calibration cycle</h3>
+      <HeadingWithHelp
+        as="h3"
+        className="text-text-primary font-medium text-base"
+        title="Battery Calibration Cycle"
+        help={
+          <>
+            A full discharge and charge brings a drifting battery SOC back into line, which is what the
+            GivEnergy BMS SOC bug needs. HEM empties the battery to {status.floor_soc}%, charges it to 100%,
+            holds it there while the cells balance, then puts every setting it changed back as it was.
+            Battery settings changed while it runs are put back to how they were when it started.
+          </>
+        }
+      />
       <div className="bg-bg-surface border border-bg-elevated rounded-xl p-3 space-y-3">
         <p className="text-text-secondary text-xs">
-          A full discharge and charge brings a drifting battery SOC back into line, which is what the
-          GivEnergy BMS SOC bug needs. HEM empties the battery to {status.floor_soc}%, charges it to 100%,
-          holds it there while the cells balance, then puts every setting it changed back as it was.
-          Battery settings changed while it runs are put back to how they were when it started.
+          Empties to {status.floor_soc}%, charges to 100% and holds, then restores your settings.
         </p>
 
         {!status.supported ? (
@@ -141,7 +151,7 @@ export default function BatteryCalibrationCycle() {
                 disabled={busy}
                 className="py-1.5 px-3 bg-bg-elevated text-text-primary rounded-lg text-xs font-medium hover:opacity-80 transition disabled:opacity-40"
               >
-                Cancel calibration
+                Cancel Calibration
               </button>
             )}
           </div>
@@ -149,7 +159,7 @@ export default function BatteryCalibrationCycle() {
           <div className="space-y-3">
             <div className="flex items-center gap-3">
               <label htmlFor="calibration-hold-hours" className="text-text-secondary text-xs">
-                Hold at 100% for (hours)
+                Hold at 100% for (Hours)
               </label>
               <input
                 id="calibration-hold-hours"
@@ -164,9 +174,12 @@ export default function BatteryCalibrationCycle() {
               <p className="text-amber-400 text-xs">Choose between {minHours} and {maxHours} hours.</p>
             )}
             <p className="text-amber-300/80 text-xs">
-              It exports at full power, so on a time-of-use tariff the battery sells at your export rate and
-              is bought back at whatever import rate applies while it recharges. Starting a few hours before
-              your cheap rate keeps that cost down.
+              Exports at full power. Start a few hours before your cheap rate.{' '}
+              <HelpTip label="the cost of a calibration cycle">
+                It exports at full power, so on a time-of-use tariff the battery sells at your export rate and
+                is bought back at whatever import rate applies while it recharges. Starting a few hours before
+                your cheap rate keeps that cost down.
+              </HelpTip>
             </p>
             <button
               type="button"
@@ -174,7 +187,7 @@ export default function BatteryCalibrationCycle() {
               disabled={busy || holdMinutes == null}
               className="py-1.5 px-3 bg-amber-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
             >
-              Start calibration
+              Start Calibration
             </button>
           </div>
         )}

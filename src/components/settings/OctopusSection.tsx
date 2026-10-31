@@ -5,6 +5,7 @@ import type { PollSettings } from '../../lib/types';
 import Toggle from '../Toggle';
 import { SettingsSection } from './SettingsSection';
 import { useSettingsSave, type Flash } from './useSettingsSave';
+import HelpTip from '../HelpTip';
 
 type GasUnit = 'unknown' | 'kwh' | 'm3';
 
@@ -68,7 +69,8 @@ export default function OctopusSection({
     <SettingsSection
       id={id}
       title="Octopus Energy Data"
-      description="Save your Octopus account number and API key to add an Octopus tab with your smart-meter readings, costs and Saving Sessions alerts. Clear the account number and save to switch it off."
+      description="Adds an Octopus tab with your smart-meter readings, costs and Saving Sessions."
+      help="Save your Octopus account number and API key to add an Octopus tab with your smart-meter readings, costs and Saving Sessions alerts. Clear the account number and save to switch it off."
     >
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block">
@@ -85,27 +87,40 @@ export default function OctopusSection({
         onClick={() => openExternal('https://octopus.energy/dashboard/new/accounts/personal-details/api-access')}
         className="self-start text-sm text-accent underline hover:opacity-80"
       >
-        Get your Octopus API key
+        Get Your Octopus API Key
       </button>
       <div className="flex items-center justify-between gap-4 rounded-lg bg-bg-elevated px-4 py-3">
         <span>
-          <span className="block text-sm font-medium text-text-primary">My Home Has Gas</span>
-          <span className="block text-xs text-text-secondary">Switch off if you are electricity only. Gas readings are not fetched and gas is hidden from the Octopus page and its exports.</span>
+          <span className="block text-sm font-medium text-text-primary">
+            My Home Has Gas{' '}
+            <HelpTip label="My Home Has Gas">
+              Switch off if you are electricity only. Gas readings are not fetched and gas is hidden from the Octopus
+              page and its exports.
+            </HelpTip>
+          </span>
+          <span className="block text-xs text-text-secondary">Switch off if you are electricity only.</span>
         </span>
         <Toggle checked={gasEnabled} onChange={setGasEnabled} ariaLabel="My Home Has Gas" />
       </div>
       {gasEnabled && (
-        <label className="block max-w-sm">
-          <span className={FIELD_LABEL}>Gas API Unit</span>
-          <select value={gasUnit} onChange={(e) => setGasUnit(e.target.value as GasUnit)} className={INPUT}>
-            <option value="unknown">Unknown — Do Not Calculate Gas Cost</option>
-            <option value="kwh">kWh — Calculate Gas Cost</option>
-            <option value="m3">m³ — Usage Only</option>
-          </select>
+        <div className="max-w-sm">
+          <label className="block">
+            <span className={FIELD_LABEL}>Gas API Unit</span>
+            <select value={gasUnit} onChange={(e) => setGasUnit(e.target.value as GasUnit)} className={INPUT}>
+              <option value="unknown">Unknown — Do Not Calculate Gas Cost</option>
+              <option value="kwh">kWh — Calculate Gas Cost</option>
+              <option value="m3">m³ — Usage Only</option>
+            </select>
+          </label>
+          {/* Outside the <label>, so the ⓘ's name isn't read as part of the select's. */}
           <span className="mt-1 block text-xs text-text-secondary">
-            Octopus does not label gas units in this API. Only choose kWh if your downloaded readings are already converted; m³ needs billing conversion data that the API does not provide.
+            Choose kWh only if your readings are already converted.{' '}
+            <HelpTip label="Gas API Unit">
+              Octopus does not label gas units in this API. Only choose kWh if your downloaded readings are already
+              converted; m³ needs billing conversion data that the API does not provide.
+            </HelpTip>
           </span>
-        </label>
+        </div>
       )}
       <div className="max-w-sm">
         <span className={FIELD_LABEL}>Economy 7 Night-Rate Window</span>
@@ -120,7 +135,11 @@ export default function OctopusSection({
           </label>
         </div>
         <span className="mt-1 block text-xs text-text-secondary">
-          Used only for historical E-2R tariffs. Times follow the Europe/London clock; check your meter or bill because Economy 7 hours can vary.
+          Only for historical E-2R tariffs, in UK time.{' '}
+          <HelpTip label="Economy 7 Night-Rate Window">
+            Used only for historical E-2R tariffs. Times follow the Europe/London clock; check your meter or bill
+            because Economy 7 hours can vary.
+          </HelpTip>
         </span>
       </div>
       <p className="text-xs text-text-secondary">

@@ -265,7 +265,7 @@ describe('<ControlPage/> — connection-state gate', () => {
     expect(screen.queryByRole('heading', { name: 'Battery Mode', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Charge Schedule', exact: true })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Timed Export', exact: true })).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Battery And Power Controls', exact: true })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Battery and Power Controls', exact: true })).toBeNull();
 
     // The Retry button is there so the user can poke the backend instead
     // of waiting for the poll loop's own back-off.
@@ -627,7 +627,7 @@ describe('<ControlPage/> — connection-state gate', () => {
     });
     render(<ControlPage />);
 
-    const heading = await screen.findByRole('heading', { name: 'Battery And Power Controls' });
+    const heading = await screen.findByRole('heading', { name: 'Battery and Power Controls' });
     const section = heading.closest('section');
     expect(section).not.toBeNull();
     const slider = within(section!).getByRole('slider', { name: 'Minimum SOC' });

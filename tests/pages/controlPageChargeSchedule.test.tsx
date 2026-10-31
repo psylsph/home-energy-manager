@@ -243,6 +243,59 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     return section;
   }
 
+  const twoSlots = (): ScheduleSlot[] => [
+    { enabled: true, start_hour: 2, start_minute: 0, end_hour: 5, end_minute: 0, target_soc: 100 },
+    { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 },
+  ];
+
+  /** The Timed Export <section>, for the discharge-side slot warnings. */
+  async function timedExportSection() {
+    const heading = await screen.findByRole('heading', { name: 'Timed Export', exact: true });
+    const section = heading.closest('section');
+    if (!section) throw new Error('Timed Export heading has no <section> ancestor');
+    return section;
+  }
+
+  it('shows the same slot-label and old-firmware warnings above slot 2 in both schedules', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        firmware_version: '302',
+        max_charge_slots: 2,
+        max_discharge_slots: 2,
+        charge_slots: twoSlots(),
+        discharge_slots: twoSlots(),
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    for (const section of [await chargeScheduleSection(), await timedExportSection()]) {
+      expect(within(section).getAllByText('Slot Labels Differ from the GivEnergy Cloud')).toHaveLength(1);
+      expect(within(section).getAllByText('Older Gen3 Firmware Detected (ARM FW 302)')).toHaveLength(1);
+      expect(within(section).getByText(/per-slot target SOCs may show stale or wrong values/)).toBeDefined();
+    }
+  });
+
+  it('leaves out the firmware warning on firmware 303 or later', async () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        firmware_version: '303',
+        max_charge_slots: 2,
+        max_discharge_slots: 2,
+        charge_slots: twoSlots(),
+        discharge_slots: twoSlots(),
+      }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const charge = await chargeScheduleSection();
+    expect(within(charge).getByText('Slot Labels Differ from the GivEnergy Cloud')).toBeDefined();
+    expect(screen.queryByText(/Older Gen3 Firmware/)).toBeNull();
+  });
+
   it('shows a configured charge slot as dimmed when enable_charge is off (issue #135)', async () => {
     // The exact register state the reporter is on: HR 94/95 = 02:00/05:00,
     // HR 96 = 0 (enable_charge OFF), HR 116 = 4, HR 242 = 100. The slot is

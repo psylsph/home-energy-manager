@@ -4,6 +4,7 @@ import { useInverterStore } from '../../store/useInverterStore';
 import Toggle from '../Toggle';
 import { AdvancedSettings, SettingsGroup, SettingsSection } from './SettingsSection';
 import { useSettingsSave, type Flash } from './useSettingsSave';
+import HelpTip from '../HelpTip';
 
 const BASE_PANELS = [
   ['power', 'Power'],
@@ -212,7 +213,8 @@ function HistoryAveragesGroup() {
   return (
     <SettingsGroup
       title="History Chart Averages"
-      description="Draw a horizontal line on each History graph showing the average of that series over the selected period. Daily energy and cost graphs are left out, because the average of a running total doesn't tell you much."
+      description="A line on each History graph at the series' average for the period."
+      help="Draw a horizontal line on each History graph showing the average of that series over the selected period. Daily energy and cost graphs are left out, because the average of a running total doesn't tell you much."
     >
       <div className={TOGGLE_ROW}>
         <span className={LABEL}>Show Average Lines</span>
@@ -260,10 +262,14 @@ function EnergyFlowGroup() {
       {externalMeters.length > 0 && (
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
           <div className="flex flex-col gap-0.5 sm:max-w-[60%]">
-            <span className={LABEL}>Grid CT Meter</span>
-            <span className={HINT}>
-              Which CT clamp measures your grid point. “Auto” uses the built-in grid CT when present, otherwise meter 0x01. Used to show grid amps instead of frequency on the energy wheel.
+            <span className={LABEL}>
+              Grid CT Meter{' '}
+              <HelpTip label="Grid CT Meter">
+                Which CT clamp measures your grid point. “Auto” uses the built-in grid CT when present, otherwise meter
+                0x01. Used to show grid amps instead of frequency on the energy wheel.
+              </HelpTip>
             </span>
+            <span className={HINT}>The CT clamp at your grid point, for grid amps on the wheel.</span>
           </div>
           <select
             value={gridMeterAddress}
@@ -291,8 +297,11 @@ function EnergyFlowGroup() {
       )}
 
       <p className={HINT}>
-        Flows below this wattage are treated as zero — no animated line, no arrow, displayed value rounds to 0W.
-        Prevents tiny readings from cluttering the diagram.
+        Flows below this wattage show as zero.{' '}
+        <HelpTip label="the flow threshold">
+          Flows below this wattage are treated as zero — no animated line, no arrow, displayed value rounds to 0W.
+          Prevents tiny readings from cluttering the diagram.
+        </HelpTip>
       </p>
       <div className="flex items-center gap-3">
         <input

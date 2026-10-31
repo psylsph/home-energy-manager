@@ -403,7 +403,7 @@ describe('formatTimedExportState', () => {
         ['entering', 'Timed Export — Entering…'],
         ['exiting', 'Timed Export — Exiting…'],
         ['active_now', 'Timed Export — Exporting Now'],
-        ['blocked_by_pause', 'Timed Export — Blocked By Pause Discharge'],
+        ['blocked_by_pause', 'Timed Export — Blocked by Pause Discharge'],
         ['error', 'Timed Export — Error'],
     ] as const)('formats %s as %s', (state: TimedExportPresentationState, expected: string) => {
         expect(formatTimedExportState(state)).toBe(expected);
@@ -694,7 +694,7 @@ describe('deriveTimedExportButton (single toggle, dynamic label)', () => {
         expect(button.variant).toBe('blocked');
         expect(button.label).toBe('Timed Export — Blocked');
         expect(button.action).toBe('stop');
-        expect(button.ariaLabel).toContain('Blocked By Pause Discharge');
+        expect(button.ariaLabel).toContain('Blocked by Pause Discharge');
     });
 
     it('machine error shows the error variant instead of active', () => {

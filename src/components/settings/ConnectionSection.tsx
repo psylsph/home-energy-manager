@@ -23,7 +23,7 @@ function RestartModal({ host, onClose }: { host: string; onClose: () => void }) 
           onClick={onClose}
           className="w-full py-2.5 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition"
         >
-          Got it
+          Got It
         </button>
       </div>
     </div>

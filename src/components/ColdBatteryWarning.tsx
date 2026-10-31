@@ -62,7 +62,7 @@ export default function ColdBatteryWarning() {
   return (
     <div className="bg-blue-900/30 border border-blue-700/40 rounded-xl px-4 py-3 text-sm space-y-1">
       <p className="text-text-primary font-medium">
-        Cold battery ({tempDisplay})
+        Cold Battery ({tempDisplay})
       </p>
       <p className="text-text-secondary text-xs">
         Enable{' '}

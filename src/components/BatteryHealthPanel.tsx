@@ -30,6 +30,7 @@ import { tooltipStyleProps } from '../lib/chartTooltip';
 import { getHistoryChartGridProps } from '../lib/historyRangeConfig';
 import { useInverterStore } from '../store/useInverterStore';
 import type { BatteryHealth } from '../lib/types';
+import HelpTip from './HelpTip';
 
 // Battery Health (issue #393): the daily per-module summary the backend keeps
 // (cell spread, cycles, BMS-reported capacity, temperature) charted over
@@ -76,8 +77,15 @@ function HealthLineChart({ title, hint, data, modules, unit, digits }: ChartProp
   const axis = useMemo(() => healthAxis(data.map((row) => row.t)), [data]);
   return (
     <div className="space-y-1">
-      <div className="text-text-secondary text-xs">{title}</div>
-      {hint && <div className="text-text-secondary/60 text-[11px]">{hint}</div>}
+      <div className="text-text-secondary text-xs">
+        {title}
+        {hint && (
+          <>
+            {' '}
+            <HelpTip label={title}>{hint}</HelpTip>
+          </>
+        )}
+      </div>
       <ResponsiveContainer width="100%" height={180}>
         {/* The newest day (or month) label can sit centred on the right
             edge, so the right margin holds half of the widest label. */}
@@ -210,8 +218,11 @@ export default function BatteryHealthPanel() {
         <div className="bg-bg-elevated/50 rounded-lg px-4 py-3">
           <p className="text-text-secondary text-sm">No battery health recorded yet.</p>
           <p className="text-text-secondary/60 text-xs mt-1">
-            A daily summary per battery module (cell spread, cycles, capacity) is recorded while the app
-            is running and connected. Trends appear after a few days.
+            Trends appear after a few days connected.{' '}
+            <HelpTip label="battery health recording">
+              A daily summary per battery module (cell spread, cycles, capacity) is recorded while the app
+              is running and connected. Trends appear after a few days.
+            </HelpTip>
           </p>
         </div>
       ) : (
@@ -230,7 +241,7 @@ export default function BatteryHealthPanel() {
                   </div>
                   <div>
                     <div className="text-text-secondary text-xs">
-                      Cell spread{m.spreadKind ? (m.spreadKind === 'full' ? ' · near full' : " · day's worst") : ''}
+                      Cell Spread{m.spreadKind ? (m.spreadKind === 'full' ? ' · Near Full' : " · Day's Worst") : ''}
                     </div>
                     <div className="text-text-primary font-mono">{fmt(m.spreadMv, 0, ' mV')}</div>
                   </div>
@@ -252,13 +263,18 @@ export default function BatteryHealthPanel() {
 
           {socEvents.length > 0 && (
             <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl px-4 py-3 space-y-1">
-              <div className="text-text-primary text-xs font-medium">SOC warnings</div>
+              <div className="text-text-primary text-xs font-medium">
+                SOC Warnings{' '}
+                <HelpTip label="SOC Warnings">
+                  Days the battery&apos;s own state of charge jumped in one step or stayed put while energy
+                  flowed, the pattern of the GivEnergy BMS SOC bug. A full discharge and charge usually
+                  corrects it. HEM can run one for you from Battery Calibration Cycle on the Control page; by
+                  hand, set the battery reserve to 4%, run Force Discharge until it stops, then Force Charge to
+                  100%, and put your reserve back afterwards.
+                </HelpTip>
+              </div>
               <p className="text-text-secondary/80 text-[11px]">
-                Days the battery&apos;s own state of charge jumped in one step or stayed put while energy
-                flowed, the pattern of the GivEnergy BMS SOC bug. A full discharge and charge usually
-                corrects it. HEM can run one for you from Battery calibration cycle on the Control page; by
-                hand, set the battery reserve to 4%, run Force Discharge until it stops, then Force Charge to
-                100%, and put your reserve back afterwards.
+                SOC jumped or stuck on these days. A calibration cycle usually fixes it.
               </p>
               <ul className="text-text-secondary text-xs space-y-0.5">
                 {socEvents.map((e) => (
@@ -283,7 +299,7 @@ export default function BatteryHealthPanel() {
                         effectiveMode === 'full' ? 'bg-accent text-on-accent' : 'bg-bg-elevated text-text-secondary'
                       }`}
                     >
-                      Near full
+                      Near Full
                     </button>
                   )}
                   <button
@@ -294,11 +310,11 @@ export default function BatteryHealthPanel() {
                       effectiveMode === 'worst' ? 'bg-accent text-on-accent' : 'bg-bg-elevated text-text-secondary'
                     }`}
                   >
-                    Day&apos;s worst
+                    Day&apos;s Worst
                   </button>
                 </div>
                 <HealthLineChart
-                  title="Cell spread (highest − lowest cell)"
+                  title="Cell Spread (Highest − Lowest Cell)"
                   hint={
                     effectiveMode === 'full'
                       ? 'Largest spread seen each day while the module was above 95%. Cells drift apart near full and empty even when healthy, so trend this figure; a steady widening is the warning sign.'
@@ -322,11 +338,11 @@ export default function BatteryHealthPanel() {
               />
             )}
             {cyclesData.length > 0 && (
-              <HealthLineChart title="Charge cycles" data={cyclesData} modules={modules} unit="" digits={0} />
+              <HealthLineChart title="Charge Cycles" data={cyclesData} modules={modules} unit="" digits={0} />
             )}
             {tempData.length > 0 && (
               <HealthLineChart
-                title="Hottest cell temperature (daily max)"
+                title="Hottest Cell Temperature (Daily Max)"
                 data={tempData}
                 modules={modules}
                 unit="°C"

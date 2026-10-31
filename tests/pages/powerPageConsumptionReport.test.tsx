@@ -248,9 +248,9 @@ describe('<PowerPage/> — Consumption Report cost integration (issue #131)', ()
       // Chart titles and labels in the generated report follow the same casing
       // as the page (the report is a string, so check the rendered output).
       for (const title of [
-        'Solar Generation Vs Home Load',
-        'Battery Charge Vs Discharge',
-        'Grid Import Vs Export',
+        'Solar Generation vs Home Load',
+        'Battery Charge vs Discharge',
+        'Grid Import vs Export',
         'Grid Balance',
         'Battery Activity',
         'Estimated Solar Destination',

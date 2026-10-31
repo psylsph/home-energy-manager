@@ -4,13 +4,15 @@ import { FIELD_LABEL, LINK, TEXT_INPUT, type AlertsFormProps } from './alertsCon
 
 export default function PushoverSettings({ config, update }: AlertsFormProps) {
   return (
-    <SettingsGroup title="Pushover">
+    <SettingsGroup
+      title="Pushover"
+      help="Paid-once-per-platform push notifications. Create an application at pushover.net/apps/build to get your App API Token, then copy your User Key from your Pushover account settings."
+    >
       <p className="text-text-secondary/70 text-xs font-sans">
-        Paid-once-per-platform push notifications via{' '}
-        <button onClick={() => openExternal('https://pushover.net')} className={LINK}>Pushover</button>.
-        Create an application at{' '}
-        <button onClick={() => openExternal('https://pushover.net/apps/build')} className={LINK}>pushover.net/apps/build</button>{' '}
-        to get your App API Token, then copy your User Key from your Pushover account settings.
+        Push via{' '}
+        <button onClick={() => openExternal('https://pushover.net')} className={LINK}>Pushover</button>; create an
+        app at{' '}
+        <button onClick={() => openExternal('https://pushover.net/apps/build')} className={LINK}>pushover.net/apps/build</button>.
       </p>
       <label className="flex flex-col gap-1">
         <span className={FIELD_LABEL}>App API Token (from pushover.net/apps/build)</span>
@@ -22,7 +24,7 @@ export default function PushoverSettings({ config, update }: AlertsFormProps) {
         />
       </label>
       <label className="flex flex-col gap-1">
-        <span className={FIELD_LABEL}>User Key (from your Pushover account)</span>
+        <span className={FIELD_LABEL}>User Key (from Your Pushover Account)</span>
         <input
           type="password" placeholder="Your User Key"
           value={config.pushover_user_key}

@@ -530,7 +530,7 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       mountApiMocks();
       render(<SettingsPage />);
 
-      fireEvent.click(await screen.findByRole('button', { name: 'Get your Octopus API key' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Get Your Octopus API Key' }));
 
       expect(openExternalMock).toHaveBeenCalledWith(
         'https://octopus.energy/dashboard/new/accounts/personal-details/api-access',
@@ -721,7 +721,7 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       mountApiMocks();
       useInverterStore.setState({ developerMode: true });
       render(<SettingsPage />);
-      expect(await screen.findByText(/SolarWatch/)).toBeDefined();
+      expect(await screen.findByText(/External integrations \(e\.g\. SolarWatch\)/)).toBeDefined();
       // The API configuration itself must stay in Remote / Mobile Network
       // Access even when developer mode is on — no copies back in Developer.
       const developer = screen.getByRole('heading', { name: 'Developer', level: 2 }).closest('section')!;

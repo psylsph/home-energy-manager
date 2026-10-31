@@ -10,6 +10,7 @@ import {
 } from '../lib/exportOnce';
 import type { ExportOnceBooking } from '../lib/exportOnce';
 import type { ExportOnceEvent, ExportOnceListResponse, ScheduleSlot } from '../lib/types';
+import { HeadingWithHelp } from './HelpTip';
 
 const REFRESH_MS = 15_000;
 
@@ -104,10 +105,19 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
 
   return (
     <div className="space-y-3 border-t border-bg-elevated pt-4" data-testid="export-once-card">
-      <h3 className="text-text-primary font-semibold">Export Once</h3>
+      <HeadingWithHelp
+        as="h3"
+        className="text-text-primary font-semibold"
+        title="Export Once"
+        help={
+          <>
+            Book a single export on a date. HEM puts it into the slot you pick shortly before it
+            starts, then puts that slot back to how it was when it ends. Keep HEM running until then.
+          </>
+        }
+      />
       <p className="text-text-secondary/60 text-xs">
-        Book a single export on a date. HEM puts it into the slot you pick shortly before it
-        starts, then puts that slot back to how it was when it ends. Keep HEM running until then.
+        One export on a chosen date, with the slot restored afterwards.
       </p>
 
       {loadFailed && (
@@ -139,7 +149,7 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
                 aria-label={`Cancel export in slot ${event.slot} on ${formatEventWindow(event)}`}
                 className="text-xs text-red-300 hover:text-red-200 disabled:opacity-50"
               >
-                {event.state === 'active' ? 'Stop And Put The Slot Back' : 'Cancel'}
+                {event.state === 'active' ? 'Stop and Put the Slot Back' : 'Cancel'}
               </button>
             </li>
           ))}
@@ -150,7 +160,7 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
         <div className="bg-bg-surface rounded-xl p-3 space-y-3">
           {maxDischargeSlots > 1 && (
             <label className="flex items-center justify-between gap-3 text-sm text-text-secondary">
-              Slot To Use
+              Slot to Use
               <select
                 value={form.slot}
                 onChange={(e) => update({ slot: Number(e.target.value) })}
@@ -204,7 +214,7 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
           {showFloor && (
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-text-secondary text-sm">Stop Exporting At</span>
+                <span className="text-text-secondary text-sm">Stop Exporting at</span>
                 <span className="font-mono text-text-primary text-sm">{form.target_soc}%</span>
               </div>
               <input
@@ -213,7 +223,7 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
                 max={99}
                 step={1}
                 value={form.target_soc}
-                aria-label="Stop Exporting At"
+                aria-label="Stop Exporting at"
                 onChange={(e) => update({ target_soc: Number(e.target.value) })}
                 disabled={saving}
                 className="w-full"

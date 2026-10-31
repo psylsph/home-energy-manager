@@ -4,6 +4,7 @@ import { formatSessionWindow } from '../lib/savingSessions';
 import { dispatchLabel, readDispatchesResponse } from '../lib/smartCharging';
 import type { SmartChargingResponse } from '../lib/types';
 import Toggle from './Toggle';
+import HelpTip from './HelpTip';
 
 const REFRESH_MS = 60_000;
 
@@ -64,8 +65,8 @@ export default function SmartChargingPanel() {
       <h3 className="font-medium text-text-primary">Intelligent Octopus Go</h3>
       <div className="mt-2 flex items-start justify-between gap-3 text-sm text-text-primary">
         <span>
-          Hold The Battery While Octopus Smart-Charges Your Car
-          <span className="mt-1 block text-xs text-text-secondary">
+          Hold the Battery While Octopus Smart-Charges Your Car{' '}
+          <HelpTip label="holding the battery during smart charges">
             Octopus can charge your car outside 23:30–05:30, and the battery would then empty
             itself into the car. With this on, HEM reads your planned charges from Octopus and
             pauses battery discharge while a smart charge runs, so the car charges from the cheap
@@ -73,6 +74,9 @@ export default function SmartChargingPanel() {
             Boost charges are billed at the peak rate, so the battery is left to help with those.
             If HEM cannot read your charges, the battery behaves as normal. HEM must be running and
             connected to the inverter at the time.
+          </HelpTip>
+          <span className="mt-1 block text-xs text-text-secondary">
+            Stops the battery emptying into the car during smart charges. Boosts are left alone.
           </span>
         </span>
         <div className="mt-0.5 shrink-0">
@@ -80,7 +84,7 @@ export default function SmartChargingPanel() {
             checked={data.enabled}
             disabled={saving}
             onChange={(enabled) => void setHold(enabled)}
-            ariaLabel="Hold The Battery While Octopus Smart-Charges Your Car"
+            ariaLabel="Hold the Battery While Octopus Smart-Charges Your Car"
           />
         </div>
       </div>
@@ -103,9 +107,8 @@ export default function SmartChargingPanel() {
 
       {watching && data.error && (
         <p role="status" className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-text-primary">
-          Planned charges could not be checked just now: {data.error}. HEM keeps using the last
-          list it got, and lets the battery behave as normal once that is more than{' '}
-          {data.stale_after_minutes} minutes old.
+          Couldn&apos;t check planned charges: {data.error}. The battery behaves as normal once
+          the last list is more than {data.stale_after_minutes} minutes old.
         </p>
       )}
 

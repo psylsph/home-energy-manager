@@ -16,12 +16,14 @@ export default function NtfySettings({
   onCopyTopic: () => void;
 }) {
   return (
-    <SettingsGroup title="ntfy Push Notifications">
+    <SettingsGroup
+      title="ntfy Push Notifications"
+      help="Install the ntfy app on your phone and subscribe to the topic below. A topic is auto-generated from your inverter serial (unique to you) — edit it only if you want a custom one."
+    >
       <p className="text-text-secondary/70 text-xs font-sans">
         Free push notifications via&nbsp;
-        <button onClick={() => openExternal('https://ntfy.sh')} className={LINK}>ntfy.sh</button>.
-        Install the app on your phone and subscribe to the topic below.
-        A topic is auto-generated from your inverter serial (unique to you) — edit it only if you want a custom one.
+        <button onClick={() => openExternal('https://ntfy.sh')} className={LINK}>ntfy.sh</button>; subscribe to the
+        topic below in its app.
       </p>
       <label className="flex flex-col gap-1">
         <span className={FIELD_LABEL}>Topic (Subscribe to This in the ntfy App)</span>
@@ -53,7 +55,7 @@ export default function NtfySettings({
         )}
       </label>
       <label className="flex flex-col gap-1">
-        <span className={FIELD_LABEL}>Server (optional, default: ntfy.sh)</span>
+        <span className={FIELD_LABEL}>Server (Optional, Default: ntfy.sh)</span>
         <input
           type="text" placeholder="https://ntfy.sh"
           value={config.ntfy_server}

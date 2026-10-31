@@ -11,6 +11,7 @@ import CosyBlockedNotice from '../components/CosyBlockedNotice';
 import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import { cosyBlockedMessage } from '../lib/cosyBlocked';
 import { agileBlockedMessage } from '../lib/agileBlocked';
+import HelpTip from '../components/HelpTip';
 
 export default function InverterPage() {
   const { snapshot, connectionState } = useInverterStore();
@@ -213,8 +214,12 @@ export default function InverterPage() {
 
           <div className="mt-4 bg-bg-elevated/50 rounded-lg px-3 py-2">
             <p className="text-text-secondary text-xs">
-              Battery cell-level data requires a direct connection to each AIO (not yet supported).
-              The Gateway aggregates battery data — only SOC, power, and energy totals are shown here.
+              Battery cell data isn&apos;t available through the Gateway.{' '}
+              <HelpTip label="Gateway battery data">
+                The Gateway aggregates battery telemetry from its child AIO(s) — only aggregate SOC,
+                power and energy totals are reported. Per-cell voltages and module temperatures
+                require a direct connection to each AIO (not yet supported).
+              </HelpTip>
             </p>
           </div>
         </section>
@@ -332,16 +337,6 @@ export default function InverterPage() {
         </div>
       </section>
 
-      {/* Gateway battery note */}
-      {s.device_type_code.startsWith('70') && (
-        <div className="bg-bg-surface rounded-2xl p-5">
-          <p className="text-text-secondary text-xs">
-            Battery cell data not available on the Gateway. The Gateway aggregates battery telemetry
-            from its child AIO(s) — only aggregate SOC, power and energy totals are reported.
-            Per-cell voltages and module temperatures require a direct connection to each AIO (not yet supported).
-          </p>
-        </div>
-      )}
 
       {/* Features & Status */}
       <section className="bg-bg-surface rounded-2xl p-5">

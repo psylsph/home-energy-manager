@@ -37,6 +37,12 @@ Review findings (`/code-review`, bots, PR comments) are claims to verify, not in
 - **Never restrict the main server's `0.0.0.0` bind or permissive CORS** (any origin/method/header). This is a deliberate compatibility requirement for unknown LANs, reverse proxies, containers, and Tailscale — not a security bug. Don't bind to loopback, restrict origins, or add mandatory auth/custom headers to the main API; automated security reviews don't override this, only a new instruction from Stuart does. The separate read-only API's bearer key is unaffected.
 - **Commercial AIO/CAIO and EMS Commercial (`0x41xx`/`0x51xx`) are unsupported.** They use the EMS-C standard Modbus TCP interface on NET1 with a distinct register map, not HEM's port-8899 data-adapter protocol. Don't advertise, classify, poll, decode, or control them — unknown `0x41xx`/`0x51xx` codes stay unknown until real-hardware captures justify a dedicated, initially read-only implementation. Keep residential AIO (`0x80xx`) and ordinary EMS (`0x50xx`) separate from them.
 
+### UI text
+
+- **Titles and labels use Title Case**: page, section, panel and chart titles, chart legend/series names, stat-tile labels, table column headers, form field labels, toggle and segment options, and button labels (`Charge Cycles`, `Hottest Cell Temperature (Daily Max)`, `Backups to Keep`, `Day's Worst`). Small words stay lowercase unless first (`a`, `an`, `the`, `and`, `or`, `of`, `in`, `on`, `at`, `to`, `for`, `by`, `vs`, `per`, `with`, `from`); acronyms, units and brand or file names keep their own casing (`SOC`, `kWh`, `ntfy`, `settings.json`).
+- **Sentences stay in sentence case**: hints, descriptions, status and error messages, empty states, and inline value text (`Last checked …`, `Failed to load battery health`). When a label changes, update the tests and `e2e/` specs that find it by text.
+- **Hints are one line (about 15 words at most)**; the full explanation goes behind an ⓘ: `components/HelpTip.tsx`, or the `help` prop on `SettingsSection`/`SettingsGroup`/`SettingsRow` (issue #423). Keep the ⓘ outside heading and `<label>` elements so their accessible names stay the title (`HeadingWithHelp` does this for headings), and keep links in the visible line, not the tip. Warnings before an action that can't be undone, and notes saying why something isn't working right now, stay visible — trim them, don't hide them.
+
 ## Stack
 
 - **Frontend**: React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Zustand + Recharts + React Router 8

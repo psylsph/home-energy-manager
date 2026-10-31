@@ -69,6 +69,26 @@ import {
 import type { HistoryPoint, PastRange, PlanHistorySnapshot } from '../lib/planHistory';
 import type { InverterSnapshot } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
+import HelpTip from '../components/HelpTip';
+
+/** One-line summary and full explanation of each planner strategy (issue #423). */
+const STRATEGY_HELP: Record<PlanStrategy, { summary: string; detail: string }> = {
+  cheapest: {
+    summary: 'Charges only as far as the cheap rate saves money.',
+    detail:
+      'Charges as far as the cheap rate saves money, then holds the battery there. Plans against the low solar estimate, so a dull day costs less, and leaves room for the sun when exports earn little.',
+  },
+  hold_window: {
+    summary: 'Charges just enough to last until the next cheap period.',
+    detail:
+      'Charges to the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house for the rest of the cheap window.',
+  },
+  min_soc: {
+    summary: 'A full-rate charge just long enough to stay above your minimum.',
+    detail:
+      'Charges at full rate for just long enough to stay above your minimum, then lets the battery run the house again.',
+  },
+};
 
 /**
  * Forecast & planning page (issue #283).
@@ -1205,7 +1225,7 @@ export default function ForecastPage() {
                 htmlFor="forecast-plan-strategy"
                 className="text-text-primary text-xs font-sans font-medium"
               >
-                Charging strategy
+                Charging Strategy
               </label>
               <select
                 id="forecast-plan-strategy"
@@ -1226,11 +1246,8 @@ export default function ForecastPage() {
               )}
             </div>
             <p className="text-[11px] text-text-secondary font-sans">
-              {planStrategy === 'cheapest'
-                ? 'Charges as far as the cheap rate saves money, then holds the battery there. Plans against the low solar estimate, so a dull day costs less, and leaves room for the sun when exports earn little.'
-                : planStrategy === 'hold_window'
-                  ? 'Charges to the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house for the rest of the cheap window.'
-                  : 'Charges at full rate for just long enough to stay above your minimum, then lets the battery run the house again.'}
+              {STRATEGY_HELP[planStrategy].summary}{' '}
+              <HelpTip label="Charging Strategy">{STRATEGY_HELP[planStrategy].detail}</HelpTip>
             </p>
           </div>
           {/* Planner floor — the planner sizes the overnight charge so the
@@ -1243,7 +1260,7 @@ export default function ForecastPage() {
                 title="The planner never lets the battery drop below this percentage over the next 72 h"
                 className="text-text-primary text-xs font-sans font-medium"
               >
-                Minimum battery level
+                Minimum Battery Level
               </label>
               <input
                 id="forecast-min-soc-input"
@@ -1270,9 +1287,12 @@ export default function ForecastPage() {
               )}
             </div>
             <p className="text-[11px] text-text-secondary font-sans">
-              The planner sizes the next overnight charge so the battery stays above this
-              level until the following cheap period. Lower means less grid import; higher
-              keeps more backup in reserve.
+              The battery stays above this until the next cheap period.{' '}
+              <HelpTip label="Minimum Battery Level">
+                The planner sizes the next overnight charge so the battery stays above this
+                level until the following cheap period. Lower means less grid import; higher
+                keeps more backup in reserve.
+              </HelpTip>
             </p>
             {reserveNote && (
               <p data-testid="forecast-min-soc-reserve-note" className="text-[11px] text-amber-300 font-sans">
@@ -1302,10 +1322,10 @@ export default function ForecastPage() {
                 title="Applies the calculated charging plan automatically before the cheap tariff window and notifies you"
                 className="text-text-primary text-xs font-sans font-medium"
               >
-                Apply charging plan automatically
+                Apply Charging Plan Automatically
               </span>
               <Toggle
-                ariaLabel="Apply charging plan automatically"
+                ariaLabel="Apply Charging Plan Automatically"
                 checked={planAutoHandling}
                 onChange={() => {
                   // This save carries the lead field too, so a pending lead
@@ -1373,19 +1393,36 @@ export default function ForecastPage() {
                         windowStart != null
                           ? planAutoApplyTriggerLabel(windowStart, lead)
                           : null;
-                      return trigger && windowStart
-                        ? `On — today's plan applies itself at ${trigger}, ${planAutoApplyLeadInput} min before the ${windowStart} window. You'll get a notification when it runs.`
-                        : 'On — the plan applies itself before each cheap window and you\'ll get a notification when it runs.';
+                      return (
+                        <>
+                          {trigger && windowStart
+                            ? `On — today's plan applies itself at ${trigger}, ${planAutoApplyLeadInput} min before the ${windowStart} window.`
+                            : 'On — the plan applies itself before each cheap window.'}{' '}
+                          <HelpTip label="automatic plan apply">
+                            You&apos;ll get a notification on your alert channels each time it runs. When
+                            no charge is needed it clears the charge slot instead.
+                          </HelpTip>
+                        </>
+                      );
                     })()
                   ) : (
-                    'Auto-refresh keeps this plan’s charge slot in step from the live battery before each cheap window — no daily re-apply needed. Editing the lead time upgrades this to auto-apply.'
+                    <>
+                      Auto-refresh keeps this plan’s charge slot in step.{' '}
+                      <HelpTip label="auto-refresh">
+                        Auto-refresh re-sizes this plan’s charge slot from the live battery before
+                        each cheap window — no daily re-apply needed. Editing the lead time upgrades
+                        this to auto-apply.
+                      </HelpTip>
+                    </>
                   )}
                 </span>
               ) : (
                 <span data-testid="forecast-auto-apply-note">
-                  Off — apply the plan yourself with the button above. Switch
-                  on to have the app apply it automatically before each cheap
-                  window and send you a notification.
+                  Off — apply the plan yourself with the button above.{' '}
+                  <HelpTip label="automatic plan apply">
+                    Switch on to have the app apply it automatically before each cheap window and
+                    send you a notification.
+                  </HelpTip>
                 </span>
               )}
             </p>
@@ -1399,7 +1436,7 @@ export default function ForecastPage() {
                 htmlFor="forecast-charge-eff"
                 className="text-text-primary text-xs font-sans font-medium"
               >
-                Battery charge efficiency
+                Battery Charge Efficiency
               </label>
               <input
                 id="forecast-charge-eff"
@@ -1424,7 +1461,7 @@ export default function ForecastPage() {
                 htmlFor="forecast-discharge-eff"
                 className="text-text-primary text-xs font-sans font-medium"
               >
-                Battery discharge efficiency
+                Battery Discharge Efficiency
               </label>
               <input
                 id="forecast-discharge-eff"
@@ -1616,7 +1653,7 @@ export default function ForecastPage() {
                       className="inline-block w-3 h-px align-middle mr-1"
                       style={{ borderTop: `2px dashed ${PAST_PLANNED_COLOUR}` }}
                     />
-                    Forecast made at the time
+                    Forecast Made at the Time
                   </>
                 ) : null}
                 {hasPastActualSolar ? (
@@ -1626,7 +1663,7 @@ export default function ForecastPage() {
                       className={`inline-block w-3 h-px align-middle mr-1 ${hasPastSolar ? 'ml-3' : ''}`}
                       style={{ borderTop: `2px solid ${PAST_ACTUAL_COLOUR}` }}
                     />
-                    Actual generation
+                    Actual Generation
                   </>
                 ) : null}
               </p>
@@ -1948,13 +1985,13 @@ export default function ForecastPage() {
                     className="inline-block w-3 h-px align-middle mr-1"
                     style={{ borderTop: '2px dashed #34d399' }}
                   />
-                  Charge start
+                  Charge Start
                   <span
                     aria-hidden
                     className="inline-block w-3 h-px align-middle mr-1 ml-3"
                     style={{ borderTop: '2px dashed #fbbf24' }}
                   />
-                  Charge end
+                  Charge End
                 </p>
               ) : null}
             </>
@@ -2164,8 +2201,8 @@ export default function ForecastPage() {
           )}
           {pastDecisions.length === 0 && !past.decisionsFailed && (
             <p data-testid="forecast-past-empty" className="text-xs text-text-secondary">
-              No planner decisions were recorded in this period. The planner records one before each
-              cheap window once weather is set up, so there is nothing to look back on yet.
+              No planner decisions in this period. One is recorded before each cheap window once
+              weather is set up.
             </p>
           )}
         </section>

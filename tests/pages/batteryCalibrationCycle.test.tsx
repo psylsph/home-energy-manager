@@ -66,27 +66,29 @@ describe('BatteryCalibrationCycle', () => {
   it('offers a start with a two-hour hold and warns about exporting at full power', async () => {
     serve(status());
     render(<BatteryCalibrationCycle />);
-    const hold = (await screen.findByLabelText('Hold at 100% for (hours)')) as HTMLInputElement;
+    const hold = (await screen.findByLabelText('Hold at 100% for (Hours)')) as HTMLInputElement;
     expect(hold.value).toBe('2');
-    expect(screen.getByRole('button', { name: 'Start calibration' })).toBeTruthy();
-    expect(screen.getByText(/exports at full power/i)).toBeTruthy();
-    expect(screen.getByText(/tariff/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start Calibration' })).toBeTruthy();
+    expect(screen.getByText(/^Exports at full power\. Start a few hours before your cheap rate\./)).toBeTruthy();
+    // The cost detail sits behind the ⓘ (issue #423).
+    expect(screen.getByRole('button', { name: 'More about the cost of a calibration cycle' })).toBeTruthy();
+    expect(screen.getByText(/on a time-of-use tariff/i).getAttribute('role')).toBe('tooltip');
   });
 
   it('says when the inverter is not supported, with no start button', async () => {
     serve(status({ supported: false }));
     render(<BatteryCalibrationCycle />);
     expect(await screen.findByText(/isn't available for this inverter/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Start calibration' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Start Calibration' })).toBeNull();
   });
 
   it('starts with the chosen hold after confirming', async () => {
     serve(status(), running());
     apiPost.mockResolvedValue({ ok: true });
     render(<BatteryCalibrationCycle />);
-    const hold = await screen.findByLabelText('Hold at 100% for (hours)');
+    const hold = await screen.findByLabelText('Hold at 100% for (Hours)');
     fireEvent.change(hold, { target: { value: '3' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Start calibration' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start Calibration' }));
     await waitFor(() =>
       expect(apiPost).toHaveBeenCalledWith('/api/battery/calibration', { hold_minutes: 180 }),
     );
@@ -98,16 +100,16 @@ describe('BatteryCalibrationCycle', () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     serve(status());
     render(<BatteryCalibrationCycle />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Start calibration' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Start Calibration' }));
     expect(apiPost).not.toHaveBeenCalled();
   });
 
   it('will not start with a hold out of range', async () => {
     serve(status());
     render(<BatteryCalibrationCycle />);
-    const hold = await screen.findByLabelText('Hold at 100% for (hours)');
+    const hold = await screen.findByLabelText('Hold at 100% for (Hours)');
     fireEvent.change(hold, { target: { value: '12' } });
-    const button = screen.getByRole('button', { name: 'Start calibration' }) as HTMLButtonElement;
+    const button = screen.getByRole('button', { name: 'Start Calibration' }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(screen.getByText(/between 0.5 and 8 hours/i)).toBeTruthy();
   });
@@ -116,7 +118,7 @@ describe('BatteryCalibrationCycle', () => {
     serve(status());
     apiPost.mockRejectedValue(new Error('Stop Force Charge before starting a calibration'));
     render(<BatteryCalibrationCycle />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Start calibration' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Start Calibration' }));
     expect(await screen.findByText('Stop Force Charge before starting a calibration')).toBeTruthy();
   });
 
@@ -125,12 +127,12 @@ describe('BatteryCalibrationCycle', () => {
     apiPost.mockResolvedValue({ ok: true });
     render(<BatteryCalibrationCycle />);
     expect(await screen.findByText('Holding at 100% while the cells balance')).toBeTruthy();
-    expect(screen.queryByLabelText('Hold at 100% for (hours)')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel calibration' }));
+    expect(screen.queryByLabelText('Hold at 100% for (Hours)')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel Calibration' }));
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/battery/calibration/cancel'));
     expect(await screen.findByText('Cancelling: putting your settings back')).toBeTruthy();
     // Nothing left to cancel while the settings go back.
-    expect(screen.queryByRole('button', { name: 'Cancel calibration' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel Calibration' })).toBeNull();
   });
 
   it('shows how the last cycle ended', async () => {

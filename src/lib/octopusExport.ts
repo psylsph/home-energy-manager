@@ -565,6 +565,6 @@ export async function buildOctopusSummaryPdf(data: OctopusExportData): Promise<j
       ? `${day.missing_import_intervals}/${day.missing_export_intervals}/${day.missing_gas_intervals}`
       : `${day.missing_import_intervals}/${day.missing_export_intervals}`,
   ]);
-  drawTable(doc, 'Octopus Versus HEM And Missing Data', ['Date', 'Oct Imp.', 'HEM Imp.', 'Diff.', 'Oct Exp.', 'HEM Exp.', 'Diff.', withGas ? 'Missing I/E/G' : 'Missing I/E'], comparisonRows, y);
+  drawTable(doc, 'Octopus Versus HEM and Missing Data', ['Date', 'Oct Imp.', 'HEM Imp.', 'Diff.', 'Oct Exp.', 'HEM Exp.', 'Diff.', withGas ? 'Missing I/E/G' : 'Missing I/E'], comparisonRows, y);
   return doc;
 }

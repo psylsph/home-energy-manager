@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react';
 import { apiGet, apiPost } from '../lib/api';
 import Toggle from './Toggle';
+import HelpTip, { HeadingWithHelp } from './HelpTip';
 import { exportStatusLabel, formatReward, formatSessionWindow, readSessionsResponse } from '../lib/savingSessions';
 import type { SavingSessionsMode, SavingSessionsResponse } from '../lib/types';
 
@@ -12,7 +13,7 @@ const REFRESH_MS = 60_000;
 const MODES: { value: SavingSessionsMode; label: string }[] = [
   { value: 'off', label: 'Off' },
   { value: 'alert', label: 'Alert Only' },
-  { value: 'export', label: 'Alert And Export' },
+  { value: 'export', label: 'Alert and Export' },
 ];
 
 /**
@@ -113,13 +114,13 @@ export default function SavingSessionsPanel() {
       (reply) => {
         setSlotDraft(null);
         setFloorDraft(null);
-        // Saved from a page that still showed Alert And Export after the
+        // Saved from a page that still showed Alert and Export after the
         // mode was changed elsewhere: the values are kept but not used yet.
         const now = MODES.find((item) => item.value === reply?.mode);
         if (now && now.value !== 'export') {
           setSaveNotice(
             `Export settings saved, but Saving Sessions is set to ${now.label}, so nothing will ` +
-              'be exported. Choose Alert And Export to use them.',
+              'be exported. Choose Alert and Export to use them.',
           );
         }
       },
@@ -136,12 +137,21 @@ export default function SavingSessionsPanel() {
     <div className="mt-4 border-t border-bg-elevated pt-4" data-testid="saving-sessions-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="font-medium text-text-primary">Saving Sessions</h3>
+          <HeadingWithHelp
+            as="h3"
+            className="font-medium text-text-primary"
+            title="Saving Sessions"
+            help={
+              <>
+                HEM can message you when you have joined a Saving Session and again shortly before
+                it starts, and can also export from your battery during it. Joining is separate:
+                join in the Octopus app, or let HEM join them for you. Off turns all of this off,
+                joining included.
+              </>
+            }
+          />
           <p className="mt-1 text-xs text-text-secondary">
-            HEM can message you when you have joined a Saving Session and again shortly before
-            it starts, and can also export from your battery during it. Joining is separate:
-            join in the Octopus app, or let HEM join them for you. Off turns all of this off,
-            joining included.
+            Alerts and battery export for the sessions you join.
           </p>
         </div>
         <div className="flex flex-col items-start gap-1">
@@ -191,15 +201,18 @@ export default function SavingSessionsPanel() {
           </h4>
           <div className="flex items-start justify-between gap-3 text-sm text-text-primary">
             <span>
-              Join Sessions For Me
-              <span className="mt-1 block text-xs text-text-secondary">
+              Join Sessions for Me{' '}
+              <HelpTip label="Join Sessions for Me">
                 HEM asks Octopus to join each Saving Session on offer to your account that it has
                 not tried before, including any already on offer when you turn this on. Each one is
                 tried once, and only counts as joined after checking your account shows it.
-                This works the same whichever of Alert Only or Alert And Export is chosen. Your
+                This works the same whichever of Alert Only or Alert and Export is chosen. Your
                 account must already be signed up to Octoplus Saving Sessions; HEM will not sign
                 it up. If a join fails, HEM shows it here, messages you if an alert channel is
                 set up, and does not try that session again.
+              </HelpTip>
+              <span className="mt-1 block text-xs text-text-secondary">
+                Tries each session on offer once. Needs an Octoplus sign-up.
               </span>
             </span>
             <div className="mt-0.5 shrink-0">
@@ -207,15 +220,18 @@ export default function SavingSessionsPanel() {
                 checked={data.auto_join}
                 disabled={saving}
                 onChange={(auto_join) => void post('/api/octopus/sessions/mode', { auto_join })}
-                ariaLabel="Join Sessions For Me"
+                ariaLabel="Join Sessions for Me"
               />
             </div>
           </div>
           {!watching && data.auto_join && (
             <p role="status" className="mt-2 text-xs text-text-secondary">
-              Joining is paused while Saving Sessions is Off. Choosing Alert Only or Alert And
-              Export starts a check, which straight away joins any session on offer that it has
-              not tried before, if your account is signed up to Octoplus Saving Sessions.
+              Paused while Saving Sessions is Off.{' '}
+              <HelpTip label="paused joining">
+                Joining is paused while Saving Sessions is Off. Choosing Alert Only or Alert and
+                Export starts a check, which straight away joins any session on offer that it has
+                not tried before, if your account is signed up to Octoplus Saving Sessions.
+              </HelpTip>
             </p>
           )}
           {watching && data.auto_join && data.join_failures.length > 0 && (
@@ -238,18 +254,21 @@ export default function SavingSessionsPanel() {
       {exporting && (
         <div className="mt-3 space-y-3 rounded-lg bg-bg-elevated p-3">
           <p className="text-xs text-text-primary">
-            HEM will export from your battery during each Saving Session you have joined.{' '}
-            {showSlotPicker
-              ? 'The slot below is used for the session'
-              : 'Your inverter has a single export slot, which is used for the session'}{' '}
-            and put back to how it was afterwards. HEM must be running and connected to the
-            inverter at the time.
+            Exports during each session you join, then puts your settings back.{' '}
+            <HelpTip label="Alert and Export">
+              HEM will export from your battery during each Saving Session you have joined.{' '}
+              {showSlotPicker
+                ? 'The slot below is used for the session'
+                : 'Your inverter has a single export slot, which is used for the session'}{' '}
+              and put back to how it was afterwards. HEM must be running and connected to the
+              inverter at the time.
+            </HelpTip>
           </p>
           {(showSlotPicker || showFloor) && (
           <div className="flex flex-wrap items-center gap-4">
             {showSlotPicker && (
             <label className="flex items-center gap-2 text-sm text-text-secondary">
-              Slot To Use
+              Slot to Use
               <select
                 value={slot}
                 onChange={(e) => setSlotDraft(Number(e.target.value))}
@@ -264,14 +283,14 @@ export default function SavingSessionsPanel() {
             )}
             {showFloor && (
               <label className="flex flex-1 items-center gap-2 text-sm text-text-secondary">
-                Stop Exporting At
+                Stop Exporting at
                 <input
                   type="range"
                   min={4}
                   max={99}
                   step={1}
                   value={floor}
-                  aria-label="Stop Exporting At"
+                  aria-label="Stop Exporting at"
                   onChange={(e) => setFloorDraft(Number(e.target.value))}
                   disabled={saving}
                   className="min-w-24 flex-1"
@@ -299,7 +318,7 @@ export default function SavingSessionsPanel() {
       )}
 
       {/* Alert Only with joining on and no channel may be deliberate (join but
-          stay quiet), so it is a note rather than a warning. In Alert And Export
+          stay quiet), so it is a note rather than a warning. In Alert and Export
           the export messages would be lost too, and nothing is joined until a
           check has succeeded for an account signed up to Octoplus, so those
           keep the warning. alerts_ready is also false when a channel exists

@@ -19,12 +19,22 @@ function StoreQr({ url, alt }: { url: string; alt: string }) {
 
 export default function TelegramSettings({ config, update }: AlertsFormProps) {
   return (
-    <SettingsGroup title="Telegram">
+    <SettingsGroup
+      title="Telegram"
+      help={
+        <>
+          Send alerts when critical conditions are detected. Create a bot via @BotFather on Telegram, get your
+          bot token, then send /start to your bot and get your chat ID from @userinfobot. Once configured, send{' '}
+          <code>/status</code>, <code>/today</code>, <code>/battery</code>, or <code>/help</code> in the chat to ask
+          your inverter a question. The bot only replies to this chat id.
+        </>
+      }
+    >
       <p className={FIELD_LABEL}>
-        <strong className="text-green-400">Recommended</strong> — Send alerts when critical conditions are detected. Create a bot via{' '}
-        <button onClick={() => openExternal('https://t.me/botfather')} className={LINK}>@BotFather</button> on Telegram, get your bot token, then send /start to your bot and get your chat ID from{' '}
+        <strong className="text-green-400">Recommended</strong> — make a bot with{' '}
+        <button onClick={() => openExternal('https://t.me/botfather')} className={LINK}>@BotFather</button>, then get
+        your chat ID from{' '}
         <button onClick={() => openExternal('https://t.me/userinfobot')} className={LINK}>@userinfobot</button>.
-        Once configured, send <code>/status</code>, <code>/today</code>, <code>/battery</code>, or <code>/help</code> in the chat to ask your inverter a question. The bot only replies to this chat id.
       </p>
       <label className="flex flex-col gap-1">
         <span className={FIELD_LABEL}>Bot Token (from @BotFather)</span>

@@ -362,7 +362,7 @@ export default function OctopusPage() {
               disabled={!billing || !comparison}
               className="rounded-lg bg-bg-elevated px-3 py-2 text-sm font-medium text-text-primary disabled:opacity-50"
             >
-              PDF report
+              PDF Report
             </button>
             <button
               type="button"
@@ -726,7 +726,7 @@ export default function OctopusPage() {
           <h3 className="font-medium text-text-primary">Daily HEM Comparison</h3>
           <div className="mt-4 max-h-96 overflow-auto">
             <table className="w-full min-w-[940px] text-left text-xs">
-              <thead className="sticky top-0 bg-bg-surface text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Date</th><th className="px-2 py-2">Octopus import</th><th className="px-2 py-2">HEM import</th><th className="px-2 py-2">Difference</th><th className="px-2 py-2">Octopus export</th><th className="px-2 py-2">HEM export</th><th className="px-2 py-2">Difference</th></tr></thead>
+              <thead className="sticky top-0 bg-bg-surface text-text-secondary"><tr className="border-b border-white/10"><th className="px-2 py-2">Date</th><th className="px-2 py-2">Octopus Import</th><th className="px-2 py-2">HEM Import</th><th className="px-2 py-2">Difference</th><th className="px-2 py-2">Octopus Export</th><th className="px-2 py-2">HEM Export</th><th className="px-2 py-2">Difference</th></tr></thead>
               <tbody>
                 {[...comparison.data.days].reverse().map((day) => (
                   <tr key={day.date} className="border-b border-white/5 text-text-primary"><td className="px-2 py-2 font-medium">{day.date}</td><td className="px-2 py-2">{formatComparison(day.octopus_import_kwh)}</td><td className="px-2 py-2">{formatComparison(day.hem_import_kwh)}</td><td className="px-2 py-2">{formatComparison(day.import_difference_kwh)}{day.import_difference_percent != null ? ` (${day.import_difference_percent.toFixed(1)}%)` : ''}</td><td className="px-2 py-2">{formatComparison(day.octopus_export_kwh)}</td><td className="px-2 py-2">{formatComparison(day.hem_export_kwh)}</td><td className="px-2 py-2">{formatComparison(day.export_difference_kwh)}{day.export_difference_percent != null ? ` (${day.export_difference_percent.toFixed(1)}%)` : ''}</td></tr>

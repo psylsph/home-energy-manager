@@ -49,6 +49,16 @@ describe('SmartChargingPanel', () => {
   });
   afterEach(cleanup);
 
+  it('keeps the hold explanation behind an ⓘ, with a one-line hint (issue #423)', async () => {
+    apiGet.mockResolvedValue(reply());
+    render(<SmartChargingPanel />);
+    const help = await screen.findByRole('button', { name: 'More about holding the battery during smart charges' });
+    expect(screen.getByText(/Boosts are left alone/)).toBeTruthy();
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    fireEvent.click(help);
+    expect(screen.getByRole('tooltip').textContent).toMatch(/Boost charges are billed at the peak rate/);
+  });
+
   it('lists planned charges in UK time and says which hold the battery', async () => {
     apiGet.mockResolvedValue(reply({ dispatches: [smart, boost] }));
     render(<SmartChargingPanel />);
@@ -63,7 +73,7 @@ describe('SmartChargingPanel', () => {
     apiGet.mockResolvedValue(reply({ enabled: false }));
     apiPost.mockResolvedValue({ ok: true, enabled: true });
     render(<SmartChargingPanel />);
-    const toggle = await screen.findByRole('switch', { name: /Hold The Battery/ });
+    const toggle = await screen.findByRole('switch', { name: /Hold the Battery/ });
     expect(toggle.getAttribute('aria-checked')).toBe('false');
     fireEvent.click(toggle);
     await waitFor(() =>
@@ -75,7 +85,7 @@ describe('SmartChargingPanel', () => {
   it('shows only the switch and what it does while off', async () => {
     apiGet.mockResolvedValue(reply({ enabled: false, dispatches: [smart] }));
     render(<SmartChargingPanel />);
-    await screen.findByRole('switch', { name: /Hold The Battery/ });
+    await screen.findByRole('switch', { name: /Hold the Battery/ });
     expect(screen.getByText(/23:30–05:30/)).toBeTruthy();
     expect(screen.queryByText(/Mon 19 Oct/)).toBeNull();
     expect(screen.queryByText(/Last checked/)).toBeNull();
@@ -98,8 +108,8 @@ describe('SmartChargingPanel', () => {
       reply({ error: 'Octopus returned an error: Unable to fetch (KT-CT-4340)', dispatches: [smart] }),
     );
     render(<SmartChargingPanel />);
-    expect(await screen.findByText(/could not be checked just now: .*KT-CT-4340/)).toBeTruthy();
-    expect(screen.getByText(/more than 15 minutes old/)).toBeTruthy();
+    expect(await screen.findByText(/Couldn.t check planned charges: .*KT-CT-4340/)).toBeTruthy();
+    expect(screen.getByText(/behaves as normal once the last list is more than 15 minutes old/)).toBeTruthy();
     expect(screen.getByText(/Mon 19 Oct, 14:00–15:30/)).toBeTruthy();
   });
 
@@ -120,10 +130,10 @@ describe('SmartChargingPanel', () => {
     apiGet.mockResolvedValue(reply({ enabled: false }));
     apiPost.mockRejectedValue(new Error('Could not save the setting: disk full'));
     render(<SmartChargingPanel />);
-    fireEvent.click(await screen.findByRole('switch', { name: /Hold The Battery/ }));
+    fireEvent.click(await screen.findByRole('switch', { name: /Hold the Battery/ }));
     expect(await screen.findByText(/disk full/)).toBeTruthy();
     expect(
-      screen.getByRole('switch', { name: /Hold The Battery/ }).getAttribute('aria-checked'),
+      screen.getByRole('switch', { name: /Hold the Battery/ }).getAttribute('aria-checked'),
     ).toBe('false');
   });
 
@@ -160,7 +170,7 @@ describe('SmartChargingPanel', () => {
       expect(apiGet).toHaveBeenCalledTimes(2);
 
       expect(screen.getByTestId('smart-charging-panel')).toBeTruthy();
-      expect(screen.getByRole('switch', { name: /Hold The Battery/i })).toBeTruthy();
+      expect(screen.getByRole('switch', { name: /Hold the Battery/i })).toBeTruthy();
       expect(screen.getByText(/Mon 19 Oct, 14:00–15:30/)).toBeTruthy();
     });
 
@@ -182,7 +192,7 @@ describe('SmartChargingPanel', () => {
       apiGet.mockResolvedValueOnce(reply({ enabled: true }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SmartChargingPanel />);
-      const toggle = await screen.findByRole('switch', { name: /Hold The Battery/i });
+      const toggle = await screen.findByRole('switch', { name: /Hold the Battery/i });
       expect(toggle.getAttribute('aria-checked')).toBe('true');
 
       apiGet.mockRejectedValue(new Error('offline'));
@@ -193,7 +203,7 @@ describe('SmartChargingPanel', () => {
       });
 
       expect(
-        screen.getByRole('switch', { name: /Hold The Battery/i }).getAttribute('aria-checked'),
+        screen.getByRole('switch', { name: /Hold the Battery/i }).getAttribute('aria-checked'),
       ).toBe('false');
     });
   });

@@ -65,10 +65,9 @@ export default function AwaitingConnection({
                 Can't reach the dongle after {Math.min(connectFailures, 99)}+ attempts
               </p>
               <p className="text-xs text-amber-100/80 leading-relaxed">
-                This is usually because the GivEnergy dongle has locked up.
-                Try <strong>power-cycling the inverter</strong> (turn off the
-                AC isolator, wait 30&nbsp;seconds, turn it back on). The dongle
-                will reboot and should reconnect within a few minutes.
+                The dongle has probably locked up. <strong>Power-cycle the inverter</strong>{' '}
+                (AC isolator off for 30&nbsp;seconds, then on); it should reconnect within a few
+                minutes.
               </p>
               <button
                 onClick={reconnect}

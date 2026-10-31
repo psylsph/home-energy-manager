@@ -45,11 +45,11 @@ describe('HistoryBackupPanel', () => {
   it('shows the config with the default folder as a placeholder', async () => {
     serve(status());
     render(<HistoryBackupPanel />);
-    const folder = (await screen.findByLabelText('Backup folder')) as HTMLInputElement;
+    const folder = (await screen.findByLabelText('Backup Folder')) as HTMLInputElement;
     expect(folder.value).toBe('');
     expect(folder.placeholder).toBe('/home/me/.givenergy-local/backups');
-    expect((screen.getByLabelText('Every (hours)') as HTMLInputElement).value).toBe('24');
-    expect((screen.getByLabelText('Backups to keep') as HTMLInputElement).value).toBe('7');
+    expect((screen.getByLabelText('Every (Hours)') as HTMLInputElement).value).toBe('24');
+    expect((screen.getByLabelText('Backups to Keep') as HTMLInputElement).value).toBe('7');
     expect(screen.getByRole('switch', { name: 'Automatic Backups' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.getByRole('switch', { name: 'Include settings.json' }).getAttribute('aria-checked')).toBe('false');
     expect(screen.getByText('No backup yet.')).toBeTruthy();
@@ -89,20 +89,20 @@ describe('HistoryBackupPanel', () => {
     serve(status(), status({ config: { ...status().config, destination: '/mnt/nas', keep: 14 } }));
     apiPost.mockResolvedValue({ ok: true });
     render(<HistoryBackupPanel />);
-    fireEvent.change(await screen.findByLabelText('Backup folder'), { target: { value: ' /mnt/nas ' } });
-    fireEvent.change(screen.getByLabelText('Backups to keep'), { target: { value: '14' } });
+    fireEvent.change(await screen.findByLabelText('Backup Folder'), { target: { value: ' /mnt/nas ' } });
+    fireEvent.change(screen.getByLabelText('Backups to Keep'), { target: { value: '14' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(apiPost).toHaveBeenCalledWith('/api/backup', { destination: '/mnt/nas', keep: 14, interval_hours: 24 }),
     );
     expect(await screen.findByRole('status')).toHaveProperty('textContent', 'Backup settings saved');
-    await waitFor(() => expect((screen.getByLabelText('Backup folder') as HTMLInputElement).value).toBe('/mnt/nas'));
+    await waitFor(() => expect((screen.getByLabelText('Backup Folder') as HTMLInputElement).value).toBe('/mnt/nas'));
   });
 
   it('does not send an invalid form', async () => {
     serve(status());
     render(<HistoryBackupPanel />);
-    fireEvent.change(await screen.findByLabelText('Every (hours)'), { target: { value: '0' } });
+    fireEvent.change(await screen.findByLabelText('Every (Hours)'), { target: { value: '0' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect((await screen.findByRole('alert')).textContent).toContain('hours');
     expect(apiPost).not.toHaveBeenCalled();
@@ -112,12 +112,12 @@ describe('HistoryBackupPanel', () => {
     serve(status());
     apiPost.mockRejectedValue(new Error('Backup folder /mnt/nas does not exist (is the drive or share mounted?)'));
     render(<HistoryBackupPanel />);
-    fireEvent.change(await screen.findByLabelText('Backup folder'), { target: { value: '/mnt/nas' } });
+    fireEvent.change(await screen.findByLabelText('Backup Folder'), { target: { value: '/mnt/nas' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect((await screen.findByRole('alert')).textContent).toContain('does not exist');
     // What was typed survives the rejection, so it can be fixed and saved again.
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
-    expect((screen.getByLabelText('Backup folder') as HTMLInputElement).value).toBe('/mnt/nas');
+    expect((screen.getByLabelText('Backup Folder') as HTMLInputElement).value).toBe('/mnt/nas');
   });
 
   it('turns automatic backups and settings.json on and off', async () => {
@@ -188,13 +188,13 @@ describe('HistoryBackupPanel', () => {
     serve(status(), status({ config: { ...status().config, include_settings: true } }));
     apiPost.mockResolvedValue({ ok: true });
     render(<HistoryBackupPanel />);
-    fireEvent.change(await screen.findByLabelText('Backup folder'), { target: { value: '/mnt/nas' } });
-    fireEvent.change(screen.getByLabelText('Backups to keep'), { target: { value: '30' } });
+    fireEvent.change(await screen.findByLabelText('Backup Folder'), { target: { value: '/mnt/nas' } });
+    fireEvent.change(screen.getByLabelText('Backups to Keep'), { target: { value: '30' } });
     fireEvent.click(screen.getByRole('switch', { name: 'Include settings.json' }));
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/backup', { include_settings: true }));
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
-    expect((screen.getByLabelText('Backup folder') as HTMLInputElement).value).toBe('/mnt/nas');
-    expect((screen.getByLabelText('Backups to keep') as HTMLInputElement).value).toBe('30');
+    expect((screen.getByLabelText('Backup Folder') as HTMLInputElement).value).toBe('/mnt/nas');
+    expect((screen.getByLabelText('Backups to Keep') as HTMLInputElement).value).toBe('30');
     // The switch shows the new state straight away.
     expect(screen.getByRole('switch', { name: 'Include settings.json' }).getAttribute('aria-checked')).toBe('true');
   });

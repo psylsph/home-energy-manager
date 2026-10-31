@@ -92,7 +92,7 @@ export function adaptiveStateLabel(state: string | undefined): string {
     case 'outside_window': return 'Outside Configured Period';
     case 'preferred': return 'Preferred Rate Active';
     case 'recovery': return 'Low-SOC Recovery Active';
-    case 'suspended_auto_winter': return 'Suspended By Auto Winter';
+    case 'suspended_auto_winter': return 'Suspended by Auto Winter';
     case 'restoring': return 'Restoring Manual Rate';
     case 'error': return 'Error';
     default: return 'Inactive';

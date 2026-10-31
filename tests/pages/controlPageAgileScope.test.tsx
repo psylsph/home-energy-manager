@@ -367,7 +367,7 @@ describe('<ControlPage/> — Agile scope UI', () => {
     const { default: ControlPage } = await import('../../src/pages/ControlPage');
     render(<ControlPage />);
 
-    const toggle = await screen.findByRole('switch', { name: 'Hold Minimum SOC during schedule' });
+    const toggle = await screen.findByRole('switch', { name: 'Hold Minimum SOC During Schedule' });
     expect(toggle).toBeDefined();
     fireEvent.click(toggle);
     const floor = screen.getByRole('slider', { name: /floor/i }) as HTMLInputElement;

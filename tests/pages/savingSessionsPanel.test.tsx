@@ -47,6 +47,16 @@ describe('SavingSessionsPanel', () => {
   });
   afterEach(cleanup);
 
+  it('keeps the joining explanation behind an ⓘ, with a one-line hint (issue #423)', async () => {
+    apiGet.mockResolvedValue(reply({ configured: true }));
+    render(<SavingSessionsPanel />);
+    const help = await screen.findByRole('button', { name: 'More about Join Sessions for Me' });
+    expect(screen.getByText('Tries each session on offer once. Needs an Octoplus sign-up.')).toBeTruthy();
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    fireEvent.click(help);
+    expect(screen.getByRole('tooltip').textContent).toMatch(/only counts as joined after checking your account/);
+  });
+
   it('lists joined sessions in UK time with the reward', async () => {
     apiGet.mockResolvedValue(reply({ sessions: [session] }));
     render(<SavingSessionsPanel />);
@@ -215,14 +225,14 @@ describe('SavingSessionsPanel', () => {
     );
   });
 
-  describe('Alert And Export', () => {
+  describe('Alert and Export', () => {
     const exporting = (overrides: Partial<SavingSessionsResponse> = {}) =>
       reply({ mode: 'export', ...overrides });
 
     it('offers three modes and marks the current one', async () => {
       apiGet.mockResolvedValue(exporting());
       render(<SavingSessionsPanel />);
-      expect((await screen.findByRole('button', { name: 'Alert And Export' })).getAttribute('aria-pressed')).toBe('true');
+      expect((await screen.findByRole('button', { name: 'Alert and Export' })).getAttribute('aria-pressed')).toBe('true');
       expect(screen.getByRole('button', { name: 'Alert Only' }).getAttribute('aria-pressed')).toBe('false');
       expect(screen.getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('false');
     });
@@ -232,7 +242,7 @@ describe('SavingSessionsPanel', () => {
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
       expect(screen.queryByText(/will export from your battery/)).toBeNull();
-      fireEvent.click(await screen.findByRole('button', { name: 'Alert And Export' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Alert and Export' }));
       await waitFor(() =>
         expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { mode: 'export' }),
       );
@@ -242,24 +252,24 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(exporting());
       const first = render(<SavingSessionsPanel />);
       expect(await screen.findByText(/will export from your battery/)).toBeTruthy();
-      expect(screen.getByLabelText('Slot To Use')).toBeTruthy();
-      expect(screen.getByLabelText('Stop Exporting At')).toBeTruthy();
+      expect(screen.getByLabelText('Slot to Use')).toBeTruthy();
+      expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
       first.unmount();
 
       apiGet.mockResolvedValue(reply());
       render(<SavingSessionsPanel />);
       await screen.findByRole('button', { name: 'Off' });
-      expect(screen.queryByLabelText('Slot To Use')).toBeNull();
+      expect(screen.queryByLabelText('Slot to Use')).toBeNull();
       expect(screen.queryByText(/will export from your battery/)).toBeNull();
     });
 
     it('offers exactly the inverter\'s slots, with the saved one selected', async () => {
       apiGet.mockResolvedValue(exporting({ export_slot: 2, max_discharge_slots: 3 }));
       render(<SavingSessionsPanel />);
-      const select = (await screen.findByLabelText('Slot To Use')) as HTMLSelectElement;
+      const select = (await screen.findByLabelText('Slot to Use')) as HTMLSelectElement;
       expect(Array.from(select.options).map((o) => o.value)).toEqual(['1', '2', '3']);
       expect(select.value).toBe('2');
-      expect((screen.getByLabelText('Stop Exporting At') as HTMLInputElement).value).toBe('20');
+      expect((screen.getByLabelText('Stop Exporting at') as HTMLInputElement).value).toBe('20');
     });
 
     it('saves a changed slot and floor together, and not before anything changed', async () => {
@@ -269,8 +279,8 @@ describe('SavingSessionsPanel', () => {
       const save = await screen.findByRole('button', { name: 'Save Export Settings' });
       expect(save).toBeDisabled();
 
-      fireEvent.change(screen.getByLabelText('Slot To Use'), { target: { value: '3' } });
-      fireEvent.change(screen.getByLabelText('Stop Exporting At'), { target: { value: '45' } });
+      fireEvent.change(screen.getByLabelText('Slot to Use'), { target: { value: '3' } });
+      fireEvent.change(screen.getByLabelText('Stop Exporting at'), { target: { value: '45' } });
       expect(save).toBeEnabled();
       fireEvent.click(save);
       await waitFor(() =>
@@ -290,8 +300,8 @@ describe('SavingSessionsPanel', () => {
       render(<SavingSessionsPanel />);
       expect(await screen.findByText(/will export from your battery/)).toBeTruthy();
       expect(screen.getByText(/single export slot/)).toBeTruthy();
-      expect(screen.queryByLabelText('Slot To Use')).toBeNull();
-      expect(screen.queryByLabelText('Stop Exporting At')).toBeNull();
+      expect(screen.queryByLabelText('Slot to Use')).toBeNull();
+      expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Save Export Settings' })).toBeNull();
     });
 
@@ -299,9 +309,9 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(exporting({ max_discharge_slots: 2, export_slot: 1 }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      const select = (await screen.findByLabelText('Slot To Use')) as HTMLSelectElement;
+      const select = (await screen.findByLabelText('Slot to Use')) as HTMLSelectElement;
       expect(Array.from(select.options).map((o) => o.value)).toEqual(['1', '2']);
-      expect(screen.queryByLabelText('Stop Exporting At')).toBeNull();
+      expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
       const save = screen.getByRole('button', { name: 'Save Export Settings' });
       expect(save).toBeDisabled();
 
@@ -322,7 +332,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(exporting({ max_discharge_slots: 1, export_slot: 2 }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      const select = (await screen.findByLabelText('Slot To Use')) as HTMLSelectElement;
+      const select = (await screen.findByLabelText('Slot to Use')) as HTMLSelectElement;
       expect(Array.from(select.options).map((o) => o.value)).toEqual(['1']);
       expect(select.value).toBe('1');
       const save = screen.getByRole('button', { name: 'Save Export Settings' });
@@ -389,7 +399,7 @@ describe('SavingSessionsPanel', () => {
       render(<SavingSessionsPanel />);
       await screen.findByText(/Mon 19 Oct/);
       expect(screen.queryByRole('button', { name: /Skip Session/ })).toBeNull();
-      expect(screen.queryByLabelText('Slot To Use')).toBeNull();
+      expect(screen.queryByLabelText('Slot to Use')).toBeNull();
     });
 
     it('says so when export settings are saved while the mode has changed elsewhere', async () => {
@@ -398,18 +408,18 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(exporting());
       apiPost.mockResolvedValue({ ok: true, mode: 'alert' });
       render(<SavingSessionsPanel />);
-      fireEvent.change(await screen.findByLabelText('Slot To Use'), { target: { value: '3' } });
+      fireEvent.change(await screen.findByLabelText('Slot to Use'), { target: { value: '3' } });
       fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
       const notice = await screen.findByText(/Export settings saved, but Saving Sessions is set to Alert Only/);
       expect(notice.getAttribute('role')).toBe('status');
-      expect(notice.textContent).toMatch(/Choose Alert And Export/);
+      expect(notice.textContent).toMatch(/Choose Alert and Export/);
     });
 
-    it('says nothing extra when export settings are saved in Alert And Export', async () => {
+    it('says nothing extra when export settings are saved in Alert and Export', async () => {
       apiGet.mockResolvedValue(exporting());
       apiPost.mockResolvedValue({ ok: true, mode: 'export' });
       render(<SavingSessionsPanel />);
-      fireEvent.change(await screen.findByLabelText('Slot To Use'), { target: { value: '3' } });
+      fireEvent.change(await screen.findByLabelText('Slot to Use'), { target: { value: '3' } });
       fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
       await waitFor(() => expect(apiPost).toHaveBeenCalled());
       await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(2));
@@ -420,7 +430,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(exporting());
       apiPost.mockRejectedValue(new Error('Slot must be between 1 and 2 on this inverter'));
       render(<SavingSessionsPanel />);
-      fireEvent.change(await screen.findByLabelText('Slot To Use'), { target: { value: '3' } });
+      fireEvent.change(await screen.findByLabelText('Slot to Use'), { target: { value: '3' } });
       fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
       expect(await screen.findByText('Slot must be between 1 and 2 on this inverter')).toBeTruthy();
       expect(screen.queryByRole('alert')).toBeNull();
@@ -432,7 +442,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply());
       render(<SavingSessionsPanel />);
       const box = (await screen.findByRole('switch', {
-        name: /Join Sessions For Me/,
+        name: /Join Sessions for Me/,
       }));
       // Not "new": sessions already on offer are joined too.
       expect(screen.queryByText(/new sessions/i)).toBeNull();
@@ -448,7 +458,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ mode: 'export' }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      fireEvent.click(await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
+      fireEvent.click(await screen.findByRole('switch', { name: /Join Sessions for Me/ }));
       await waitFor(() =>
         // The tick alone: a stale mode sent with it could switch the
         // feature and stop a running export.
@@ -461,7 +471,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ auto_join: true }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      const box = (await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
+      const box = (await screen.findByRole('switch', { name: /Join Sessions for Me/ }));
       expect(box.getAttribute('aria-checked')).toBe('true');
       fireEvent.click(box);
       await waitFor(() =>
@@ -475,7 +485,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ mode: 'off', auto_join: true }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      const box = (await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
+      const box = (await screen.findByRole('switch', { name: /Join Sessions for Me/ }));
       expect(box.getAttribute('aria-checked')).toBe('true');
       fireEvent.click(box);
       await waitFor(() =>
@@ -523,7 +533,7 @@ describe('SavingSessionsPanel', () => {
       apiGet.mockResolvedValue(reply({ mode: 'export' }));
       render(<SavingSessionsPanel />);
       const section = await screen.findByRole('group', { name: 'Joining' });
-      const box = screen.getByRole('switch', { name: /Join Sessions For Me/ });
+      const box = screen.getByRole('switch', { name: /Join Sessions for Me/ });
       expect(section.contains(box)).toBe(true);
       const exportText = screen.getByText(/will export from your battery/);
       expect(section.compareDocumentPosition(exportText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -535,8 +545,8 @@ describe('SavingSessionsPanel', () => {
         apiPost.mockReset();
         apiPost.mockResolvedValue({ ok: true });
         const { unmount } = render(<SavingSessionsPanel />);
-        fireEvent.click(await screen.findByRole('switch', { name: /Join Sessions For Me/ }));
-        expect(screen.getByText(/whichever of Alert Only or Alert And Export is chosen/)).toBeTruthy();
+        fireEvent.click(await screen.findByRole('switch', { name: /Join Sessions for Me/ }));
+        expect(screen.getByText(/whichever of Alert Only or Alert and Export is chosen/)).toBeTruthy();
         await waitFor(() =>
           expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { auto_join: true }),
         );
@@ -549,9 +559,12 @@ describe('SavingSessionsPanel', () => {
       // choice survives. Without this note it looked like joining was armed.
       apiGet.mockResolvedValue(reply({ mode: 'off', auto_join: true }));
       render(<SavingSessionsPanel />);
-      const note = await screen.findByText(/Joining is paused while Saving Sessions is Off/);
-      expect(note.getAttribute('role')).toBe('status');
-      expect(note.textContent).toMatch(/Alert Only or Alert And Export/);
+      // The one-line note stays visible; the detail sits in its ⓘ tip (issue #423).
+      const tip = await screen.findByText(/Joining is paused while Saving Sessions is Off/);
+      expect(tip.getAttribute('role')).toBe('tooltip');
+      const note = tip.closest('[role="status"]') as HTMLElement;
+      expect(note.textContent).toMatch(/^Paused while Saving Sessions is Off\./);
+      expect(note.textContent).toMatch(/Alert Only or Alert and Export/);
       // Choosing a mode checks at once, joining whatever is on offer now.
       expect(note.textContent).toMatch(/straight away joins any session on offer that it has not tried before/);
       // Joining needs an account signed up to Octoplus, which is not known while Off.
@@ -617,7 +630,7 @@ describe('SavingSessionsPanel', () => {
       expect(screen.queryByText(/HEM will still join sessions for you/)).toBeNull();
     });
 
-    it('still warns about a missing alert channel in Alert And Export, joining or not', async () => {
+    it('still warns about a missing alert channel in Alert and Export, joining or not', async () => {
       // Export start, finish and failure messages would go nowhere too.
       apiGet.mockResolvedValue(reply({ mode: 'export', alerts_ready: false, auto_join: true }));
       render(<SavingSessionsPanel />);
@@ -637,7 +650,7 @@ describe('SavingSessionsPanel', () => {
         }],
       }));
       render(<SavingSessionsPanel />);
-      await screen.findByRole('switch', { name: /Join Sessions For Me/ });
+      await screen.findByRole('switch', { name: /Join Sessions for Me/ });
       expect(screen.queryByText(/Could not join/)).toBeNull();
     });
   });

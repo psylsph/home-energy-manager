@@ -33,6 +33,8 @@ import CosyBlockedNotice from '../components/CosyBlockedNotice';
 import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import ExportOnceCard from '../components/ExportOnceCard';
 import Toggle from '../components/Toggle';
+import HelpTip from '../components/HelpTip';
+import SlotScheduleWarnings from '../components/SlotScheduleWarnings';
 import {
   LOGARITHMIC_RANGE_MAX,
   logarithmicPositionToValue,
@@ -78,6 +80,35 @@ import {
  * the backend models as `cosy_enabled = true` regardless of scope).
  */
 type ChargeMode = 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge' | 'adaptive';
+
+/** One-line summary and full explanation for each automated charging mode (issue #423). */
+const MODE_HELP: Record<Exclude<ChargeMode, 'standard'>, { name: string; summary: string; detail: string }> = {
+  cosy: {
+    name: 'Cosy',
+    summary: 'Force-charges in your slots. Closing the app mid-slot leaves it charging.',
+    detail: 'Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.',
+  },
+  adaptive: {
+    name: 'Adaptive Charge',
+    summary: 'Sets the charge rate from time and SOC. It never forces a charge.',
+    detail: 'Adaptive Charge changes the maximum charge rate from time and battery SOC. It does not force charging. The app must stay running to evaluate periods and SOC thresholds.',
+  },
+  agile: {
+    name: 'Agile',
+    summary: 'Charges and discharges from live Octopus prices.',
+    detail: 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.',
+  },
+  agile_charge: {
+    name: 'Agile Charge Only',
+    summary: 'Prices drive the charge slot; your export schedules keep the discharge side.',
+    detail: 'Agile — Charge only drives the cheap-side charge slot from prices, while your Timed Export and Timed Discharge schedules keep full control of the discharge side. The app must stay running for price checks to keep the charge slot current.',
+  },
+  agile_discharge: {
+    name: 'Agile Discharge Only',
+    summary: 'Prices drive the discharge slot; your Charge Schedule keeps the charge side.',
+    detail: 'Agile — Discharge only drives the expensive-side discharge slot from prices, while your Charge Schedule keeps full control of the charge side. The app must stay running for price checks to keep the discharge slot current.',
+  },
+};
 
 const BATTERY_MODE_LABELS: Record<BatteryModeKind, string> = {
   eco: 'Eco',
@@ -808,10 +839,12 @@ function AutoWinterSection() {
 
         {enabled && (
           <div className="text-xs bg-blue-900/30 text-text-primary px-3 py-2 rounded-lg">
-            <strong>Note:</strong> This is implemented locally within this app — it monitors
-            battery temperature via Modbus and forces charging when the battery gets cold.
-            It does not use GivEnergy's cloud-based winter mode. The app must stay running
-            for it to work.
+            Runs in this app, not the GivEnergy cloud — keep it running.{' '}
+            <HelpTip label="Cold Battery Protection">
+              This is implemented locally within this app — it monitors battery temperature via
+              Modbus and forces charging when the battery gets cold. It does not use GivEnergy's
+              cloud-based winter mode. The app must stay running for it to work.
+            </HelpTip>
           </div>
         )}
 
@@ -959,7 +992,7 @@ function AdaptiveChargeSection() {
                   onChange={(all_day) => updatePeriod(index, { all_day })}
                   ariaLabel={`Period ${index + 1} All Day`}
                 />
-                All day
+                All Day
               </span>
               {!period.all_day && (
                 <div className="flex flex-col sm:flex-row gap-3">
@@ -1048,7 +1081,7 @@ function AdaptiveChargeSection() {
           }))}
           className="w-full py-2 border border-dashed border-bg-elevated text-text-secondary rounded-lg text-sm hover:text-text-primary"
         >
-          Add period
+          Add Period
         </button>
       )}
 
@@ -1215,19 +1248,9 @@ function CosyChargingSection({
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Beta</span>
             <span className="text-[11px] text-text-primary font-medium">App Must Be Kept Running</span>
+            <HelpTip label={`${MODE_HELP[mode].name} mode`}>{MODE_HELP[mode].detail}</HelpTip>
           </div>
-          <p className="text-[11px] text-text-secondary leading-relaxed">
-            {mode === 'cosy'
-              ? 'Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.'
-              : mode === 'adaptive'
-                ? 'Adaptive Charge changes the maximum charge rate from time and battery SOC. It does not force charging. The app must stay running to evaluate periods and SOC thresholds.'
-              : mode === 'agile'
-                ? 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
-                : mode === 'agile_charge'
-                  ? 'Agile — Charge only drives the cheap-side charge slot from prices, while your Timed Export and Timed Discharge schedules keep full control of the discharge side. The app must stay running for price checks to keep the charge slot current.'
-                  : 'Agile — Discharge only drives the expensive-side discharge slot from prices, while your Charge Schedule keeps full control of the charge side. The app must stay running for price checks to keep the discharge slot current.'
-            }
-          </p>
+          <p className="text-[11px] text-text-secondary leading-relaxed">{MODE_HELP[mode].summary}</p>
         </div>
       )}
 
@@ -1724,8 +1747,11 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
   return (
     <div className="space-y-4 mt-3">
       <p className="text-text-secondary/60 text-xs">
-        Automatically charges when Agile prices are low and discharges when prices are high.
-        Prices are fetched from the public Octopus Energy API — no account needed.
+        Charges when Agile prices are low and discharges when they are high.{' '}
+        <HelpTip label="Agile mode">
+          Automatically charges when Agile prices are low and discharges when prices are high.
+          Prices are fetched from the public Octopus Energy API — no account needed.
+        </HelpTip>
       </p>
 
       {/* Postcode lookup */}
@@ -1948,7 +1974,7 @@ function BatteryCalibrationSection() {
   if (!supported) return null;
 
   const handleStartCalibration = async () => {
-    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThis will cycle the battery through: discharge → calibrate → charge → balance → set capacity.\n\nThe balancing phase ensures all cells are equalized. The full cycle can take several hours.\n\nOnly proceed if you understand the risks. Continue?')) return;
+    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThe battery will discharge, charge and balance over several hours. It cannot be cancelled once started.\n\nContinue?')) return;
     setSaving(true);
     setFeedback(null);
     try {
@@ -1981,10 +2007,8 @@ function BatteryCalibrationSection() {
       <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-3">
         <p className="text-text-primary text-xs font-medium">⚠️  WARNING</p>
         <p className="text-text-secondary text-xs">
-          Calibration cycles the battery through: discharge → calibrate lower
-          limit → charge → balance → calibrate upper limit. Once started, the
-          process cannot be cancelled — it must run to completion.
-          This can take several hours. Only use if you understand the risks.
+          Discharges, charges and balances the battery over several hours. Once
+          started it cannot be cancelled.
         </p>
         <p className="text-amber-300/70 text-xs">
           ℹ️  This control is for Gen1/Gen2 batteries only (BMS firmware &lt; 3000).
@@ -2115,22 +2139,25 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
     <div className="space-y-3">
       <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule Minimum SOC</h2>
       <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-text-primary">
-        While an inverter Discharge Schedule window is active, HEM
-        temporarily raises the inverter&apos;s Minimum SOC reserve. The normal
-        reserve is restored when the window ends. This does not change battery mode.
+        Raises the reserve during Discharge Schedule windows, then restores it.{' '}
+        <HelpTip label="Discharge Schedule Minimum SOC">
+          While an inverter Discharge Schedule window is active, HEM temporarily raises the
+          inverter&apos;s Minimum SOC reserve. The normal reserve is restored when the window
+          ends. This does not change battery mode.
+        </HelpTip>
       </div>
       <div className="bg-bg-surface rounded-xl p-4 space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div>
             <span className="text-text-secondary text-sm">
-              Hold Minimum SOC during schedule
+              Hold Minimum SOC During Schedule
             </span>
             <p className="text-text-secondary/60 text-xs">Uses the inverter&apos;s configured discharge-slot times.</p>
           </div>
           <Toggle
             checked={enabled}
             onChange={setEnabled}
-            ariaLabel="Hold Minimum SOC during schedule"
+            ariaLabel="Hold Minimum SOC During Schedule"
           />
         </div>
         <div className="flex items-center gap-3">
@@ -2377,9 +2404,12 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
 
             {/* App-must-stay-running note */}
             <div className="text-xs bg-blue-900/30 text-text-primary px-3 py-2 rounded-lg">
-              <strong>Note:</strong> This is implemented locally within this app. It monitors
-              home power via Modbus and pauses battery discharge when the load is high.
-              The app must stay running for this to work.
+              Runs in this app, so keep it running.{' '}
+              <HelpTip label="the load-based discharge pause">
+                This is implemented locally within this app. It monitors home power via Modbus
+                and pauses battery discharge when the load is high. The app must stay running
+                for this to work.
+              </HelpTip>
             </div>
           </>
         )}
@@ -3089,6 +3119,7 @@ export default function ControlPage() {
   // the dongle returns stale or garbage values, which can show up as phantom
   // schedules or wrong target SOCs. See issue #41.
   const isLegacyGen3Fw = isHybrid && !Number.isNaN(armFwNum) && armFwNum > 0 && armFwNum <= 302;
+  const legacyGen3Firmware = isLegacyGen3Fw ? (snapshot?.firmware_version ?? null) : null;
   const isThreePhaseLimitModelDevice = isThreePhaseLimitModel(snapshot?.device_type_code);
   // Three-phase-bank models use HR1113-1121 for charge/discharge schedules;
   // the backend now selects that register map automatically.
@@ -3751,9 +3782,8 @@ export default function ControlPage() {
         </div>
         {dispatchHoldActive && (
           <p className="text-text-secondary text-xs" role="status" aria-label="Dispatch hold">
-            The Intelligent Octopus Go hold has paused battery discharge for a smart charge of your
-            car, and restores it by itself when the charge ends. Resuming now stops the hold;
-            switch it back on from the Octopus page if you want it for later charges.
+            The Intelligent Octopus Go hold has paused battery discharge while your car smart-charges.
+            Resuming now turns the hold off; switch it back on from the Octopus page.
           </p>
         )}
         {forceChargeError && (
@@ -3999,43 +4029,20 @@ export default function ControlPage() {
                   data-testid="charge-slot-1-planner-owned-banner"
                 >
                   <div className="font-semibold mb-1">
-                    Slot 1 is managed by the Forecast plan
+                    Slot 1 Is Managed by the Forecast Plan{' '}
+                    <HelpTip label="the Forecast plan managing Slot 1">
+                      With auto-refresh or auto-apply enabled, the planner
+                      re-sizes this slot from the live battery shortly before
+                      each cheap period — and rewrites the charge rate back to
+                      100% when it does. Manual edits here are applied, but the
+                      next automatic apply will replace them.
+                    </HelpTip>
                   </div>
-                  With auto-refresh or auto-apply enabled, the planner
-                  re-sizes this slot from the live battery shortly before
-                  each cheap period — and rewrites the charge rate back to
-                  100% when it does. Manual edits here are applied, but the
-                  next automatic apply will replace them.
+                  The next automatic apply replaces manual edits to this slot.
                 </div>
               )}
-              {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
-                <div key="slot-warn-charge" className="space-y-2">
-                  {showSlotOrderingWarning && (
-                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
-                        <div className="font-semibold mb-1">
-                          Slot labels differ from the GivEnergy cloud
-                        </div>
-                        This app uses the canonical Modbus register layout from the{' '}
-                        <code>givenergy-modbus</code> reference library, which labels
-                        discharge slots in the opposite order to the GivEnergy cloud UI:
-                        our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
-                        and vice versa. The underlying schedule data is identical — only the labels differ.
-                    </div>
-                  )}
-                  {isLegacyGen3Fw && (
-                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
-                      <div className="font-semibold mb-1">
-                        Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
-                      </div>
-                      Slot 2 and beyond (and per-slot target SOCs) come from extended
-                      registers that your inverter firmware does not fully
-                      support. Values shown here may be stale or incorrect. GivEnergy&apos;s
-                      own cloud UI generally hides these slots on this firmware. Updating
-                      your inverter firmware to version 303 or later (if available) will
-                      resolve this.
-                    </div>
-                  )}
-                </div>
+              {i === 1 && (
+                <SlotScheduleWarnings slotOrdering={showSlotOrderingWarning} legacyFirmware={legacyGen3Firmware} />
               )}
               <ScheduleSlotEditor
                 slotIndex={i}
@@ -4113,31 +4120,8 @@ export default function ControlPage() {
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
               <Fragment key={`discharge-${i}`}>
-                {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
-                  <div key="slot-warn-discharge" className="space-y-2">
-                    {showSlotOrderingWarning && (
-                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
-                        <div className="font-semibold mb-1">
-                          Slot labels differ from the GivEnergy cloud
-                        </div>
-                        This app uses the canonical Modbus register layout from the{' '}
-                        <code>givenergy-modbus</code> reference library, which labels
-                        discharge slots in the opposite order to the GivEnergy cloud UI:
-                        our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
-                        and vice versa. The underlying schedule data is identical — only the labels differ.
-                      </div>
-                    )}
-                    {isLegacyGen3Fw && (
-                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
-                        <div className="font-semibold mb-1">
-                          Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
-                        </div>
-                        Slot 2 and beyond come from extended registers that
-                        your inverter firmware does not fully support. Values shown here
-                        may be stale or incorrect.
-                      </div>
-                    )}
-                  </div>
+                {i === 1 && (
+                  <SlotScheduleWarnings slotOrdering={showSlotOrderingWarning} legacyFirmware={legacyGen3Firmware} />
                 )}
                 <ScheduleSlotEditor
                   slotIndex={i}
@@ -4167,7 +4151,7 @@ export default function ControlPage() {
 
       {/* Section 6: Battery and Power Controls */}
       <section className="space-y-3">
-        <h2 className="text-text-primary font-semibold text-lg">Battery And Power Controls</h2>
+        <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
         {powerControlSaving && <InverterWriteProgress />}
         {powerControlSaveError && (
           <div

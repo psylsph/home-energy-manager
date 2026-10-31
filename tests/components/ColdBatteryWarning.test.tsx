@@ -63,7 +63,7 @@ describe('<ColdBatteryWarning/>', () => {
     await waitFor(() => {
       expect(container.querySelector('.bg-blue-900\\/30')).not.toBeNull();
     });
-    expect(container.textContent).toContain('Cold battery');
+    expect(container.textContent).toContain('Cold Battery');
     expect(container.textContent).toContain('2.0°C');
   });
 

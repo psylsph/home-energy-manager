@@ -75,7 +75,7 @@ describe('<ControlPage/> — Discharge Schedule Minimum SOC', () => {
   it('is shown in developer mode', async () => {
     await renderLoaded();
     expect(screen.getByRole('heading', { name: HEADING })).toBeInTheDocument();
-    expect(screen.getByRole('switch', { name: 'Hold Minimum SOC during schedule' })).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Hold Minimum SOC During Schedule' })).toBeInTheDocument();
   });
 
   it('is hidden outside developer mode', async () => {
@@ -87,14 +87,14 @@ describe('<ControlPage/> — Discharge Schedule Minimum SOC', () => {
 
   it('shows the loaded values in the form', async () => {
     await renderLoaded();
-    expect(screen.getByRole('switch', { name: 'Hold Minimum SOC during schedule' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByRole('switch', { name: 'Hold Minimum SOC During Schedule' }).getAttribute('aria-checked')).toBe('false');
     expect((screen.getByLabelText(/Floor:/) as HTMLInputElement).value).toBe('40');
   });
 
   it('confirms a successful save, then returns the button to Save', async () => {
     vi.mocked(apiPost).mockResolvedValue({ ok: true });
     await renderLoaded();
-    fireEvent.click(screen.getByRole('switch', { name: 'Hold Minimum SOC during schedule' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Hold Minimum SOC During Schedule' }));
     vi.useFakeTimers();
 
     fireEvent.click(saveButton());
@@ -111,7 +111,7 @@ describe('<ControlPage/> — Discharge Schedule Minimum SOC', () => {
   it('reports a failed save, keeps the edits, then returns the button to Save', async () => {
     vi.mocked(apiPost).mockRejectedValue(new Error('inverter busy'));
     await renderLoaded();
-    fireEvent.click(screen.getByRole('switch', { name: 'Hold Minimum SOC during schedule' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Hold Minimum SOC During Schedule' }));
     fireEvent.change(screen.getByLabelText(/Floor:/), { target: { value: '65' } });
     vi.useFakeTimers();
 
@@ -121,7 +121,7 @@ describe('<ControlPage/> — Discharge Schedule Minimum SOC', () => {
     expect(saveButton().textContent).toBe('✗ Error');
     expect(saveButton()).toBeEnabled();
     // The user's edits are still on screen so they can simply try again.
-    expect(screen.getByRole('switch', { name: 'Hold Minimum SOC during schedule' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('switch', { name: 'Hold Minimum SOC During Schedule' }).getAttribute('aria-checked')).toBe('true');
     expect((screen.getByLabelText(/Floor:/) as HTMLInputElement).value).toBe('65');
 
     act(() => {

@@ -6,7 +6,7 @@ type BooleanField = {
   [K in keyof AlertsConfig]: AlertsConfig[K] extends boolean ? K : never;
 }[keyof AlertsConfig];
 
-const TRIGGERS: { key: BooleanField; label: string; hint?: string }[] = [
+const TRIGGERS: { key: BooleanField; label: string; hint?: string; help?: string }[] = [
   { key: 'grid_offline_enabled', label: 'Grid Offline' },
   { key: 'inverter_trip_enabled', label: 'Inverter Trip' },
   { key: 'battery_over_temp_enabled', label: 'Inverter Battery Warning' },
@@ -23,7 +23,8 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string }[] = [
   {
     key: 'cell_spread_alert_enabled',
     label: 'Battery Cell Spread Widening',
-    hint: "Checked once a day: notify when the gap between a battery's highest and lowest cell near full charge keeps growing, an early sign of a weakening cell",
+    hint: 'A daily check for a growing gap between cells near full charge',
+    help: "Checked once a day: notify when the gap between a battery's highest and lowest cell near full charge keeps growing, an early sign of a weakening cell",
   },
   {
     key: 'soc_anomaly_alert_enabled',
@@ -41,15 +42,15 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string }[] = [
 export default function AlertTriggers({ config, update }: AlertsFormProps) {
   return (
     <SettingsGroup title="Alert Triggers & Cooldown">
-      {TRIGGERS.map(({ key, label, hint }) => (
+      {TRIGGERS.map(({ key, label, hint, help }) => (
         <div key={key} className="contents">
-          <SettingsRow label={label} hint={hint}>
+          <SettingsRow label={label} hint={hint} help={help}>
             <Toggle checked={config[key]} ariaLabel={label} onChange={(v) => update({ [key]: v })} />
           </SettingsRow>
           {key === 'solar_clipping_enabled' && config.solar_clipping_enabled && (
             <label className="flex items-center justify-between gap-3">
               <span className={FIELD_LABEL}>
-                Clipping Ceiling (W) — rated AC output, 0 = off
+                Clipping Ceiling (W) — Rated AC Output, 0 = Off
               </span>
               <input
                 type="number" step="100" min="0" max="100000"

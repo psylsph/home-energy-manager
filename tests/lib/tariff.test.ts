@@ -173,7 +173,7 @@ describe('addTariffSlot', () => {
   });
 
   test('new slot uses the supplied defaultRate (not the split slot\'s rate)', () => {
-    // A user with a flat rate who clicks "Add window" likely wants to set
+    // A user with a flat rate who clicks "Add Window" likely wants to set
     // up a time-of-use tariff with a different rate from the flat default
     // — so the new slot is seeded with the caller's `defaultRate`, not
     // inherited from the slot that got split.

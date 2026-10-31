@@ -394,8 +394,8 @@ describe('ControlPage Eco / Timed Export presentation', () => {
             const batteryModeSection = section.closest('section')!;
 
             // Should show "Blocked by Pause Discharge" (may appear multiple times)
-            await screen.findAllByText('Timed Export — Blocked By Pause Discharge');
-            const blockedElements = within(batteryModeSection).queryAllByText(/Blocked By Pause Discharge/);
+            await screen.findAllByText('Timed Export — Blocked by Pause Discharge');
+            const blockedElements = within(batteryModeSection).queryAllByText(/Blocked by Pause Discharge/);
             expect(blockedElements.length).toBeGreaterThan(0);
 
             vi.useRealTimers();

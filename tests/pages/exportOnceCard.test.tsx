@@ -67,7 +67,7 @@ describe('ExportOnceCard', () => {
     apiPost.mockResolvedValue({ ok: true });
     renderCard();
     await screen.findByLabelText('Start');
-    fireEvent.change(screen.getByLabelText('Slot To Use'), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText('Slot to Use'), { target: { value: '2' } });
     fireEvent.change(screen.getByLabelText('Start'), { target: { value: '18:00' } });
     fireEvent.change(screen.getByLabelText('End'), { target: { value: '19:00' } });
     fireEvent.click(screen.getByRole('button', { name: 'Book Export' }));
@@ -128,7 +128,7 @@ describe('ExportOnceCard', () => {
     expect(await screen.findByText('Running')).toBeTruthy();
     expect(screen.getByText(/goes back to 22:00–23:00 afterwards/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Cancel export in slot 2/ }).textContent).toBe(
-      'Stop And Put The Slot Back',
+      'Stop and Put the Slot Back',
     );
   });
 
@@ -147,15 +147,15 @@ describe('ExportOnceCard', () => {
     serve([]);
     renderCard(1);
     await screen.findByLabelText('Start');
-    expect(screen.queryByLabelText('Slot To Use')).toBeNull();
-    expect(screen.queryByLabelText('Stop Exporting At')).toBeNull();
+    expect(screen.queryByLabelText('Slot to Use')).toBeNull();
+    expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
   });
 
   it('offers the discharge floor on models with per-slot SOC', async () => {
     serve([]);
     renderCard(10);
     await screen.findByLabelText('Start');
-    expect(screen.getByLabelText('Stop Exporting At')).toBeTruthy();
+    expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
   });
 
   it('warns when the list cannot be loaded and does not offer a form', async () => {

@@ -164,7 +164,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
         // null otherwise.
         {
           key: 'pv-pct',
-          title: 'PV % Of Rated (kWp)',
+          title: 'PV % of Rated (kWp)',
           unit: '%',
           fields: [
             { field: 'pv1_pct', color: '#F59E0B', label: 'PV1' },

@@ -634,7 +634,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
     <div class="card"><span>Net Grid</span><strong>${formatKwh(s.netGridKwh)}</strong></div>
     <div class="card"><span>Battery Charged</span><strong style="color:#7c3aed">${formatKwh(s.batteryChargeKwh)}</strong></div>
     <div class="card"><span>Battery Discharged</span><strong style="color:#16a34a">${formatKwh(s.batteryDischargeKwh)}</strong></div>
-    <div class="card"><span>SOC range</span><strong>${formatPercentValue(s.socMin)} – ${formatPercentValue(s.socMax)}</strong></div>
+    <div class="card"><span>SOC Range</span><strong>${formatPercentValue(s.socMin)} – ${formatPercentValue(s.socMax)}</strong></div>
     <div class="card"><span>Solar Coverage</span><strong>${formatPercentValue(s.solarCoveragePct)}</strong></div>
     <div class="card"><span>Grid Dependency</span><strong>${formatPercentValue(s.gridDependencyPct)}</strong></div>
     <div class="card"><span>Peak Home Load</span><strong>${formatWatts(s.peakHomeW)}</strong></div>
@@ -654,15 +654,15 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
   </section>
 
   ${renderCombinedPowerChart(rows)}
-  ${renderBarChart('Solar Generation Vs Home Load', report.buckets, [
+  ${renderBarChart('Solar Generation vs Home Load', report.buckets, [
     { key: 'solarKwh', label: 'Solar', color: '#F59E0B' },
     { key: 'homeKwh', label: 'Home/Load', color: '#14B8A6' },
   ])}
-  ${renderBarChart('Grid Import Vs Export', report.buckets, [
+  ${renderBarChart('Grid Import vs Export', report.buckets, [
     { key: 'importKwh', label: 'Import', color: '#EF4444' },
     { key: 'exportKwh', label: 'Export', color: '#38BDF8' },
   ])}
-  ${renderBarChart('Battery Charge Vs Discharge', report.buckets, [
+  ${renderBarChart('Battery Charge vs Discharge', report.buckets, [
     { key: 'batteryChargeKwh', label: 'Charge', color: '#8B5CF6' },
     { key: 'batteryDischargeKwh', label: 'Discharge', color: '#22C55E' },
   ])}

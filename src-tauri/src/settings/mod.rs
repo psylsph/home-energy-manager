@@ -1701,7 +1701,7 @@ pub struct Settings {
     pub octopus_sessions_announced: Vec<i64>,
     #[serde(default)]
     pub octopus_sessions_reminded: Vec<i64>,
-    /// Discharge slot used for Saving Session exports in "Alert And Export"
+    /// Discharge slot used for Saving Session exports in "Alert and Export"
     /// mode. It is borrowed for the session and put back afterwards.
     #[serde(default = "default_sessions_export_slot")]
     pub octopus_sessions_export_slot: u8,

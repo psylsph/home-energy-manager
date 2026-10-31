@@ -88,7 +88,7 @@ describe('<SolarArraysSection/> — Solar Arrays (issue #110)', () => {
       });
     });
 
-    it('renders the "+ Add array" button', async () => {
+    it('renders the "+ Add Array" button', async () => {
       render(<Section />);
       await screen.findByTestId('solar-array-add');
     });
@@ -135,7 +135,7 @@ describe('<SolarArraysSection/> — Solar Arrays (issue #110)', () => {
   // -------------------------------------------------------------------------
 
   describe('CT array list', () => {
-    it('"+ Add array" appends a new row', async () => {
+    it('"+ Add Array" appends a new row', async () => {
       render(<Section />);
       const before = (await screen.findAllByTestId('solar-array-row')).length;
       fireEvent.click(await screen.findByTestId('solar-array-add'));
