@@ -5440,6 +5440,30 @@ mod tests {
     }
 
     #[test]
+    fn single_phase_pv2_survives_after_sunset_whatever_the_inverter_output() {
+        // IR(44) is inverter-output-today (#419), not a PV aggregate, so it
+        // cannot vouch for IR(19). On a day when most PV went into the battery
+        // it reads well below PV1+PV2; dropping PV2 when its voltage falls at
+        // dusk would be a false mid-evening reset of the solar total.
+        for ir44 in [0, 100, 300, 0xFFFF] {
+            let mut snap = InverterSnapshot::default();
+            let mut data = vec![0u16; 60];
+            data[2] = 0; // pv2_voltage = 0 after sunset
+            data[9] = 0; // pv2_current = 0 after sunset
+            data[17] = 150; // PV1 15.0 kWh
+            data[19] = 147; // PV2 14.7 kWh
+            data[44] = ir44;
+            decode_input_0_59(&data, &mut snap);
+            assert!(
+                (snap.today_pv2_kwh - 14.7).abs() < 0.01,
+                "IR44={ir44}: PV2 {}",
+                snap.today_pv2_kwh
+            );
+            assert!((snap.today_solar_kwh - 29.7).abs() < 0.01);
+        }
+    }
+
+    #[test]
     fn single_phase_pv2_corroboration_rejects_fingerprint_aggregate() {
         // A 0xFFFF "fingerprint" corruption of the aggregate IR(44) must NOT
         // corroborate IR(19) on a no-PV2 system. Without the leading
