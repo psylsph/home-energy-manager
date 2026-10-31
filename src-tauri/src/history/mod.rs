@@ -7,6 +7,7 @@
 pub mod backup;
 pub mod battery_health;
 pub mod battery_health_trend;
+pub mod evc_power;
 pub mod minute;
 
 use std::path::Path;
@@ -1023,6 +1024,13 @@ CREATE TABLE IF NOT EXISTS forecast_values (
     source     TEXT NOT NULL,
     fetched_at INTEGER NOT NULL,
     PRIMARY KEY (timestamp, variable, source)
+);
+-- EV charger average power per minute (issue #400); `timestamp` is the
+-- minute's start.
+CREATE TABLE IF NOT EXISTS evc_power_minutes (
+    timestamp INTEGER PRIMARY KEY,
+    power_w   REAL NOT NULL,
+    samples   INTEGER NOT NULL
 );
 ";
 

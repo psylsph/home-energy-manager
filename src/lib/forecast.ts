@@ -49,6 +49,11 @@ export type ForecastData = {
   consumption_days_observed: number;
   consumption_sufficient: boolean;
   consumption_tomorrow_kwh: number;
+  /** EV charging left out of the profile (issue #400), kWh over its
+   *  window: from the charger's recorded power, and above the threshold.
+   *  Absent from older backends. */
+  consumption_excluded_ev_kwh?: number;
+  consumption_excluded_above_kwh?: number;
   battery: ForecastBattery | null;
   import_tomorrow_kwh: number;
   export_tomorrow_kwh: number;
@@ -675,4 +680,28 @@ export function shouldRefetchForecast(
   if (nowMs - lastRefetchMs >= FORECAST_REFRESH_INTERVAL_MS) return true;
 
   return false;
+}
+
+/** Days of history the consumption profile is built from. */
+export const CONSUMPTION_WINDOW_DAYS = 28;
+
+/** Limits of the "Leave out load above" setting, kW (issue #400). */
+export const LOAD_ABOVE_MIN_KW = 1;
+export const LOAD_ABOVE_MAX_KW = 25;
+
+/**
+ * Parse the "Leave out load above" field: empty turns it off (null),
+ * otherwise a number of kW within the limits.
+ */
+export function parseLoadAboveKw(
+  text: string,
+): { ok: true; kw: number | null } | { ok: false; error: string } {
+  void text;
+  return { ok: true, kw: null };
+}
+
+/** How much EV charging the prediction left out, or null for none. */
+export function consumptionExclusionNote(data: ForecastData): string | null {
+  void data;
+  return null;
 }

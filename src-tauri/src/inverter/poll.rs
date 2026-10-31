@@ -605,6 +605,9 @@ pub struct AppState {
     /// stays visible on the diagram after HR 72 zeroes, and resets on the
     /// "No Cable" → "Cable In" transition. See `crate::evc::SessionLatch`.
     pub evc_session_latch: Arc<Mutex<crate::evc::SessionLatch>>,
+    /// The minute of EV charger power being averaged for history (issue
+    /// #400), written to `evc_power_minutes` when the next minute starts.
+    pub evc_power_minute: Arc<Mutex<crate::history::evc_power::EvcMinuteAccumulator>>,
     /// Email alert configuration.
     pub alert_config: Arc<Mutex<crate::settings::AlertsConfig>>,
     /// Email alert debounce tracker (in-memory only).
@@ -844,6 +847,7 @@ impl AppState {
             latest_evc: Arc::new(Mutex::new(None)),
             evc_reachability: Arc::new(Mutex::new(crate::evc::EvcReachability::default())),
             evc_session_latch: Arc::new(Mutex::new(crate::evc::SessionLatch::default())),
+            evc_power_minute: Arc::new(Mutex::new(Default::default())),
             connected_since: Arc::new(std::sync::Mutex::new(None)),
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),

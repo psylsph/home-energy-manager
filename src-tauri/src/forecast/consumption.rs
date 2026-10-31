@@ -58,6 +58,28 @@ pub struct ConsumptionProfile {
     pub weekday_days_observed: u32,
     /// Distinct weekend days that contributed at least one valid delta.
     pub weekend_days_observed: u32,
+    /// Energy left out because the EV charger drew it (issue #400), kWh.
+    pub excluded_ev_kwh: f64,
+    /// Energy left out above the "leave out load above" threshold, kWh.
+    pub excluded_above_kwh: f64,
+}
+
+/// One minute of EV charger power (issue #400): the average of the
+/// charger's polls in the minute starting at `timestamp`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EvPowerMinute {
+    pub timestamp: i64,
+    pub power_w: f64,
+}
+
+/// What to leave out of the profile (issue #400). Where the charger's power
+/// was recorded, its energy is taken away; elsewhere, load above
+/// `load_above_kw` (when set) is clipped off as car charging.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConsumptionExclusions<'a> {
+    /// Charger minutes, sorted by timestamp.
+    pub ev_minutes: &'a [EvPowerMinute],
+    pub load_above_kw: Option<f64>,
 }
 
 impl ConsumptionProfile {
@@ -141,9 +163,52 @@ fn percentile_sorted(sorted: &[f64], pct: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * frac
 }
 
+/// Charger energy (kWh) over `[start_ts, end_ts)` and how many of its
+/// seconds a recorded charger minute covers.
+fn ev_energy_kwh(minutes: &[EvPowerMinute], start_ts: i64, end_ts: i64) -> (f64, i64) {
+    let _ = (minutes, start_ts, end_ts);
+    (0.0, 0)
+}
+
+/// One local hour of one day, before EV charging is taken out.
+#[derive(Debug, Default, Clone, Copy)]
+struct HourSum {
+    /// Home energy over the hour's intervals, kWh.
+    home_kwh: f64,
+    /// Seconds those intervals span.
+    secs: i64,
+    /// Charger energy over the same intervals, kWh.
+    ev_kwh: f64,
+    /// Seconds of them a charger minute covers.
+    ev_secs: i64,
+}
+
+#[derive(Default)]
+struct Excluded {
+    ev_kwh: f64,
+    above_kwh: f64,
+}
+
+/// The household's share of one hour. Done per hour, not per interval: the
+/// home counter moves in 0.1 kWh steps, so a minute's delta is 0, 0.1 or
+/// 0.2 kWh and only an hour's sum is close to what was drawn.
+///
+/// The charger's energy comes off first, floored at zero. Load above the
+/// threshold is clipped only in hours the charger didn't cover end to end,
+/// so a polled, idle charger keeps a heavy evening as the house's.
+fn household_kwh(
+    sum: &HourSum,
+    exclusions: &ConsumptionExclusions,
+    excluded: &mut Excluded,
+) -> f64 {
+    let _ = (exclusions, excluded);
+    sum.home_kwh
+}
+
 fn add_delta_at_midpoint(
-    hour_sums: &mut std::collections::BTreeMap<(chrono::NaiveDate, u8), f64>,
+    hour_sums: &mut std::collections::BTreeMap<(chrono::NaiveDate, u8), HourSum>,
     days: &mut std::collections::BTreeSet<chrono::NaiveDate>,
+    ev_minutes: &[EvPowerMinute],
     start_ts: i64,
     end_ts: i64,
     delta: f64,
@@ -154,13 +219,26 @@ fn add_delta_at_midpoint(
     };
     let local = dt.with_timezone(&chrono::Local);
     let key = (local.date_naive(), local.hour() as u8);
-    *hour_sums.entry(key).or_insert(0.0) += delta;
+    let (ev_kwh, ev_secs) = ev_energy_kwh(ev_minutes, start_ts, end_ts);
+    let sum = hour_sums.entry(key).or_default();
+    sum.home_kwh += delta;
+    sum.secs += end_ts - start_ts;
+    sum.ev_kwh += ev_kwh;
+    sum.ev_secs += ev_secs;
     days.insert(key.0);
 }
 
 /// Build the hour-of-day profile from counter samples (any ordering; the
 /// samples are sorted by timestamp internally).
 pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionProfile {
+    build_consumption_profile_excluding(rows, &ConsumptionExclusions::default())
+}
+
+/// [`build_consumption_profile`] with EV charging left out (issue #400).
+pub fn build_consumption_profile_excluding(
+    rows: &[ConsumptionCounterRow],
+    exclusions: &ConsumptionExclusions,
+) -> ConsumptionProfile {
     let mut sorted: Vec<&ConsumptionCounterRow> = rows.iter().filter(|r| r.kwh.is_some()).collect();
     sorted.sort_by_key(|r| r.timestamp);
 
@@ -171,9 +249,10 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
     // interval: gaps > 2 h are skipped entirely (the missing energy must
     // not be smeared into one bucket), midnight resets and negative
     // glitches contribute nothing.
-    let mut hour_sums: std::collections::BTreeMap<(chrono::NaiveDate, u8), f64> =
+    let mut hour_sums: std::collections::BTreeMap<(chrono::NaiveDate, u8), HourSum> =
         Default::default();
     let mut days: std::collections::BTreeSet<chrono::NaiveDate> = Default::default();
+    let ev = exclusions.ev_minutes;
 
     for pair in sorted.windows(2) {
         let (a, b) = (pair[0], pair[1]);
@@ -200,7 +279,14 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         if a_local.date_naive() == b_local.date_naive() {
             // Attribute same-day intervals to the hour containing their
             // midpoint.
-            add_delta_at_midpoint(&mut hour_sums, &mut days, a.timestamp, b.timestamp, delta);
+            add_delta_at_midpoint(
+                &mut hour_sums,
+                &mut days,
+                ev,
+                a.timestamp,
+                b.timestamp,
+                delta,
+            );
             continue;
         }
 
@@ -224,6 +310,7 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         add_delta_at_midpoint(
             &mut hour_sums,
             &mut days,
+            ev,
             a.timestamp,
             midnight_ts,
             delta * before_secs as f64 / gap as f64,
@@ -231,6 +318,7 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         add_delta_at_midpoint(
             &mut hour_sums,
             &mut days,
+            ev,
             midnight_ts,
             b.timestamp,
             delta * after_secs as f64 / gap as f64,
@@ -246,7 +334,9 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
     let mut weekend_buckets: Vec<Vec<f64>> = vec![Vec::new(); 24];
     let mut weekday_days = std::collections::BTreeSet::new();
     let mut weekend_days = std::collections::BTreeSet::new();
+    let mut excluded = Excluded::default();
     for ((day, hour), sum) in hour_sums {
+        let sum = household_kwh(&sum, exclusions, &mut excluded);
         all_buckets[hour as usize].push(sum);
         if day.weekday().number_from_monday() >= 6 {
             weekend_buckets[hour as usize].push(sum);
@@ -283,6 +373,8 @@ pub fn build_consumption_profile(rows: &[ConsumptionCounterRow]) -> ConsumptionP
         days_observed: days.len() as u32,
         weekday_days_observed: weekday_days.len() as u32,
         weekend_days_observed: weekend_days.len() as u32,
+        excluded_ev_kwh: excluded.ev_kwh,
+        excluded_above_kwh: excluded.above_kwh,
     }
 }
 
@@ -517,6 +609,237 @@ mod tests {
         fn daily_total_helper(&self) -> f64 {
             profile_daily_total(self)
         }
+    }
+
+    /// Minute counter rows from `start` for `minutes`, drawing `kw`.
+    fn minute_rows(start: i64, minutes: i64, kw: f64) -> Vec<ConsumptionCounterRow> {
+        (0..=minutes)
+            .map(|i| row(start + i * 60, 10.0 + kw * i as f64 / 60.0))
+            .collect()
+    }
+
+    fn ev_minutes(start: i64, minutes: i64, power_w: f64) -> Vec<EvPowerMinute> {
+        (0..minutes)
+            .map(|i| EvPowerMinute {
+                timestamp: start + i * 60,
+                power_w,
+            })
+            .collect()
+    }
+
+    fn hour_median(profile: &ConsumptionProfile, hour: usize) -> f64 {
+        profile.hours[hour].expect("hour observed").median
+    }
+
+    #[test]
+    fn charger_energy_is_taken_out_of_the_hour_it_was_drawn_in() {
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 8.0);
+        let ev = ev_minutes(start, 60, 7_000.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: None,
+            },
+        );
+        assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
+        assert!((profile.excluded_ev_kwh - 7.0).abs() < 1e-6);
+        assert_eq!(profile.excluded_above_kwh, 0.0);
+    }
+
+    #[test]
+    fn charger_energy_never_takes_an_interval_below_zero() {
+        // The charger reads more than the house meter saw (a CT that
+        // doesn't see the charger, or timing skew): the hour goes to zero,
+        // never negative.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 2.0);
+        let ev = ev_minutes(start, 60, 7_000.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: None,
+            },
+        );
+        assert!(hour_median(&profile, 18).abs() < 1e-9);
+        assert!((profile.excluded_ev_kwh - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_above_the_threshold_is_clipped_where_there_is_no_charger_data() {
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 8.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &[],
+                load_above_kw: Some(3.0),
+            },
+        );
+        assert!((hour_median(&profile, 18) - 3.0).abs() < 1e-6);
+        assert!((profile.excluded_above_kwh - 5.0).abs() < 1e-6);
+        assert_eq!(profile.excluded_ev_kwh, 0.0);
+    }
+
+    #[test]
+    fn load_below_the_threshold_is_kept() {
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 2.5);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &[],
+                load_above_kw: Some(3.0),
+            },
+        );
+        assert!((hour_median(&profile, 18) - 2.5).abs() < 1e-6);
+        assert_eq!(profile.excluded_above_kwh, 0.0);
+    }
+
+    #[test]
+    fn charger_data_overrides_the_threshold() {
+        // The charger was polled and idle, so an 8 kW evening is the house
+        // (an oven, a shower), not the car.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 8.0);
+        let ev = ev_minutes(start, 60, 0.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: Some(3.0),
+            },
+        );
+        assert!((hour_median(&profile, 18) - 8.0).abs() < 1e-6);
+        assert_eq!(profile.excluded_above_kwh, 0.0);
+        assert_eq!(profile.excluded_ev_kwh, 0.0);
+    }
+
+    #[test]
+    fn the_threshold_still_applies_in_an_hour_the_charger_only_partly_covered() {
+        // Charger data for the first half hour only (it went offline while
+        // the car kept charging): its energy comes off, then the hour is
+        // clipped at the threshold as well.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 8.0);
+        let ev = ev_minutes(start, 30, 7_000.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: Some(3.0),
+            },
+        );
+        assert!((hour_median(&profile, 18) - 3.0).abs() < 1e-6);
+        assert!((profile.excluded_ev_kwh - 3.5).abs() < 1e-6);
+        assert!((profile.excluded_above_kwh - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn charger_energy_counts_only_the_overlapping_part_of_a_minute() {
+        let ev = ev_minutes(1_000_020, 3, 6_000.0); // minutes at :20 offsets
+        assert_eq!(ev_energy_kwh(&ev, 0, 1_000_020), (0.0, 0));
+        assert_eq!(ev_energy_kwh(&ev, 1_000_200, 1_000_300), (0.0, 0));
+        let (half_minute, secs) = ev_energy_kwh(&ev, 1_000_050, 1_000_080);
+        assert!((half_minute - 6.0 * 30.0 / 3600.0).abs() < 1e-9);
+        assert_eq!(secs, 30);
+        let (all, secs) = ev_energy_kwh(&ev, 0, 2_000_000);
+        assert!((all - 6.0 * 180.0 / 3600.0).abs() < 1e-9);
+        assert_eq!(secs, 180);
+    }
+
+    /// Minute rows of a counter that, like the inverter's, only moves in
+    /// 0.1 kWh steps, while drawing a steady `kw`.
+    fn stepped_minute_rows(start: i64, minutes: i64, kw: f64) -> Vec<ConsumptionCounterRow> {
+        (0..=minutes)
+            .map(|i| {
+                let exact = kw * i as f64 / 60.0;
+                row(start + i * 60, 10.0 + (exact * 10.0 + 1e-9).floor() / 10.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stepped_counter_below_the_threshold_is_not_clipped() {
+        // 2.5 kW against a 3 kW threshold: each 0.1 kWh step lands in one
+        // minute, which looks like 6 kW on its own. The hour is what counts.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = stepped_minute_rows(start, 60, 2.5);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &[],
+                load_above_kw: Some(3.0),
+            },
+        );
+        assert!((hour_median(&profile, 18) - 2.5).abs() < 1e-6);
+        assert_eq!(profile.excluded_above_kwh, 0.0);
+    }
+
+    #[test]
+    fn a_stepped_counter_keeps_the_true_house_share_while_the_car_charges() {
+        // 7 kW car + 1 kW house: minute deltas are 0.1 or 0.2 kWh, but the
+        // hour still comes out at the house's 1 kWh.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = stepped_minute_rows(start, 60, 8.0);
+        let ev = ev_minutes(start, 60, 7_000.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: None,
+            },
+        );
+        assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_threshold_of_zero_or_less_from_a_hand_edited_file_is_ignored() {
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 2.0);
+        for bad in [0.0, -1.0, f64::NAN] {
+            let profile = build_consumption_profile_excluding(
+                &rows,
+                &ConsumptionExclusions {
+                    ev_minutes: &[],
+                    load_above_kw: Some(bad),
+                },
+            );
+            assert!((hour_median(&profile, 18) - 2.0).abs() < 1e-6, "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_hourly_interval_with_a_charging_session_keeps_the_house_share() {
+        // Sparse rows (one an hour, as older history has): the charger's
+        // half hour at 7 kW comes out of the hour's 4.5 kWh.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = vec![row(start, 10.0), row(start + 3600, 14.5)];
+        let ev = ev_minutes(start + 600, 30, 7_000.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: None,
+            },
+        );
+        assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_exclusions_match_the_plain_profile() {
+        let mut rows = Vec::new();
+        for d in 5..12 {
+            rows.extend(day(2026, 10, d, 0.0, 0.7));
+        }
+        let plain = build_consumption_profile(&rows);
+        let excluding =
+            build_consumption_profile_excluding(&rows, &ConsumptionExclusions::default());
+        assert_eq!(plain, excluding);
+        assert_eq!(plain.excluded_ev_kwh, 0.0);
+        assert_eq!(plain.excluded_above_kwh, 0.0);
     }
 
     #[test]

@@ -1870,6 +1870,9 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // Min SOC the planner keeps the battery above across the
             // forward forecast window (issue #283, planner v2).
             "forecast_min_soc_pct": settings.forecast_min_soc_pct,
+            // Home load above this is left out of the consumption profile
+            // as EV charging (issue #400); null keeps all load.
+            "forecast_exclude_load_above_kw": settings.forecast_exclude_load_above_kw,
             // Nightly auto-refresh of the Forecast plan's charge slot:
             // re-sizes slot 1 from the live SOC before each cheap period.
             "forecast_plan_auto_refresh": settings.forecast_plan_auto_refresh,
@@ -2229,6 +2232,20 @@ pub async fn update_settings(
                 return Err("Min SOC must be between 0 and 100 percent".to_string());
             }
             persist.forecast_min_soc_pct = v;
+        }
+        if let Some(value) = body.get("forecast_exclude_load_above_kw") {
+            persist.forecast_exclude_load_above_kw = match value {
+                Value::Null => None,
+                v => match v.as_f64() {
+                    Some(kw) if (1.0..=25.0).contains(&kw) => Some(kw),
+                    _ => {
+                        return Err(
+                            "Leave out load above must be between 1 and 25 kW, or empty"
+                                .to_string(),
+                        )
+                    }
+                },
+            };
         }
         if let Some(v) = body
             .get("forecast_plan_auto_refresh")
@@ -2637,6 +2654,12 @@ fn settings_log_fields(
             "forecast_min_soc={}%",
             persist.forecast_min_soc_pct
         ));
+    }
+    if is_present("forecast_exclude_load_above_kw") {
+        out.push(match persist.forecast_exclude_load_above_kw {
+            Some(kw) => format!("forecast_exclude_load_above={kw}kW"),
+            None => "forecast_exclude_load_above=off".to_string(),
+        });
     }
     if is_present("forecast_plan_strategy") {
         let strategy = serde_json::to_value(persist.forecast_plan_strategy)
@@ -20879,6 +20902,55 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn update_settings_validates_and_clears_forecast_exclude_load_above_kw() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let load = || crate::settings::Settings::load().forecast_exclude_load_above_kw;
+            assert_eq!(load(), None);
+
+            for bad in [json!(0.5), json!(30.0), json!("7")] {
+                let (status, body) = update_settings(
+                    State(state.clone()),
+                    Json(json!({ "forecast_exclude_load_above_kw": bad })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Leave out load above"));
+                assert_eq!(load(), None);
+            }
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_exclude_load_above_kw": 3.5 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(load(), Some(3.5));
+
+            // Another field's save leaves it alone.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_min_soc_pct": 30.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(load(), Some(3.5));
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_exclude_load_above_kw": null })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(load(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn update_settings_rejected_request_leaves_disk_untouched() {
         with_isolated_config_dir_async(|| async {
             // Seed a known baseline host so we can detect any partial write.
@@ -25386,6 +25458,8 @@ pub(crate) mod tests {
             consumption_days_observed: 7,
             consumption_sufficient: true,
             consumption_tomorrow_kwh: 12.0,
+            consumption_excluded_ev_kwh: 0.0,
+            consumption_excluded_above_kwh: 0.0,
             battery: None,
             import_tomorrow_kwh: 0.0,
             export_tomorrow_kwh: 0.0,

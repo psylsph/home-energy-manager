@@ -21,6 +21,8 @@ import {
   toSolarChartData,
   toBatteryChartData,
   tomorrowSummary,
+  parseLoadAboveKw,
+  consumptionExclusionNote,
 } from '../../src/lib/forecast';
 import type { ForecastData, ForecastBattery, PlanRecommendation } from '../../src/lib/forecast';
 
@@ -735,5 +737,49 @@ describe('hold plans (issue #359 review)', () => {
     expect(chargeTargetReadBack(75, 75)).toBe(true);
     expect(chargeTargetReadBack(75, 62)).toBe(false);
     expect(chargeTargetReadBack(75, undefined)).toBe(false);
+  });
+});
+
+describe('parseLoadAboveKw', () => {
+  it('turns an empty field off', () => {
+    expect(parseLoadAboveKw('')).toEqual({ ok: true, kw: null });
+    expect(parseLoadAboveKw('  ')).toEqual({ ok: true, kw: null });
+  });
+
+  it('accepts kW inside the limits', () => {
+    expect(parseLoadAboveKw('3.5')).toEqual({ ok: true, kw: 3.5 });
+    expect(parseLoadAboveKw('1')).toEqual({ ok: true, kw: 1 });
+    expect(parseLoadAboveKw('25')).toEqual({ ok: true, kw: 25 });
+  });
+
+  it('refuses anything else', () => {
+    for (const text of ['0.5', '26', 'abc', '-3']) {
+      const parsed = parseLoadAboveKw(text);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toMatch(/between 1 and 25 kW/);
+    }
+  });
+});
+
+describe('consumptionExclusionNote', () => {
+  const data = {
+    consumption_excluded_ev_kwh: 0,
+    consumption_excluded_above_kwh: 0,
+  } as ForecastData;
+
+  it('says nothing when nothing was left out, or for an older backend', () => {
+    expect(consumptionExclusionNote(data)).toBeNull();
+    expect(consumptionExclusionNote({ ...data, consumption_excluded_ev_kwh: 0.01 })).toBeNull();
+    expect(consumptionExclusionNote({} as ForecastData)).toBeNull();
+  });
+
+  it('adds the charger and threshold figures together', () => {
+    expect(
+      consumptionExclusionNote({
+        ...data,
+        consumption_excluded_ev_kwh: 10.04,
+        consumption_excluded_above_kwh: 4.2,
+      }),
+    ).toBe('14.2 kWh of EV charging left out of the last 28 days');
   });
 });

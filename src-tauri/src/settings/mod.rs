@@ -1529,6 +1529,11 @@ pub struct Settings {
     /// planner owns no target.
     #[serde(default)]
     pub forecast_plan_armed_target_pct: Option<u8>,
+    /// Leave home load above this many kW out of the consumption profile as
+    /// EV charging (issue #400), where the EV charger's own power wasn't
+    /// recorded. `None` keeps all load.
+    #[serde(default)]
+    pub forecast_exclude_load_above_kw: Option<f64>,
 
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
@@ -2133,6 +2138,7 @@ impl Default for Settings {
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
+            forecast_exclude_load_above_kw: None,
             check_for_updates: default_check_for_updates(),
             history_backup: HistoryBackupConfig::default(),
             octopus_api_key: String::new(),
@@ -2791,6 +2797,7 @@ mod tests {
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
+            forecast_exclude_load_above_kw: None,
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -3578,6 +3585,7 @@ mod tests {
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
+            forecast_exclude_load_above_kw: None,
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
             octopus_api_base_url: String::new(),

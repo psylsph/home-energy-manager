@@ -22,7 +22,7 @@ pub(crate) mod time_windows;
 use chrono::{DateTime, Datelike, Local, Timelike};
 
 use crate::forecast::calibration::calibrate_performance_ratio_detailed;
-use crate::forecast::consumption::build_consumption_profile;
+use crate::forecast::consumption::{build_consumption_profile_excluding, ConsumptionExclusions};
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
 use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
@@ -143,6 +143,10 @@ pub struct ForecastPayload {
     pub consumption_days_observed: u32,
     pub consumption_sufficient: bool,
     pub consumption_tomorrow_kwh: f64,
+    /// EV charging left out of the profile's window (issue #400), kWh:
+    /// from the charger's recorded power, and above the load threshold.
+    pub consumption_excluded_ev_kwh: f64,
+    pub consumption_excluded_above_kwh: f64,
     pub battery: Option<ForecastBattery>,
     pub import_tomorrow_kwh: f64,
     pub export_tomorrow_kwh: f64,
@@ -269,14 +273,27 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
     }
 
     // --- consumption profile ----------------------------------------------
+    let since_ts = now_ts - CONSUMPTION_WINDOW_DAYS * 86_400;
     let rows = inputs
         .db
         .map(|db| {
-            db.consumption_counter_rows_since(now_ts - CONSUMPTION_WINDOW_DAYS * 86_400)
+            db.consumption_counter_rows_since(since_ts)
                 .unwrap_or_default()
         })
         .unwrap_or_default();
-    let profile = build_consumption_profile(&rows);
+    // EV charging is left out (issue #400): the charger's recorded power
+    // where HEM has it, else load above the user's threshold.
+    let ev_minutes = inputs
+        .db
+        .map(|db| db.evc_power_minutes_since(since_ts).unwrap_or_default())
+        .unwrap_or_default();
+    let profile = build_consumption_profile_excluding(
+        &rows,
+        &ConsumptionExclusions {
+            ev_minutes: &ev_minutes,
+            load_above_kw: inputs.settings.forecast_exclude_load_above_kw,
+        },
+    );
     if !profile.sufficient() {
         status.push("insufficient_consumption_history".to_string());
     }
@@ -381,6 +398,8 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         consumption_days_observed: profile.days_observed,
         consumption_sufficient: profile.sufficient(),
         consumption_tomorrow_kwh,
+        consumption_excluded_ev_kwh: profile.excluded_ev_kwh,
+        consumption_excluded_above_kwh: profile.excluded_above_kwh,
         battery,
         import_tomorrow_kwh,
         export_tomorrow_kwh,
@@ -1268,6 +1287,52 @@ mod tests {
             battery_reserve: 10,
             ..Default::default()
         }
+    }
+
+    /// Issue #400: the charger's recorded power comes out of the profile,
+    /// and the threshold clips load where there's no charger data.
+    #[test]
+    fn ev_charging_is_left_out_of_the_consumption_prediction() {
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        seed_consumption_history(&db, now);
+        let settings = five_kwp_settings();
+        let payload = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
+        assert!((payload.consumption_tomorrow_kwh - 12.0).abs() < 1e-6);
+        assert_eq!(payload.consumption_excluded_ev_kwh, 0.0);
+        assert_eq!(payload.consumption_excluded_above_kwh, 0.0);
+
+        // The charger drew 300 W through 18:00–19:00 every day.
+        let mut date = now.date_naive() - chrono::Duration::days(7);
+        while date < now.date_naive() {
+            let start = Local
+                .from_local_datetime(&date.and_hms_opt(18, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp();
+            for m in 0..60 {
+                db.record_evc_power_minute(&crate::history::evc_power::EvcMinuteRow {
+                    timestamp: start + m * 60,
+                    power_w: 300.0,
+                    samples: 6,
+                })
+                .unwrap();
+            }
+            date = date.succ_opt().unwrap();
+        }
+        let payload = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
+        assert!((payload.consumption_tomorrow_kwh - 11.7).abs() < 1e-6);
+        assert!((payload.consumption_excluded_ev_kwh - 7.0 * 0.3).abs() < 1e-6);
+
+        // Load above 0.4 kW is clipped in every other hour; 18:00 has the
+        // charger's own figure, so it isn't clipped as well.
+        let settings = Settings {
+            forecast_exclude_load_above_kw: Some(0.4),
+            ..five_kwp_settings()
+        };
+        let payload = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
+        assert!((payload.consumption_tomorrow_kwh - (0.2 + 23.0 * 0.4)).abs() < 1e-6);
+        assert!(payload.consumption_excluded_above_kwh > 0.0);
     }
 
     /// Issue #359: the plan the API serves and the automation applies

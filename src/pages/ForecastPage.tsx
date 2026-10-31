@@ -18,6 +18,7 @@ import { apiGet, apiPost } from '../lib/api';
 import { openExternal } from '../lib/openExternal';
 import { useDeferredSave } from '../hooks/useDeferredSave';
 import Toggle from '../components/Toggle';
+import LoadAboveSetting from '../components/LoadAboveSetting';
 import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
@@ -33,6 +34,7 @@ import {
   chargeTargetReadBack,
   holdTargetPct,
   forecastStatusMessages,
+  consumptionExclusionNote,
   forecastXAxisTicks,
   forecastYAxisScale,
   forwardHourTimestamps,
@@ -348,6 +350,10 @@ export default function ForecastPage() {
   const [minSocPctInput, setMinSocPctInput] = useState<string>('20');
   const [minSocError, setMinSocError] = useState<string | null>(null);
   const [minSocPct, setMinSocPct] = useState<number>(20);
+  const [loadAboveKw, setLoadAboveKw] = useState<number | null>(null);
+  // Bumped when the form syncs from saved settings, remounting the load
+  // threshold field; its own saves don't, so an edit keeps its focus.
+  const [settingsSyncs, setSettingsSyncs] = useState(0);
   const [planStrategy, setPlanStrategy] = useState<PlanStrategy>('min_soc');
   const [planStrategySaving, setPlanStrategySaving] = useState(false);
   const [planStrategyError, setPlanStrategyError] = useState<string | null>(null);
@@ -437,6 +443,7 @@ export default function ForecastPage() {
             forecast_plan_strategy?: PlanStrategy;
             forecast_charge_efficiency?: number;
             forecast_discharge_efficiency?: number;
+            forecast_exclude_load_above_kw?: number | null;
           } & Record<string, unknown>;
         }>('/api/settings'),
       ]);
@@ -456,6 +463,8 @@ export default function ForecastPage() {
           : 'min_soc',
       );
       if (syncForm) {
+        setLoadAboveKw(settingsRes.data.forecast_exclude_load_above_kw ?? null);
+        setSettingsSyncs((n) => n + 1);
         if (settingsRes.data.forecast_min_soc_pct != null) {
           setMinSocPctInput(String(Math.round(settingsRes.data.forecast_min_soc_pct)));
         }
@@ -1039,7 +1048,12 @@ export default function ForecastPage() {
           label="House Consumption"
           value={formatEnergy(summary.consumptionKwh)}
           testId="forecast-consumption-tomorrow"
-          hint={`${data.consumption_days_observed} days observed`}
+          hint={[
+            `${data.consumption_days_observed} days observed`,
+            consumptionExclusionNote(data),
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         />
         <SummaryTile
           label="Expected Export"
@@ -1266,6 +1280,14 @@ export default function ForecastPage() {
               </p>
             )}
           </div>
+          {/* EV charging left out of the consumption prediction (issue
+              #400). */}
+          <LoadAboveSetting
+            key={settingsSyncs}
+            savedKw={loadAboveKw}
+            disabled={!data}
+            onSaved={() => load(false)}
+          />
           {/* Automatic plan handling — one control for keeping charge slot 1
               in step with the plan: the backend applies the calculated plan
               (or clears the slot when no charge is needed) the configured

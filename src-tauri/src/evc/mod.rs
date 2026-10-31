@@ -625,8 +625,18 @@ async fn publish_evc_cached(state: &Arc<AppState>, snapshot: EvcSnapshot) {
         let mut evc = state.latest_evc.lock().await;
         *evc = Some(snapshot.clone());
     }
+    let power_w = snapshot.active_power;
     let _ = state.tx.send(PollMessage::Evc(Box::new(snapshot)));
     record_evc_success(state).await;
+    // After the broadcast and the reachability update, so a busy history
+    // database only delays the next poll, never what this one reports.
+    record_evc_power(state, chrono::Utc::now().timestamp(), power_w).await;
+}
+
+/// Fold a poll's power into the current minute and store the minute before
+/// it once it ends (issue #400). Storing runs on the blocking pool.
+async fn record_evc_power(state: &Arc<AppState>, now_ts: i64, power_w: i32) {
+    let _ = (state, now_ts, power_w);
 }
 
 fn carry_forward_evc_block2(
@@ -1491,5 +1501,38 @@ mod tests {
         assert!(!reset.reachable);
         assert!(!reset.stale);
         assert_eq!(reset.last_success_at_epoch_ms, None);
+    }
+
+    #[tokio::test]
+    async fn charger_power_is_stored_once_its_minute_ends() {
+        use crate::inverter::poll::AppState;
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let path = crate::test_util::make_unique_test_dir("evc-power").join("h.db");
+            let db = Arc::new(crate::history::HistoryDb::open(&path).unwrap());
+            *state.history.lock().await = Some(db.clone());
+
+            let minute = 1_790_000_040;
+            record_evc_power(&state, minute + 5, 7_000).await;
+            record_evc_power(&state, minute + 15, 7_400).await;
+            assert!(db.evc_power_minutes_since(0).unwrap().is_empty());
+            record_evc_power(&state, minute + 65, 0).await;
+            let rows = db.evc_power_minutes_since(0).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].timestamp, minute);
+            assert!((rows[0].power_w - 7_200.0).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charger_power_without_a_history_database_is_dropped_quietly() {
+        use crate::inverter::poll::AppState;
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            record_evc_power(&state, 1_790_000_040, 7_000).await;
+            record_evc_power(&state, 1_790_000_100, 7_000).await;
+        })
+        .await;
     }
 }

@@ -1181,6 +1181,74 @@ describe('ForecastPage min SOC input', () => {
     });
   });
 
+  it('shows how much EV charging the consumption prediction left out', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: {
+            ...fullPayload(),
+            consumption_excluded_ev_kwh: 10.0,
+            consumption_excluded_above_kwh: 4.2,
+          },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(
+        screen.getByText('14 days observed · 14.2 kWh of EV charging left out of the last 28 days'),
+      ).toBeTruthy();
+    });
+  });
+
+  it('shows the saved load threshold and saves a new one without remounting the field', async () => {
+    // The settings read returns whatever was saved last, as the backend does.
+    let saved: number | null = 3.5;
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('no_plan');
+      if (path === '/api/settings') {
+        return { ok: true, data: { forecast_exclude_load_above_kw: saved } };
+      }
+      return { ok: true, data: {} };
+    });
+    apiPostMocked.mockImplementation(async (_path: string, body?: unknown) => {
+      const b = body as { forecast_exclude_load_above_kw?: number | null };
+      if (b && 'forecast_exclude_load_above_kw' in b) saved = b.forecast_exclude_load_above_kw ?? null;
+      return { ok: true };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId('forecast-load-above-input') as HTMLInputElement).value,
+      ).toBe('3.5');
+    });
+    const input = screen.getByTestId('forecast-load-above-input') as HTMLInputElement;
+    const settingsReads = () =>
+      apiGetMock.mock.calls.filter((c) => c[0] === '/api/settings').length;
+    const readsBefore = settingsReads();
+    input.focus();
+    fireEvent.change(input, { target: { value: '5' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => {
+      expect(apiPostMocked).toHaveBeenCalledWith('/api/settings', {
+        forecast_exclude_load_above_kw: 5,
+      });
+    });
+    // The save refetches settings carrying the new value; the field is not
+    // remounted, so it keeps its element, text and focus.
+    await waitFor(() => expect(settingsReads()).toBeGreaterThan(readsBefore));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getByTestId('forecast-load-above-input')).toBe(input);
+    expect(input.value).toBe('5');
+    expect(document.activeElement).toBe(input);
+  });
+
   it('rejects a blank minimum SOC without posting or changing the floor', async () => {
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/forecast') return { ok: true, data: fullPayload() };
