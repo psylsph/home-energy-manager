@@ -219,7 +219,7 @@ test.describe('Control Page - Discharge Schedule', () => {
 test.describe('Control Page - Battery And Power Controls', () => {
   test('should show Battery And Power Controls heading', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Battery And Power Controls')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Battery And Power Controls' })).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Minimum SOC section', async ({ page }) => {

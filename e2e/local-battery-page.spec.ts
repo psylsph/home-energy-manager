@@ -19,7 +19,7 @@ test.describe('Battery Page - SOC Overview', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('h2, h3').locator('text=Battery')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('heading', { name: 'Battery', exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show battery state badge', async ({ page }) => {
@@ -67,7 +67,7 @@ test.describe('Battery Page - SOC Overview', () => {
     await page.goto('/#/battery');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('text=Temperature')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('Temperature', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show Mode row', async ({ page }) => {
