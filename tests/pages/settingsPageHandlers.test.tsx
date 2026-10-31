@@ -31,6 +31,7 @@ vi.mock('../../src/lib/openExternal', () => ({
 
 import SettingsPage from '../../src/pages/SettingsPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
+import { openAdvanced } from './settingsTestUtils';
 
 function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -176,8 +177,10 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     });
     render(<SettingsPage />);
 
-    await screen.findByText('Save Notification Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Save Notification Settings' }));
+    const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
+    // Save stays locked until the saved config has loaded.
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
 
     await waitFor(() => {
       const alertSave = apiPostMock.mock.calls.find(([path]) => path === '/api/alerts');
@@ -197,6 +200,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('posts the new interval and flashes a success message', async () => {
       mountApiMocks({ interval_secs: 20 });
       render(<SettingsPage />);
+      await openAdvanced();
       await screen.findByText('Refresh Interval');
       const fifteenBtn = screen.getByText('15s');
       fireEvent.click(fifteenBtn);
@@ -213,6 +217,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       mountApiMocks({ interval_secs: 20 });
       apiPostMock.mockRejectedValueOnce(new Error('server unreachable'));
       render(<SettingsPage />);
+      await openAdvanced();
       await screen.findByText('Refresh Interval');
       fireEvent.click(screen.getByText('15s'));
       await waitFor(() => {
@@ -229,6 +234,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
           await Promise.resolve();
           await Promise.resolve();
         });
+        for (const b of screen.getAllByRole('button', { name: 'Advanced' })) fireEvent.click(b);
 
         await act(async () => {
           fireEvent.click(screen.getByText('15s'));
@@ -263,6 +269,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
           await Promise.resolve();
           await Promise.resolve();
         });
+        for (const b of screen.getAllByRole('button', { name: 'Advanced' })) fireEvent.click(b);
         await act(async () => {
           fireEvent.click(screen.getByText('15s'));
           await Promise.resolve();
@@ -360,6 +367,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       // The App section contains the HTTP port input + a Save button. Find
       // the input by its wrapping flex container (it's the only number input
       // next to a Save button in the App section).
+      await openAdvanced();
       const portHeading = await screen.findByText('HTTP Port');
       const section = portHeading.closest('section')!;
       // The HTTP port input sits inside the same flex row as the Save button.
@@ -392,6 +400,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('posts the normalized bind address and origins when applying network settings', async () => {
       mountApiMocks({ api_port: 7338, api_bind_address: '127.0.0.1', api_allowed_origins: ['https://a.example'] });
       render(<SettingsPage />);
+      await openAdvanced();
       const applyButton = await screen.findByRole('button', { name: 'Apply Network Settings' });
       // Normalise whitespace and drop empty entries before posting.
       fireEvent.click(applyButton);
@@ -406,6 +415,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       mountApiMocks({ api_port: 7338, api_bind_address: '127.0.0.1' });
       apiPostMock.mockRejectedValueOnce(new Error('The authenticated API listener could not be reconfigured: bind failed. The previous settings were restored.'));
       render(<SettingsPage />);
+      await openAdvanced();
       const applyButton = await screen.findByRole('button', { name: 'Apply Network Settings' });
       fireEvent.click(applyButton);
       await waitFor(() => expect(screen.getByText(/could not be reconfigured/)).toBeDefined());
@@ -414,6 +424,7 @@ describe('<SettingsPage/> — save handlers & validation', () => {
     it('rejects a blank HTTP port without posting zero', async () => {
       mountApiMocks({ http_port: 7337 });
       render(<SettingsPage />);
+      await openAdvanced();
       const portHeading = await screen.findByText('HTTP Port');
       const section = portHeading.closest('section')!;
       const portInput = section.querySelector('input[type="number"]') as HTMLInputElement;
@@ -740,8 +751,9 @@ describe('<SettingsPage/> — save handlers & validation', () => {
 
     it('derives the ntfy topic from the serial when none is configured', async () => {
       mountWithAlerts('SA999');
-      await screen.findByText('Save Notification Settings');
-      fireEvent.click(screen.getByRole('button', { name: 'Save Notification Settings' }));
+      const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
+      await waitFor(() => expect(save).toBeEnabled());
+      fireEvent.click(save);
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/alerts', expect.objectContaining({
           ntfy_topic: 'hem-SA999',
@@ -749,10 +761,45 @@ describe('<SettingsPage/> — save handlers & validation', () => {
       });
     });
 
+    it('derives the topic from a serial saved with Connect during the visit', async () => {
+      mountWithAlerts('SA999');
+      const serialInput = await screen.findByPlaceholderText('Leave blank to auto-detect');
+      fireEvent.change(serialInput, { target: { value: 'SB111' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+      await waitFor(() => expect(apiPostMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({ serial: 'SB111' })));
+
+      const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
+      await waitFor(() => expect(save).toBeEnabled());
+      fireEvent.click(save);
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/alerts', expect.objectContaining({ ntfy_topic: 'hem-SB111' }));
+      });
+    });
+
+    it('keeps the saved serial for the topic when Connect fails', async () => {
+      mountWithAlerts('SA999');
+      apiPostMock.mockImplementation(async (path: string) => {
+        if (path === '/api/settings') throw new Error('settings locked');
+        return { ok: true, message: 'Saved' };
+      });
+      const serialInput = await screen.findByPlaceholderText('Leave blank to auto-detect');
+      fireEvent.change(serialInput, { target: { value: 'SB111' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+      await screen.findByText('settings locked');
+
+      const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
+      await waitFor(() => expect(save).toBeEnabled());
+      fireEvent.click(save);
+      await waitFor(() => {
+        expect(apiPostMock).toHaveBeenCalledWith('/api/alerts', expect.objectContaining({ ntfy_topic: 'hem-SA999' }));
+      });
+    });
+
     it('uses the user-entered ntfy topic over the derived default', async () => {
       mountWithAlerts('SA999', { ntfy_topic: 'my-custom-topic' });
-      await screen.findByText('Save Notification Settings');
-      fireEvent.click(screen.getByRole('button', { name: 'Save Notification Settings' }));
+      const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
+      await waitFor(() => expect(save).toBeEnabled());
+      fireEvent.click(save);
       await waitFor(() => {
         expect(apiPostMock).toHaveBeenCalledWith('/api/alerts', expect.objectContaining({
           ntfy_topic: 'my-custom-topic',

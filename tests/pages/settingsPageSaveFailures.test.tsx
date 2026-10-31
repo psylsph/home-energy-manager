@@ -380,7 +380,7 @@ describe('<SettingsPage/> — notifications', () => {
     useInverterStore.setState({ inverterTempConfig: { inverter_temp_min: 8, inverter_temp_max: 60 } });
     render(<SettingsPage />);
     const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
-    await waitFor(() => expect(apiGetMock).toHaveBeenCalledWith('/api/alerts'));
+    await waitFor(() => expect(save).toBeEnabled());
 
     fireEvent.click(save);
 
@@ -393,7 +393,7 @@ describe('<SettingsPage/> — notifications', () => {
     apiPostMock.mockResolvedValue({ ok: true, message: 'Alert settings saved' });
     render(<SettingsPage />);
     const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
-    await waitFor(() => expect(apiGetMock).toHaveBeenCalledWith('/api/alerts'));
+    await waitFor(() => expect(save).toBeEnabled());
 
     fireEvent.click(save);
 
@@ -407,7 +407,9 @@ describe('<SettingsPage/> — notifications', () => {
     mount();
     failPost('/api/alerts');
     render(<SettingsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Save Notification Settings' }));
+    const save = await screen.findByRole('button', { name: 'Save Notification Settings' });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
     await screen.findByText('Failed to save alert settings');
   });
 
@@ -602,6 +604,8 @@ describe('<SettingsPage/> — copying the access URL', () => {
     mount();
     render(<SettingsPage />);
     const section = await sectionOf('Remote / Mobile Network Access');
+    // The LAN address arrives from /api/status after the section mounts.
+    await within(section).findByText('http://192.168.1.99:7337');
     return within(section).getAllByRole('button', { name: 'Copy' })[0];
   };
 

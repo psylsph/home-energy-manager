@@ -5,40 +5,14 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 // lacks the actual storage methods). We can therefore use it directly here.
 
 vi.mock('../../src/lib/api', () => ({
-  apiGet: vi.fn(async (path: string) => {
-    if (path === '/api/settings') {
-      return {
-        ok: true,
-        data: {
-          host: '', port: 8899, serial: '', interval_secs: 20, http_port: 7337,
-          evc_port: 502, import_tariff_config: null, export_tariff_config: null,
-          evc_host: '',
-        },
-      };
-    }
-    if (path === '/api/alerts') {
-      return { ok: true, data: { config: { enabled: false, telegram: { bot_token: '', chat_id: '', enabled: false }, ntfy: { topic: '', server: 'https://ntfy.sh', enabled: false }, thresholds: {} } } };
-    }
-    if (path === '/api/weather') {
-      return { ok: true, data: { config: { enabled: false, latitude: null, longitude: null, update_interval_mins: 30 }, current: null, history: [] } };
-    }
-    if (path === '/api/status') return { ok: true, lan_ip: null, clients: [], client_count: 0 };
-    if (path === '/api/discover') return { ok: true, subnets: [], inverters: [] };
-    if (path === '/api/evc/discover') return { ok: true, subnets: [], chargers: [] };
-    return { ok: true, data: {} };
-  }),
   apiPost: vi.fn().mockResolvedValue({ ok: true, data: {} }),
-  getApiBase: () => 'http://localhost:7337',
-  getServerPort: () => 7337,
-  fetchHistory: vi.fn().mockResolvedValue({}),
-  isTauri: false,
 }));
 
-vi.mock('../../src/lib/openExternal', () => ({
-  openExternal: vi.fn().mockResolvedValue(undefined),
-}));
+import PanelControlsSection from '../../src/components/settings/PanelControlsSection';
 
-import SettingsPage from '../../src/pages/SettingsPage';
+const Section = () => (
+  <PanelControlsSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />
+);
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot, MeterData } from '../../src/lib/types';
 
@@ -59,7 +33,7 @@ function meter(address: number, overrides: Partial<MeterData> = {}): MeterData {
   };
 }
 
-/** Snapshot carrying only the fields SettingsPage reads from it. */
+/** Snapshot carrying only the fields Panel Controls reads from it. */
 function snapshotWith(meters: MeterData[]): InverterSnapshot {
   return {
     meters,
@@ -69,7 +43,7 @@ function snapshotWith(meters: MeterData[]): InverterSnapshot {
   } as unknown as InverterSnapshot;
 }
 
-describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
+describe('<PanelControlsSection/> — Grid CT meter picker (issue #192)', () => {
   beforeEach(() => {
     silenceConsoleError();
     localStorage.removeItem('gridMeterAddress');
@@ -87,14 +61,14 @@ describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
     // override; Auto resolves to the built-in grid CT and the control stays
     // out of the way.
     useInverterStore.setState({ snapshot: snapshotWith([meter(0x00, { i_total: 5 })]) });
-    render(<SettingsPage />);
+    render(<Section />);
     await screen.findByText('Show Node Status Words');
     expect(screen.queryByTestId('grid-ct-meter-select')).toBeNull();
   });
 
   it('lists each external CT and defaults to Auto', async () => {
     useInverterStore.setState({ snapshot: snapshotWith([meter(0x01), meter(0x02)]) });
-    render(<SettingsPage />);
+    render(<Section />);
     const select = (await screen.findByTestId('grid-ct-meter-select')) as HTMLSelectElement;
     // Built-in (address 0) is the default selection.
     expect(select.value).toBe('0');
@@ -106,7 +80,7 @@ describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
 
   it('selecting an external CT updates the store and persists to localStorage', async () => {
     useInverterStore.setState({ snapshot: snapshotWith([meter(0x01, { i_total: 41.2 })]) });
-    render(<SettingsPage />);
+    render(<Section />);
     const select = (await screen.findByTestId('grid-ct-meter-select')) as HTMLSelectElement;
     fireEvent.change(select, { target: { value: '1' } });
     await waitFor(() => {
@@ -128,7 +102,7 @@ describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
   // -------------------------------------------------------------------------
   it('stacks the label and the select vertically on mobile (flex-col)', async () => {
     useInverterStore.setState({ snapshot: snapshotWith([meter(0x01)]) });
-    render(<SettingsPage />);
+    render(<Section />);
     const select = await screen.findByTestId('grid-ct-meter-select');
     // The outer row must collapse to a column on narrow screens so the
     // long description text isn't crammed into a 1/3-width gutter.
@@ -139,7 +113,7 @@ describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
 
   it('makes the select full-width on mobile and intrinsic on sm+', async () => {
     useInverterStore.setState({ snapshot: snapshotWith([meter(0x01)]) });
-    render(<SettingsPage />);
+    render(<Section />);
     const select = await screen.findByTestId('grid-ct-meter-select');
     // `w-full` so it spans the available row width on mobile; `sm:w-auto`
     // releases it back to its content width on wider screens.
@@ -149,7 +123,7 @@ describe('<SettingsPage/> — Grid CT meter picker (issue #192)', () => {
 
   it('caps the description column at 60% width on sm+ so it does not crowd the select', async () => {
     useInverterStore.setState({ snapshot: snapshotWith([meter(0x01)]) });
-    render(<SettingsPage />);
+    render(<Section />);
     const select = await screen.findByTestId('grid-ct-meter-select');
     // The label/description column (sibling of the select inside the row).
     const labelCol = select.previousElementSibling as HTMLElement | null;

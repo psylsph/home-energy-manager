@@ -1,102 +1,32 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
-// ---------------------------------------------------------------------------
-// Mocks — same shape as the other SettingsPage tests. `apiPost` is exported
-// from the mock so individual tests can assert on the recorded calls (we use
-// `toHaveBeenCalledWith` rather than a manual push array).
-// ---------------------------------------------------------------------------
+// `apiPost` is mocked so tests can assert on the recorded calls.
 
 vi.mock('../../src/lib/api', () => ({
-  apiGet: vi.fn(async (path: string) => {
-    if (path === '/api/settings') {
-      return {
-        ok: true,
-        data: {
-          host: '',
-          port: 8899,
-          serial: '',
-          interval_secs: 20,
-          http_port: 7337,
-          evc_port: 502,
-          import_tariff_config: null,
-          export_tariff_config: null,
-          evc_host: '',
-          // Issue #131: surface a non-zero Standing Charge so we can assert
-          // the input hydrates correctly on load.
-          import_standing_charge_p_per_day: 54.86,
-        },
-      };
-    }
-    if (path === '/api/alerts') {
-      return {
-        ok: true,
-        data: {
-          config: {
-            enabled: false,
-            telegram: { bot_token: '', chat_id: '', enabled: false },
-            ntfy: { topic: '', server: 'https://ntfy.sh', enabled: false },
-            thresholds: {},
-          },
-        },
-      };
-    }
-    if (path === '/api/weather') {
-      return {
-        ok: true,
-        data: {
-          config: {
-            enabled: false,
-            latitude: null,
-            longitude: null,
-            update_interval_mins: 30,
-          },
-          current: null,
-          history: [],
-        },
-      };
-    }
-    if (path === '/api/status') {
-      return { ok: true, lan_ip: null, clients: [], client_count: 0 };
-    }
-    if (path === '/api/discover') {
-      return { ok: true, subnets: [], inverters: [] };
-    }
-    if (path === '/api/evc/discover') {
-      return { ok: true, subnets: [], chargers: [] };
-    }
-    return { ok: true, data: {} };
-  }),
   apiPost: vi.fn().mockResolvedValue({ ok: true, data: {} }),
-  getApiBase: () => 'http://localhost:7337',
-  getServerPort: () => 7337,
-  fetchHistory: vi.fn().mockResolvedValue({}),
-  isTauri: false,
 }));
 
-vi.mock('../../src/lib/openExternal', () => ({
-  openExternal: vi.fn().mockResolvedValue(undefined),
-}));
+import TariffsSection from '../../src/components/settings/TariffsSection';
 
-// Imported after the vi.mock() calls above (factories are hoisted regardless).
-import SettingsPage from '../../src/pages/SettingsPage';
+// Issue #131: a non-zero saved Standing Charge, so hydration can be checked.
+const Section = () => (
+  <TariffsSection flash={() => {}} initial={{ import_standing_charge_p_per_day: 54.86 }} />
+);
 import { apiPost } from '../../src/lib/api';
-import { useInverterStore } from '../../src/store/useInverterStore';
 
 function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
 }
 
-describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
+describe('<TariffsSection/> — Standing Charge input (issue #131)', () => {
   beforeEach(() => {
     silenceConsoleError();
     vi.mocked(apiPost).mockClear();
-    useInverterStore.setState({ gridLineWeight: 'standard' });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    useInverterStore.setState({ developerMode: false });
     cleanup();
   });
 
@@ -106,7 +36,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
       // TariffSlotEditor, with the Save Tariffs button further down. The
       // exact ordering matters — the issue specifically asks for the input
       // to be "below the Export entry section".
-      render(<SettingsPage />);
+      render(<Section />);
 
       const input = await screen.findByLabelText(
         /Import Standing Charge in Pence Per Day/i,
@@ -118,9 +48,8 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
     });
 
     it('hydrates the input from the server-provided Standing Charge', async () => {
-      // The mocked /api/settings returns 54.86; the input must show that
-      // exact value once settings load.
-      render(<SettingsPage />);
+      // The saved Standing Charge is 54.86; the input must show exactly that.
+      render(<Section />);
       const input = await screen.findByLabelText(
         /Import Standing Charge in Pence Per Day/i,
       );
@@ -132,7 +61,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
     it('renders the helper text explaining the field purpose', async () => {
       // The placeholder / caption must mention p/day and the Octopus Flux
       // example so a first-time user knows what to type.
-      render(<SettingsPage />);
+      render(<Section />);
       expect(
         await screen.findByText(/Daily fixed import cost/i),
       ).toBeDefined();
@@ -144,7 +73,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
       // Future refactors must not relocate the input to a different section
       // — this guards against accidentally moving it into Section 5
       // (Local Weather) or somewhere else entirely.
-      render(<SettingsPage />);
+      render(<Section />);
 
       const exportHeading = await screen.findByRole('heading', {
         name: 'Export',
@@ -172,7 +101,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
 
   describe('save round-trip', () => {
     it('Save Tariffs posts the Standing Charge in pence/day', async () => {
-      render(<SettingsPage />);
+      render(<Section />);
       const input = await screen.findByLabelText(
         /Import Standing Charge in Pence Per Day/i,
       );
@@ -197,7 +126,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
     it('blank input serialises to 0 (no Standing Charge)', async () => {
       // Clear the field — saving with an empty value should persist 0, the
       // documented "no Standing Charge" sentinel.
-      render(<SettingsPage />);
+      render(<Section />);
       const input = await screen.findByLabelText(
         /Import Standing Charge in Pence Per Day/i,
       );
@@ -217,7 +146,7 @@ describe('<SettingsPage/> — Standing Charge input (issue #131)', () => {
       // Defensive: a paste of "abc" or similar junk must not blow up the
       // save handler with NaN (which would fail backend validation or, worse,
       // serialise into settings.json as the literal string "NaN").
-      render(<SettingsPage />);
+      render(<Section />);
       const input = await screen.findByLabelText(
         /Import Standing Charge in Pence Per Day/i,
       );

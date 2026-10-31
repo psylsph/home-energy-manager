@@ -2,71 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
-  apiGet: vi.fn(async (path: string) => {
-    if (path === '/api/settings') {
-      return {
-        ok: true,
-        data: {
-          host: '',
-          port: 8899,
-          serial: '',
-          interval_secs: 20,
-          http_port: 7337,
-          evc_port: 502,
-          import_tariff_config: null,
-          export_tariff_config: null,
-          evc_host: '',
-        },
-      };
-    }
-    if (path === '/api/alerts') {
-      return {
-        ok: true,
-        data: {
-          config: {
-            enabled: false,
-            telegram: { bot_token: '', chat_id: '', enabled: false },
-            ntfy: { topic: '', server: 'https://ntfy.sh', enabled: false },
-            thresholds: {},
-          },
-        },
-      };
-    }
-    if (path === '/api/weather') {
-      return {
-        ok: true,
-        data: {
-          config: {
-            enabled: false,
-            latitude: null,
-            longitude: null,
-            update_interval_mins: 30,
-          },
-          current: null,
-          history: [],
-        },
-      };
-    }
-    if (path === '/api/status') {
-      return { ok: true, lan_ip: null, clients: [], client_count: 0 };
-    }
-    if (path === '/api/discover') {
-      return { ok: true, subnets: [], inverters: [] };
-    }
-    if (path === '/api/evc/discover') {
-      return { ok: true, subnets: [], chargers: [] };
-    }
-    return { ok: true, data: {} };
-  }),
   apiPost: vi.fn().mockResolvedValue({ ok: true, data: {} }),
-  getApiBase: () => 'http://localhost:7337',
-  getServerPort: () => 7337,
-  fetchHistory: vi.fn().mockResolvedValue({}),
-  isTauri: false,
-}));
-
-vi.mock('../../src/lib/openExternal', () => ({
-  openExternal: vi.fn().mockResolvedValue(undefined),
 }));
 
 function silenceConsoleError() {
@@ -85,7 +21,7 @@ function toggleFor(label: string): HTMLElement {
   return toggle as HTMLElement;
 }
 
-describe('<SettingsPage/> — Energy Flow diagram node status words', () => {
+describe('<PanelControlsSection/> — Energy Flow diagram node status words', () => {
   beforeEach(() => {
     silenceConsoleError();
     localStorage.removeItem('showFlowStatusWords');
@@ -109,10 +45,10 @@ describe('<SettingsPage/> — Energy Flow diagram node status words', () => {
     // picks up the (absent) key; otherwise the cached store from a prior
     // test would carry whatever state the previous test set it to.
     vi.resetModules();
-    const { default: FreshSettingsPage } = await import('../../src/pages/SettingsPage');
+    const { default: PanelControlsSection } = await import('../../src/components/settings/PanelControlsSection');
     const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
 
-    render(<FreshSettingsPage />);
+    render(<PanelControlsSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
     await screen.findByText('Show Node Status Words');
 
     expect(freshStore.getState().showFlowStatusWords).toBe(true);
@@ -124,10 +60,10 @@ describe('<SettingsPage/> — Energy Flow diagram node status words', () => {
     // initializes to the ON default, then exercise the toggle in both
     // directions.
     vi.resetModules();
-    const { default: FreshSettingsPage } = await import('../../src/pages/SettingsPage');
+    const { default: PanelControlsSection } = await import('../../src/components/settings/PanelControlsSection');
     const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
 
-    render(<FreshSettingsPage />);
+    render(<PanelControlsSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
     await screen.findByText('Show Node Status Words');
 
     // The toggle starts checked (default-on). First click turns it off.

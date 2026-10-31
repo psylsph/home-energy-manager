@@ -195,42 +195,54 @@ describe('<SettingsPage/> — toggles are real switches', () => {
 
 describe('<SettingsPage/> — enable switches survive a rejection that is not an Error', () => {
   for (const [label, reason] of [['null', null], ['undefined', undefined]] as const) {
-    it(`Enable Alerts: a ${label} rejection shows a generic message`, async () => {
+    it(`Enable Alerts: a ${label} rejection shows a generic message and moves the switch back`, async () => {
       await open();
       apiPostMock.mockImplementation(async (p: string) => {
         if (p === '/api/alerts') return Promise.reject(reason);
         return { ok: true, message: 'Saved' };
       });
 
-      fireEvent.click(screen.getByRole('switch', { name: 'Enable Alerts' }));
+      const toggle = screen.getByRole('switch', { name: 'Enable Alerts' });
+      const before = toggle.getAttribute('aria-checked');
+      fireEvent.click(toggle);
 
       await screen.findByText('Failed to save');
+      // It moves back, so it never shows a setting that didn't save.
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe(before));
     });
 
-    it(`Enable Weather: a ${label} rejection shows a generic message`, async () => {
+    it(`Enable Weather: a ${label} rejection shows a generic message and moves the switch back`, async () => {
       await open();
       apiPostMock.mockImplementation(async (p: string) => {
         if (p === '/api/weather') return Promise.reject(reason);
         return { ok: true, message: 'Saved' };
       });
 
-      fireEvent.click(screen.getByRole('switch', { name: 'Enable Weather' }));
+      const toggle = screen.getByRole('switch', { name: 'Enable Weather' });
+      const before = toggle.getAttribute('aria-checked');
+      fireEvent.click(toggle);
 
       await screen.findByText('Failed to save');
+      // It moves back, so it never shows a setting that didn't save.
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe(before));
     });
   }
 
   for (const [label, reason] of [['null', null], ['undefined', undefined]] as const) {
-    it(`Enable Auto-Discovery: a ${label} rejection shows a generic message`, async () => {
+    it(`Enable Auto-Discovery: a ${label} rejection shows a generic message and moves the switch back`, async () => {
       await open();
       apiPostMock.mockImplementation(async (p: string) => {
         if (p === '/api/settings') return Promise.reject(reason);
         return { ok: true, message: 'Saved' };
       });
 
-      fireEvent.click(screen.getByRole('switch', { name: 'Enable Auto-Discovery' }));
+      const toggle = screen.getByRole('switch', { name: 'Enable Auto-Discovery' });
+      const before = toggle.getAttribute('aria-checked');
+      fireEvent.click(toggle);
 
       await screen.findByText('Failed to save');
+      // It moves back, so it never shows a setting that didn't save.
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe(before));
     });
   }
 

@@ -30,6 +30,8 @@ vi.mock('../../src/lib/openExternal', () => ({
 
 import SettingsPage from '../../src/pages/SettingsPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
+import { SETTINGS_NAV } from '../../src/lib/settingsNav';
+import { openAdvanced } from './settingsTestUtils';
 
 function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -200,6 +202,7 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       // The interval is rendered as a row of buttons labelled with the
       // step in seconds. 33 clamps to the nearest lower step (30), so the
       // 30s button is the active one.
+      await openAdvanced();
       await screen.findByText('Refresh Interval');
       const thirtyBtn = screen.getByText('30s');
       expect(thirtyBtn.className).toContain('bg-accent');
@@ -209,6 +212,7 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     it('warns that each poll also reaches the GivEnergy cloud via the dongle', async () => {
       mountApiMocks();
       render(<SettingsPage />);
+      await openAdvanced();
       await screen.findByText('Refresh Interval');
       expect(
         screen.getByText(/Each poll also reaches the GivEnergy cloud through the WiFi dongle/),
@@ -273,8 +277,17 @@ describe('<SettingsPage/> — page shell & hydration', () => {
         'EV Charger',
         'About',
       ]) {
-        expect(await screen.findByText(heading)).toBeDefined();
+        expect(await screen.findByRole('heading', { name: heading, level: 2 })).toBeDefined();
       }
+    });
+
+    it('has a section on the page for every navigation link, in navigation order', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+      await screen.findByRole('heading', { name: 'About', level: 2 });
+      const ids = SETTINGS_NAV.flatMap((g) => g.sections.map((s) => s.id));
+      const onPage = Array.from(document.querySelectorAll('section[id]')).map((el) => el.id);
+      expect(onPage).toEqual(ids);
     });
 
     it('places History Backup directly above Developer', async () => {
@@ -408,6 +421,41 @@ describe('<SettingsPage/> — page shell & hydration', () => {
           hidden_panels: ['octopus'],
         });
       });
+    });
+
+    it('offers the Octopus panel once the Octopus credentials are saved, and drops it when they are cleared', async () => {
+      // Panel Visibility and the Octopus settings are separate sections; the
+      // Octopus option follows what the Octopus section last saved.
+      mountApiMocks();
+      apiPostMock.mockResolvedValue({ ok: true });
+      render(<SettingsPage />);
+      await screen.findByText('Panel Visibility');
+      expect(screen.queryByRole('checkbox', { name: 'Octopus' })).toBeNull();
+
+      // Typing alone doesn't change the list — only a save does.
+      const account = screen.getByPlaceholderText('A-1234ABCD');
+      fireEvent.change(account, { target: { value: 'A-1234ABCD' } });
+      fireEvent.change(screen.getByPlaceholderText('sk_live_…'), { target: { value: 'sk_live_abc' } });
+      expect(screen.queryByRole('checkbox', { name: 'Octopus' })).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
+      expect(await screen.findByRole('checkbox', { name: 'Octopus' })).toBeDefined();
+
+      fireEvent.change(account, { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
+      await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Octopus' })).toBeNull());
+    });
+
+    it('keeps the Octopus panel when an Octopus save fails', async () => {
+      mountApiMocks({ octopus_api_key_configured: true, octopus_account_number: 'A-1234ABCD' });
+      apiPostMock.mockRejectedValue(new Error('settings locked'));
+      render(<SettingsPage />);
+      await screen.findByRole('checkbox', { name: 'Octopus' });
+
+      fireEvent.change(screen.getByPlaceholderText('A-1234ABCD'), { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Octopus Settings' }));
+      await screen.findByText('settings locked');
+      expect(screen.getByRole('checkbox', { name: 'Octopus' })).toBeDefined();
     });
 
     it('offers the Planner panel and persists hiding it', async () => {
@@ -601,21 +649,66 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     });
   });
 
+  describe('saved settings reach their sections', () => {
+    afterEach(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
+
+    const switchOn = (name: string) => screen.getByRole('switch', { name }).getAttribute('aria-checked');
+
+    it('shows saved app, tray and update settings', async () => {
+      (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+      mountApiMocks({
+        autostart_enabled: true, minimise_to_tray: true, start_minimised: true,
+        check_for_updates: false, http_port: 8123, interval_secs: 45,
+      });
+      render(<SettingsPage />);
+      await screen.findByRole('switch', { name: 'Start on Login' });
+      expect(switchOn('Start on Login')).toBe('true');
+      expect(switchOn('Minimise to Tray')).toBe('true');
+      expect(switchOn('Start Hidden in Tray')).toBe('true');
+      expect(switchOn('Check for New Releases')).toBe('false');
+
+      await openAdvanced();
+      const app = screen.getByRole('heading', { name: 'App', level: 2 }).closest('section')!;
+      expect((within(app).getByRole('spinbutton') as HTMLInputElement).value).toBe('8123');
+      expect(within(app).getByRole('button', { name: '45s' }).className).toContain('bg-accent');
+    });
+
+    it('falls back to the defaults for settings an older backend leaves out', async () => {
+      (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+      mountApiMocks({
+        autostart_enabled: undefined, minimise_to_tray: undefined, start_minimised: undefined,
+        check_for_updates: undefined, http_port: undefined, interval_secs: undefined,
+      });
+      render(<SettingsPage />);
+      await screen.findByRole('switch', { name: 'Start on Login' });
+      expect(switchOn('Start on Login')).toBe('false');
+      expect(switchOn('Minimise to Tray')).toBe('false');
+      expect(switchOn('Start Hidden in Tray')).toBe('false');
+      expect(switchOn('Check for New Releases')).toBe('true');
+
+      await openAdvanced();
+      const app = screen.getByRole('heading', { name: 'App', level: 2 }).closest('section')!;
+      expect((within(app).getByRole('spinbutton') as HTMLInputElement).value).toBe('7337');
+      expect(within(app).getByRole('button', { name: '20s' }).className).toContain('bg-accent');
+    });
+  });
+
   describe('developer mode', () => {
     it('always renders the Developer section heading (the toggle lives there)', async () => {
       mountApiMocks();
       useInverterStore.setState({ developerMode: false });
       render(<SettingsPage />);
-      expect(await screen.findByText('Developer')).toBeDefined();
+      expect(await screen.findByRole('heading', { name: 'Developer', level: 2 })).toBeDefined();
     });
 
     it('shows API configuration in Remote / Mobile Network Access without developer mode', async () => {
       mountApiMocks();
       useInverterStore.setState({ developerMode: false });
       render(<SettingsPage />);
-      await screen.findByText('Developer');
-      const remote = screen.getByText('Remote / Mobile Network Access').closest('section')!;
-      const developer = screen.getByText('Developer').closest('section')!;
+      const developer = (await screen.findByRole('heading', { name: 'Developer', level: 2 })).closest('section')!;
+      const remote = screen.getByRole('heading', { name: 'Remote / Mobile Network Access', level: 2 }).closest('section')!;
       // Keys are generated (no free-text input); the section exposes the
       // generate action, the port field and the control-permission toggle.
       expect(remote.contains(screen.getByRole('button', { name: 'Generate API Key' }))).toBe(true);
@@ -631,7 +724,7 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       expect(await screen.findByText(/SolarWatch/)).toBeDefined();
       // The API configuration itself must stay in Remote / Mobile Network
       // Access even when developer mode is on — no copies back in Developer.
-      const developer = screen.getByText('Developer').closest('section')!;
+      const developer = screen.getByRole('heading', { name: 'Developer', level: 2 }).closest('section')!;
       expect(developer.textContent).not.toContain('Authenticated API');
       expect(developer.querySelector('input')).toBeNull();
     });

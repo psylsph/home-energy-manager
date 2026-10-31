@@ -25,7 +25,7 @@ function formFrom(status: Status): BackupForm {
  * Settings → History Backup (issue #379): scheduled, verified copies of
  * history.db, a "Back up now" button and the last result.
  */
-export default function HistoryBackupPanel() {
+export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
   const [status, setStatus] = useState<Status | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [form, setForm] = useState<BackupForm | null>(null);
@@ -144,7 +144,7 @@ export default function HistoryBackupPanel() {
     'bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors';
 
   return (
-    <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4" aria-labelledby="history-backup-heading">
+    <section id={id} className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4 scroll-mt-32 md:scroll-mt-24" aria-labelledby="history-backup-heading">
       <div>
         <h2 id="history-backup-heading" className="text-text-primary text-lg font-semibold font-sans">
           History Backup

@@ -74,8 +74,22 @@ function mount(hold: string[]) {
   apiPostMock.mockResolvedValue({ ok: true, message: 'Saved' });
 }
 
-const release = (path: string) => act(async () => pending[path].resolve(undefined));
-const fail = (path: string) => act(async () => pending[path].reject(new Error('backend not ready')));
+/**
+ * The held request, once it has been made. Sections fetch their own config
+ * when they mount, which can be just after their heading first appears.
+ */
+async function held(path: string): Promise<Deferred> {
+  await waitFor(() => expect(pending[path]).toBeDefined());
+  return pending[path]!;
+}
+const release = async (path: string) => {
+  const d = await held(path);
+  await act(async () => d.resolve(undefined));
+};
+const fail = async (path: string) => {
+  const d = await held(path);
+  await act(async () => d.reject(new Error('backend not ready')));
+};
 
 async function section(heading: string): Promise<HTMLElement> {
   return (await screen.findByRole('heading', { name: heading })).closest('section') as HTMLElement;

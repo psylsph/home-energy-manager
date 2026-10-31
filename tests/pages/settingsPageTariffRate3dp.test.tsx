@@ -11,57 +11,26 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
-  apiGet: vi.fn(async (path: string) => {
-    if (path === '/api/settings') {
-      return {
-        ok: true,
-        data: {
-          host: '',
-          port: 8899,
-          serial: '',
-          interval_secs: 20,
-          http_port: 7337,
-          evc_port: 502,
-          // 0.12345 £/kWh = 12.345p — needs 3dp.
-          import_tariff_config: { slots: [{ start: '00:00', end: '23:59', rate: 0.12345 }] },
-          export_tariff_config: { slots: [{ start: '00:00', end: '23:59', rate: 0.15 }] },
-          evc_host: '',
-          import_standing_charge_p_per_day: 0,
-        },
-      };
-    }
-    if (path === '/api/alerts') {
-      return { ok: true, data: { config: { enabled: false, telegram: { bot_token: '', chat_id: '', enabled: false }, ntfy: { topic: '', server: 'https://ntfy.sh', enabled: false }, thresholds: {} } } };
-    }
-    if (path === '/api/weather') {
-      return { ok: true, data: { config: { enabled: false, latitude: null, longitude: null, update_interval_mins: 30 }, current: null, history: [] } };
-    }
-    if (path === '/api/status') return { ok: true, lan_ip: null, clients: [], client_count: 0 };
-    if (path === '/api/discover') return { ok: true, subnets: [], inverters: [] };
-    if (path === '/api/evc/discover') return { ok: true, subnets: [], chargers: [] };
-    return { ok: true, data: {} };
-  }),
   apiPost: vi.fn().mockResolvedValue({ ok: true, data: {} }),
-  getApiBase: () => 'http://localhost:7337',
-  getServerPort: () => 7337,
-  fetchHistory: vi.fn().mockResolvedValue({}),
-  isTauri: false,
 }));
 
-vi.mock('../../src/lib/openExternal', () => ({
-  openExternal: vi.fn().mockResolvedValue(undefined),
-}));
+import TariffsSection from '../../src/components/settings/TariffsSection';
 
-import SettingsPage from '../../src/pages/SettingsPage';
-import { useInverterStore } from '../../src/store/useInverterStore';
+const Section = () => (
+  <TariffsSection
+    flash={() => {}}
+    initial={{
+      // 0.12345 £/kWh = 12.345p — needs 3dp.
+      import_tariff_config: { slots: [{ start: '00:00', end: '23:59', rate: 0.12345 }] },
+      export_tariff_config: { slots: [{ start: '00:00', end: '23:59', rate: 0.15 }] },
+      import_standing_charge_p_per_day: 0,
+    }}
+  />
+);
 
-describe('<SettingsPage/> — tariff Rate field is 3dp', () => {
+describe('<TariffsSection/> — tariff Rate field is 3dp', () => {
   beforeEach(() => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    useInverterStore.setState({
-      developerMode: false,
-      inverterTempConfig: null,
-    });
   });
 
   afterEach(() => {
@@ -70,7 +39,7 @@ describe('<SettingsPage/> — tariff Rate field is 3dp', () => {
   });
 
   it('renders the import rate to 3dp (12.345p) with a 0.001 step', async () => {
-    render(<SettingsPage />);
+    render(<Section />);
     // Import editor is rendered before Export, so its Rate input is first.
     const rateInputs = await screen.findAllByLabelText(/Rate \(p\/kWh\)/i);
     const importRate = rateInputs[0] as HTMLInputElement;

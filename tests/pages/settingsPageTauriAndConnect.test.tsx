@@ -42,6 +42,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import SettingsPage from '../../src/pages/SettingsPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
+import { openAdvanced } from './settingsTestUtils';
 
 const tariff = () => ({ slots: [{ start: '00:00', end: '23:59', rate: 0.15 }], version: 2 });
 
@@ -378,6 +379,7 @@ describe('<SettingsPage/> — authenticated API key and network', () => {
   it('reports a failed network apply, and a generic message when none is given', async () => {
     mount({ api_port: 7338, api_bind_address: '127.0.0.1' });
     render(<SettingsPage />);
+    await openAdvanced();
     const apply = await screen.findByRole('button', { name: 'Apply Network Settings' });
 
     failPost('/api/settings', new Error('address already in use'));
@@ -392,6 +394,7 @@ describe('<SettingsPage/> — authenticated API key and network', () => {
   it('refuses a blank port when applying network settings', async () => {
     mount();
     render(<SettingsPage />);
+    await openAdvanced();
     const apply = await screen.findByRole('button', { name: 'Apply Network Settings' });
     fireEvent.change(screen.getByLabelText('Port'), { target: { value: '' } });
     fireEvent.click(apply);

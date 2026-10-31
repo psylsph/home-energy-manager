@@ -58,14 +58,21 @@ test.describe('Settings Page - Connection', () => {
   });
 });
 
+/** Unfold the App section's Advanced settings (interval and HTTP port). */
+async function openAppAdvanced(page: import('@playwright/test').Page) {
+  await page.goto('/#/settings');
+  const app = page.locator('section', { has: page.getByRole('heading', { name: 'App', exact: true, level: 2 }) });
+  await app.getByRole('button', { name: 'Advanced' }).click({ timeout: 10_000 });
+}
+
 test.describe('Settings Page - Refresh Interval', () => {
   test('should show Refresh Interval heading', async ({ page }) => {
-    await page.goto('/#/settings');
+    await openAppAdvanced(page);
     await expect(page.locator('text=Refresh Interval')).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show interval buttons', async ({ page }) => {
-    await page.goto('/#/settings');
+    await openAppAdvanced(page);
     await expect(page.getByRole('button', { name: '5s', exact: true })).toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole('button', { name: '10s', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '15s', exact: true })).toBeVisible();
@@ -73,7 +80,7 @@ test.describe('Settings Page - Refresh Interval', () => {
   });
 
   test('5s should be active by default', async ({ page }) => {
-    await page.goto('/#/settings');
+    await openAppAdvanced(page);
     // The 5s button should have the active/highlighted style
     const btn = page.getByRole('button', { name: '5s', exact: true });
     await expect(btn).toBeVisible({ timeout: 10_000 });
@@ -82,7 +89,7 @@ test.describe('Settings Page - Refresh Interval', () => {
 
 test.describe('Settings Page - HTTP Port', () => {
   test('should show HTTP Port heading', async ({ page }) => {
-    await page.goto('/#/settings');
+    await openAppAdvanced(page);
     await expect(page.locator('text=HTTP Port')).toBeVisible({ timeout: 10_000 });
   });
 });
@@ -358,7 +365,7 @@ test.describe('Settings Page - Network Access', () => {
 test.describe('Settings Page - Developer', () => {
   test('should show Developer heading', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.getByText('Developer', { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Developer', exact: true, level: 2 })).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show Developer Mode toggle', async ({ page }) => {
@@ -388,7 +395,7 @@ test.describe('Settings Page - Developer', () => {
 test.describe('Settings Page - About', () => {
   test('should show About heading', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=About')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'About', exact: true, level: 2 })).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show GitHub link', async ({ page }) => {
@@ -418,7 +425,7 @@ test.describe('Settings Page - API', () => {
 test.describe('Settings Page - Energy Flow Diagram Noise Threshold', () => {
   test('should show Energy Flow Diagram sub-section under Panel Controls', async ({ page }) => {
     await page.goto('/#/settings');
-    await expect(page.locator('text=Panel Controls')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: 'Panel Controls', exact: true, level: 2 })).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('text=Energy Flow Diagram')).toBeVisible({ timeout: 5_000 });
   });
 
