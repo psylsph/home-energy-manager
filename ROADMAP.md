@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 31 October 2026 (v0.98.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 31 October 2026 (v1.0.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 The order weighs three things: whether users are affected today, whether a later item depends on it, and how much it costs. Where it differs from the issue's own label, the reason is given.
 
@@ -10,15 +10,15 @@ The code is done for all of these. They stay open only until a release or a repl
 
 | # | Issue | Effort | What is left |
 |---|---|---|---|
-| [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps were posted on the issue (30 Oct) and are now in `INSTALL.md`, linked from the issue (31 Oct). Waiting for the reporter to confirm a restore works, then close. |
+| [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps were posted on the issue (30 Oct) and are now in `INSTALL.md`, linked from the issue (31 Oct). The reporter has thanked us and is reworking their own backup script around it (31 Oct), so nothing is left on HEM's side. Ready to close. |
 | [419](https://github.com/psylsph/home-energy-manager/issues/419) | Solar Graph puzzle | S | Fixed in v0.97.0. The overnight climb was the inverter's output counter standing in for solar while the panel counters read zero, not a clock problem; solar now comes only from the panel counters, so the drop at sunrise and the inflated Generated total are gone. Days already recorded keep their old values. Explained on the issue (31 Oct); waiting for the reporter to confirm on v0.97.0, then close. |
 
-## Tier 2: user-facing gaps and groundwork
+## Tier 2: user-facing gaps and polish
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
-| 1 | [402](https://github.com/psylsph/home-energy-manager/issues/402) | Break up the Settings page | L | A pure refactor, but `SettingsPage.tsx` is about 2,900 lines and the save-without-blur bugs (#391) came from copied save logic. Do it before #397 and #396 each add another Settings section. Work in the order the issue suggests (Panel Controls and Notifications first), with the test suite green after each step. Do the section components and the shared save hook first, and the navigation rail after. |
-| 2 | [417](https://github.com/psylsph/home-energy-manager/issues/417) | Alert formatting in ntfy and Pushover | S | `<b>` tags show as literal text in ntfy and Pushover messages. Every existing HEM alert does this, so it's better fixed for all of them as a separate change. Telegram is sent with HTML parse mode and is fine. |
+| 1 | [417](https://github.com/psylsph/home-energy-manager/issues/417) | Alert formatting in ntfy and Pushover | S | `<b>` tags show as literal text in ntfy and Pushover messages. Every existing HEM alert does this, so it's better fixed for all of them as a separate change. Telegram is sent with HTML parse mode and is fine. |
+| 2 | [422](https://github.com/psylsph/home-energy-manager/issues/422) | Optional illustrated house view for the Status page | L | Stuart's own design, now unblocked: the Settings split (#402, v0.99.0) gives the "Energy flow display: Orbit / House" choice a home in Panel Controls. It is a second renderer over `EnergyFlowViewModel`, so the numbers can't drift from the orbit diagram, plus a burger-menu drawer that replaces the bottom bar only when House is chosen. Orbit stays the default. Most of the cost is the illustration and the test matrix (five flow states, both themes, drawer focus handling). A reporter has suggested a choice of house styles, a garage when an EV charger is set up, and supplier mascots. Ship the single house first; a garage drawn when the EV charger is configured is a reasonable follow-up, but leave supplier logos out (third-party branding). |
 
 ## Tier 3: smarter planning around Intelligent Octopus Go
 
@@ -35,7 +35,7 @@ These come from #403 (now closed), where Brian and Stuart split the original dis
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
-| 1 | [397](https://github.com/psylsph/home-energy-manager/issues/397) | Detect a dongle factory reset, add a security checklist | M | Labelled low priority, but with GivEnergy in administration no firmware fix is coming. A reset wipes the schedule silently, and the checklist half is cheap, passive documentation. It must not probe the dongle's other ports. Best after #402 so the checklist gets a proper Settings section. |
+| 1 | [397](https://github.com/psylsph/home-energy-manager/issues/397) | Detect a dongle factory reset, add a security checklist | M | Labelled low priority, but with GivEnergy in administration no firmware fix is coming. A reset wipes the schedule silently, and the checklist half is cheap, passive documentation. It must not probe the dongle's other ports. The Settings split (#402) is done, so the checklist can have its own Settings section. |
 | 2 | [396](https://github.com/psylsph/home-energy-manager/issues/396) | MQTT output with Home Assistant auto-discovery | L | Probably the largest group of potential users, and it gives them one poller on the dongle instead of two. Publish only at first. Control over MQTT later, through the same safety rules as the authenticated control API. The main server's bind and CORS stay as they are. |
 
 ## Tier 5: later
@@ -52,5 +52,5 @@ These come from #403 (now closed), where Brian and Stuart split the original dis
 ```text
 #400 EV out of profile (done) ─► #406 dispatch as load ─► #404 re-plan on moved slot
                                        └─────────► #405 export surplus ◄── #407 back-stop
-#402 Settings split ─────► #397 reset detection + checklist, #396 MQTT
+#402 Settings split (done) ─► #397 reset detection + checklist, #396 MQTT, #422 display option
 ```
