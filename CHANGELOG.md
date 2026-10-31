@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.97.0] - 2026-10-31
+
+### Added
+
+- **HEM can calibrate your battery for you.** When the charge reading drifts, start a guided calibration from the Control page: HEM empties the battery to 4%, charges it to 100%, holds it there while the cells balance (2 hours by default), then puts all your battery settings back. It carries on after a restart and you can cancel at any time. Available on single-phase hybrid and AC-coupled inverters with low-voltage batteries (#418).
+- **The Planner no longer mistakes car charging for house load.** With a GivEnergy EV charger, HEM takes the car's energy out of the home load it learns from, so evenings you charged the car stop raising the predicted load for every night. Without one, the new optional "Leave out load above" setting on the Planner page treats heavy hours as car charging. The House Consumption tile shows how much was left out (#400).
+
+### Fixed
+
+- **Solar totals no longer count overnight inverter output.** On several hybrid models the History solar line climbed through the night, dropped to zero at sunrise and then rose again, and the day's Generated total included the night-time climb. Solar now comes only from the panel counters on every single-phase model. Days already recorded keep their old values (#419).
+- **The second panel string's daily total no longer disappears at dusk.** On some two-string systems PV2's energy for the day could drop out of the solar total in the evening.
+- **Battery health charts label every day.** The X-axis no longer skips labels or cuts off the last one.
+
 ## [0.96.0] - 2026-10-30
 
 ### Added
