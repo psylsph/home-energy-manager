@@ -21403,6 +21403,7 @@ pub(crate) mod tests {
     async fn first_credential_defaults_bind_to_loopback_existing_keeps_legacy() {
         with_isolated_config_dir_async(|| async {
             // A previously unconfigured install gets loopback on generate.
+            crate::test_util::seed_free_api_port();
             let state = Arc::new(AppState::new());
             let (status, _) = update_settings(
                 State(state.clone()),
@@ -21639,10 +21640,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn update_settings_generate_only_preserves_port() {
         with_isolated_config_dir_async(|| async {
-            // Seed a known port on disk first.
-            let mut s = crate::settings::Settings::load();
-            s.api_port = 7338;
-            s.save().expect("settings save");
+            // Seed a known (free) port on disk first.
+            let port = crate::test_util::seed_free_api_port();
 
             let state = Arc::new(AppState::new());
 
@@ -21662,7 +21661,7 @@ pub(crate) mod tests {
                 "credential should be generated"
             );
             assert_eq!(
-                saved.api_port, 7338,
+                saved.api_port, port,
                 "api_port should stay at its previous value when not in the request"
             );
         })

@@ -1507,6 +1507,7 @@ mod tests {
     async fn local_settings_calls_keep_api_security_access() {
         use axum::extract::connect_info::MockConnectInfo;
         crate::test_util::with_isolated_config_dir_async(|| async {
+            crate::test_util::seed_free_api_port();
             let local: std::net::SocketAddr = "127.0.0.1:51001".parse().unwrap();
 
             // Loopback caller: generate works and returns the one-time secret.
