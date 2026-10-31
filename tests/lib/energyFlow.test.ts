@@ -429,9 +429,21 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     }
   });
 
-  it('puts the battery voltage and current in the supporting node label', () => {
-    const vm = buildEnergyFlows(snap({ battery_voltage: 51.2, battery_current: -25.4 }));
-    expect(vm.nodes.find((node) => node.id === 'battery')?.subLabel).toBe('51.2V/-25.4A');
+  it('preserves charging and discharging signs in the battery measurements', () => {
+    const charging = buildEnergyFlows(snap({
+      battery_power: -1300,
+      battery_state: 'charging',
+      battery_voltage: 51.2,
+      battery_current: -25.4,
+    }));
+    const discharging = buildEnergyFlows(snap({
+      battery_power: 1300,
+      battery_state: 'discharging',
+      battery_voltage: 51.2,
+      battery_current: 25.4,
+    }));
+    expect(charging.nodes.find((node) => node.id === 'battery')?.subLabel).toBe('51.2V/-25.4A');
+    expect(discharging.nodes.find((node) => node.id === 'battery')?.subLabel).toBe('51.2V/25.4A');
   });
 });
 

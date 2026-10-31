@@ -267,10 +267,10 @@ describe('EnergyOrbitDiagram', () => {
         battery_power: 1300,
         battery_state: 'discharging',
         battery_voltage: 51.2,
-        battery_current: -25.4,
+        battery_current: 25.4,
       })} />,
     );
-    expect(container.querySelector('[data-testid="battery-sublabel"]')?.textContent).toBe('51.2V/-25.4A');
+    expect(container.querySelector('[data-testid="battery-sublabel"]')?.textContent).toBe('51.2V/25.4A');
   });
 
   it('hides node status words by default and shows them when enabled', () => {
