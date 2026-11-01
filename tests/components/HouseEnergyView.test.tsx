@@ -15,6 +15,7 @@ vi.mock('../../src/hooks/useCarbonIntensity', () => ({
 
 import HouseEnergyView from '../../src/components/house/HouseEnergyView';
 import { buildEnergyFlows, FLOW_COLORS } from '../../src/lib/energyFlow';
+import { HOUSE, HOUSE_VIEWBOX, SKY_BAND, iso, skyPoint } from '../../src/lib/houseGeometry';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
 
@@ -240,7 +241,8 @@ describe('<HouseEnergyView/>', () => {
       expect(c.getAttribute('data-band')).toBe('high');
       expect(c.getAttribute('aria-label')).toBe('Grid carbon 183 g/kWh, high, South England. Lowest 03:30 at 92 g/kWh.');
       expect(tid('house-carbon-leaf')!.getAttribute('fill')).toBe('#F97316');
-      expect(tid('house-carbon-value')!.textContent).toBe('183 g/kWh↓03:30');
+      // Just the figure: when it's lowest is in the label, not drawn.
+      expect(tid('house-carbon-value')!.textContent).toBe('183 g/kWh');
     });
 
     it('leaves a clear gap above the EV reading', () => {
@@ -255,14 +257,34 @@ describe('<HouseEnergyView/>', () => {
       );
       const carbonBaseline = Number(y());
       const evBaseline = Number(tid('house-value-ev')!.getAttribute('y'));
-      // The EV value is 22 px tall: its top must sit well below the carbon line.
-      expect(evBaseline - 22 - carbonBaseline).toBeGreaterThanOrEqual(14);
+      // The EV digits are ~16 px tall (22 px font): their top must sit well
+      // below the carbon line.
+      expect(evBaseline - 16 - carbonBaseline).toBeGreaterThanOrEqual(20);
     });
 
-    it('leaves out the lowest time when now is lowest, and greys an unknown band', () => {
+    it('keeps the widest EV status pill left of the roof eave', () => {
+      render(
+        <HouseEnergyView
+          snapshot={snap()}
+          showEvc evcEverConnected
+          connectionState="connected" gridFault={false}
+        />,
+      );
+      const pill = tid('house-status-ev')!;
+      expect(pill.textContent).toBe('Disconnected');
+      const rect = pill.querySelector('rect')!;
+      const right = Number(rect.getAttribute('x')) + Number(rect.getAttribute('width'));
+      const bottom = Number(rect.getAttribute('y')) + Number(rect.getAttribute('height'));
+      // The eave runs from the front-left corner up towards the ridge.
+      const eave = iso(HOUSE.x0, HOUSE.y1, HOUSE.wall);
+      const ridge = iso(HOUSE.x0, (HOUSE.y0 + HOUSE.y1) / 2, HOUSE.ridge);
+      const roofX = eave.x + ((eave.y - bottom) / (eave.y - ridge.y)) * (ridge.x - eave.x);
+      expect(right).toBeLessThan(roofX - 3);
+    });
+
+    it('greys an unknown band', () => {
       carbonState.value = { ...carbon, band: null, lowest: null };
       view();
-      expect(tid('house-carbon-lowest')).toBeNull();
       expect(tid('house-carbon-leaf')!.getAttribute('fill')).toBe('var(--app-text-secondary, #8B949E)');
     });
 
@@ -279,6 +301,77 @@ describe('<HouseEnergyView/>', () => {
       weatherState.value = null;
       view();
       expect(y()).toBe('68');
+    });
+  });
+
+  describe('sky band', () => {
+    const ALTON = { latitude: 51.1058, longitude: -1.048 };
+    const withSky = (iso: string, location: CurrentWeather['location'] | null = ALTON) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.parse(iso));
+      weatherState.value = { temperatureC: 9, kind: 'cloudy', description: 'Cloudy', solarWm2: null, location: location ?? undefined };
+      return render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
+    };
+    const viewBoxHeight = () => Number(document.querySelector('svg')!.getAttribute('viewBox')!.split(' ')[3]);
+    const at = (el: Element) => el.getAttribute('transform')!.match(/translate\(([\d.]+) ([\d.]+)\)/)!.slice(1).map(Number);
+
+    afterEach(() => vi.useRealTimers());
+
+    it('draws no sky, and leaves the house where it was, without a location', () => {
+      withSky('2026-11-01T12:00:00Z', null);
+      expect(tid('house-sky')).toBeNull();
+      expect(viewBoxHeight()).toBe(HOUSE_VIEWBOX.height);
+      expect(tid('house-scene')!.getAttribute('transform')).toBeNull();
+    });
+
+    it('moves the house down to make room for the sky band', () => {
+      withSky('2026-11-01T12:00:00Z');
+      expect(viewBoxHeight()).toBe(HOUSE_VIEWBOX.height + SKY_BAND);
+      expect(tid('house-scene')!.getAttribute('transform')).toBe(`translate(0 ${SKY_BAND})`);
+      // Weather, readings and the house all move; the status pill doesn't.
+      expect(tid('house-scene')!.contains(tid('house-weather'))).toBe(true);
+      expect(tid('house-scene')!.contains(tid('house-reading-solar'))).toBe(true);
+      expect(tid('house-scene')!.contains(tid('house-status-pill'))).toBe(false);
+    });
+
+    it('puts the sun near the top of its arc at midday, with the day\'s times at the ends', () => {
+      withSky('2026-11-01T11:45:00Z');
+      const sky = tid('house-sky')!;
+      expect(sky.getAttribute('data-body')).toBe('sun');
+      const [x, y] = at(tid('house-sun')!);
+      const top = skyPoint(0.5);
+      expect(Math.abs(x - top.x)).toBeLessThan(5);
+      expect(Math.abs(y - top.y)).toBeLessThan(1);
+      const local = (iso: string) => {
+        const d = new Date(iso);
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      };
+      // Alton, 1 Nov: sunrise ~06:57, sunset ~16:39 UTC.
+      expect([local('2026-11-01T06:56:00Z'), local('2026-11-01T06:57:00Z'), local('2026-11-01T06:58:00Z')]).toContain(tid('house-sunrise')!.textContent);
+      expect([local('2026-11-01T16:38:00Z'), local('2026-11-01T16:39:00Z'), local('2026-11-01T16:40:00Z')]).toContain(tid('house-sunset')!.textContent);
+      expect(sky.getAttribute('aria-label')).toMatch(/^Sunrise \d\d:\d\d, sunset \d\d:\d\d$/);
+    });
+
+    it('shows the moon at night, early on its path in the evening', () => {
+      withSky('2026-11-01T18:00:00Z');
+      expect(tid('house-sun')).toBeNull();
+      const [x] = at(tid('house-moon')!);
+      expect(x).toBeLessThan(skyPoint(0.25).x);
+    });
+
+    it('keeps the sun clear of the status pill at the top of its arc', () => {
+      withSky('2026-11-01T11:45:00Z');
+      const [, y] = at(tid('house-sun')!);
+      const pill = tid('house-status-pill')!.querySelector('rect')!;
+      const pillBottom = Number(pill.getAttribute('y')) + Number(pill.getAttribute('height'));
+      // Rays reach 10.5 from the centre.
+      expect(y - 10.5).toBeGreaterThan(pillBottom);
+    });
+
+    it('draws no sky where the sun never sets', () => {
+      withSky('2026-06-21T12:00:00Z', { latitude: 78.2, longitude: 15.6 });
+      expect(tid('house-sky')).toBeNull();
+      expect(viewBoxHeight()).toBe(HOUSE_VIEWBOX.height);
     });
   });
 

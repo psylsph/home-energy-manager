@@ -61,7 +61,7 @@ export function weatherDescription(kind: WeatherIconKind): string {
 
 /** The subset of `GET /api/weather` the house view reads. */
 export interface LiveWeatherState {
-  config: { enabled: boolean };
+  config: { enabled: boolean; latitude?: number | null; longitude?: number | null };
   last_fetch_at: string | null;
   last_fetched_temperature_c: number | null;
   last_fetched_weather_code?: number | null;
@@ -78,6 +78,8 @@ export interface CurrentWeather {
   description: string;
   /** Solar irradiance (W/m²), or `null` when unknown or at night with none. */
   solarWm2: number | null;
+  /** Where the weather is for (drives the sky's sun position), when known. */
+  location?: { latitude: number; longitude: number };
 }
 
 /** Bars in the solar-intensity gauge; each is 200 W/m² (clear midday sun is about 1000). */
@@ -114,7 +116,13 @@ export function currentWeather(state: LiveWeatherState | null | undefined, now: 
   const solarWm2 = solar == null || !Number.isFinite(solar) || solar < 0 || (solar === 0 && state.last_fetched_is_day !== true)
     ? null
     : solar;
-  return { temperatureC: temp, kind, description: weatherDescription(kind), solarWm2 };
+  const { latitude, longitude } = state.config;
+  const location = typeof latitude === 'number' && typeof longitude === 'number'
+    && Number.isFinite(latitude) && Number.isFinite(longitude)
+    && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
+    ? { latitude, longitude }
+    : undefined;
+  return { temperatureC: temp, kind, description: weatherDescription(kind), solarWm2, ...(location ? { location } : {}) };
 }
 
 /** Temperature as shown next to the icon, e.g. `"10 °C"`. */

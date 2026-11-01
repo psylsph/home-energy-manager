@@ -1,7 +1,7 @@
 /**
  * Static isometric illustration for the house view (issue #422): a British
  * two-storey brick house on its own plot — slate roof with white fascias,
- * chimney with two pots, white casement windows, a green front door under a
+ * chimney with two pots, grey-framed casement windows, a green front door under a
  * canopy, a path, lawn and hedges, and the inverter and consumer unit on the
  * gable wall.
  *
@@ -65,7 +65,7 @@ function Box({ x0, x1, y0, y1, z0, z1, top, front, side, stroke, strokeWidth }: 
   );
 }
 
-/** A white casement window on the front wall (y = HOUSE.y1), spanning x0..x1, z0..z1. */
+/** A grey-framed casement window on the front wall (y = HOUSE.y1), spanning x0..x1, z0..z1. */
 function FrontWindow({ x0, x1, z0, z1 }: { x0: number; x1: number; z0: number; z1: number }) {
   const y = HOUSE.y1 + 0.01;
   const i = 0.12;
@@ -82,7 +82,7 @@ function FrontWindow({ x0, x1, z0, z1 }: { x0: number; x1: number; z0: number; z
   );
 }
 
-/** A white casement window on the gable wall (x = HOUSE.x1), spanning y0..y1, z0..z1. */
+/** A grey-framed casement window on the gable wall (x = HOUSE.x1), spanning y0..y1, z0..z1. */
 function SideWindow({ y0, y1, z0, z1 }: { y0: number; y1: number; z0: number; z1: number }) {
   const x = HOUSE.x1 + 0.01;
   const i = 0.12;

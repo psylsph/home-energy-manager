@@ -122,7 +122,7 @@ export default function SettingsNav({ groups }: { groups: SettingsNavGroup[] }) 
           gridTemplateColumns: `repeat(${groups.length}, minmax(0, 1fr))`,
           ...(navTop != null ? { top: navTop } : {}),
         }}
-        className="md:hidden fixed inset-x-0 top-[calc(env(safe-area-inset-top,0px)+3.5rem+1px)] z-20 px-2 py-2 bg-bg-base/90 backdrop-blur-md border-b border-white/5 grid gap-1"
+        className="md:hidden fixed inset-x-0 top-[calc(env(safe-area-inset-top,0px)+4rem+1px)] z-20 px-2 py-2 bg-bg-base/90 backdrop-blur-md border-b border-white/5 grid gap-1"
       >
         {groups.map((g) => {
           const current = g === activeGroup;

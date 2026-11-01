@@ -231,3 +231,35 @@ export function polylineLength(points: ScreenPoint[]): number {
   }
   return len;
 }
+
+// ---------------------------------------------------------------------------
+// Sky: a band under the status pill with the sun's (or moon's) daily path
+// ---------------------------------------------------------------------------
+
+/**
+ * Height of the sky band: the house, readings and weather move down by this
+ * much when it's shown, into the room left under the house on a phone.
+ */
+export const SKY_BAND = 48;
+
+/**
+ * The sky arc, in the band: a wide, shallow path from sunrise on the left to
+ * sunset on the right, its top clear of the status pill even with the sun's
+ * rays, its ends level with the times beside them.
+ */
+export const SKY_ARC = { start: { x: 56, y: 82 }, end: { x: 334, y: 82 }, lift: 38 } as const;
+
+/** Point `t` (0 = sunrise, 1 = sunset) along the sky arc; `t` is clamped. */
+export function skyPoint(t: number): ScreenPoint {
+  const f = Math.min(1, Math.max(0, Number.isFinite(t) ? t : 0));
+  const { start, end, lift } = SKY_ARC;
+  return {
+    x: start.x + (end.x - start.x) * f,
+    y: start.y + (end.y - start.y) * f - lift * Math.sin(Math.PI * f),
+  };
+}
+
+/** The whole arc as a path. */
+export function skyArcD(steps = 48): string {
+  return pathD(Array.from({ length: steps + 1 }, (_, i) => skyPoint(i / steps)));
+}

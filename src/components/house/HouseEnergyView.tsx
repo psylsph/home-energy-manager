@@ -15,11 +15,12 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { useEnergyFlowViewModel, type EnergyFlowSourceProps } from '../../hooks/useEnergyFlowViewModel';
 import { useLiveWeather } from '../../hooks/useLiveWeather';
 import { useCarbonIntensity } from '../../hooks/useCarbonIntensity';
+import { useNow } from '../../hooks/useNow';
+import { formatClock, skyPosition, type SkyPosition } from '../../lib/sun';
 import {
   CARBON_BAND_COLORS,
   carbonLabel,
   formatCarbon,
-  formatCarbonTime,
   type CurrentCarbon,
 } from '../../lib/carbonIntensity';
 import type { ConnectionState } from '../../lib/types';
@@ -40,6 +41,10 @@ import {
   HOUSE_VIEWBOX,
   panelCells,
   polygonPoints,
+  SKY_ARC,
+  SKY_BAND,
+  skyArcD,
+  skyPoint,
   type WorldPoint,
 } from '../../lib/houseGeometry';
 import {
@@ -169,7 +174,8 @@ function WeatherGlyph({ kind, x, y }: { kind: WeatherIconKind; x: number; y: num
       return (
         <g>
           {cloudAt(cx, cy, 1, '#6B7280')}
-          <path d={`M ${cx} ${cy + 6} L ${cx - 4} ${cy + 13} L ${cx} ${cy + 13} L ${cx - 3} ${cy + 20} L ${cx + 5} ${cy + 10} L ${cx + 1} ${cy + 10} Z`} fill="#FBBF24" />
+          {/* Short enough to stay clear of the solar bars below. */}
+          <path d={`M ${cx} ${cy + 6} L ${cx - 4} ${cy + 10} L ${cx} ${cy + 10} L ${cx - 3} ${cy + 15} L ${cx + 5} ${cy + 8} L ${cx + 1} ${cy + 8} Z`} fill="#FBBF24" />
         </g>
       );
     case 'cloudy':
@@ -185,7 +191,8 @@ function Weather({ weather }: { weather: CurrentWeather }) {
     + (solarWm2 == null ? '' : `, sunlight ${formatIrradiance(solarWm2)}`);
   return (
     <g data-testid="house-weather" data-kind={weather.kind} aria-label={label}>
-      <WeatherGlyph kind={weather.kind} x={10} y={48} />
+      {/* Centred on the digits of the temperature (baseline 68, ~12 px tall). */}
+      <WeatherGlyph kind={weather.kind} x={10} y={52} />
       <text x={44} y={68} fill={TEXT_PRIMARY} fontSize={16} fontWeight={600} fontFamily={MONO}>
         {formatWeatherTemp(weather.temperatureC)}
       </text>
@@ -212,8 +219,7 @@ function Weather({ weather }: { weather: CurrentWeather }) {
 
 /**
  * Grid carbon intensity (issue #401) under the weather: a leaf in the band's
- * colour, the intensity now, and when it is lowest ahead (`↓03:30`) — kept
- * short so the row stays clear of the chimney. Moves up into
+ * colour and the intensity now; when it is lowest ahead is in the label. Moves up into
  * the weather's place when the weather (or its solar line) isn't shown.
  */
 function Carbon({ carbon, y }: { carbon: CurrentCarbon; y: number }) {
@@ -230,12 +236,40 @@ function Carbon({ carbon, y }: { carbon: CurrentCarbon; y: number }) {
       <line x1={cx - 6} y1={cy + 5} x2={cx + 2} y2={cy - 2} stroke="var(--app-bg-base, #0D1117)" strokeWidth={1} strokeLinecap="round" />
       <text x={44} y={y} fill={TEXT_SECONDARY} fontSize={11} fontFamily={MONO} data-testid="house-carbon-value">
         {formatCarbon(carbon.intensity)}
-        {carbon.lowest && (
-          <tspan fontSize={10} dx={4} data-testid="house-carbon-lowest">
-            ↓{formatCarbonTime(carbon.lowest.at)}
-          </tspan>
-        )}
       </text>
+    </g>
+  );
+}
+
+/**
+ * The sun's path across the sky band under the status pill, with today's
+ * sunrise and sunset beside its ends; the sun moves along it by day and the
+ * moon by night.
+ */
+function Sky({ sky }: { sky: SkyPosition }) {
+  const p = skyPoint(sky.fraction);
+  const { start, end } = SKY_ARC;
+  const rise = formatClock(sky.sunrise);
+  const set = formatClock(sky.sunset);
+  return (
+    <g data-testid="house-sky" data-body={sky.body} aria-label={`Sunrise ${rise}, sunset ${set}`}>
+      <path d={skyArcD()} fill="none" stroke={TEXT_SECONDARY} strokeOpacity={0.35} strokeWidth={1} strokeDasharray="2 4" strokeLinecap="round" />
+      <text x={start.x - 8} y={start.y + 4} textAnchor="end" fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-sunrise">{rise}</text>
+      <text x={end.x + 8} y={end.y + 4} fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-sunset">{set}</text>
+      {sky.body === 'sun' ? (
+        <g data-testid="house-sun" transform={`translate(${p.x} ${p.y})`}>
+          <circle r={11} fill="#FBBF24" opacity={0.18} />
+          <circle r={6} fill="#FBBF24" />
+          {Array.from({ length: 8 }).map((_, i) => {
+            const a = (i * Math.PI) / 4;
+            return <line key={i} x1={Math.cos(a) * 8} y1={Math.sin(a) * 8} x2={Math.cos(a) * 10.5} y2={Math.sin(a) * 10.5} stroke="#FBBF24" strokeWidth={1.5} strokeLinecap="round" />;
+          })}
+        </g>
+      ) : (
+        <g data-testid="house-moon" transform={`translate(${p.x} ${p.y})`}>
+          <path d="M 2 -6 A 6 6 0 1 0 6 2.4 A 4.8 4.8 0 0 1 2 -6 Z" fill="#CBD5E1" />
+        </g>
+      )}
     </g>
   );
 }
@@ -410,6 +444,11 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
   const weather = useLiveWeather();
   const carbon = useCarbonIntensity();
   const carbonY = !weather ? 68 : weather.solarWm2 == null ? 86 : 104;
+  // Moves the sun along its arc; a minute is a fraction of a pixel.
+  const now = useNow(60_000);
+  const sky = weather?.location ? skyPosition(now, weather.location.latitude, weather.location.longitude) : null;
+  // The sky band pushes everything under the pill down; without it, no gap.
+  const band = sky ? SKY_BAND : 0;
   const scene = buildHouseScene(vm, { connectionState, gridFault });
   const reduced = reducedMotion();
   const solarColor = FLOW_COLORS.solar;
@@ -440,7 +479,7 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
   return (
     <div className="flex justify-center w-full" data-testid="house-energy-view">
       <svg
-        viewBox={`0 0 ${HOUSE_VIEWBOX.width} ${HOUSE_VIEWBOX.height}`}
+        viewBox={`0 0 ${HOUSE_VIEWBOX.width} ${HOUSE_VIEWBOX.height + band}`}
         className="w-full"
         style={{ maxWidth: '440px', fontFamily: SANS }}
         ref={svgRef}
@@ -451,52 +490,55 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
         onClick={() => setTipFor(null)}
       >
         <TopPill pill={scene.pill} />
-        {weather && <Weather weather={weather} />}
-        {carbon && <Carbon carbon={carbon} y={carbonY} />}
+        {sky && <Sky sky={sky} />}
+        <g data-testid="house-scene" transform={band ? `translate(0 ${band})` : undefined}>
+          {weather && <Weather weather={weather} />}
+          {carbon && <Carbon carbon={carbon} y={carbonY} />}
 
-        <HouseIllustration />
+          <HouseIllustration />
 
-        {/* Panels glow in the solar colour while generating. */}
-        <g data-testid="house-panel-glow" data-active={scene.solarActive}>
-          {panelCells().map((cell, i) => (
-            <polygon
-              key={i}
-              points={polygonPoints(cell)}
-              fill={solarColor}
-              fillOpacity={scene.solarActive ? 0.42 : 0.06}
-              stroke={solarColor}
-              strokeOpacity={scene.solarActive ? 0.95 : 0.45}
-              strokeWidth={1}
-              strokeLinejoin="round"
+          {/* Panels glow in the solar colour while generating. */}
+          <g data-testid="house-panel-glow" data-active={scene.solarActive}>
+            {panelCells().map((cell, i) => (
+              <polygon
+                key={i}
+                points={polygonPoints(cell)}
+                fill={solarColor}
+                fillOpacity={scene.solarActive ? 0.42 : 0.06}
+                stroke={solarColor}
+                strokeOpacity={scene.solarActive ? 0.95 : 0.45}
+                strokeWidth={1}
+                strokeLinejoin="round"
+              />
+            ))}
+          </g>
+
+          <BatteryCabinet barsLit={scene.battery.barsLit} color={scene.battery.color} />
+          {source.showEvc && <EvPost />}
+
+          {/* Idle wiring, then one moving cable per part with power on it. */}
+          <g data-testid="house-idle-tracks">
+            {scene.idleTracks.map((d, i) => (
+              <path key={i} d={d} fill="none" stroke="var(--app-text-secondary, #8B949E)" strokeOpacity={0.28} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+            ))}
+          </g>
+          {scene.routes.map((route) => (
+            <Route key={route.id} route={route} reduced={reduced} />
+          ))}
+
+          {scene.readings.map((r) => (
+            <Reading
+              key={r.id}
+              r={r}
+              open={tipFor === r.id}
+              onShow={() => setTipFor(r.id)}
+              onHide={() => setTipFor((cur) => (cur === r.id ? null : cur))}
+              onToggle={() => setTipFor((cur) => (cur === r.id ? null : r.id))}
             />
           ))}
+          {/* Drawn last so the bubble sits over the house and the lines. */}
+          {tipReading && <DetailTip r={tipReading} />}
         </g>
-
-        <BatteryCabinet barsLit={scene.battery.barsLit} color={scene.battery.color} />
-        {source.showEvc && <EvPost />}
-
-        {/* Idle wiring, then one moving cable per part with power on it. */}
-        <g data-testid="house-idle-tracks">
-          {scene.idleTracks.map((d, i) => (
-            <path key={i} d={d} fill="none" stroke="var(--app-text-secondary, #8B949E)" strokeOpacity={0.28} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-          ))}
-        </g>
-        {scene.routes.map((route) => (
-          <Route key={route.id} route={route} reduced={reduced} />
-        ))}
-
-        {scene.readings.map((r) => (
-          <Reading
-            key={r.id}
-            r={r}
-            open={tipFor === r.id}
-            onShow={() => setTipFor(r.id)}
-            onHide={() => setTipFor((cur) => (cur === r.id ? null : cur))}
-            onToggle={() => setTipFor((cur) => (cur === r.id ? null : r.id))}
-          />
-        ))}
-        {/* Drawn last so the bubble sits over the house and the lines. */}
-        {tipReading && <DetailTip r={tipReading} />}
       </svg>
     </div>
   );

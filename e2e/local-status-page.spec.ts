@@ -180,6 +180,13 @@ test.describe('Status Page - API Snapshot', () => {
 
 test.describe('Status Page - House View (issue #422)', () => {
   const useHouse = async (page: Page, theme: 'dark' | 'light' = 'dark') => {
+    // No "new version available" banner: whether the backend has seen a newer
+    // release would otherwise decide whether the page fits.
+    await page.route('**/api/latest-version', async (r) => {
+      const res = await r.fetch();
+      const j = await res.json();
+      await r.fulfill({ response: res, json: { ...j, latest_version: j.current_version, update_available: false } });
+    });
     await page.addInitScript((t) => {
       localStorage.setItem('energyFlowDisplay', 'house');
       localStorage.setItem('themeMode', t);
@@ -193,8 +200,21 @@ test.describe('Status Page - House View (issue #422)', () => {
       // untouched default.
       await page.setViewportSize({ width: 390, height: 763 });
       await useHouse(page, theme);
+      // The tallest layout: weather (with a location, so the sky band shows)
+      // and carbon intensity.
+      const now = Date.now();
+      await page.route('**/api/weather', (r) => r.fulfill({ json: { ok: true, data: {
+        config: { enabled: true, latitude: 51.1, longitude: -1.05 }, last_fetch_at: new Date(now).toISOString(),
+        last_fetched_temperature_c: 11, last_fetched_weather_code: 2, last_fetched_is_day: true, last_fetched_solar_w_m2: 486,
+      } } }));
+      await page.route('**/api/carbon-intensity', (r) => r.fulfill({ json: { ok: true, data: {
+        region: 'South England', fetched_at: new Date(now).toISOString(),
+        periods: [{ from: new Date(now - 60_000).toISOString(), to: new Date(now + 1_800_000).toISOString(), forecast: 183, index: 'high' }],
+      } } }));
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
+      await expect(page.getByTestId('house-sky')).toBeVisible();
+      await expect(page.getByTestId('house-carbon')).toBeVisible();
 
       await expect(page.getByTestId('house-energy-view')).toBeVisible();
       await expect(page.getByTestId('house-reading-battery')).toBeVisible();
@@ -230,13 +250,50 @@ test.describe('Status Page - House View (issue #422)', () => {
     await expect(page.getByRole('heading', { level: 1, name: /^Home Energy Manager/ })).toBeAttached();
     // Extra room at the top on a phone, where iOS dims the edge of the screen.
     const headerPadTop = () => page.locator('header').first().evaluate((el) => getComputedStyle(el).paddingTop);
-    expect(await headerPadTop()).toBe('20px');
+    expect(await headerPadTop()).toBe('28px');
 
     await page.setViewportSize({ width: 1280, height: 800 });
     expect(await headerPadTop()).toBe('12px');
     await expect(page.getByTestId('app-title-short')).toBeHidden();
     await expect(page.getByText('Home Energy Manager', { exact: true })).toBeVisible();
     expect(await fullWidth()).toBeGreaterThan(100);
+  });
+
+  test('centres each weather icon on the temperature, clear of the solar bars', async ({ page }) => {
+    const kinds: [number, boolean][] = [[0, true], [0, false], [2, true], [2, false], [3, true], [45, true], [51, true], [61, true], [71, true], [95, true]];
+    let current = kinds[0];
+    await page.route('**/api/weather', (r) => r.fulfill({ json: { ok: true, data: {
+      config: { enabled: true }, last_fetch_at: new Date().toISOString(), last_fetched_temperature_c: 11,
+      last_fetched_weather_code: current[0], last_fetched_is_day: current[1], last_fetched_solar_w_m2: 486,
+    } } }));
+    await page.setViewportSize({ width: 390, height: 763 });
+    await useHouse(page);
+    for (const kind of kinds) {
+      current = kind;
+      await page.goto('/');
+      await expect(page.getByTestId('house-weather')).toBeVisible({ timeout: 20_000 });
+      const m = await page.getByTestId('house-weather').evaluate((el) => {
+        const glyph = (el.children[0] as SVGGraphicsElement).getBBox();
+        const text = el.querySelector('text') as SVGTextElement;
+        const baseline = Number(text.getAttribute('y'));
+        const size = Number(text.getAttribute('font-size'));
+        // Icon shapes overlapping a bar by more than a hairline on both axes
+        // (each shape on its own: the icon's overall box is mostly empty).
+        const box = (e: Element) => (e as SVGGraphicsElement).getBBox();
+        const shapes = [...el.children[0].querySelectorAll('path, line, circle')].map(box);
+        const bars = [...el.querySelectorAll('[data-testid="house-solar-bar"]')].map(box);
+        const hits = shapes.filter((a) => bars.some((r) => {
+          const ox = Math.min(a.x + a.width, r.x + r.width) - Math.max(a.x, r.x);
+          const oy = Math.min(a.y + a.height, r.y + r.height) - Math.max(a.y, r.y);
+          return ox > 0.5 && oy > 0.5;
+        })).length;
+        return { centre: glyph.y + glyph.height / 2, digits: baseline - size * 0.36, hits };
+      });
+      // Within a few px of the digits' middle: the plain icons sit within 2,
+      // thunder's bolt hangs lowest at ~4 (the old layout was 5 off).
+      expect(Math.abs(m.centre - m.digits), `code ${kind[0]}`).toBeLessThanOrEqual(4.5);
+      expect(m.hits, `code ${kind[0]}`).toBe(0);
+    }
   });
 
   test('navigates from the burger menu and closes it', async ({ page }) => {
@@ -250,7 +307,7 @@ test.describe('Status Page - House View (issue #422)', () => {
     const drawer = page.getByRole('dialog', { name: 'Pages' });
     await expect(drawer).toBeVisible();
     // Lines up with the header, below the edge iOS dims.
-    expect(await drawer.evaluate((el) => getComputedStyle(el).paddingTop)).toBe('20px');
+    expect(await drawer.evaluate((el) => getComputedStyle(el).paddingTop)).toBe('28px');
     await expect(drawer.getByRole('link', { name: 'Status' })).toHaveAttribute('aria-current', 'page');
 
     await page.keyboard.press('Escape');

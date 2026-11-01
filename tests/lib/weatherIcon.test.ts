@@ -81,6 +81,17 @@ describe('currentWeather', () => {
     expect(currentWeather(state(), NOW)).toEqual({ temperatureC: 10.4, kind: 'rain', description: 'Rain', solarWm2: null });
   });
 
+  it('carries the location for the sky, when it is a real one', () => {
+    const at = (latitude: unknown, longitude: unknown) =>
+      currentWeather(state({ config: { enabled: true, latitude, longitude } as LiveWeatherState['config'] }), NOW)?.location;
+    expect(at(51.1, -1.05)).toEqual({ latitude: 51.1, longitude: -1.05 });
+    expect(at(null, null)).toBeUndefined();
+    expect(at(51.1, undefined)).toBeUndefined();
+    expect(at(Number.NaN, 0)).toBeUndefined();
+    expect(at(95, 0)).toBeUndefined();
+    expect(at(51, 200)).toBeUndefined();
+  });
+
   it('carries the solar irradiance, including a daytime zero', () => {
     expect(currentWeather(state({ last_fetched_solar_w_m2: 486 }), NOW)?.solarWm2).toBe(486);
     expect(currentWeather(state({ last_fetched_solar_w_m2: 0 }), NOW)?.solarWm2).toBe(0);
