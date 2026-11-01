@@ -73,6 +73,24 @@ impl Dispatch {
     }
 }
 
+/// What the planner gets from the dispatch list (issue #406).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlanningDispatches {
+    /// Dispatches not yet over, from a list fresh enough to trust.
+    pub dispatches: Vec<Dispatch>,
+    /// When that list was read.
+    pub checked_at: Option<DateTime<Utc>>,
+    /// The hold is on but the list is missing or too old to plan with.
+    pub stale: bool,
+}
+
+/// No dispatches: what the planner sees with the hold off.
+pub static NO_DISPATCHES: PlanningDispatches = PlanningDispatches {
+    dispatches: Vec::new(),
+    checked_at: None,
+    stale: false,
+};
+
 /// An Octopus access token. Its `Debug` output is redacted so logging the
 /// state never leaks it.
 #[derive(Clone)]
@@ -139,6 +157,14 @@ impl DispatchesState {
         self.restart_hold_until.is_some_and(|until| {
             now < until && (until - now) <= Duration::minutes(RESTART_HOLD_MINUTES)
         })
+    }
+
+    /// The dispatches the planner may use (issue #406): the ones not yet
+    /// over, from a fresh list, while the hold is wanted. Otherwise none;
+    /// `stale` says a wanted list couldn't be trusted.
+    pub fn for_planning(&self, now: DateTime<Utc>, wanted: bool) -> PlanningDispatches {
+        let _ = (now, wanted);
+        PlanningDispatches::default()
     }
 
     /// Forget everything, as when the hold is turned off.
@@ -306,6 +332,19 @@ fn fetch_blocking(settings: &Settings, known: Known) -> Result<Fetched, String> 
 /// Whether the hold should be checking at all.
 pub(crate) fn wanted(settings: &Settings) -> bool {
     settings.octopus_dispatch_hold && crate::octopus::configured(settings)
+}
+
+/// [`DispatchesState::for_planning`] for the live state and settings.
+pub async fn planning_dispatches(
+    state: &AppState,
+    settings: &Settings,
+    now: DateTime<Utc>,
+) -> PlanningDispatches {
+    state
+        .octopus_dispatches
+        .lock()
+        .await
+        .for_planning(now, wanted(settings))
 }
 
 /// One pass: read the dispatches and publish them.
@@ -678,6 +717,59 @@ mod tests {
             ..dispatch
         };
         assert!(!boost.holds_at(utc("2026-10-17T13:10:00+00:00")));
+    }
+
+    #[test]
+    fn the_planner_gets_nothing_while_the_hold_is_off() {
+        let state = checked(
+            "2026-10-17T13:00:00+00:00",
+            vec![smart(
+                "2026-10-17T19:00:00+00:00",
+                "2026-10-17T20:00:00+00:00",
+            )],
+        );
+        assert_eq!(
+            state.for_planning(utc("2026-10-17T13:05:00+00:00"), false),
+            PlanningDispatches::default()
+        );
+    }
+
+    #[test]
+    fn the_planner_gets_the_dispatches_not_yet_over_from_a_fresh_list() {
+        let over = smart("2026-10-17T11:00:00+00:00", "2026-10-17T13:00:00+00:00");
+        let running = smart("2026-10-17T12:30:00+00:00", "2026-10-17T13:30:00+00:00");
+        let later = smart("2026-10-17T19:00:00+00:00", "2026-10-17T20:00:00+00:00");
+        let state = checked(
+            "2026-10-17T13:00:00+00:00",
+            vec![over, running.clone(), later.clone()],
+        );
+        let got = state.for_planning(utc("2026-10-17T13:05:00+00:00"), true);
+        assert_eq!(got.dispatches, vec![running, later]);
+        assert_eq!(got.checked_at, Some(utc("2026-10-17T13:00:00+00:00")));
+        assert!(!got.stale);
+    }
+
+    #[test]
+    fn a_wanted_list_that_is_missing_or_old_is_stale_and_gives_nothing() {
+        let later = smart("2026-10-17T19:00:00+00:00", "2026-10-17T20:00:00+00:00");
+        let never = DispatchesState {
+            dispatches: vec![later.clone()],
+            ..Default::default()
+        };
+        let got = never.for_planning(utc("2026-10-17T13:00:00+00:00"), true);
+        assert!(got.stale && got.dispatches.is_empty() && got.checked_at.is_none());
+
+        let state = checked("2026-10-17T13:00:00+00:00", vec![later]);
+        for now in ["2026-10-17T13:15:01+00:00", "2026-10-17T12:44:59+00:00"] {
+            let got = state.for_planning(utc(now), true);
+            assert!(got.stale, "{now}");
+            assert!(got.dispatches.is_empty(), "{now}");
+            assert_eq!(
+                got.checked_at,
+                Some(utc("2026-10-17T13:00:00+00:00")),
+                "{now}"
+            );
+        }
     }
 
     #[test]

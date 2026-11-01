@@ -8563,6 +8563,12 @@ pub(crate) async fn get_forecast_at(
         )
     };
     let settings = crate::settings::Settings::load_async().await;
+    let dispatches = crate::octopus_dispatches::planning_dispatches(
+        &state,
+        &settings,
+        now.with_timezone(&chrono::Utc),
+    )
+    .await;
     let payload = match tokio::task::spawn_blocking(move || {
         crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
@@ -8571,6 +8577,7 @@ pub(crate) async fn get_forecast_at(
             weather_enabled,
             weather_coords: coords,
             now,
+            dispatches: &dispatches,
         })
     })
     .await
@@ -8774,6 +8781,12 @@ pub(crate) async fn get_forecast_plan_at(
         )
     };
     let settings = crate::settings::Settings::load_async().await;
+    let dispatches = crate::octopus_dispatches::planning_dispatches(
+        &state,
+        &settings,
+        now.with_timezone(&chrono::Utc),
+    )
+    .await;
     let (charge, export_advice) = match tokio::task::spawn_blocking(move || {
         let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
@@ -8782,6 +8795,7 @@ pub(crate) async fn get_forecast_plan_at(
             weather_enabled,
             weather_coords: coords,
             now,
+            dispatches: &dispatches,
         });
         compute_full_plan(&forecast, &settings, snapshot.as_ref(), now.timestamp())
     })
@@ -25463,6 +25477,26 @@ pub(crate) mod tests {
             battery: None,
             import_tomorrow_kwh: 0.0,
             export_tomorrow_kwh: 0.0,
+            ev_dispatch_hours: Vec::new(),
+            ev_dispatch_tomorrow_kwh: 0.0,
+            dispatches_checked_at: None,
+        }
+    }
+
+    #[test]
+    fn the_planner_hours_carry_the_planned_car_charging_in_both_bands() {
+        // Issue #406: the plan re-simulates from the payload, so the car and
+        // the dispatch hold must come back with the hours they belong to.
+        let mut forecast = forecast_with_bands(&[(0.0, 0.0, 0.0); 3]);
+        forecast.ev_dispatch_hours = vec![crate::forecast::dispatch_load::DispatchHour {
+            timestamp: 1_800_000_000 + 3600,
+            ev_kwh: 3.5,
+            held_fraction: 0.5,
+        }];
+        for band in [SolarBand::Median, SolarBand::Low] {
+            let hours = forecast_sim_hours(&forecast, band);
+            let got: Vec<(f64, f64)> = hours.iter().map(|h| (h.ev_kwh, h.held_fraction)).collect();
+            assert_eq!(got, vec![(0.0, 0.0), (3.5, 0.5), (0.0, 0.0)], "{band:?}");
         }
     }
 

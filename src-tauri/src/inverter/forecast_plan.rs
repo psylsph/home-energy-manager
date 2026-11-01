@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Local, NaiveDate, Timelike};
+use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
 
 use crate::forecast::planner::PlanRecommendation;
 use crate::forecast::refresh::{
@@ -418,6 +418,9 @@ async fn compute_plan(
         )
     };
     let history = state.history.lock().await.clone();
+    let dispatches =
+        crate::octopus_dispatches::planning_dispatches(state, settings, now.with_timezone(&Utc))
+            .await;
     let live_snapshot = snapshot.clone();
     let settings = settings.clone();
     tokio::task::spawn_blocking(move || {
@@ -428,6 +431,7 @@ async fn compute_plan(
             weather_enabled,
             weather_coords: coords,
             now,
+            dispatches: &dispatches,
         });
         let (rec, export) = crate::server::api::compute_full_plan(
             &forecast,
