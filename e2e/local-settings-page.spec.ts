@@ -431,6 +431,8 @@ test.describe('Settings Page - Energy Flow Diagram Noise Threshold', () => {
 
   test('should show the noise floor description', async ({ page }) => {
     await page.goto('/#/settings');
+    // The full description lives behind the ⓘ (issue #423); open it by hover.
+    await page.getByRole('button', { name: 'More about the flow threshold' }).hover();
     await expect(page.locator('text=no animated line, no arrow')).toBeVisible({ timeout: 10_000 });
   });
 
