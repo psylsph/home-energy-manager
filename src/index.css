@@ -134,6 +134,14 @@ body {
 @utility pt-safe {
   padding-top: env(safe-area-inset-top, 0px);
 }
+/* Top padding for the header and the nav drawer, which line up: more on
+   phones, where iOS dims the top edge of the screen. */
+@utility pt-header {
+  padding-top: calc(env(safe-area-inset-top, 0px) + 1.25rem);
+  @media (width >= 48rem) {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+  }
+}
 @utility pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }

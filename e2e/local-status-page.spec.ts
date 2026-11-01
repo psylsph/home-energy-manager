@@ -228,8 +228,12 @@ test.describe('Status Page - House View (issue #422)', () => {
     const fullWidth = () => page.getByText('Home Energy Manager', { exact: true }).evaluate((el) => el.getBoundingClientRect().width);
     expect(await fullWidth()).toBeLessThanOrEqual(1);
     await expect(page.getByRole('heading', { level: 1, name: /^Home Energy Manager/ })).toBeAttached();
+    // Extra room at the top on a phone, where iOS dims the edge of the screen.
+    const headerPadTop = () => page.locator('header').first().evaluate((el) => getComputedStyle(el).paddingTop);
+    expect(await headerPadTop()).toBe('20px');
 
     await page.setViewportSize({ width: 1280, height: 800 });
+    expect(await headerPadTop()).toBe('12px');
     await expect(page.getByTestId('app-title-short')).toBeHidden();
     await expect(page.getByText('Home Energy Manager', { exact: true })).toBeVisible();
     expect(await fullWidth()).toBeGreaterThan(100);
@@ -245,6 +249,8 @@ test.describe('Status Page - House View (issue #422)', () => {
     await menu.click();
     const drawer = page.getByRole('dialog', { name: 'Pages' });
     await expect(drawer).toBeVisible();
+    // Lines up with the header, below the edge iOS dims.
+    expect(await drawer.evaluate((el) => getComputedStyle(el).paddingTop)).toBe('20px');
     await expect(drawer.getByRole('link', { name: 'Status' })).toHaveAttribute('aria-current', 'page');
 
     await page.keyboard.press('Escape');

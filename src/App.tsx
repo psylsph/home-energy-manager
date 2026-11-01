@@ -495,7 +495,7 @@ function Layout() {
   return (
     <div className="min-h-screen bg-bg-base flex flex-col">
       {/* Header */}
-      <header className="bg-bg-surface/80 backdrop-blur-md border-b border-white/5 px-6 pt-[calc(env(safe-area-inset-top,0px)+0.75rem)] pb-3 flex items-center justify-between sticky top-0 z-30">
+      <header className="bg-bg-surface/80 backdrop-blur-md border-b border-white/5 px-6 pt-header pb-3 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-3 min-w-0">
           {burgerNav && <NavDrawer items={navItems} />}
           <div className="min-w-0">

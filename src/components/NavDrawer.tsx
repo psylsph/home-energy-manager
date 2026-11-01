@@ -131,7 +131,7 @@ export default function NavDrawer({ items }: { items: NavDrawerItem[] }) {
             aria-modal="true"
             aria-label="Pages"
             onKeyDown={onPanelKeyDown}
-            className="absolute inset-y-0 left-0 w-64 max-w-[80vw] bg-bg-surface border-r border-white/10 shadow-2xl flex flex-col pt-[calc(env(safe-area-inset-top,0px)+0.75rem)] pb-safe"
+            className="absolute inset-y-0 left-0 w-64 max-w-[80vw] bg-bg-surface border-r border-white/10 shadow-2xl flex flex-col pt-header pb-safe"
           >
             <div className="flex items-center justify-between px-4 pb-3 border-b border-white/5">
               <span className="text-sm font-semibold text-text-primary">Pages</span>
