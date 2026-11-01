@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-11-01
+
+### Added
+
+- **The sun and moon on the house view.** With weather turned on, a strip above the house shows today's sunrise and sunset with the sun moving along an arc between them. After dark it shows the moon's path through the night, from when it rises (or sunset) to when it sets (or sunrise), with the moon drawn in its current phase. Everything is worked out from your weather location, with no extra internet requests.
+
+### Changed
+
+- **The carbon intensity line shows just the current figure.** The "lowest later" time that appeared beside it in 1.2.0 has been removed to keep the corner tidy.
+- **A more modern look for the house.** The window frames and roof edging are grey instead of white.
+- **More room at the top of the screen on phones**, so the connection details are clear of the edge that iOS dims.
+- **Tidier layout on the house view.** The weather icon lines up with the temperature, and the EV charger reading sits lower and further left, away from the weather and clear of the roof.
+
+### Fixed
+
+- **The house view no longer jumps when a weather update fails.** The sun and moon strip stays in place even when the latest weather reading is out of date.
+
 ## [1.2.0] - 2026-11-01
 
 ### Added
