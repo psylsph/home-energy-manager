@@ -25,6 +25,12 @@ export interface InverterSnapshot {
    * the value is 0 — see `BatteryPanel.tsx`.
    */
   eps_power_w: number;
+  /**
+   * The inverter's AC-side power in watts (IR 24 `p_inverter_out`): + = out,
+   * − = drawing from AC. `battery_power` is the DC side; the gap is
+   * conversion loss. Null/absent on Gateway and three-phase models.
+   */
+  inverter_output_power?: number | null;
   grid_power: number;
   grid_voltage: number;
   grid_frequency: number;

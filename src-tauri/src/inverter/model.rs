@@ -1088,6 +1088,12 @@ pub struct InverterSnapshot {
     /// corruption and replaced with the previous reading.
     #[serde(default)]
     pub eps_power_w: u32,
+    /// The inverter's AC-side power in watts (IR(24) `p_inverter_out`,
+    /// GivTCP `Invertor_Power`): + = feeding AC out, − = drawing from AC.
+    /// `battery_power` is the DC side, so the two differ by conversion loss.
+    /// `None` on models without the IR 0-59 bank (Gateway, three-phase).
+    #[serde(default)]
+    pub inverter_output_power: Option<i32>,
 
     // -- PV details --
     pub pv1_voltage: f32,
@@ -1497,6 +1503,7 @@ impl InverterSnapshot {
             grid_power: 0,
             home_power: 0,
             eps_power_w: 0,
+            inverter_output_power: None,
             pv1_voltage: 0.0,
             pv2_voltage: 0.0,
             pv1_current: 0.0,

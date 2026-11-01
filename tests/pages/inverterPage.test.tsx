@@ -285,3 +285,48 @@ describe('<InverterPage/> Agile on hold', () => {
     expect(container.textContent).not.toMatch(/Agile is on hold/);
   });
 });
+
+describe('<InverterPage/> AC output and conversion loss', () => {
+  function rowValue(container: HTMLElement, label: string): string | undefined {
+    const labelEl = Array.from(container.querySelectorAll('span.text-text-secondary'))
+      .find((r) => r.textContent === label);
+    return labelEl?.nextElementSibling?.textContent ?? undefined;
+  }
+
+  it('shows the AC output and the loss against the DC battery reading', () => {
+    // The user report: battery 446 W (DC) vs inverter 390 W (AC) on an AIO.
+    useInverterStore.setState({
+      snapshot: makeSnapshot({
+        device_type_code: '8001', battery_state: 'discharging', battery_power: 446, inverter_output_power: 390,
+      }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'AC Output')).toBe('390W');
+    expect(rowValue(container, 'Conversion Loss')).toBe('56W');
+  });
+
+  it('shows the AC output as a magnitude when drawing from AC', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ battery_state: 'charging', battery_power: -1000, inverter_output_power: -1100 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'AC Output')).toBe('1.1kW');
+    expect(rowValue(container, 'Conversion Loss')).toBe('100W');
+  });
+
+  it('shows a dash for the loss when it cannot be worked out', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ device_type_code: '3001', solar_power: 2000, inverter_output_power: 0 }),
+    });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'AC Output')).toBe('0W');
+    expect(rowValue(container, 'Conversion Loss')).toBe('—');
+  });
+
+  it('hides both rows without an AC output reading (Gateway, three-phase)', () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ inverter_output_power: null }) });
+    const { container } = render(<InverterPage />);
+    expect(rowValue(container, 'AC Output')).toBeUndefined();
+    expect(rowValue(container, 'Conversion Loss')).toBeUndefined();
+  });
+});

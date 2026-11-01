@@ -6497,6 +6497,47 @@ mod tests {
     }
 
     #[test]
+    fn inverter_output_power_in_range_is_kept() {
+        let mut snap = base_grid_connected_snap();
+        snap.max_ac_power_w = 6000;
+        snap.inverter_output_power = Some(-5_900);
+        sanitize_for_test(&mut snap, None);
+        assert_eq!(snap.inverter_output_power, Some(-5_900));
+    }
+
+    #[test]
+    fn inverter_output_power_beyond_the_rating_falls_back_without_a_repoll() {
+        // A display-only reading: a corrupt value is replaced (previous good
+        // reading, else none) but never flags the snapshot, so it can't spin
+        // the poll loop on its own.
+        let mut prev = base_grid_connected_snap();
+        prev.max_ac_power_w = 6000;
+        prev.inverter_output_power = Some(390);
+        let mut snap = prev.clone();
+        snap.timestamp = 220;
+        snap.inverter_output_power = Some(-31_000);
+        assert!(!sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.inverter_output_power, Some(390));
+
+        let mut snap = prev.clone();
+        snap.inverter_output_power = Some(6_001);
+        sanitize_for_test(&mut snap, None);
+        assert_eq!(snap.inverter_output_power, None);
+    }
+
+    #[test]
+    fn inverter_output_power_uses_15_kw_when_the_rating_is_unknown() {
+        let mut snap = base_grid_connected_snap();
+        snap.max_ac_power_w = 0;
+        snap.inverter_output_power = Some(14_000);
+        sanitize_for_test(&mut snap, None);
+        assert_eq!(snap.inverter_output_power, Some(14_000));
+        snap.inverter_output_power = Some(15_001);
+        sanitize_for_test(&mut snap, None);
+        assert_eq!(snap.inverter_output_power, None);
+    }
+
+    #[test]
     fn eps_power_uses_the_model_ac_power_ceiling() {
         let mut prev = base_grid_connected_snap();
         prev.device_type = DeviceType::ACCoupled;

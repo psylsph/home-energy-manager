@@ -7389,8 +7389,8 @@ mod tests {
         b1[17] = 3500;
         // Load: p_load = 1200 W
         b1[18] = 1200;
-        // AIO power: p_ac1 = -500 W (charging in GE sign)
-        b1[16] = (-500i16) as u16;
+        // Grid: p_ac1 = +1500 W (export)
+        b1[16] = 1500;
         // First AIO serial "SA24230001" (5 regs).
         b1[27] = 0x5341; // 'S','A'
         b1[28] = 0x3234; // '2','4'
@@ -7523,8 +7523,7 @@ mod tests {
         assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.battery_state, BatteryState::Charging);
 
-        // grid_power (derived): solar + battery - home = 3500 + (-800) - 1200 = 1500 W
-        // Positive = export (solar charges battery AND exports to grid)
+        // grid_power: metered p_ac1 = +1500 W (positive = export)
         assert_eq!(snap.grid_power, 1500);
 
         // grid_voltage from v_grid = 241.0 V
@@ -7674,6 +7673,29 @@ mod tests {
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
             make_block(RegisterType::Holding, 60, 60, "holding_60_119", vec![0; 60]),
         ]
+    }
+
+    #[test]
+    fn single_phase_decodes_inverter_ac_output_from_ir24() {
+        // IR(24) p_inverter_out: the inverter's AC-side power, + = out,
+        // − = drawing from AC (GivTCP `Invertor_Power`). The user report
+        // behind this: battery 446 W (DC, IR 52) vs inverter 390 W (AC).
+        let mut blocks = single_phase_blocks_with_battery(446);
+        blocks[0].data[24] = 390;
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.battery_power, 446);
+        assert_eq!(snap.inverter_output_power, Some(390));
+
+        let mut blocks = single_phase_blocks_with_battery(-1000);
+        blocks[0].data[24] = (-1100i16) as u16;
+        assert_eq!(decode_snapshot(&blocks).inverter_output_power, Some(-1100));
+    }
+
+    #[test]
+    fn inverter_ac_output_is_absent_without_the_ir_0_59_bank() {
+        // The Gateway has no IR 0-59 bank; no AC-output reading, not 0 W.
+        let snap = decode_snapshot(&gateway_blocks_for_power_flow(0, 344, -446));
+        assert_eq!(snap.inverter_output_power, None);
     }
 
     #[test]
@@ -7852,8 +7874,8 @@ mod tests {
     }
 
     /// Helper: gateway fixture with configurable p_aio_total at IR(1702),
-    /// plus explicit p_pv (IR 1617) and p_load (IR 1618) so the derived
-    /// grid_power formula is exercised. One AIO online.
+    /// plus explicit p_pv (IR 1617) and p_load (IR 1618). Grid (`p_ac1`,
+    /// IR 1616) is 0 unless set with [`set_gateway_p_ac1`]. One AIO online.
     fn gateway_blocks_for_power_flow(p_pv: u16, p_load: u16, p_aio_total: i16) -> Vec<BlockRead> {
         let mut b1 = [0u16; 60];
         // Identity "GA000009" → V1 (IR(1603) = 9 < 10).
@@ -7879,11 +7901,43 @@ mod tests {
     }
 
     #[test]
+    fn gateway_grid_power_is_read_from_p_ac1_not_derived() {
+        // The Gateway meters grid flow directly at IR(1616) `p_ac1`
+        // (GivTCP `read.py`: `Grid_Power = GEInv.p_ac1`, + = export,
+        // − = import — HEM's convention). A balance-derived figure folds
+        // inverter losses and any unmetered AC source into the grid reading:
+        // here the balance says 0 + 446 − 344 = +102 W export while the meter
+        // reads 1 W.
+        let mut blocks = gateway_blocks_for_power_flow(0, 344, -446);
+        set_gateway_p_ac1(&mut blocks, 1);
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.battery_power, 446);
+        assert_eq!(snap.home_power, 344);
+        assert_eq!(snap.grid_power, 1);
+
+        // Import keeps its negative sign.
+        let mut blocks = gateway_blocks_for_power_flow(0, 2_000, 0);
+        set_gateway_p_ac1(&mut blocks, -1_950);
+        assert_eq!(decode_snapshot(&blocks).grid_power, -1_950);
+    }
+
+    /// Write `p_ac1` (IR 1616, signed) into a Gateway fixture's IR 1600 block.
+    fn set_gateway_p_ac1(blocks: &mut [BlockRead], p_ac1: i16) {
+        let block = blocks
+            .iter_mut()
+            .find(|b| b.block.start == 1600)
+            .expect("fixture has the IR 1600 block");
+        block.data[16] = p_ac1 as u16;
+    }
+
+    #[test]
     fn sign_convention_gateway_discharging() {
         // Raw p_aio_total = -800 (GE wire: − = discharging). Negated on decode
         // → battery_power = +800 (discharging).
-        // solar=1000, home=500 → grid = solar + battery - home = 1000 + 800 - 500 = +1300 (export).
-        let snap = decode_snapshot(&gateway_blocks_for_power_flow(1000, 500, -800));
+        // solar=1000, home=500 → the meter reads +1300 (export).
+        let mut blocks = gateway_blocks_for_power_flow(1000, 500, -800);
+        set_gateway_p_ac1(&mut blocks, 1300);
+        let snap = decode_snapshot(&blocks);
         assert_eq!(snap.battery_power, 800);
         assert_eq!(snap.battery_state, BatteryState::Discharging);
         assert_eq!(snap.grid_power, 1300);
@@ -7893,8 +7947,10 @@ mod tests {
     fn sign_convention_gateway_charging() {
         // Raw p_aio_total = +800 (GE wire: + = charging). Negated on decode
         // → battery_power = -800 (charging).
-        // solar=3500, home=1200 → grid = solar + battery - home = 3500 + (-800) - 1200 = +1500 (export).
-        let snap = decode_snapshot(&gateway_blocks_for_power_flow(3500, 1200, 800));
+        // solar=3500, home=1200 → the meter reads +1500 (export).
+        let mut blocks = gateway_blocks_for_power_flow(3500, 1200, 800);
+        set_gateway_p_ac1(&mut blocks, 1500);
+        let snap = decode_snapshot(&blocks);
         assert_eq!(snap.battery_power, -800);
         assert_eq!(snap.battery_state, BatteryState::Charging);
         assert_eq!(snap.grid_power, 1500);
@@ -7903,7 +7959,7 @@ mod tests {
     #[test]
     fn sign_convention_gateway_idle() {
         // p_aio_total = 0 → battery_power = 0, Idle.
-        // solar=2000, home=2000 → grid = 2000 - 0 - 2000 = 0.
+        // solar=2000, home=2000 → the meter reads 0.
         let snap = decode_snapshot(&gateway_blocks_for_power_flow(2000, 2000, 0));
         assert_eq!(snap.battery_power, 0);
         assert_eq!(snap.battery_state, BatteryState::Idle);
@@ -7918,18 +7974,22 @@ mod tests {
         // (export cannot exceed solar + battery). Root cause: p_aio_total's raw
         // GE sign is + = CHARGING (opposite of p_battery), and we mapped it
         // verbatim. While the battery charges from surplus solar the register
-        // reads +5500; negating gives battery_power = -5500 (charging) and
-        // grid = 6300 + (-5500) - 615 = 185 W export — sensible.
-        let snap = decode_snapshot(&gateway_blocks_for_power_flow(6300, 615, 5500));
+        // reads +5500; negating gives battery_power = -5500 (charging). Grid
+        // comes from the meter (p_ac1), so the battery sign can no longer
+        // invert it.
+        let mut blocks = gateway_blocks_for_power_flow(6300, 615, 5500);
+        set_gateway_p_ac1(&mut blocks, 185);
+        let snap = decode_snapshot(&blocks);
         assert_eq!(snap.battery_power, -5500);
         assert_eq!(snap.battery_state, BatteryState::Charging);
         assert_eq!(snap.grid_power, 185);
     }
 
     #[test]
-    fn sign_convention_gateway_invalid_version_skips_grid_derivation() {
-        // When gateway_software_version is invalid (all zeros), the
-        // gateway-specific grid derivation must NOT run — grid stays at 0.
+    fn gateway_invalid_version_does_not_derive_grid_from_balance() {
+        // Grid only ever comes from the meter (p_ac1, zero here): even with an
+        // invalid version and a balance implying 3500 + 800 − 1200 = 3100 W of
+        // export, grid stays at the metered 0.
         let mut b1 = [0u16; 60];
         // All-zero identity registers → decoded version is all zeros → invalid.
         b1[0] = 0x0000;
@@ -7954,7 +8014,7 @@ mod tests {
         let snap = decode_snapshot(&blocks);
         assert!(!gateway_is_valid(&snap.gateway_software_version));
         // battery_power is still decoded (negated from raw −800 → +800,
-        // discharging), but grid stays at 0 because the derivation guard failed.
+        // discharging), and grid is the metered 0, not the balance.
         assert_eq!(snap.battery_power, 800);
         assert_eq!(snap.grid_power, 0);
     }
