@@ -13,6 +13,7 @@
 pub mod calibration;
 pub mod consumption;
 pub mod current_schedule;
+pub mod dispatch_load;
 pub mod planner;
 pub mod refresh;
 pub mod simulate;

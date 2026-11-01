@@ -1,0 +1,279 @@
+//! Planned car charging as known load (issue #406).
+//!
+//! Turns the account's Intelligent Octopus dispatch list into, for each
+//! forecast hour, the car's planned energy and the share of the hour a smart
+//! dispatch holds the battery (issue #394). The simulator then runs the car
+//! from the battery outside a hold and from the grid inside one.
+//!
+//! Pure: the caller decides whether the list is fresh enough to use and
+//! whether an hour's history is free of car charging (`add_load`), so this
+//! never counts the car twice.
+
+use crate::octopus_dispatches::Dispatch;
+
+/// The fastest home charger there is (three-phase 22 kW). A dispatch
+/// claiming more energy than this could deliver in its time is not believed.
+pub const MAX_CHARGER_KW: f64 = 22.0;
+
+/// One forecast hour's planned car charging.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
+pub struct DispatchHour {
+    /// Start of the hour, unix seconds.
+    pub timestamp: i64,
+    /// The car's planned energy in the hour, kWh.
+    pub ev_kwh: f64,
+    /// Share of the hour (0–1) a smart dispatch holds the battery for.
+    pub held_fraction: f64,
+}
+
+/// [`dispatch_overlay`]'s answer: one entry per hour asked about, in order.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DispatchOverlay {
+    pub hours: Vec<DispatchHour>,
+    /// A dispatch in the horizon gave no believable energy: its hold is
+    /// modelled, its load is not.
+    pub energy_unknown: bool,
+    /// Car load was left out of an hour because its history may still hold
+    /// the car (`add_load` said no).
+    pub load_not_added: bool,
+}
+
+/// Each hour `[start, start + 1 h)` in `hour_starts` against `dispatches`.
+///
+/// - `held_fraction`: the time smart dispatches overlap the hour (merged, so
+///   two cars at once hold it once), as `Dispatch::holds_at` decides.
+/// - `ev_kwh`: each dispatch's energy pro rata to its overlap, smart or not,
+///   where `add_load(hour_start)` allows. Boosts and unknown kinds add load
+///   but no hold, as the poll loop never holds them.
+pub fn dispatch_overlay(
+    hour_starts: &[i64],
+    dispatches: &[Dispatch],
+    add_load: impl Fn(i64) -> bool,
+) -> DispatchOverlay {
+    let _ = (dispatches, &add_load);
+    DispatchOverlay {
+        hours: hour_starts
+            .iter()
+            .map(|&timestamp| DispatchHour {
+                timestamp,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    const H: i64 = 3600;
+    /// 2026-10-17 18:00 UTC.
+    const T0: i64 = 1_792_260_000;
+
+    fn at(ts: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(ts, 0).unwrap()
+    }
+
+    fn dispatch(start: i64, end: i64, kind: Option<&str>, kwh: Option<f64>) -> Dispatch {
+        Dispatch {
+            start: at(start),
+            end: at(end),
+            kind: kind.map(str::to_string),
+            energy_added_kwh: kwh,
+        }
+    }
+
+    fn smart(start: i64, end: i64, kwh: f64) -> Dispatch {
+        dispatch(start, end, Some("SMART"), Some(kwh))
+    }
+
+    fn hours(n: i64) -> Vec<i64> {
+        (0..n).map(|i| T0 + i * H).collect()
+    }
+
+    fn always(_: i64) -> bool {
+        true
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn no_dispatches_means_no_car_and_no_hold_in_every_hour() {
+        let overlay = dispatch_overlay(&hours(3), &[], always);
+        assert_eq!(overlay.hours.len(), 3);
+        for (i, hour) in overlay.hours.iter().enumerate() {
+            assert_eq!(hour.timestamp, T0 + i as i64 * H);
+            assert_eq!(hour.ev_kwh, 0.0);
+            assert_eq!(hour.held_fraction, 0.0);
+        }
+        assert!(!overlay.energy_unknown);
+        assert!(!overlay.load_not_added);
+    }
+
+    #[test]
+    fn a_dispatch_across_an_hour_boundary_splits_its_energy_and_hold() {
+        // 18:30–19:30, 7 kWh: half in each hour.
+        let overlay =
+            dispatch_overlay(&hours(3), &[smart(T0 + H / 2, T0 + 3 * H / 2, 7.0)], always);
+        let [first, second, third] = overlay.hours[..] else {
+            panic!("three hours");
+        };
+        assert!(
+            close(first.ev_kwh, 3.5) && close(first.held_fraction, 0.5),
+            "{first:?}"
+        );
+        assert!(
+            close(second.ev_kwh, 3.5) && close(second.held_fraction, 0.5),
+            "{second:?}"
+        );
+        assert_eq!((third.ev_kwh, third.held_fraction), (0.0, 0.0));
+    }
+
+    #[test]
+    fn energy_is_spread_by_time_over_a_long_dispatch() {
+        // 18:00–20:30, 10 kWh: 4 kWh an hour, 2 kWh in the last half hour.
+        let overlay = dispatch_overlay(&hours(3), &[smart(T0, T0 + 5 * H / 2, 10.0)], always);
+        let kwh: Vec<f64> = overlay.hours.iter().map(|h| h.ev_kwh).collect();
+        assert!(
+            close(kwh[0], 4.0) && close(kwh[1], 4.0) && close(kwh[2], 2.0),
+            "{kwh:?}"
+        );
+        assert!(close(overlay.hours[2].held_fraction, 0.5));
+    }
+
+    #[test]
+    fn overlapping_smart_dispatches_hold_the_hour_once_but_add_both_cars() {
+        // Two cars: 18:00–18:45 and 18:15–19:00.
+        let overlay = dispatch_overlay(
+            &hours(1),
+            &[
+                smart(T0, T0 + 45 * 60, 3.0),
+                smart(T0 + 15 * 60, T0 + H, 6.0),
+            ],
+            always,
+        );
+        let hour = overlay.hours[0];
+        assert!(close(hour.held_fraction, 1.0), "{hour:?}");
+        assert!(close(hour.ev_kwh, 9.0), "{hour:?}");
+    }
+
+    #[test]
+    fn separate_smart_dispatches_in_one_hour_add_their_held_time() {
+        let overlay = dispatch_overlay(
+            &hours(1),
+            &[
+                smart(T0, T0 + 15 * 60, 1.0),
+                smart(T0 + 30 * 60, T0 + 45 * 60, 1.0),
+            ],
+            always,
+        );
+        assert!(
+            close(overlay.hours[0].held_fraction, 0.5),
+            "{:?}",
+            overlay.hours[0]
+        );
+    }
+
+    #[test]
+    fn a_boost_or_unknown_kind_adds_load_but_never_holds() {
+        for kind in ["BOOST", "SOMETHING_NEW"] {
+            let overlay = dispatch_overlay(
+                &hours(1),
+                &[dispatch(T0, T0 + H, Some(kind), Some(7.0))],
+                always,
+            );
+            let hour = overlay.hours[0];
+            assert!(close(hour.ev_kwh, 7.0), "{kind}: {hour:?}");
+            assert_eq!(hour.held_fraction, 0.0, "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_unlabelled_dispatch_is_smart() {
+        let overlay = dispatch_overlay(&hours(1), &[dispatch(T0, T0 + H, None, Some(7.0))], always);
+        assert!(close(overlay.hours[0].held_fraction, 1.0));
+    }
+
+    #[test]
+    fn unbelievable_energy_keeps_the_hold_but_adds_no_load() {
+        for kwh in [
+            None,
+            Some(0.0),
+            Some(-3.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(22.1),
+        ] {
+            let overlay = dispatch_overlay(
+                &hours(1),
+                &[dispatch(T0, T0 + H, Some("SMART"), kwh)],
+                always,
+            );
+            let hour = overlay.hours[0];
+            assert_eq!(hour.ev_kwh, 0.0, "{kwh:?}");
+            assert!(close(hour.held_fraction, 1.0), "{kwh:?}");
+            assert!(overlay.energy_unknown, "{kwh:?}");
+        }
+        // 22 kWh in an hour is a 22 kW charger: believable.
+        let overlay = dispatch_overlay(&hours(1), &[smart(T0, T0 + H, 22.0)], always);
+        assert!(close(overlay.hours[0].ev_kwh, 22.0));
+        assert!(!overlay.energy_unknown);
+    }
+
+    #[test]
+    fn unknown_energy_outside_the_horizon_is_not_reported() {
+        let overlay = dispatch_overlay(
+            &hours(1),
+            &[dispatch(T0 - 2 * H, T0 - H, Some("SMART"), None)],
+            always,
+        );
+        assert!(!overlay.energy_unknown);
+    }
+
+    #[test]
+    fn a_dispatch_already_over_or_not_yet_reached_changes_nothing() {
+        let overlay = dispatch_overlay(
+            &hours(2),
+            &[
+                smart(T0 - 2 * H, T0, 7.0),
+                smart(T0 + 2 * H, T0 + 3 * H, 7.0),
+            ],
+            always,
+        );
+        for hour in &overlay.hours {
+            assert_eq!((hour.ev_kwh, hour.held_fraction), (0.0, 0.0), "{hour:?}");
+        }
+    }
+
+    #[test]
+    fn a_dispatch_running_since_before_the_horizon_counts_only_its_rest() {
+        // 17:00–19:00, 8 kWh: the 18:00 hour gets the second half.
+        let overlay = dispatch_overlay(&hours(1), &[smart(T0 - H, T0 + H, 8.0)], always);
+        assert!(
+            close(overlay.hours[0].ev_kwh, 4.0),
+            "{:?}",
+            overlay.hours[0]
+        );
+        assert!(close(overlay.hours[0].held_fraction, 1.0));
+    }
+
+    #[test]
+    fn hours_whose_history_may_hold_the_car_get_the_hold_but_not_the_load() {
+        let only_second = |ts: i64| ts == T0 + H;
+        let overlay = dispatch_overlay(&hours(2), &[smart(T0, T0 + 2 * H, 14.0)], only_second);
+        assert_eq!(overlay.hours[0].ev_kwh, 0.0);
+        assert!(close(overlay.hours[0].held_fraction, 1.0));
+        assert!(close(overlay.hours[1].ev_kwh, 7.0));
+        assert!(overlay.load_not_added);
+    }
+
+    #[test]
+    fn load_not_added_is_only_reported_where_there_was_load_to_add() {
+        let overlay = dispatch_overlay(&hours(2), &[smart(T0, T0 + H, 7.0)], |ts| ts == T0);
+        assert!(!overlay.load_not_added, "the refused hour had no car");
+    }
+}
