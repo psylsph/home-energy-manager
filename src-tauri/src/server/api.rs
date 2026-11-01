@@ -8953,7 +8953,7 @@ pub(crate) fn forecast_sim_hours(
     band: SolarBand,
 ) -> Vec<crate::forecast::simulate::SimHourInput> {
     use chrono::{Datelike, Timelike};
-    forecast
+    let mut hours: Vec<crate::forecast::simulate::SimHourInput> = forecast
         .solar
         .iter()
         .map(|s| {
@@ -8979,7 +8979,11 @@ pub(crate) fn forecast_sim_hours(
                 ..Default::default()
             }
         })
-        .collect()
+        .collect();
+    // Planned car charging and dispatch holds (issue #406), the same way
+    // the forecast applied them.
+    crate::forecast::dispatch_load::apply_dispatch_hours(&mut hours, &forecast.ev_dispatch_hours);
+    hours
 }
 
 /// The context the export advice needs to ride the charge plan's

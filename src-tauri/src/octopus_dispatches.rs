@@ -163,8 +163,26 @@ impl DispatchesState {
     /// over, from a fresh list, while the hold is wanted. Otherwise none;
     /// `stale` says a wanted list couldn't be trusted.
     pub fn for_planning(&self, now: DateTime<Utc>, wanted: bool) -> PlanningDispatches {
-        let _ = (now, wanted);
-        PlanningDispatches::default()
+        if !wanted {
+            return PlanningDispatches::default();
+        }
+        if !self.fresh(now) {
+            return PlanningDispatches {
+                checked_at: self.checked_at,
+                stale: true,
+                ..PlanningDispatches::default()
+            };
+        }
+        PlanningDispatches {
+            dispatches: self
+                .dispatches
+                .iter()
+                .filter(|dispatch| dispatch.end > now)
+                .cloned()
+                .collect(),
+            checked_at: self.checked_at,
+            stale: false,
+        }
     }
 
     /// Forget everything, as when the hold is turned off.

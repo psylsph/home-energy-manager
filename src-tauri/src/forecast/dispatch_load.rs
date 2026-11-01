@@ -88,6 +88,24 @@ pub fn dispatch_overlay(
     overlay
 }
 
+/// Put the car and the hold onto the simulator's hours, matched by start
+/// time. The forecast and the plan both build their hours through this, so
+/// they always agree.
+pub fn apply_dispatch_hours(
+    hours: &mut [crate::forecast::simulate::SimHourInput],
+    dispatch_hours: &[DispatchHour],
+) {
+    for hour in hours {
+        if let Some(found) = dispatch_hours
+            .iter()
+            .find(|dispatch_hour| dispatch_hour.timestamp == hour.timestamp)
+        {
+            hour.ev_kwh = found.ev_kwh;
+            hour.held_fraction = found.held_fraction;
+        }
+    }
+}
+
 const HOUR_SECS: i64 = 3600;
 
 /// The dispatch's planned energy, if it's a finite, positive figure a home

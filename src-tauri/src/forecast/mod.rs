@@ -23,9 +23,10 @@ pub(crate) mod time_windows;
 use chrono::{DateTime, Datelike, Local, Timelike};
 
 use crate::forecast::calibration::calibrate_performance_ratio_detailed;
+use crate::forecast::consumption::EvPowerMinute;
 use crate::forecast::consumption::{build_consumption_profile_excluding, ConsumptionExclusions};
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
-use crate::forecast::dispatch_load::DispatchHour;
+use crate::forecast::dispatch_load::{apply_dispatch_hours, dispatch_overlay, DispatchHour};
 use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
 use crate::history::{ForecastValueRow, HistoryDb};
@@ -310,6 +311,40 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
     if !profile.sufficient() {
         status.push("insufficient_consumption_history".to_string());
     }
+    // --- planned car charging (issue #406) --------------------------------
+    // The car's load goes in only where the profile is free of it, so it is
+    // never counted twice; the hold goes in regardless.
+    let car_free = profile_free_of_car(inputs.settings, &ev_minutes, since_ts);
+    let planning = inputs.dispatches;
+    if planning.stale {
+        status.push("dispatches_stale".to_string());
+    }
+    let hour_starts: Vec<i64> = solar.iter().map(|hour| hour.timestamp).collect();
+    let overlay = dispatch_overlay(&hour_starts, &planning.dispatches, |_| car_free);
+    if overlay.energy_unknown {
+        status.push("dispatch_energy_unknown".to_string());
+    }
+    if overlay.load_not_added {
+        status.push("dispatch_load_not_added".to_string());
+    }
+    let ev_dispatch_hours: Vec<DispatchHour> = overlay
+        .hours
+        .into_iter()
+        .filter(|hour| hour.ev_kwh > 0.0 || hour.held_fraction > 0.0)
+        .collect();
+    let ev_dispatch_tomorrow_kwh: f64 = ev_dispatch_hours
+        .iter()
+        .filter(|hour| {
+            chrono::DateTime::from_timestamp(hour.timestamp, 0)
+                .is_some_and(|dt| dt.with_timezone(&chrono::Local).date_naive() == tomorrow)
+        })
+        .map(|hour| hour.ev_kwh)
+        .sum();
+    let dispatches_checked_at = (!planning.stale)
+        .then_some(planning.checked_at)
+        .flatten()
+        .map(|at| at.timestamp());
+
     let consumption_weekday = consumption_series(&profile, false);
     let consumption_weekend = consumption_series(&profile, true);
     let tomorrow_is_weekend = tomorrow.weekday().number_from_monday() >= 6;
@@ -335,7 +370,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
             } else if snap.battery_capacity_kwh <= 0.0 || charge_kw <= 0.0 || discharge_kw <= 0.0 {
                 status.push("no_battery_capacity".to_string());
             } else {
-                let sim_hours: Vec<SimHourInput> = solar
+                let mut sim_hours: Vec<SimHourInput> = solar
                     .iter()
                     .map(|s| {
                         let (hour, is_weekend) = chrono::DateTime::from_timestamp(s.timestamp, 0)
@@ -355,6 +390,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                         }
                     })
                     .collect();
+                apply_dispatch_hours(&mut sim_hours, &ev_dispatch_hours);
                 let params = SimulationParams {
                     capacity_kwh: snap.battery_capacity_kwh as f64,
                     start_soc_pct: snap.soc as f64,
@@ -417,10 +453,23 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         battery,
         import_tomorrow_kwh,
         export_tomorrow_kwh,
-        ev_dispatch_hours: Vec::new(),
-        ev_dispatch_tomorrow_kwh: 0.0,
-        dispatches_checked_at: None,
+        ev_dispatch_hours,
+        ev_dispatch_tomorrow_kwh,
+        dispatches_checked_at,
     }
+}
+
+/// Whether the consumption profile is free of car charging (issue #406):
+/// the "leave out load above" threshold clips it, or the GivEnergy
+/// charger's power was recorded from the start of the profile's window (a
+/// day's slack), so #400 took it out. Until then planned car charging is
+/// left out of the forecast instead, or the car would count twice.
+fn profile_free_of_car(settings: &Settings, ev_minutes: &[EvPowerMinute], since_ts: i64) -> bool {
+    let threshold = settings
+        .forecast_exclude_load_above_kw
+        .is_some_and(|kw| kw.is_finite() && kw > 0.0);
+    let charger_since = ev_minutes.iter().map(|minute| minute.timestamp).min();
+    threshold || charger_since.is_some_and(|first| first <= since_ts + 86_400)
 }
 
 /// Battery AC rate limits in kW derived from snapshot registers, using
@@ -622,7 +671,6 @@ async fn run_solar_forecast_fetch_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forecast::dispatch_load::DispatchHour;
     use crate::forecast::solar::SolarForecastSample;
     use crate::inverter::model::InverterSnapshot;
     use crate::octopus_dispatches::{Dispatch, PlanningDispatches, NO_DISPATCHES};
