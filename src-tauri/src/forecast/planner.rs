@@ -5186,4 +5186,165 @@ mod tests {
             "cost {cost} vs expected {expected}"
         );
     }
+    // ---- planned car charging (issue #406) ----
+
+    /// Hour 0 of the fixture day inside a 00:00–01:00 window, hour 1 after
+    /// it; house load 0.5 kWh an hour plus `ev` of car charging.
+    fn car_case(ev: f64) -> (Vec<SimHourInput>, ChargeWindow, i64) {
+        let hours = (0..2)
+            .map(|h| SimHourInput {
+                timestamp: hour_ts(h, 1),
+                solar_kwh: 0.0,
+                consumption_kwh: 0.5,
+                ev_kwh: ev,
+                ..Default::default()
+            })
+            .collect();
+        let window = ChargeWindow {
+            start_min: 0,
+            end_min: 60,
+            tomorrow: true,
+            rate: 0.07,
+        };
+        (hours, window, hour_ts(0, 1) - 60)
+    }
+
+    #[test]
+    fn a_max_rate_charge_covers_the_car_from_the_grid_and_eco_does_not() {
+        let p = params();
+        let (without, window, now) = car_case(0.0);
+        let (with, _, _) = car_case(2.0);
+        let base = simulate_with_max_rate(&without, &p, &window, now);
+        let car = simulate_with_max_rate(&with, &p, &window, now);
+        assert!(
+            (car.series[0].soc_pct - base.series[0].soc_pct).abs() < 1e-9,
+            "inside the window: {} vs {}",
+            car.series[0].soc_pct,
+            base.series[0].soc_pct
+        );
+        assert!(
+            car.series[1].soc_pct < base.series[1].soc_pct - 1.0,
+            "after the window the battery covers the car: {} vs {}",
+            car.series[1].soc_pct,
+            base.series[1].soc_pct
+        );
+    }
+
+    #[test]
+    fn a_sized_charge_covers_the_car_from_the_grid_and_eco_does_not() {
+        let p = params();
+        let (without, _, _) = car_case(0.0);
+        let (with, _, _) = car_case(2.0);
+        let base = simulate_with_charge(&without, &p, &[0], 2.0);
+        let car = simulate_with_charge(&with, &p, &[0], 2.0);
+        assert!((car.series[0].soc_pct - base.series[0].soc_pct).abs() < 1e-9);
+        assert!(car.series[1].soc_pct < base.series[1].soc_pct - 1.0);
+    }
+
+    #[test]
+    fn a_hold_window_covers_the_car_from_the_grid() {
+        let (mut hours, p, window, now) = midday_window_case(0.0);
+        let base = hold::simulate_hold(&hours, &p, &window, now, 60).expect("simulates");
+        hours[1].ev_kwh = 2.0;
+        let car = hold::simulate_hold(&hours, &p, &window, now, 60).expect("simulates");
+        assert!((car.series[1].soc_pct - base.series[1].soc_pct).abs() < 1e-9);
+        assert!(
+            (car.grid_kwh - base.grid_kwh - 2.0).abs() < 1e-9,
+            "the grid supplies the car: {} vs {}",
+            car.grid_kwh,
+            base.grid_kwh
+        );
+    }
+
+    #[test]
+    fn a_charge_window_keeps_charging_through_a_held_hour() {
+        // The hold pauses discharge, not a grid charge.
+        let p = params();
+        let (plain, window, now) = car_case(0.0);
+        let mut held = plain.clone();
+        held[0].held_fraction = 1.0;
+        let base = simulate_with_max_rate(&plain, &p, &window, now);
+        let got = simulate_with_max_rate(&held, &p, &window, now);
+        assert!((got.series[0].soc_pct - base.series[0].soc_pct).abs() < 1e-9);
+    }
+
+    #[test]
+    fn planned_export_leaves_room_for_the_car_and_stops_while_held() {
+        let p = SimulationParams {
+            start_soc_pct: 90.0,
+            ..params()
+        };
+        let (mut hours, window, _) = car_case(0.0);
+        hours.truncate(1);
+        let base = simulate_planner_hours(&hours, &p, None, None, Some(&[0]), Some(&window), 2.5)
+            .expect("simulates");
+        assert!((base.export_kwh - 2.0).abs() < 1e-9, "{}", base.export_kwh);
+
+        hours[0].ev_kwh = 1.5;
+        let car = simulate_planner_hours(&hours, &p, None, None, Some(&[0]), Some(&window), 2.5)
+            .expect("simulates");
+        assert!(
+            (car.export_kwh - 0.5).abs() < 1e-9,
+            "the car takes 1.5 of the 2.5 kW: {}",
+            car.export_kwh
+        );
+
+        hours[0].held_fraction = 1.0;
+        let held = simulate_planner_hours(&hours, &p, None, None, Some(&[0]), Some(&window), 2.5)
+            .expect("simulates");
+        assert_eq!(held.export_kwh, 0.0);
+        assert!((held.series[0].soc_pct - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_floor_counts_the_car_but_not_load_the_grid_covers_in_a_hold() {
+        // At the reserve with nothing usable left, a car the battery would
+        // have to cover breaks the floor; the same car during a dispatch
+        // hold runs from the grid and doesn't.
+        let p = SimulationParams {
+            start_soc_pct: 10.0,
+            ..params()
+        };
+        let series = [SimHourResult {
+            timestamp: hour_ts(0, 1),
+            soc_pct: 10.0,
+            import_kwh: 0.0,
+            export_kwh: 0.0,
+            charge_kwh: 0.0,
+            discharge_kwh: 0.0,
+        }];
+        let (mut hours, _, _) = car_case(2.0);
+        hours.truncate(1);
+        hours[0].consumption_kwh = 0.0;
+        assert!(!floor_held(&series, &hours, &p, 0, 1, 5.0));
+        hours[0].held_fraction = 1.0;
+        assert!(floor_held(&series, &hours, &p, 0, 1, 5.0));
+    }
+
+    #[test]
+    fn a_half_held_export_hour_exports_for_the_unheld_half_only() {
+        let p = SimulationParams {
+            start_soc_pct: 90.0,
+            ..params()
+        };
+        let (mut hours, window, _) = car_case(0.0);
+        hours.truncate(1);
+        hours[0].held_fraction = 0.5;
+        let got = simulate_planner_hours(&hours, &p, None, None, Some(&[0]), Some(&window), 2.5)
+            .expect("simulates");
+        // 2 kW spare after the 0.5 kW house, for half an hour; the house
+        // runs from the battery in that half and from the grid in the other.
+        assert!((got.export_kwh - 1.0).abs() < 1e-9, "{}", got.export_kwh);
+        let expected = 90.0 - (1.0 + 0.25) / p.discharge_efficiency / p.capacity_kwh * 100.0;
+        assert!(
+            (got.series[0].soc_pct - expected).abs() < 1e-9,
+            "expected {expected}, got {}",
+            got.series[0].soc_pct
+        );
+        assert!(
+            (got.series[0].import_kwh - 0.25).abs() < 1e-9,
+            "only the held half's house load is imported: {}",
+            got.series[0].import_kwh
+        );
+    }
 }

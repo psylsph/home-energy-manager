@@ -776,4 +776,112 @@ mod tests {
             );
         }
     }
+    // ---- planned car charging (issue #406) ----
+
+    fn car_day() -> i64 {
+        chrono::Local
+            .with_ymd_and_hms(2025, 6, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp()
+    }
+
+    fn two_hours(day: i64, ev: f64) -> Vec<SimHourInput> {
+        (0..2)
+            .map(|h| SimHourInput {
+                timestamp: day + h * 3600,
+                solar_kwh: 0.0,
+                consumption_kwh: 0.5,
+                ev_kwh: ev,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_charge_slot_covers_the_car_from_the_grid_and_eco_does_not() {
+        let day = car_day();
+        let schedule = CurrentSchedule {
+            charge_windows: vec![ScheduledWindow {
+                start_min: 0,
+                end_min: 60,
+                rate_kw: 3.0,
+                target_soc_pct: 100.0,
+            }],
+            discharge_windows: Vec::new(),
+        };
+        let without = simulate_current_schedule(&two_hours(day, 0.0), &params(), &schedule);
+        let with = simulate_current_schedule(&two_hours(day, 2.0), &params(), &schedule);
+        assert!(
+            (with[0].1 - without[0].1).abs() < 1e-9,
+            "inside the slot the car runs from the grid: {} vs {}",
+            with[0].1,
+            without[0].1
+        );
+        assert!(
+            with[1].1 < without[1].1 - 1.0,
+            "after the slot the battery covers the car: {} vs {}",
+            with[1].1,
+            without[1].1
+        );
+    }
+
+    #[test]
+    fn a_discharge_slot_exports_nothing_while_a_dispatch_holds_the_battery() {
+        let day = car_day();
+        let schedule = CurrentSchedule {
+            charge_windows: Vec::new(),
+            discharge_windows: vec![ScheduledWindow {
+                start_min: 0,
+                end_min: 60,
+                rate_kw: 3.0,
+                target_soc_pct: 10.0,
+            }],
+        };
+        let mut hours = two_hours(day, 0.0);
+        hours.truncate(1);
+        hours[0].held_fraction = 1.0;
+        let out = simulate_current_schedule(&hours, &params(), &schedule);
+        assert!(
+            (out[0].1 - params().start_soc_pct).abs() < 1e-9,
+            "held: SOC stays at {} but got {}",
+            params().start_soc_pct,
+            out[0].1
+        );
+    }
+
+    #[test]
+    fn a_half_held_export_hour_matches_an_export_half_and_a_held_half() {
+        // A dispatch holds half the hour. The export slot runs in the other
+        // half only: the same as half an hour of export, then half an hour
+        // of the house running from the grid.
+        let day = car_day();
+        let window = ScheduledWindow {
+            start_min: 0,
+            end_min: 60,
+            rate_kw: 2.0,
+            target_soc_pct: 10.0,
+        };
+        let schedule = CurrentSchedule {
+            charge_windows: Vec::new(),
+            discharge_windows: vec![window.clone()],
+        };
+        let p = SimulationParams {
+            start_soc_pct: 90.0,
+            ..params()
+        };
+        let mut hours = two_hours(day, 0.0);
+        hours.truncate(1);
+        hours[0].held_fraction = 0.5;
+        let got = simulate_current_schedule(&hours, &p, &schedule)[0].1;
+
+        // Half an hour of export at 2 kW on top of 0.25 kWh of house load,
+        // inside the inverter's 3 kW discharge limit.
+        let eta_d = p.discharge_efficiency;
+        let expected = 90.0 - (1.0 + 0.25) / eta_d / p.capacity_kwh * 100.0;
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "expected {expected}, got {got}"
+        );
+    }
 }

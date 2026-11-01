@@ -232,6 +232,93 @@ mod tests {
         assert_eq!(full.segment(1.0), full);
     }
 
+    fn with_car(ts: i64, solar: f64, cons: f64, ev: f64, held: f64) -> SimHourInput {
+        SimHourInput {
+            ev_kwh: ev,
+            held_fraction: held,
+            ..hour(ts, solar, cons)
+        }
+    }
+
+    // ---- planned car charging (issue #406) ----
+
+    #[test]
+    fn car_charging_adds_to_the_load_the_battery_covers() {
+        let out = simulate_battery(
+            &[with_car(0, 0.0, 1.0, 2.0, 0.0)],
+            &params(10.0, 80.0, 10.0),
+        );
+        let h = out.hours[0];
+        assert!((h.discharge_kwh - 3.0).abs() < 1e-9, "{h:?}");
+        assert_eq!(h.import_kwh, 0.0);
+        assert!((h.soc_pct - (80.0 - 3.0 / 0.95 / 10.0 * 100.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_held_hour_leaves_the_battery_alone_and_imports_the_whole_deficit() {
+        let out = simulate_battery(
+            &[with_car(0, 0.0, 1.0, 3.0, 1.0)],
+            &params(10.0, 80.0, 10.0),
+        );
+        let h = out.hours[0];
+        assert_eq!(h.discharge_kwh, 0.0);
+        assert!((h.import_kwh - 4.0).abs() < 1e-9, "{h:?}");
+        assert!((h.soc_pct - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_half_held_hour_discharges_for_half_the_deficit() {
+        let out = simulate_battery(
+            &[with_car(0, 0.0, 2.0, 0.0, 0.5)],
+            &params(10.0, 80.0, 10.0),
+        );
+        let h = out.hours[0];
+        assert!((h.discharge_kwh - 1.0).abs() < 1e-9, "{h:?}");
+        assert!((h.import_kwh - 1.0).abs() < 1e-9, "{h:?}");
+    }
+
+    #[test]
+    fn a_held_hour_still_charges_from_the_solar_the_car_leaves() {
+        // The hold pauses discharge only: 4 kWh of solar less 2 kWh of house
+        // and car leaves 2 kWh to charge.
+        let out = simulate_battery(
+            &[with_car(0, 4.0, 0.5, 1.5, 1.0)],
+            &params(10.0, 50.0, 10.0),
+        );
+        let h = out.hours[0];
+        assert!((h.charge_kwh - 2.0).abs() < 1e-9, "{h:?}");
+        assert_eq!(h.import_kwh, 0.0);
+        assert_eq!(h.export_kwh, 0.0);
+    }
+
+    #[test]
+    fn nonsense_car_figures_count_as_no_car_and_no_hold() {
+        let p = params(10.0, 80.0, 10.0);
+        let plain = simulate_battery(&[hour(0, 0.0, 1.0)], &p).hours[0];
+        for (ev, held) in [
+            (f64::NAN, 0.0),
+            (-2.0, 0.0),
+            (f64::INFINITY, 0.0),
+            (0.0, f64::NAN),
+            (0.0, -1.0),
+        ] {
+            let got = simulate_battery(&[with_car(0, 0.0, 1.0, ev, held)], &p).hours[0];
+            assert_eq!(got, plain, "ev {ev} held {held}");
+        }
+        let over = simulate_battery(&[with_car(0, 0.0, 1.0, 0.0, 1.5)], &p).hours[0];
+        let full = simulate_battery(&[with_car(0, 0.0, 1.0, 0.0, 1.0)], &p).hours[0];
+        assert_eq!(over, full, "a share above 1 is the whole hour");
+    }
+
+    #[test]
+    fn a_segment_of_a_held_hour_is_held_too() {
+        let held = with_car(0, 0.0, 2.0, 2.0, 1.0);
+        let res = simulate_battery_segment(held.segment(0.5), &params(10.0, 80.0, 10.0), 0.5)
+            .expect("simulates");
+        assert_eq!(res.discharge_kwh, 0.0);
+        assert!((res.import_kwh - 2.0).abs() < 1e-9, "{res:?}");
+    }
+
     #[test]
     fn surplus_charges_with_efficiency_and_caps_at_full() {
         // 10 kWh battery at 50%: 5 kWh room, surplus 3 kWh → all 3 kWh AC
