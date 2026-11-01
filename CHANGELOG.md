@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-11-01
+
+### Added
+
+- **Grid carbon intensity on the house view.** With weather turned on and a GB postcode set, the house view shows how much carbon your region's grid electricity is producing right now (in g/kWh, with a leaf coloured from green to red) and the time it will be lowest over the next day, so you can pick a greener time to run the washing machine or charge the car. Figures come from the National Energy System Operator's free Carbon Intensity service; Northern Ireland and addresses outside Great Britain aren't covered (#401).
+
+### Changed
+
+- **More room at the top of the screen on phones.** The header and the page menu sit a little lower, clear of the edge that iOS dims.
+- **The EV charger reading on the house view sits a little lower**, leaving room for the carbon intensity line above it.
+
 ## [1.1.0] - 2026-11-01
 
 ### Added
