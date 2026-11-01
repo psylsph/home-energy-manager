@@ -147,35 +147,37 @@ fn simulate_hold_run(
             discharge_kwh: 0.0,
         };
         for (start, end, inside) in split_hour_segments(&active) {
-            let fraction = end - start;
-            let mut segment_hour = hour.segment(fraction);
-            let segment_params = SimulationParams {
-                start_soc_pct: soc,
-                ..*params
-            };
-            let mut drawn = 0.0;
-            if inside {
-                // Solar surplus charges first, as in Eco; the grid tops up only
-                // what is left of the room to the target and of the rate.
-                let surplus = (hour.solar_kwh - hour.consumption_kwh).max(0.0) * fraction;
-                let room_ac = (target - soc).max(0.0) / 100.0 * params.capacity_kwh / eta_c;
-                let charge_ac = (params.max_charge_kw * fraction - surplus)
-                    .min(room_ac - surplus)
-                    .max(0.0);
-                let unmet_load = (hour.consumption_kwh - hour.solar_kwh).max(0.0) * fraction;
-                segment_hour.solar_kwh += charge_ac + unmet_load;
-                charge_kwh += charge_ac;
-                drawn = charge_ac + unmet_load;
+            // Each part free or wholly held (`held_parts`), so a
+            // dispatch hold is never applied twice.
+            for (mut segment_hour, fraction) in hour.held_parts(end - start) {
+                let segment_params = SimulationParams {
+                    start_soc_pct: soc,
+                    ..*params
+                };
+                let mut drawn = 0.0;
+                if inside {
+                    // Solar surplus charges first, as in Eco; the grid tops up only
+                    // what is left of the room to the target and of the rate.
+                    let surplus = hour.surplus_kwh() * fraction;
+                    let room_ac = (target - soc).max(0.0) / 100.0 * params.capacity_kwh / eta_c;
+                    let charge_ac = (params.max_charge_kw * fraction - surplus)
+                        .min(room_ac - surplus)
+                        .max(0.0);
+                    let unmet_load = hour.net_load_kwh() * fraction;
+                    segment_hour.solar_kwh += charge_ac + unmet_load;
+                    charge_kwh += charge_ac;
+                    drawn = charge_ac + unmet_load;
+                }
+                let res = simulate_battery_segment(segment_hour, &segment_params, fraction)?;
+                soc = res.soc_pct;
+                grid_kwh += drawn;
+                hour_drawn += drawn;
+                combined.soc_pct = res.soc_pct;
+                combined.import_kwh += res.import_kwh + drawn;
+                combined.export_kwh += res.export_kwh;
+                combined.charge_kwh += res.charge_kwh;
+                combined.discharge_kwh += res.discharge_kwh;
             }
-            let res = simulate_battery_segment(segment_hour, &segment_params, fraction)?;
-            soc = res.soc_pct;
-            grid_kwh += drawn;
-            hour_drawn += drawn;
-            combined.soc_pct = res.soc_pct;
-            combined.import_kwh += res.import_kwh + drawn;
-            combined.export_kwh += res.export_kwh;
-            combined.charge_kwh += res.charge_kwh;
-            combined.discharge_kwh += res.discharge_kwh;
         }
         series.push(combined);
         window_grid.push(hour_drawn);

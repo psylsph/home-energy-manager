@@ -170,47 +170,52 @@ pub fn simulate_current_schedule(
             discharge_kwh: 0.0,
         };
         for (start, end, inside) in segments {
-            let fraction = end - start;
-            let mut segment_hour = hour.segment(fraction);
-            let mut segment_params = SimulationParams {
-                start_soc_pct: soc,
-                ..*params
-            };
-            if inside {
-                if let Some(w) = charge {
-                    // Grid charge for this segment, capped by the AC energy
-                    // that still fits between the running SOC and target.
-                    let room_ac = (w.target_soc_pct - soc).max(0.0) / 100.0 * capacity / eta_c;
-                    let charge_ac = (w.rate_kw * fraction).min(room_ac);
-                    // The slot holds the battery instead of discharging for
-                    // household load; grid supply is represented as extra
-                    // solar for this segment only.
-                    let unmet_load = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
-                    segment_hour.solar_kwh += charge_ac + unmet_load * fraction;
-                } else if let Some(w) = discharge {
-                    // The slot floor also bounds household drain while
-                    // Timed Export is active. Its export is represented as
-                    // additional virtual load for this segment only.
-                    segment_params.reserve_soc_pct =
-                        segment_params.reserve_soc_pct.max(w.target_soc_pct);
-                    let available_ac = (soc - w.target_soc_pct).max(0.0) / 100.0 * capacity * eta_d;
-                    let export_ac = (w.rate_kw * fraction).min(available_ac);
-                    segment_hour.solar_kwh -= export_ac;
+            // Each part free or wholly held (`held_parts`), so a
+            // dispatch hold is never applied twice.
+            for (mut segment_hour, fraction) in hour.held_parts(end - start) {
+                let mut segment_params = SimulationParams {
+                    start_soc_pct: soc,
+                    ..*params
+                };
+                if inside {
+                    if let Some(w) = charge {
+                        // Grid charge for this segment, capped by the AC energy
+                        // that still fits between the running SOC and target.
+                        let room_ac = (w.target_soc_pct - soc).max(0.0) / 100.0 * capacity / eta_c;
+                        let charge_ac = (w.rate_kw * fraction).min(room_ac);
+                        // The slot holds the battery instead of discharging for
+                        // household load; grid supply is represented as extra
+                        // solar for this segment only.
+                        let unmet_load = hour.net_load_kwh();
+                        segment_hour.solar_kwh += charge_ac + unmet_load * fraction;
+                    } else if let Some(w) = discharge {
+                        // The slot floor also bounds household drain while
+                        // Timed Export is active. Its export is represented as
+                        // additional virtual load for this segment only.
+                        segment_params.reserve_soc_pct =
+                            segment_params.reserve_soc_pct.max(w.target_soc_pct);
+                        let available_ac =
+                            (soc - w.target_soc_pct).max(0.0) / 100.0 * capacity * eta_d;
+                        // A dispatch hold pauses the export for its share.
+                        let export_ac = (w.rate_kw * fraction * segment_hour.discharge_share())
+                            .min(available_ac);
+                        segment_hour.solar_kwh -= export_ac;
+                    }
                 }
+                let Some(res) = simulate_battery_segment(segment_hour, &segment_params, fraction)
+                else {
+                    // Invalid parameters (no capacity / unknown rates / bad
+                    // start SOC) — the caller gets no projection, matching the
+                    // API's degradation path.
+                    return Vec::new();
+                };
+                soc = res.soc_pct;
+                combined.soc_pct = res.soc_pct;
+                combined.import_kwh += res.import_kwh;
+                combined.export_kwh += res.export_kwh;
+                combined.charge_kwh += res.charge_kwh;
+                combined.discharge_kwh += res.discharge_kwh;
             }
-            let Some(res) = simulate_battery_segment(segment_hour, &segment_params, fraction)
-            else {
-                // Invalid parameters (no capacity / unknown rates / bad
-                // start SOC) — the caller gets no projection, matching the
-                // API's degradation path.
-                return Vec::new();
-            };
-            soc = res.soc_pct;
-            combined.soc_pct = res.soc_pct;
-            combined.import_kwh += res.import_kwh;
-            combined.export_kwh += res.export_kwh;
-            combined.charge_kwh += res.charge_kwh;
-            combined.discharge_kwh += res.discharge_kwh;
         }
         out.push((hour.timestamp, combined.soc_pct));
     }
@@ -776,6 +781,7 @@ mod tests {
             );
         }
     }
+
     // ---- planned car charging (issue #406) ----
 
     fn car_day() -> i64 {

@@ -6,7 +6,8 @@
 //! remainder exports; deficit discharges the battery (bounded by rate,
 //! scaled by discharge efficiency) down to the reserve SOC, the remainder
 //! imports. No timed-charge/discharge windows — the planner (Phase 2)
-//! builds on top of this primitive.
+//! builds on top of this primitive. Planned car charging adds to the load,
+//! and a dispatch hold stops discharge for its share of the hour (#406).
 
 /// Per-hour inputs the simulator consumes (all kWh, one-hour buckets).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -35,6 +36,69 @@ impl SimHourInput {
             ev_kwh: self.ev_kwh * fraction,
             ..*self
         }
+    }
+
+    /// The car's planned energy; anything that isn't a finite, positive
+    /// figure counts as no car.
+    pub(crate) fn car_kwh(&self) -> f64 {
+        if self.ev_kwh.is_finite() && self.ev_kwh > 0.0 {
+            self.ev_kwh
+        } else {
+            0.0
+        }
+    }
+
+    /// The share of the hour the battery may discharge in: all of it,
+    /// less the time a dispatch holds it. A held share that isn't a finite
+    /// number counts as no hold.
+    pub(crate) fn discharge_share(&self) -> f64 {
+        if self.held_fraction.is_finite() {
+            1.0 - self.held_fraction.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Everything drawn in the hour: the house and the car.
+    pub(crate) fn load_kwh(&self) -> f64 {
+        self.consumption_kwh + self.car_kwh()
+    }
+
+    /// Load solar doesn't cover.
+    pub(crate) fn net_load_kwh(&self) -> f64 {
+        (self.load_kwh() - self.solar_kwh).max(0.0)
+    }
+
+    /// Solar left after the load.
+    pub(crate) fn surplus_kwh(&self) -> f64 {
+        (self.solar_kwh - self.load_kwh()).max(0.0)
+    }
+
+    /// The `fraction` of this hour split into the time the battery may
+    /// discharge (`held_fraction` 0) and the time a dispatch holds it
+    /// (`held_fraction` 1), each with its share of the energy and its
+    /// length as a fraction of the hour. Empty parts are left out.
+    ///
+    /// Simulating the parts one after the other is exact, where scaling a
+    /// discharge by the held share is not once a caller adds energy of its
+    /// own (a forced export would be cut twice). The free part runs first:
+    /// where in the hour the hold falls isn't known.
+    pub(crate) fn held_parts(&self, fraction: f64) -> impl Iterator<Item = (Self, f64)> {
+        let free = self.discharge_share();
+        let hour = *self;
+        [(free, 0.0), (1.0 - free, 1.0)]
+            .into_iter()
+            .filter(|(share, _)| *share > 0.0)
+            .map(move |(share, held)| {
+                let part = fraction * share;
+                (
+                    Self {
+                        held_fraction: held,
+                        ..hour.segment(part)
+                    },
+                    part,
+                )
+            })
     }
 }
 
@@ -121,28 +185,32 @@ pub fn simulate_battery(hours: &[SimHourInput], params: &SimulationParams) -> Si
     };
 
     for h in hours {
-        let net = h.solar_kwh - h.consumption_kwh;
-        let (charge, discharge, import, export) = if net >= 0.0 {
-            let surplus = net;
-            let room = capacity - stored;
-            let charge_ac = surplus.min(params.max_charge_kw).min(if eta_c > 0.0 {
-                room / eta_c
+        let (mut charge, mut discharge, mut import, mut export) = (0.0, 0.0, 0.0, 0.0);
+        // A dispatch hold pauses discharge for its share of the hour; the
+        // grid supplies the house and the car through it. Rate limits apply
+        // to each part for its length.
+        for (part, length) in h.held_parts(1.0) {
+            let net = part.solar_kwh - part.load_kwh();
+            if net >= 0.0 {
+                let room = capacity - stored;
+                let charge_ac = net.min(params.max_charge_kw * length).min(room / eta_c);
+                stored += charge_ac * eta_c;
+                charge += charge_ac;
+                export += net - charge_ac;
             } else {
-                surplus
-            });
-            stored += charge_ac * eta_c;
-            (charge_ac, 0.0, 0.0, surplus - charge_ac)
-        } else {
-            let need = -net;
-            let available_dc = (stored - reserve_stored).max(0.0);
-            let discharge_ac = need.min(params.max_discharge_kw).min(if eta_d > 0.0 {
-                available_dc * eta_d
-            } else {
-                need
-            });
-            stored -= discharge_ac / eta_d;
-            (0.0, discharge_ac, need - discharge_ac, 0.0)
-        };
+                let need = -net;
+                let discharge_ac = if part.discharge_share() > 0.0 {
+                    let available_dc = (stored - reserve_stored).max(0.0);
+                    need.min(params.max_discharge_kw * length)
+                        .min(available_dc * eta_d)
+                } else {
+                    0.0
+                };
+                stored -= discharge_ac / eta_d;
+                discharge += discharge_ac;
+                import += need - discharge_ac;
+            }
+        }
 
         // Numerical safety: never report SOC outside [0, 100].
         stored = stored.clamp(0.0, capacity);

@@ -580,7 +580,7 @@ fn simulate_with_charge(
     let per_hour_ac = kwh_ac / run.len() as f64;
     for &i in run {
         if let Some(h) = hours.get_mut(i) {
-            let unmet_load = (h.consumption_kwh - h.solar_kwh).max(0.0);
+            let unmet_load = h.net_load_kwh();
             h.solar_kwh += per_hour_ac + unmet_load;
         }
     }
@@ -656,7 +656,6 @@ fn simulate_planner_hours(
             discharge_kwh: 0.0,
         };
         for (start, end, _) in boundaries.drain(..) {
-            let fraction = end - start;
             let midpoint = (start + end) / 2.0;
             let charge_inside = charge_segments.iter().any(|(active_start, active_end)| {
                 midpoint >= *active_start && midpoint < *active_end
@@ -664,33 +663,38 @@ fn simulate_planner_hours(
             let export_inside = export_segments.iter().any(|(active_start, active_end)| {
                 midpoint >= *active_start && midpoint < *active_end
             });
-            let mut segment_hour = hour.segment(fraction);
-            let segment_params = SimulationParams {
-                start_soc_pct: soc,
-                ..*params
-            };
-            if charge_inside {
-                // Grid supply covers the otherwise-unmet household load and
-                // charges at the inverter maximum for the active segment.
-                let charge_ac = params.max_charge_kw * fraction;
-                let unmet_load = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
-                segment_hour.solar_kwh += charge_ac + unmet_load * fraction;
-            } else if export_inside {
-                // Export uses only spare discharge capacity after the home
-                // load. The virtual load exists for this segment only.
-                let net_load_kw = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
-                let spare_kw = (max_export_kw - net_load_kw).max(0.0);
-                let injection = spare_kw * fraction;
-                segment_hour.solar_kwh -= injection;
-                export_kwh += injection;
+            // Each part free or wholly held (`held_parts`), so a
+            // dispatch hold is never applied twice.
+            for (mut segment_hour, fraction) in hour.held_parts(end - start) {
+                let segment_params = SimulationParams {
+                    start_soc_pct: soc,
+                    ..*params
+                };
+                if charge_inside {
+                    // Grid supply covers the otherwise-unmet household load and
+                    // charges at the inverter maximum for the active segment.
+                    let charge_ac = params.max_charge_kw * fraction;
+                    let unmet_load = hour.net_load_kwh();
+                    segment_hour.solar_kwh += charge_ac + unmet_load * fraction;
+                } else if export_inside {
+                    // Export uses only spare discharge capacity after the home
+                    // load. The virtual load exists for this segment only.
+                    // A dispatch hold pauses the export for its share of the
+                    // hour, as it pauses any other discharge.
+                    let net_load_kw = hour.net_load_kwh();
+                    let spare_kw = (max_export_kw - net_load_kw).max(0.0);
+                    let injection = spare_kw * fraction * segment_hour.discharge_share();
+                    segment_hour.solar_kwh -= injection;
+                    export_kwh += injection;
+                }
+                let res = simulate_battery_segment(segment_hour, &segment_params, fraction)?;
+                soc = res.soc_pct;
+                combined.soc_pct = res.soc_pct;
+                combined.import_kwh += res.import_kwh;
+                combined.export_kwh += res.export_kwh;
+                combined.charge_kwh += res.charge_kwh;
+                combined.discharge_kwh += res.discharge_kwh;
             }
-            let res = simulate_battery_segment(segment_hour, &segment_params, fraction)?;
-            soc = res.soc_pct;
-            combined.soc_pct = res.soc_pct;
-            combined.import_kwh += res.import_kwh;
-            combined.export_kwh += res.export_kwh;
-            combined.charge_kwh += res.charge_kwh;
-            combined.discharge_kwh += res.discharge_kwh;
         }
         series.push(combined);
     }
@@ -812,7 +816,9 @@ fn floor_held(
         }
         if reserve < 100.0 && hour.soc_pct <= reserve + AT_RESERVE_TOLERANCE_PCT {
             if let Some(input) = sim_hours.get(i) {
-                let deficit = input.consumption_kwh - input.solar_kwh;
+                // Only what the battery must supply: a dispatch hold leaves
+                // its share of the hour to the grid.
+                let deficit = input.net_load_kwh() * input.discharge_share();
                 let usable_ac = (prev - reserve).max(0.0) / 100.0 * params.capacity_kwh * eta_d;
                 if deficit > usable_ac + 1e-6 {
                     return false;
@@ -1564,7 +1570,7 @@ fn inject_export_discharge(
         if overlap_hours <= 0.0 {
             continue;
         }
-        let net_load_kw = (hour.consumption_kwh - hour.solar_kwh).max(0.0);
+        let net_load_kw = hour.net_load_kwh();
         let spare_kw = (max_export_kw - net_load_kw).max(0.0);
         let injection = spare_kw * overlap_hours;
         hour.solar_kwh -= injection;
@@ -5186,6 +5192,7 @@ mod tests {
             "cost {cost} vs expected {expected}"
         );
     }
+
     // ---- planned car charging (issue #406) ----
 
     /// Hour 0 of the fixture day inside a 00:00–01:00 window, hour 1 after
