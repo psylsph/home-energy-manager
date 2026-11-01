@@ -664,11 +664,7 @@ fn simulate_planner_hours(
             let export_inside = export_segments.iter().any(|(active_start, active_end)| {
                 midpoint >= *active_start && midpoint < *active_end
             });
-            let mut segment_hour = SimHourInput {
-                timestamp: hour.timestamp,
-                solar_kwh: hour.solar_kwh * fraction,
-                consumption_kwh: hour.consumption_kwh * fraction,
-            };
+            let mut segment_hour = hour.segment(fraction);
             let segment_params = SimulationParams {
                 start_soc_pct: soc,
                 ..*params
@@ -1645,6 +1641,7 @@ mod tests {
                 timestamp: hour_ts(h, 1),
                 solar_kwh: if (6..=19).contains(&h) { solar } else { 0.0 },
                 consumption_kwh: cons,
+                ..Default::default()
             })
             .collect();
         let sim = simulate_battery(&hours, p);
@@ -1717,6 +1714,7 @@ mod tests {
             timestamp,
             solar_kwh: 0.0,
             consumption_kwh: 0.0,
+            ..Default::default()
         }];
         let occurrence = WindowOccurrence {
             run: vec![0],
@@ -2046,6 +2044,7 @@ mod tests {
                 timestamp: hour_ts(h as u32, 1),
                 solar_kwh: solar_kwh_per_hour[h as usize],
                 consumption_kwh: cons_kwh_per_hour[h as usize],
+                ..Default::default()
             })
             .collect();
         let sim = simulate_battery(&hours, &p);
@@ -2235,6 +2234,7 @@ mod tests {
             timestamp: day,
             solar_kwh: 0.0,
             consumption_kwh: 2.0,
+            ..Default::default()
         };
         let window = ChargeWindow {
             start_min: 30,
@@ -2253,6 +2253,7 @@ mod tests {
                 timestamp: day,
                 solar_kwh: 0.0,
                 consumption_kwh: 1.0,
+                ..Default::default()
             }],
             &half_params,
         )
@@ -2262,6 +2263,7 @@ mod tests {
                 timestamp: day + 1800,
                 solar_kwh: 2.25,
                 consumption_kwh: 1.0,
+                ..Default::default()
             }],
             &SimulationParams {
                 start_soc_pct: first.soc_pct,
@@ -2752,6 +2754,7 @@ mod tests {
                     timestamp: ts,
                     solar_kwh: solar_kwh_per_hour[h as usize],
                     consumption_kwh: cons_kwh_per_hour[h as usize],
+                    ..Default::default()
                 });
             }
         }
@@ -3153,6 +3156,7 @@ mod tests {
                     timestamp: ts,
                     solar_kwh: solar_kwh_per_hour[h as usize],
                     consumption_kwh: cons_kwh_per_hour[h as usize],
+                    ..Default::default()
                 });
             }
         }
@@ -3368,6 +3372,7 @@ mod tests {
             timestamp: ts,
             solar_kwh: 0.0,
             consumption_kwh: 1.0,
+            ..Default::default()
         }];
         let run = vec![0usize];
         let outcome = simulate_with_charge(&hours, &p, &run, 2.0);
@@ -3392,6 +3397,7 @@ mod tests {
             timestamp: ts,
             solar_kwh: 1.0,
             consumption_kwh: 0.5,
+            ..Default::default()
         }];
         let run = vec![0usize];
         let outcome = simulate_with_charge(&hours, &p, &run, 1.0);
@@ -3437,6 +3443,7 @@ mod tests {
                 timestamp: hour_ts(h as u32, day_offset),
                 solar_kwh: 0.0,
                 consumption_kwh: 0.0,
+                ..Default::default()
             })
             .collect()
     }
@@ -3590,11 +3597,13 @@ mod tests {
                 timestamp: hour_ts(16, 0),
                 solar_kwh: 0.0,
                 consumption_kwh: 2.0,
+                ..Default::default()
             },
             SimHourInput {
                 timestamp: hour_ts(17, 0),
                 solar_kwh: 0.0,
                 consumption_kwh: 0.0,
+                ..Default::default()
             },
         ];
         let window = ChargeWindow {
@@ -4466,6 +4475,7 @@ mod tests {
                     timestamp: ts,
                     solar_kwh: if (9..=15).contains(&h) { 0.3 } else { 0.0 },
                     consumption_kwh: if (6..17).contains(&h) { 0.4 } else { 0.5 },
+                    ..Default::default()
                 }
             })
             .collect();
@@ -4590,11 +4600,13 @@ mod tests {
                 timestamp: hour_ts(11, 0),
                 solar_kwh: 0.5,
                 consumption_kwh: 0.5,
+                ..Default::default()
             },
             SimHourInput {
                 timestamp: hour_ts(12, 0),
                 solar_kwh: solar,
                 consumption_kwh: 1.0,
+                ..Default::default()
             },
         ];
         let p = SimulationParams {
@@ -4722,6 +4734,7 @@ mod tests {
                     timestamp: first + i * 3600,
                     solar_kwh: if (9..=15).contains(&h) { 0.3 } else { 0.0 },
                     consumption_kwh: if (6..17).contains(&h) { 0.4 } else { 0.5 },
+                    ..Default::default()
                 }
             })
             .collect();

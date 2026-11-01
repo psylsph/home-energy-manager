@@ -9,13 +9,33 @@
 //! builds on top of this primitive.
 
 /// Per-hour inputs the simulator consumes (all kWh, one-hour buckets).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SimHourInput {
     pub timestamp: i64,
     /// Predicted solar generation for the hour.
     pub solar_kwh: f64,
     /// Predicted home consumption for the hour.
     pub consumption_kwh: f64,
+    /// Planned car charging on top of `consumption_kwh`, from the account's
+    /// Intelligent Octopus dispatches (issue #406).
+    pub ev_kwh: f64,
+    /// Share of the hour (0–1) a smart dispatch holds battery discharge for
+    /// (issue #394), spread evenly across the hour.
+    pub held_fraction: f64,
+}
+
+impl SimHourInput {
+    /// The part of this hour that is `fraction` of it long: energies scale,
+    /// the timestamp and the held share stay. Every split-hour simulation
+    /// builds its segments through this, so none of them drops a field.
+    pub(crate) fn segment(&self, fraction: f64) -> Self {
+        Self {
+            solar_kwh: self.solar_kwh * fraction,
+            consumption_kwh: self.consumption_kwh * fraction,
+            ev_kwh: self.ev_kwh * fraction,
+            ..*self
+        }
+    }
 }
 
 /// Everything the simulation needs besides the hour series.
@@ -186,7 +206,30 @@ mod tests {
             timestamp: ts,
             solar_kwh: solar,
             consumption_kwh: cons,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_segment_scales_every_energy_and_keeps_the_held_share() {
+        let full = SimHourInput {
+            timestamp: 3600,
+            solar_kwh: 2.0,
+            consumption_kwh: 1.0,
+            ev_kwh: 3.5,
+            held_fraction: 0.5,
+        };
+        assert_eq!(
+            full.segment(0.25),
+            SimHourInput {
+                timestamp: 3600,
+                solar_kwh: 0.5,
+                consumption_kwh: 0.25,
+                ev_kwh: 0.875,
+                held_fraction: 0.5,
+            }
+        );
+        assert_eq!(full.segment(1.0), full);
     }
 
     #[test]

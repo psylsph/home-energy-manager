@@ -8962,6 +8962,7 @@ pub(crate) fn forecast_sim_hours(
                     SolarBand::Low => s.band_low.min(s.kwh),
                 },
                 consumption_kwh,
+                ..Default::default()
             }
         })
         .collect()

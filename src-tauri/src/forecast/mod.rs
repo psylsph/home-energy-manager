@@ -338,6 +338,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                             timestamp: s.timestamp,
                             solar_kwh: s.kwh,
                             consumption_kwh: profile.median_kwh_for_day_type(hour, is_weekend),
+                            ..Default::default()
                         }
                     })
                     .collect();

@@ -64,6 +64,13 @@ impl Dispatch {
             matches!(kind.to_ascii_lowercase().as_str(), "smart" | "smart-charge")
         })
     }
+
+    /// Whether this dispatch holds the battery at `time`: a smart one that
+    /// has started and not yet ended. The poll loop's hold and the planner's
+    /// model of it (issue #406) both use this, so they can't disagree.
+    pub fn holds_at(&self, time: DateTime<Utc>) -> bool {
+        self.is_smart() && self.start <= time && time < self.end
+    }
 }
 
 /// An Octopus access token. Its `Debug` output is redacted so logging the
@@ -103,16 +110,19 @@ impl DispatchesState {
     /// Whether a smart dispatch is running now, by a list fresh enough to
     /// trust. Unknown means no.
     pub fn hold_now(&self, now: DateTime<Utc>) -> bool {
-        // Absolute age: a check stamped in the future (the clock stepped
-        // back) says nothing about now either.
-        let fresh = self
-            .checked_at
-            .is_some_and(|checked| (now - checked).abs() <= Duration::minutes(STALE_AFTER_MINUTES));
-        fresh
+        self.fresh(now)
             && self
                 .dispatches
                 .iter()
-                .any(|dispatch| dispatch.is_smart() && dispatch.start <= now && now < dispatch.end)
+                .any(|dispatch| dispatch.holds_at(now))
+    }
+
+    /// Whether the list is recent enough to act on. Absolute age: a check
+    /// stamped in the future (the clock stepped back) says nothing about now
+    /// either.
+    pub(crate) fn fresh(&self, now: DateTime<Utc>) -> bool {
+        self.checked_at
+            .is_some_and(|checked| (now - checked).abs() <= Duration::minutes(STALE_AFTER_MINUTES))
     }
 
     /// After a restart that found a hold active, keep holding until the first
@@ -646,6 +656,41 @@ mod tests {
         boost.kind = Some("BOOST".to_string());
         let state = checked("2026-10-17T13:00:00+00:00", vec![boost]);
         assert!(!state.hold_now(utc("2026-10-17T13:10:00+00:00")));
+    }
+
+    #[test]
+    fn a_dispatch_holds_from_its_start_to_just_before_its_end_unless_a_boost() {
+        // The planner (issue #406) asks this of each dispatch on its own,
+        // apart from the list's freshness.
+        let dispatch = smart("2026-10-17T13:00:00+00:00", "2026-10-17T13:30:00+00:00");
+        assert!(!dispatch.holds_at(utc("2026-10-17T12:59:59+00:00")));
+        assert!(dispatch.holds_at(utc("2026-10-17T13:00:00+00:00")));
+        assert!(dispatch.holds_at(utc("2026-10-17T13:29:59+00:00")));
+        assert!(!dispatch.holds_at(utc("2026-10-17T13:30:00+00:00")));
+
+        let unlabelled = Dispatch {
+            kind: None,
+            ..dispatch.clone()
+        };
+        assert!(unlabelled.holds_at(utc("2026-10-17T13:10:00+00:00")));
+        let boost = Dispatch {
+            kind: Some("BOOST".to_string()),
+            ..dispatch
+        };
+        assert!(!boost.holds_at(utc("2026-10-17T13:10:00+00:00")));
+    }
+
+    #[test]
+    fn a_list_is_fresh_for_fifteen_minutes_either_side_of_its_check() {
+        let state = checked("2026-10-17T13:00:00+00:00", Vec::new());
+        assert!(state.fresh(utc("2026-10-17T13:15:00+00:00")));
+        assert!(!state.fresh(utc("2026-10-17T13:15:01+00:00")));
+        assert!(state.fresh(utc("2026-10-17T12:45:00+00:00")));
+        assert!(
+            !state.fresh(utc("2026-10-17T12:44:59+00:00")),
+            "a check stamped in the future is no evidence about now"
+        );
+        assert!(!DispatchesState::default().fresh(utc("2026-10-17T13:00:00+00:00")));
     }
 
     #[test]

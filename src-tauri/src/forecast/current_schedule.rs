@@ -171,11 +171,7 @@ pub fn simulate_current_schedule(
         };
         for (start, end, inside) in segments {
             let fraction = end - start;
-            let mut segment_hour = SimHourInput {
-                timestamp: hour.timestamp,
-                solar_kwh: hour.solar_kwh * fraction,
-                consumption_kwh: hour.consumption_kwh * fraction,
-            };
+            let mut segment_hour = hour.segment(fraction);
             let mut segment_params = SimulationParams {
                 start_soc_pct: soc,
                 ..*params
@@ -287,6 +283,7 @@ mod tests {
                 timestamp: day_start_ts + h as i64 * 3600,
                 solar_kwh: solar,
                 consumption_kwh: cons,
+                ..Default::default()
             })
             .collect()
     }
@@ -625,6 +622,7 @@ mod tests {
             timestamp: day,
             solar_kwh: 0.0,
             consumption_kwh: 2.0,
+            ..Default::default()
         };
         let out = simulate_current_schedule(&[hour], &params(), &schedule);
 
@@ -636,6 +634,7 @@ mod tests {
                 timestamp: day,
                 solar_kwh: 0.0,
                 consumption_kwh: 1.0,
+                ..Default::default()
             }],
             &half_params,
         )
@@ -649,6 +648,7 @@ mod tests {
                 timestamp: day + 1800,
                 solar_kwh: 2.5,
                 consumption_kwh: 1.0,
+                ..Default::default()
             }],
             &second_params,
         )

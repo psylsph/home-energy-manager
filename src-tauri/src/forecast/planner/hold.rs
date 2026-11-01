@@ -148,11 +148,7 @@ fn simulate_hold_run(
         };
         for (start, end, inside) in split_hour_segments(&active) {
             let fraction = end - start;
-            let mut segment_hour = SimHourInput {
-                timestamp: hour.timestamp,
-                solar_kwh: hour.solar_kwh * fraction,
-                consumption_kwh: hour.consumption_kwh * fraction,
-            };
+            let mut segment_hour = hour.segment(fraction);
             let segment_params = SimulationParams {
                 start_soc_pct: soc,
                 ..*params

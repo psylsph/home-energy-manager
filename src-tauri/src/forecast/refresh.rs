@@ -795,6 +795,7 @@ mod tests {
                     timestamp: ts,
                     solar_kwh: 0.0,
                     consumption_kwh: cons_kwh,
+                    ..Default::default()
                 });
             }
         }
