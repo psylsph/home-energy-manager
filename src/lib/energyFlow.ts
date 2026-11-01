@@ -46,24 +46,20 @@ import {
 import { solarOverallPercent } from './solarArrays';
 import { gridMeterCurrentA, GRID_CT_AUTO } from './meters';
 
-/** True when a flow with the given id is present in the list. */
-export function hasFlow(flows: EnergyFlow[], id: string): boolean {
-  return flows.some((f) => f.id === id);
-}
-
 /**
  * Resolve the *visual* endpoint pair of a flow. The charge/ export spokes
  * have been split into source-attributed flows (solar_charge, grid_charge)
  * upstream of this point, so those spokes use their natural endpoints
- * directly. The remaining reroute is for `export` when solar is active —
- * the home → grid spoke is rerouted to start at solar so the eye follows
- * generation → grid (issue #155 follow-the-energy visual). The SVG
- * renderer and the spoke-colour rule both consume this so the rendered
- * line and its colour always agree (issue #170).
+ * directly. The remaining reroute is for `export`: it is the solar surplus
+ * and only exists while solar generates, so its home → grid spoke is always
+ * drawn from solar so the eye follows generation → grid (issue #155
+ * follow-the-energy visual) — including when the house load is under the
+ * noise floor and there is no solar → home spoke. The SVG renderer and the
+ * spoke-colour rule both consume this so the rendered line and its colour
+ * always agree (issue #170).
  */
-export function visualEndpoints(flow: EnergyFlow, flows: EnergyFlow[]): { from: FlowNodeId; to: FlowNodeId } {
-  const solarActive = hasFlow(flows, 'solar');
-  if (flow.id === 'export' && solarActive) return { from: 'solar', to: 'grid' };
+export function visualEndpoints(flow: EnergyFlow): { from: FlowNodeId; to: FlowNodeId } {
+  if (flow.id === 'export') return { from: 'solar', to: 'grid' };
   return { from: flow.from, to: flow.to };
 }
 
@@ -122,10 +118,13 @@ export const FLOW_COLORS = {
  */
 export const BATTERY_OUTPUT_COLOR = '#22C55E';
 
+/** socColor's middle (20–50%) tier; also the house view's export glyph. */
+export const SOC_MID_COLOR = '#F59E0B';
+
 /** Battery SOC tier colour, shared by the panel gauge and the diagram node. */
 export function socColor(soc: number): string {
   if (soc < 20) return '#EF4444';
-  if (soc < 50) return '#F59E0B';
+  if (soc < 50) return SOC_MID_COLOR;
   return '#22C55E';
 }
 
@@ -651,7 +650,7 @@ export function buildEnergyFlows(
   // the fact that the rendered line starts at solar when solar is active
   // (issue #170: user expects solar-touched spokes to be yellow).
   for (const f of flows) {
-    const v = visualEndpoints(f, flows);
+    const v = visualEndpoints(f);
     f.color = spokeColor(v.from, v.to);
   }
 
@@ -696,6 +695,7 @@ export function buildEnergyFlows(
       id: 'solar',
       label: 'Solar',
       value: solarValue,
+      percentText: solarOverallPct == null ? undefined : formatPercent(solarOverallPct),
       // PV1 voltage drives the volts label; when the dongle reports a real
       // voltage we show "V/A" (matches the legacy inverter-centred diagram).
       // PV strings without voltage telemetry (some gateways) fall back to

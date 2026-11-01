@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
+  SOLAR_LEVEL_BARS,
   WEATHER_MAX_AGE_MS,
   currentWeather,
+  formatIrradiance,
   formatWeatherTemp,
+  solarLevel,
   weatherDescription,
   weatherIconKind,
   type LiveWeatherState,
@@ -75,7 +78,22 @@ describe('currentWeather', () => {
   });
 
   it('shows a fresh reading', () => {
-    expect(currentWeather(state(), NOW)).toEqual({ temperatureC: 10.4, kind: 'rain', description: 'Rain' });
+    expect(currentWeather(state(), NOW)).toEqual({ temperatureC: 10.4, kind: 'rain', description: 'Rain', solarWm2: null });
+  });
+
+  it('carries the solar irradiance, including a daytime zero', () => {
+    expect(currentWeather(state({ last_fetched_solar_w_m2: 486 }), NOW)?.solarWm2).toBe(486);
+    expect(currentWeather(state({ last_fetched_solar_w_m2: 0 }), NOW)?.solarWm2).toBe(0);
+    // Zero with no day flag could be night: hidden.
+    expect(currentWeather(state({ last_fetched_solar_w_m2: 0, last_fetched_is_day: null }), NOW)?.solarWm2).toBeNull();
+  });
+
+  it('hides a night-time zero and a bad irradiance', () => {
+    expect(currentWeather(state({ last_fetched_solar_w_m2: 0, last_fetched_is_day: false }), NOW)?.solarWm2).toBeNull();
+    expect(currentWeather(state({ last_fetched_solar_w_m2: -3 }), NOW)?.solarWm2).toBeNull();
+    expect(currentWeather(state({ last_fetched_solar_w_m2: Number.NaN }), NOW)?.solarWm2).toBeNull();
+    // A small night-time reading (dusk) is real and still shows.
+    expect(currentWeather(state({ last_fetched_solar_w_m2: 12, last_fetched_is_day: false }), NOW)?.solarWm2).toBe(12);
   });
 
   it('hides when there is no state or the integration is off', () => {
@@ -116,5 +134,21 @@ describe('formatWeatherTemp', () => {
   it('rounds to whole degrees', () => {
     expect(formatWeatherTemp(10.4)).toBe('10 °C');
     expect(formatWeatherTemp(-0.6)).toBe('-1 °C');
+  });
+});
+
+describe('solarLevel', () => {
+  it.each([
+    [0, 0], [-10, 0], [Number.NaN, 0],
+    [1, 1], [200, 1], [201, 2], [486, 3], [999, SOLAR_LEVEL_BARS], [1000, SOLAR_LEVEL_BARS], [1300, SOLAR_LEVEL_BARS],
+  ])('%s W/m² lights %s bars', (w, bars) => {
+    expect(solarLevel(w)).toBe(bars);
+  });
+});
+
+describe('formatIrradiance', () => {
+  it('rounds to whole watts per square metre', () => {
+    expect(formatIrradiance(486.4)).toBe('486 W/m²');
+    expect(formatIrradiance(0)).toBe('0 W/m²');
   });
 });

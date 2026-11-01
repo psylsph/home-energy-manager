@@ -277,8 +277,8 @@ function directPath(from: FlowNodeId, to: FlowNodeId, posOf: (id: FlowNodeId) =>
   };
 }
 
-function flowPath(flow: EnergyFlow, flows: EnergyFlow[], posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
-  const { from, to } = visualEndpoints(flow, flows);
+function flowPath(flow: EnergyFlow, posOf: (id: FlowNodeId) => { x: number; y: number }): FlowPath {
+  const { from, to } = visualEndpoints(flow);
   const routed = isOuterRoute(from, to)
     ? outerArcPath(from, to, posOf)
     : directPath(from, to, posOf);
@@ -287,14 +287,13 @@ function flowPath(flow: EnergyFlow, flows: EnergyFlow[], posOf: (id: FlowNodeId)
 
 interface DotProps {
   flow: EnergyFlow;
-  flows: EnergyFlow[];
   posOf: (id: FlowNodeId) => { x: number; y: number };
   maxW: number;
   reduced: boolean;
 }
 
-function FlowTrack({ flow, flows, posOf }: Omit<DotProps, 'maxW' | 'reduced'>) {
-  const routed = flowPath(flow, flows, posOf);
+function FlowTrack({ flow, posOf }: Omit<DotProps, 'maxW' | 'reduced'>) {
+  const routed = flowPath(flow, posOf);
   return (
     <path
       data-flow-track-id={flow.id}
@@ -309,8 +308,8 @@ function FlowTrack({ flow, flows, posOf }: Omit<DotProps, 'maxW' | 'reduced'>) {
   );
 }
 
-function FlowDot({ flow, flows, posOf, maxW, reduced }: DotProps) {
-  const routed = flowPath(flow, flows, posOf);
+function FlowDot({ flow, posOf, maxW, reduced }: DotProps) {
+  const routed = flowPath(flow, posOf);
   const strength = Math.min(1, flow.watts / maxW);
   const r = 6 + 3 * strength;
   // Duration is path-length-driven so a short battery→home spoke and a long
@@ -677,7 +676,6 @@ function EnergyOrbitDiagramInner(props: Props) {
             <FlowTrack
               key={`track-${f.id}`}
               flow={f}
-              flows={vm.flows}
               posOf={posOf}
             />
           ))}
@@ -687,7 +685,6 @@ function EnergyOrbitDiagramInner(props: Props) {
             <FlowDot
               key={`dot-${f.id}`}
               flow={f}
-              flows={vm.flows}
               posOf={posOf}
               maxW={vm.maxFlowWatts}
               reduced={reduced}

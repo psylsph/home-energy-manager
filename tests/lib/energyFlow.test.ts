@@ -10,6 +10,7 @@ import {
   FLOW_COLORS,
   BATTERY_OUTPUT_COLOR,
   nodeStatus,
+  visualEndpoints,
 } from '../../src/lib/energyFlow';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
@@ -130,6 +131,24 @@ describe('buildEnergyFlows — sign conventions (home-centred)', () => {
     expect(f!.to).toBe('home');
     expect(f!.watts).toBe(5000);
     expect(f!.direction).toBe('generate');
+  });
+
+  it("gives the solar node its share of the array as its own field", () => {
+    const arrays = [{ source: 'pv1' as const, name: '', power_w: 3000, rated_kw: 6 }];
+    const vm = buildEnergyFlows(snap({ solar_power: 3000, solar_arrays: arrays }));
+    expect(vm.nodes.find((n) => n.id === 'solar')!.percentText).toBe('50%');
+    expect(buildEnergyFlows(snap({ solar_power: 3000 })).nodes.find((n) => n.id === 'solar')!.percentText).toBeUndefined();
+  });
+
+  it('draws a solar export from the panels even when the house load is below the noise floor', () => {
+    // The export flow is the solar surplus, so it only exists while solar
+    // generates. With no solar→home flow (home 10 W, under the floor) it must
+    // still be drawn from the panels, not from the home hub.
+    const vm = buildEnergyFlows(snap({ solar_power: 4000, home_power: 10, battery_power: -2000, battery_state: 'charging', grid_power: 2000 }));
+    const exp = flowById(vm, 'export')!;
+    expect(flowById(vm, 'solar')).toBeUndefined();
+    expect(visualEndpoints(exp)).toEqual({ from: 'solar', to: 'grid' });
+    expect(exp.color).toBe(FLOW_COLORS.solar);
   });
 
   it('treats +grid_power as export (home→grid) and −grid_power as import (grid→home)', () => {

@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
+  CONSUMER_UNIT,
   EV_LEG,
   HOUSE,
   HOUSE_ANCHORS,
   HOUSE_VIEWBOX,
+  INVERTER_BOX,
   ISO_ORIGIN,
   LEGS,
   PANEL_ARRAY,
@@ -11,16 +13,14 @@ import {
   frontRoofPoint,
   iso,
   isoPoint,
-  offsetPolyline,
   panelCells,
   pathD,
   polygonPoints,
   polylineLength,
-  routeBetween,
   type HousePart,
 } from '../../src/lib/houseGeometry';
 
-/** House view geometry (issue #422): projection, anchors, routes, lanes. */
+/** House view geometry (issue #422): projection, anchors, cables. */
 
 describe('iso projection', () => {
   it('puts the world origin at the screen origin', () => {
@@ -93,29 +93,46 @@ describe('roof and panels', () => {
   });
 });
 
-describe('routes', () => {
-  it('ends every leg at the inverter', () => {
-    for (const leg of Object.values(LEGS)) {
-      expect(leg[leg.length - 1]).toEqual(HOUSE_ANCHORS.inverter);
+describe('cables', () => {
+  const parts: HousePart[] = ['solar', 'battery', 'home', 'grid'];
+  const onInverter = (p: { x: number; y: number; z: number }) =>
+    p.x >= HOUSE.x1 && p.x <= HOUSE.x1 + 0.05 + INVERTER_BOX.depth
+    && p.y >= INVERTER_BOX.y0 && p.y <= INVERTER_BOX.y1
+    && p.z >= INVERTER_BOX.z0 && p.z <= INVERTER_BOX.z1;
+
+  it('ends every cable on the inverter', () => {
+    for (const part of parts) expect(onInverter(LEGS[part][LEGS[part].length - 1])).toBe(true);
+  });
+
+  it('meets the inverter at a different point for each part', () => {
+    const ends = parts.map((part) => JSON.stringify(LEGS[part][LEGS[part].length - 1]));
+    expect(new Set(ends).size).toBe(parts.length);
+  });
+
+  it('never runs a cable out of the top of the inverter', () => {
+    for (const part of parts) {
+      const leg = LEGS[part];
+      const end = leg[leg.length - 1];
+      const before = leg[leg.length - 2];
+      expect(end.z).toBeLessThan(INVERTER_BOX.z1);
+      // The last stretch doesn't come straight down onto the inverter.
+      expect(before.x === end.x && before.y === end.y && before.z > end.z).toBe(false);
     }
+  });
+
+  it('enters the house at the consumer unit', () => {
+    const start = LEGS.home[0];
+    expect(start.y).toBeGreaterThanOrEqual(CONSUMER_UNIT.y0);
+    expect(start.y).toBeLessThanOrEqual(CONSUMER_UNIT.y1);
+    expect(start.z).toBe(CONSUMER_UNIT.z1);
+  });
+
+  it('starts the solar cable at the panel array', () => {
+    expect(LEGS.solar[0]).toEqual(frontRoofPoint(PANEL_ARRAY.x1, PANEL_ARRAY.v0));
   });
 
   it('starts the grid leg at the gate', () => {
     expect(LEGS.grid[0]).toEqual(HOUSE_ANCHORS.grid);
-  });
-
-  it('joins two legs through the inverter exactly once', () => {
-    const parts: HousePart[] = ['solar', 'battery', 'home', 'grid'];
-    for (const from of parts) {
-      for (const to of parts) {
-        if (from === to) continue;
-        const route = routeBetween(from, to);
-        expect(route[0]).toEqual(LEGS[from][0]);
-        expect(route[route.length - 1]).toEqual(LEGS[to][0]);
-        expect(route.filter((p) => p === HOUSE_ANCHORS.inverter)).toHaveLength(1);
-        expect(route).toHaveLength(LEGS[from].length + LEGS[to].length - 1);
-      }
-    }
   });
 
   it('ends the EV leg at the foot of the charge post', () => {
@@ -135,47 +152,5 @@ describe('polyline helpers', () => {
   it('measures length', () => {
     expect(polylineLength([{ x: 0, y: 0 }, { x: 3, y: 4 }, { x: 3, y: 10 }])).toBe(11);
     expect(polylineLength([{ x: 1, y: 1 }])).toBe(0);
-  });
-
-  it('returns a copy unchanged for a zero offset or a single point', () => {
-    const line = [{ x: 0, y: 0 }, { x: 10, y: 0 }];
-    const out = offsetPolyline(line, 0);
-    expect(out).toEqual(line);
-    expect(out[0]).not.toBe(line[0]);
-    expect(offsetPolyline([{ x: 5, y: 5 }], 3)).toEqual([{ x: 5, y: 5 }]);
-  });
-
-  it('shifts a straight line sideways by the offset', () => {
-    // Travelling +x, "left" in screen space (y down) is −y.
-    expect(offsetPolyline([{ x: 0, y: 0 }, { x: 10, y: 0 }], 2)).toEqual([{ x: 0, y: -2 }, { x: 10, y: -2 }]);
-    expect(offsetPolyline([{ x: 0, y: 0 }, { x: 10, y: 0 }], -2)).toEqual([{ x: 0, y: 2 }, { x: 10, y: 2 }]);
-  });
-
-  it('keeps lanes parallel round a right-angle corner', () => {
-    const out = offsetPolyline([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 2);
-    // Corner miter: both legs stay exactly 2 px out.
-    expect(out[1].x).toBeCloseTo(12, 5);
-    expect(out[1].y).toBeCloseTo(-2, 5);
-    expect(out[2]).toEqual({ x: 12, y: 10 });
-  });
-
-  it('caps the miter on a sharp corner', () => {
-    const out = offsetPolyline([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 0.5 }], 2);
-    const shift = Math.hypot(out[1].x - 10, out[1].y);
-    expect(shift).toBeLessThanOrEqual(4.01);
-  });
-
-  it('survives a full reversal without NaN', () => {
-    const out = offsetPolyline([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 0 }], 2);
-    for (const p of out) {
-      expect(Number.isFinite(p.x)).toBe(true);
-      expect(Number.isFinite(p.y)).toBe(true);
-    }
-    expect(out[1]).toEqual({ x: 10, y: -2 });
-  });
-
-  it('treats a zero-length segment safely', () => {
-    const out = offsetPolyline([{ x: 0, y: 0 }, { x: 0, y: 0 }], 2);
-    for (const p of out) expect(Number.isFinite(p.x) && Number.isFinite(p.y)).toBe(true);
   });
 });

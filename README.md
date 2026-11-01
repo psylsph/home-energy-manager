@@ -20,6 +20,10 @@ Home Energy Manager connects directly to your inverter over your home network an
     <td align="center"><b>Status — Mobile</b><br><img src=".github/screenshots/status-mobile.png" width="200"></td>
   </tr>
   <tr>
+    <td align="center"><b>Status — House View</b><br><img src=".github/screenshots/status-house.png" width="400"></td>
+    <td align="center"><b>House View — Mobile</b><br><img src=".github/screenshots/status-house-mobile.png" width="200"></td>
+  </tr>
+  <tr>
     <td align="center"><b>Power Chart</b><br><img src=".github/screenshots/power.png" width="400"></td>
     <td align="center"><b>Battery Detail</b><br><img src=".github/screenshots/battery.png" width="400"></td>
   </tr>
@@ -117,7 +121,7 @@ Home Energy Manager connects directly to your inverter over your home network. I
 ### Monitoring
 
 - **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
-- **Energy flow diagram** — animated visual showing where your power is flowing right now (solar → battery → home → grid)
+- **Energy flow diagram** — animated visual showing where your power is flowing right now (solar → battery → home → grid); choose the orbit diagram or an illustrated house view with the weather, the next charge or export, and the battery level
 - **Power chart** — live chart tracking solar, battery, grid, and home power with selectable time ranges from 1 hour to 1 year. Click legend labels to show or hide individual lines.
 - **Battery detail** — individual cell voltages, temperatures, and health per battery module
 - **Solar page** — voltage, current, and power for each solar string (supports dual-string systems)

@@ -30,13 +30,15 @@ export interface ScreenPoint {
   y: number;
 }
 
-/** SVG viewBox. Sized so header + view + Summary tiles fit an iPhone 12 Pro without scrolling. */
+/** SVG viewBox. Sized so header + view + its two cards fit an iPhone 12 Pro without scrolling (Today statistics hidden). */
 export const HOUSE_VIEWBOX = { width: 390, height: 520 } as const;
 
 /** Pixels per world unit. */
 export const ISO_SCALE = 16;
 /** Screen origin of world (0, 0, 0). */
-export const ISO_ORIGIN: ScreenPoint = { x: 195, y: 222 };
+// Six px left of centre: the plot keeps a margin each side, and the Battery
+// reading, straight below the cabinet, still fits on the right.
+export const ISO_ORIGIN: ScreenPoint = { x: 189, y: 222 };
 const COS30 = Math.cos(Math.PI / 6);
 
 /** Project a world point to SVG coordinates. */
@@ -91,6 +93,8 @@ export const HEDGES = [
 ] as const;
 /** The grid cable runs this far in from the front of the plot, behind the hedge. */
 const GRID_RUN_Y = 8.8;
+/** Chimney stack (with its cap) on the back roof slope; leader lines must stay clear of it. */
+export const CHIMNEY = { x0: 0.75, x1: 1.85, y0: 2.45, y1: 3.55, z0: 6.8, z1: 9.75 } as const;
 /** Number of SOC bars drawn on the battery cabinet. */
 export const BATTERY_BARS = 10;
 
@@ -136,50 +140,62 @@ export const HOUSE_ANCHORS = {
   solar: frontRoofPoint((PANEL_ARRAY.x0 + PANEL_ARRAY.x1) / 2, (PANEL_ARRAY.v0 + PANEL_ARRAY.v1) / 2),
   /** Gable apex — the Home leader line ends here. */
   home: w(GABLE_X, RIDGE_Y, HOUSE.ridge),
-  /** Foot of the battery cabinet — the Battery leader line ends here. */
-  battery: w(GABLE_X + BATTERY_BOX.depth, (BATTERY_BOX.y0 + BATTERY_BOX.y1) / 2, 0),
+  /**
+   * Foot of the battery cabinet's front face — the Battery leader line ends
+   * here. Far enough left that the reading straight below it still fits.
+   */
+  battery: w(GABLE_X + 0.15, BATTERY_BOX.y1, 0),
   /** Front gate where the grid line comes in — the Grid leader line ends here. */
   grid: w(GATE_X, PLOT.y1, 0),
   /** EV charge post at the front-left corner of the plot. */
   ev: w(EV_POST.x, EV_POST.y, EV_POST.height),
-  /** Face of the inverter, where every route meets. */
-  inverter: w(GABLE_X + INVERTER_BOX.depth, INV_MID_Y, INV_MID_Z),
 } as const satisfies Record<string, WorldPoint>;
 
 // ---------------------------------------------------------------------------
-// Route legs — each runs from a part to the inverter (or, for the EV, from the
-// house to the charge post). A flow's route is `leg(from)` reversed into
-// `leg(to)`, so lines bend around the building rather than cutting through it.
+// Cables — one per part, each running from the part to the inverter (the EV
+// cable runs from the house to the charge post). The inverter sits at the
+// centre, as on an inverter's own power-flow screen: the panels feed it one
+// cable and it feeds the battery, the home and the grid one cable each.
+// Each cable meets a different side of the inverter, so none rises out of
+// its top.
 // ---------------------------------------------------------------------------
 
-/** Parts with a leg to the inverter. */
+/** Parts with a cable to the inverter. */
 export type HousePart = 'solar' | 'battery' | 'home' | 'grid';
 
 const SIDE = GABLE_X + 0.05;
-/** Height the wiring runs at along the gable wall. */
+/** Height the battery cable runs at along the gable wall. */
 const WIRE_Z = INV_MID_Z;
+/** The solar cable meets the inverter's front side near its top… */
+const SOLAR_IN_Z = INVERTER_BOX.z1 - 0.3;
+/** …and the home cable leaves it near its bottom. */
+const HOME_OUT_Z = INVERTER_BOX.z0 + 0.3;
 
-/** Each leg runs from the part *to* the inverter. */
+/** Consumer unit on the gable wall, between the inverter and the front corner. */
+export const CONSUMER_UNIT = { y0: 4.9, y1: 5.5, z0: 0.6, z1: 1.3, depth: 0.2 } as const;
+const CU_MID_Y = (CONSUMER_UNIT.y0 + CONSUMER_UNIT.y1) / 2;
+
+/** Each cable runs from the part *to* the inverter. */
 export const LEGS: Record<HousePart, WorldPoint[]> = {
-  // Panel array → down the front-right roof edge → down the corner → along the wall.
+  // Panel array → down the front-right roof edge → down the corner → into the inverter's front side.
   solar: [
     frontRoofPoint(PANEL_ARRAY.x1, PANEL_ARRAY.v0),
     w(SIDE, HOUSE.y1, HOUSE.wall),
-    w(SIDE, HOUSE.y1, WIRE_Z),
-    HOUSE_ANCHORS.inverter,
+    w(SIDE, HOUSE.y1, SOLAR_IN_Z),
+    w(SIDE, INVERTER_BOX.y1, SOLAR_IN_Z),
   ],
-  // Battery cabinet side → along the wall → inverter.
+  // Battery cabinet side → along the wall → the inverter's back edge (its back face is hidden).
   battery: [
     w(SIDE + BATTERY_BOX.depth, BATTERY_BOX.y1, WIRE_Z),
-    HOUSE_ANCHORS.inverter,
+    w(SIDE + INVERTER_BOX.depth, INVERTER_BOX.y0, WIRE_Z),
   ],
-  // Into the house high on the wall → down to the inverter.
+  // Consumer unit → up the wall → into the inverter's front side.
   home: [
-    w(SIDE, INV_MID_Y, HOUSE.wall - 0.6),
-    w(SIDE, INV_MID_Y, INVERTER_BOX.z1),
-    HOUSE_ANCHORS.inverter,
+    w(SIDE, CU_MID_Y, CONSUMER_UNIT.z1),
+    w(SIDE, CU_MID_Y, HOME_OUT_Z),
+    w(SIDE, INVERTER_BOX.y1, HOME_OUT_Z),
   ],
-  // Gate → along the front of the plot → up the right-hand side → up the wall.
+  // Gate → along the front of the plot → up the right-hand side → up into the inverter's underside.
   grid: [
     HOUSE_ANCHORS.grid,
     w(GATE_X, GRID_RUN_Y, 0),
@@ -187,7 +203,6 @@ export const LEGS: Record<HousePart, WorldPoint[]> = {
     w(PLOT.x1 - 1.2, INV_MID_Y, 0),
     w(SIDE + INVERTER_BOX.depth, INV_MID_Y, 0),
     w(SIDE + INVERTER_BOX.depth, INV_MID_Y, INVERTER_BOX.z0),
-    HOUSE_ANCHORS.inverter,
   ],
 };
 
@@ -198,14 +213,6 @@ export const EV_LEG: WorldPoint[] = [
   w(EV_POST.x, HOUSE.y1 + 0.8, 0),
   w(EV_POST.x, EV_POST.y, 0),
 ];
-
-/** World route between two parts, via the inverter. */
-export function routeBetween(from: HousePart, to: HousePart): WorldPoint[] {
-  const out = LEGS[from];
-  const back = [...LEGS[to]].reverse();
-  // Both legs end at the inverter; drop the duplicate.
-  return [...out, ...back.slice(1)];
-}
 
 // ---------------------------------------------------------------------------
 // Polyline helpers (screen space)
@@ -223,41 +230,4 @@ export function polylineLength(points: ScreenPoint[]): number {
     len += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
   }
   return len;
-}
-
-/**
- * Offset a screen polyline sideways by `d` pixels (positive = left of the
- * direction of travel). Used to give each concurrent flow its own lane where
- * routes share wall wiring, so every flow's colour stays visible. Interior
- * vertices use the averaged normal, scaled so lanes stay parallel.
- */
-export function offsetPolyline(points: ScreenPoint[], d: number): ScreenPoint[] {
-  if (d === 0 || points.length < 2) return points.map((p) => ({ ...p }));
-  const normals: ScreenPoint[] = [];
-  for (let i = 1; i < points.length; i++) {
-    const dx = points[i].x - points[i - 1].x;
-    const dy = points[i].y - points[i - 1].y;
-    const len = Math.hypot(dx, dy) || 1;
-    normals.push({ x: dy / len, y: -dx / len });
-  }
-  return points.map((p, i) => {
-    let n: ScreenPoint;
-    if (i === 0) n = normals[0];
-    else if (i === points.length - 1) n = normals[normals.length - 1];
-    else {
-      const a = normals[i - 1];
-      const b = normals[i];
-      const sum = { x: a.x + b.x, y: a.y + b.y };
-      const sumLen = Math.hypot(sum.x, sum.y);
-      if (sumLen < 1e-6) {
-        n = a; // 180° turn: no sensible miter, keep the incoming normal.
-      } else {
-        const m = { x: sum.x / sumLen, y: sum.y / sumLen };
-        // Miter length 1/cos(θ/2), capped so sharp corners don't spike.
-        const cos = Math.max(0.5, m.x * a.x + m.y * a.y);
-        n = { x: m.x / cos, y: m.y / cos };
-      }
-    }
-    return { x: round2(p.x + n.x * d), y: round2(p.y + n.y * d) };
-  });
 }

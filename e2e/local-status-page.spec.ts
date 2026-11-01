@@ -189,6 +189,8 @@ test.describe('Status Page - House View (issue #422)', () => {
   for (const theme of ['dark', 'light'] as const) {
     test(`fits an iPhone 12 Pro screen without scrolling (${theme})`, async ({ page }) => {
       // 844 px tall minus the ~47 px / ~34 px safe areas Chromium doesn't emulate.
+      // The house view starts with the Today statistics hidden, so this is its
+      // untouched default.
       await page.setViewportSize({ width: 390, height: 763 });
       await useHouse(page, theme);
       await page.goto('/');
@@ -197,7 +199,10 @@ test.describe('Status Page - House View (issue #422)', () => {
       await expect(page.getByTestId('house-energy-view')).toBeVisible();
       await expect(page.getByTestId('house-reading-battery')).toBeVisible();
       await expect(page.getByTestId('house-status-pill')).toBeVisible();
-      await expect(page.getByTestId('summary-tiles-grid')).toBeVisible();
+      await expect(page.getByTestId('house-charge-card')).toBeVisible();
+      await expect(page.getByTestId('house-battery-card')).toBeVisible();
+      // Hidden without ever touching the toggle: the house view's default.
+      await expect(page.getByTestId('summary-tiles-grid')).toHaveCount(0);
       await expect(page.locator('nav.sticky')).toHaveCount(0);
 
       const dims = await page.evaluate(() => {
@@ -213,6 +218,22 @@ test.describe('Status Page - House View (issue #422)', () => {
       expect(dims.main).toBeLessThanOrEqual(dims.mainClient);
     });
   }
+
+  test('shows HEM in the header on a phone and the full name on a desktop', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 763 });
+    await page.goto('/');
+    await expect(page.getByTestId('app-title-short')).toBeVisible({ timeout: 20_000 });
+    // The full name is screen-reader-only here: a 1 px clipped box, which
+    // Playwright still counts as visible, so check its rendered width.
+    const fullWidth = () => page.getByText('Home Energy Manager', { exact: true }).evaluate((el) => el.getBoundingClientRect().width);
+    expect(await fullWidth()).toBeLessThanOrEqual(1);
+    await expect(page.getByRole('heading', { level: 1, name: /^Home Energy Manager/ })).toBeAttached();
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expect(page.getByTestId('app-title-short')).toBeHidden();
+    await expect(page.getByText('Home Energy Manager', { exact: true })).toBeVisible();
+    expect(await fullWidth()).toBeGreaterThan(100);
+  });
 
   test('navigates from the burger menu and closes it', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 763 });
@@ -234,6 +255,27 @@ test.describe('Status Page - House View (issue #422)', () => {
     await drawer.getByRole('link', { name: 'Battery' }).click();
     await expect(page).toHaveURL(/#\/battery$/);
     await expect(drawer).toBeHidden();
+  });
+
+  test('draws a single cable off the panels', async ({ page }) => {
+    await useHouse(page);
+    await page.goto('/');
+    await expect(page.getByTestId('house-energy-view')).toBeVisible({ timeout: 20_000 });
+    // One cable per part: never more than one line off the panels, whatever the flows.
+    expect(await page.locator('[data-testid="house-route-solar"]').count()).toBeLessThanOrEqual(1);
+    const ids = await page.locator('[data-testid^="house-route-"]').evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')));
+    expect(new Set(ids).size).toBe(ids.length);
+    await expect(page.getByTestId('house-consumer-unit')).toBeVisible();
+  });
+
+  test('hides the Today statistics from Settings', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.getByTestId('summary-tiles-grid')).toBeVisible({ timeout: 20_000 });
+    await page.goto('/#/settings');
+    await page.getByRole('switch', { name: 'Show Today Statistics' }).click();
+    await page.goto('/#/');
+    await expect(page.getByRole('heading', { name: 'Today' })).toHaveCount(0);
+    await expect(page.getByTestId('summary-tiles-grid')).toHaveCount(0);
   });
 
   test('switches between Orbit and House from Settings without a reload', async ({ page }) => {

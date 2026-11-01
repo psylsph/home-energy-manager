@@ -173,6 +173,12 @@ interface InverterState {
    */
   energyFlowDisplay: EnergyFlowDisplay;
   /**
+   * Show the Today statistics tiles on the Status page. Default: shown with
+   * the orbit, hidden with the house view — which has to fit a phone screen —
+   * until the toggle is saved. Per device.
+   */
+  showTodayStats: boolean;
+  /**
    * Noise floor in watts for the energy flow diagram. Flows below this
    * value are treated as zero — no animated line, no arrow, displayed
    * value rounds to "0W". Default: 20W.
@@ -254,6 +260,7 @@ interface InverterState {
   resetEvc: () => void;
   setShowFlowStatusWords: (enabled: boolean) => void;
   setEnergyFlowDisplay: (display: EnergyFlowDisplay) => void;
+  setShowTodayStats: (show: boolean) => void;
   setVisualNoiseThreshold: (threshold: number) => void;
   setGridMeterAddress: (address: number) => void;
   /**
@@ -390,6 +397,26 @@ function loadEnergyFlowDisplay(): EnergyFlowDisplay {
   }
 }
 
+/**
+ * The explicitly saved Show Today Statistics choice from the toggle:
+ * `true` / `false` when the user has used it, `null` when nothing was chosen.
+ */
+function savedTodayStats(): boolean | null {
+  try {
+    const stored = localStorage.getItem('showTodayStats');
+    if (stored === 'true' || stored === 'false') return stored === 'true';
+  } catch { /* ignore */ }
+  return null;
+}
+
+function loadShowTodayStats(): boolean {
+  // Nothing chosen yet: hide the tiles with the house view, whose Status page
+  // has to fit a phone screen, and keep them on the space-rich orbit. The
+  // orbit is also what loadEnergyFlowDisplay falls back to, so both loaders
+  // degrade the same way.
+  return savedTodayStats() ?? loadEnergyFlowDisplay() !== 'house';
+}
+
 function loadVisualNoiseThreshold(): number {
   try {
     const stored = localStorage.getItem('visualNoiseThreshold');
@@ -491,6 +518,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   panelGraphsYLockMax: 0,
   showFlowStatusWords: loadShowFlowStatusWords(),
   energyFlowDisplay: loadEnergyFlowDisplay(),
+  showTodayStats: loadShowTodayStats(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
@@ -582,7 +610,19 @@ export const useInverterStore = create<InverterState>((set) => ({
     try {
       localStorage.setItem('energyFlowDisplay', display);
     } catch { /* ignore */ }
-    set({ energyFlowDisplay: display });
+    set({
+      energyFlowDisplay: display,
+      // Switching views re-applies the view's own Today-statistics default
+      // while the toggle has never been saved: the house starts without the
+      // tiles (it has to fit a phone), the orbit with them.
+      showTodayStats: savedTodayStats() ?? display !== 'house',
+    });
+  },
+  setShowTodayStats: (show) => {
+    try {
+      localStorage.setItem('showTodayStats', String(show));
+    } catch { /* ignore */ }
+    set({ showTodayStats: show });
   },
   setVisualNoiseThreshold: (threshold) => {
     try {

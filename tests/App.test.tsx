@@ -134,6 +134,19 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
     expect(screen.getByRole('link', { name: 'Settings' })).toBeDefined();
   });
 
+  it('shortens the title to HEM on phones but keeps the full name for screen readers', async () => {
+    await navigate('/');
+    render(<App />);
+    const heading = screen.getByRole('heading', { level: 1 });
+    // The short form is hidden from assistive tech; the full name is sr-only
+    // on phones and shown from the sm breakpoint up.
+    expect(heading.textContent).toMatch(/^HEMHome Energy Manager v/);
+    const short = screen.getByTestId('app-title-short');
+    expect(short.getAttribute('aria-hidden')).toBe('true');
+    expect(short.className).toContain('sm:hidden');
+    expect(screen.getByText('Home Energy Manager').className).toBe('sr-only sm:not-sr-only');
+  });
+
   it('redirects an unknown route to Status instead of leaving the main area blank', async () => {
     await navigate('/not-a-real-page');
     render(<App />);

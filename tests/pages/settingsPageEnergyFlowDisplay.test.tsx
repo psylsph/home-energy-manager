@@ -60,3 +60,48 @@ describe('<PanelControlsSection/> — Energy Flow Display', () => {
     expect(screen.getByRole('button', { name: 'More about Energy Flow Display' })).toBeDefined();
   });
 });
+
+/** Settings → Panel Controls → Show Today Statistics (issue #422, round 2). */
+describe('<PanelControlsSection/> — Show Today Statistics', () => {
+  beforeEach(() => {
+    localStorage.removeItem('showTodayStats');
+    localStorage.removeItem('energyFlowDisplay');
+    useInverterStore.setState({ showTodayStats: true, energyFlowDisplay: 'orbit' });
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.removeItem('showTodayStats');
+    localStorage.removeItem('energyFlowDisplay');
+    useInverterStore.setState({ showTodayStats: true, energyFlowDisplay: 'orbit' });
+  });
+
+  const renderSection = () =>
+    render(<PanelControlsSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
+
+  it('is on for the orbit by default and saves a change', () => {
+    renderSection();
+    const toggle = screen.getByRole('switch', { name: 'Show Today Statistics' });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(toggle);
+    expect(useInverterStore.getState().showTodayStats).toBe(false);
+    expect(localStorage.getItem('showTodayStats')).toBe('false');
+    expect(screen.getByRole('switch', { name: 'Show Today Statistics' }).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('starts off when the house view is chosen, and the hint says so', () => {
+    // The store applies the house default on the switch; nothing is saved.
+    useInverterStore.getState().setEnergyFlowDisplay('house');
+    renderSection();
+    expect(screen.getByRole('switch', { name: 'Show Today Statistics' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText(/Hidden by default with the house view/)).toBeDefined();
+  });
+
+  it('keeps a saved show on the house view', () => {
+    localStorage.setItem('showTodayStats', 'true');
+    useInverterStore.setState({ showTodayStats: true });
+    useInverterStore.getState().setEnergyFlowDisplay('house');
+    renderSection();
+    expect(screen.getByRole('switch', { name: 'Show Today Statistics' }).getAttribute('aria-checked')).toBe('true');
+  });
+});

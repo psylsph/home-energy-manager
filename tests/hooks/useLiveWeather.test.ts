@@ -41,7 +41,7 @@ describe('useLiveWeather', () => {
     const { result } = renderHook(() => useLiveWeather());
     expect(result.current).toBeNull();
     await flush();
-    expect(result.current).toEqual({ temperatureC: 9.6, kind: 'cloudy', description: 'Cloudy' });
+    expect(result.current).toEqual({ temperatureC: 9.6, kind: 'cloudy', description: 'Cloudy', solarWm2: null });
     expect(apiGet).toHaveBeenCalledWith('/api/weather');
   });
 

@@ -2,8 +2,9 @@
  * House-view model (issue #422).
  *
  * Maps the shared [`EnergyFlowViewModel`](../types/energyFlow.ts) onto the
- * illustrated house: one route per flow, readings with leader lines, the top
- * status pill and the battery gauge. Pure — the component only draws what
+ * illustrated house: one cable per part (solar, battery, home, grid, EV)
+ * through the inverter, readings with leader lines, the top status pill and
+ * the battery gauge. Pure — the component only draws what
  * this returns. Colours, status words, numbers and the noise threshold all
  * come from the view model, so the house and the orbit always agree.
  */
@@ -16,10 +17,8 @@ import {
   HOUSE_ANCHORS,
   LEGS,
   isoPoint,
-  offsetPolyline,
   pathD,
   polylineLength,
-  routeBetween,
   type HousePart,
   type ScreenPoint,
   type WorldPoint,
@@ -28,9 +27,6 @@ import {
 // ---------------------------------------------------------------------------
 // Layout (SVG user units, inside HOUSE_VIEWBOX)
 // ---------------------------------------------------------------------------
-
-/** Gap between parallel lanes where flows share wiring. */
-export const LANE_GAP = 3.5;
 
 interface ReadingSlot {
   /** Left edge of the reading text; the leader line drops from here. */
@@ -41,16 +37,28 @@ interface ReadingSlot {
   edgeY: number;
 }
 
+/** Screen x of an anchor, rounded to the SVG's 0.01 grid. */
+const anchorX = (id: keyof typeof HOUSE_ANCHORS) => isoPoint(HOUSE_ANCHORS[id]).x;
+
 /** Top row: Solar and Home. Bottom row: Grid and Battery. EV sits under the weather. */
 export const READING_SLOTS: Record<'solar' | 'home' | 'grid' | 'battery' | 'ev', ReadingSlot> = {
-  solar: { x: 180, valueY: 70, edgeY: 94 },
-  home: { x: 286, valueY: 70, edgeY: 94 },
+  // Solar sits straight above the panel centre, so its leader is one vertical
+  // line clear of the chimney; Home moves right to make room.
+  solar: { x: anchorX('solar'), valueY: 70, edgeY: 94 },
+  home: { x: 302, valueY: 70, edgeY: 94 },
   ev: { x: 24, valueY: 128, edgeY: 180 },
   // Bottom readings sit close under their anchors so the leaders stay short
-  // and don't cross the gable wall.
-  grid: { x: 100, valueY: 446, edgeY: 424 },
-  battery: { x: 246, valueY: 446, edgeY: 424 },
+  // and don't cross the gable wall: Grid straight below the gate.
+  grid: { x: anchorX('grid'), valueY: 446, edgeY: 424 },
+  // Straight below the cabinet's front foot: a single vertical leader.
+  battery: { x: anchorX('battery'), valueY: 446, edgeY: 424 },
 };
+
+/**
+ * Width of a reading's tap area from its slot's x: under the gap to the next
+ * reading's text on the same row, so a tap on Home never opens Solar's tooltip.
+ */
+export const READING_HIT_WIDTH = 100;
 
 // ---------------------------------------------------------------------------
 // Output types
@@ -68,8 +76,15 @@ export interface HouseReading {
   suffix: string;
   /** Battery only: SOC text shown after the power, e.g. `"34%"`. */
   soc?: string;
+  /**
+   * Solar only: share of the array size, e.g. `"62%"`, shown on the label
+   * line — after the power it would run into the Home reading.
+   */
+  percent?: string;
   /** Status pill text (Grid, Battery, EV). */
   status?: string;
+  /** Volts / amps (or hertz) for the tooltip, e.g. `"350V · 12.3A"`; Solar, Grid and Battery only. */
+  detail?: string;
   color: string;
   active: boolean;
   slot: ReadingSlot;
@@ -78,11 +93,22 @@ export interface HouseReading {
   anchor: ScreenPoint;
 }
 
+export type HouseCable = HousePart | 'ev';
+
 export interface HouseRoute {
-  id: string;
+  /** The cable: one per part. */
+  id: HouseCable;
+  /** Colour of the largest flow the cable carries. */
   color: string;
+  /** Net power along the cable. */
   watts: number;
-  /** 0–1 share of the largest flow; drives line weight and animation speed. */
+  /**
+   * True when the part supplies power: it runs from the part towards the
+   * inverter. False when the part receives it (for the EV, from the house).
+   * Drawn as `data-supplies` on the route.
+   */
+  supplies: boolean;
+  /** 0–1 share of the busiest cable; drives line weight and animation speed. */
   strength: number;
   d: string;
   length: number;
@@ -100,7 +126,7 @@ export interface HouseStatusPill {
 export interface HouseScene {
   readings: HouseReading[];
   routes: HouseRoute[];
-  /** Grey wiring drawn under the active routes. */
+  /** Grey wiring drawn under the active cables. */
   idleTracks: string[];
   pill: HouseStatusPill;
   solarActive: boolean;
@@ -152,15 +178,51 @@ function project(points: WorldPoint[]): ScreenPoint[] {
   return points.map(isoPoint);
 }
 
-function worldRoute(flow: EnergyFlow, flows: EnergyFlow[]): WorldPoint[] | null {
-  const { from, to } = visualEndpoints(flow, flows);
-  if (to === 'ev') return EV_LEG;
-  if (isHousePart(from) && isHousePart(to) && from !== to) return routeBetween(from, to);
-  return null;
-}
-
 function isHousePart(id: FlowNodeId): id is HousePart {
   return id === 'solar' || id === 'battery' || id === 'home' || id === 'grid';
+}
+
+interface CableLoad {
+  /** Flows leaving the part (towards the inverter). */
+  out: EnergyFlow[];
+  /** Flows arriving at the part (from the inverter). */
+  in: EnergyFlow[];
+}
+
+const sum = (flows: EnergyFlow[]) => flows.reduce((t, f) => t + f.watts, 0);
+
+/**
+ * Which flows each cable carries. A flow from A to B runs along A's cable
+ * into the inverter and out along B's; the EV flow has its own cable from
+ * the house, so it isn't counted on the home cable.
+ */
+export function cableLoads(flows: EnergyFlow[]): Record<HouseCable, CableLoad> {
+  const loads: Record<HouseCable, CableLoad> = {
+    solar: { out: [], in: [] },
+    battery: { out: [], in: [] },
+    home: { out: [], in: [] },
+    grid: { out: [], in: [] },
+    ev: { out: [], in: [] },
+  };
+  for (const flow of flows) {
+    const { from, to } = visualEndpoints(flow);
+    if (from === to) continue;
+    if (to === 'ev') {
+      loads.ev.in.push(flow);
+      continue;
+    }
+    // The house never supplies power. The view model's fallback 'charge'
+    // (home → battery, for a charge with no recognised source) comes from
+    // the inverter, so it isn't counted as leaving the home cable.
+    if (isHousePart(from) && from !== 'home') loads[from].out.push(flow);
+    if (isHousePart(to)) loads[to].in.push(flow);
+  }
+  return loads;
+}
+
+function cableColor(flows: EnergyFlow[]): string {
+  const top = flows.reduce((a, b) => (b.watts > a.watts ? b : a));
+  return top.color ?? FLOW_COLORS[visualEndpoints(top).from];
 }
 
 function leaderFor(slot: ReadingSlot, anchor: ScreenPoint): ScreenPoint[] {
@@ -171,19 +233,34 @@ function leaderFor(slot: ReadingSlot, anchor: ScreenPoint): ScreenPoint[] {
   ];
 }
 
+/**
+ * The electrical detail behind a reading, from the same view model the orbit
+ * uses: PV volts/amps for Solar, grid volts with amps (from a grid CT) or
+ * hertz for Grid, battery volts/amps for Battery. `undefined` when there is
+ * none (Home, EV, or a missing measurement).
+ */
+export function electricalDetail(node: FlowNode): string | undefined {
+  const raw = node.id === 'battery' ? node.subLabel : node.id === 'solar' || node.id === 'grid' ? node.unit : undefined;
+  return raw ? raw.split('/').join(' · ') : undefined;
+}
+
 function reading(node: FlowNode, withStatus: boolean): HouseReading {
   const id = node.id as keyof typeof READING_SLOTS;
   const slot = READING_SLOTS[id];
   const anchor = isoPoint(HOUSE_ANCHORS[id]);
   const { number, unit, suffix } = splitPowerValue(node.value);
+  // Solar's "(62%)" moves to the label line (`percent`); only the EV's
+  // session energy stays after the unit.
   return {
     id: node.id,
     label: node.label,
     number,
     unit,
-    suffix,
+    suffix: node.percentText ? '' : suffix,
     soc: node.id === 'battery' ? node.socText : undefined,
+    percent: node.percentText,
     status: withStatus ? nodeStatus(node) : undefined,
+    detail: electricalDetail(node),
     color: node.color,
     active: node.active,
     slot,
@@ -209,20 +286,30 @@ export function buildHouseScene(vm: EnergyFlowViewModel, opts: BuildHouseSceneOp
   }
   if (ev) readings.push(reading(ev, true));
 
-  // One lane per flow, centred on the wiring, so flows that share a stretch
-  // of wall sit side by side instead of hiding each other.
-  const routed = vm.flows
-    .map((flow) => ({ flow, world: worldRoute(flow, vm.flows) }))
-    .filter((r): r is { flow: EnergyFlow; world: WorldPoint[] } => r.world !== null);
-  const routes: HouseRoute[] = routed.map(({ flow, world }, i) => {
-    const offset = (i - (routed.length - 1) / 2) * LANE_GAP;
-    const screen = offsetPolyline(project(world), offset);
-    const { from } = visualEndpoints(flow, vm.flows);
+  // One cable per part. Its direction and power are the part's net flow;
+  // its colour is that of the largest flow it carries.
+  const loads = cableLoads(vm.flows);
+  const cables = (['solar', 'battery', 'home', 'grid', 'ev'] as const).flatMap((id) => {
+    const { out, in: inbound } = loads[id];
+    const net = sum(out) - sum(inbound);
+    // No net power, no moving line: the idle wiring still shows the cable.
+    if (net === 0) return [];
+    const supplies = net > 0;
+    // Never empty: net power towards the inverter needs a flow leaving the
+    // part, and away from it a flow arriving.
+    const carried = supplies ? out : inbound;
+    const world = id === 'ev' ? EV_LEG : supplies ? LEGS[id] : [...LEGS[id]].reverse();
+    return [{ id, world, watts: Math.abs(net), supplies, color: cableColor(carried) }];
+  });
+  const busiest = Math.max(...cables.map((c) => c.watts), 1);
+  const routes: HouseRoute[] = cables.map(({ id, world, watts, supplies, color }) => {
+    const screen = project(world);
     return {
-      id: flow.id,
-      color: flow.color ?? FLOW_COLORS[from],
-      watts: flow.watts,
-      strength: Math.min(1, flow.watts / vm.maxFlowWatts),
+      id,
+      color,
+      watts,
+      supplies,
+      strength: Math.min(1, watts / busiest),
       d: pathD(screen),
       length: polylineLength(screen),
     };

@@ -69,6 +69,12 @@ export interface FlowNode {
   /** Battery node only: formatted state of charge, e.g. `"34%"`. */
   socText?: string;
   /**
+   * Solar node only: output as a share of the configured array size, e.g.
+   * `"62%"` (issue #192); absent when no kWp is set. `value` also carries it
+   * as `"5.2kW (62%)"`; renderers that lay it out separately use this.
+   */
+  percentText?: string;
+  /**
    * Battery node only: the full battery-mode label from
    * `batteryModeDisplayLabel`, e.g. `"Timed Demand (Charging)"`. Renderers
    * show this rather than parsing it back out of `unit`.

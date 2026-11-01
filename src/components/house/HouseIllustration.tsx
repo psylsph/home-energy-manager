@@ -2,7 +2,8 @@
  * Static isometric illustration for the house view (issue #422): a British
  * two-storey brick house on its own plot — slate roof with white fascias,
  * chimney with two pots, white casement windows, a green front door under a
- * canopy, a path, lawn and hedges, and the inverter on the gable wall.
+ * canopy, a path, lawn and hedges, and the inverter and consumer unit on the
+ * gable wall.
  *
  * It takes no props and is memoised, so it renders once; everything that
  * changes with each poll (panel glow, battery gauge, flows, readings) is drawn
@@ -13,6 +14,8 @@
 import { memo } from 'react';
 import { FLOW_COLORS } from '../../lib/energyFlow';
 import {
+  CHIMNEY,
+  CONSUMER_UNIT,
   HEDGES,
   HOUSE,
   INVERTER_BOX,
@@ -146,12 +149,11 @@ function HouseIllustrationInner() {
       {/* Back roof slope (seen beyond the ridge). */}
       <Poly points={[w(roofX0, RIDGE_Y, ridge), w(roofX1, RIDGE_Y, ridge), w(roofX1, backEaveY, EAVE_Z), w(roofX0, backEaveY, EAVE_Z)]} fill={v('roof')} stroke={v('roof-line')} strokeWidth={0.8} />
 
-      {/* Gable wall with the attic, upstairs and downstairs windows. */}
+      {/* Gable wall with the attic and upstairs windows; downstairs is the utility wall (inverter, consumer unit, cables). */}
       <Poly points={[w(x1, y1, 0), w(x1, y0, 0), w(x1, y0, wall), w(x1, RIDGE_Y, ridge), w(x1, y1, wall)]} fill={v('brick-side')} />
       <GableMortar />
       <SideWindow y0={2.5} y1={3.5} z0={5.3} z1={6.3} />
       <SideWindow y0={3.8} y1={5.1} z0={3.2} z1={4.4} />
-      <SideWindow y0={4.0} y1={5.3} z0={0.4} z1={1.45} />
 
       {/* Front wall: windows, door and canopy. */}
       <Poly points={[w(x0, y1, 0), w(x1, y1, 0), w(x1, y1, wall), w(x0, y1, wall)]} fill={v('brick-front')} />
@@ -186,8 +188,8 @@ function HouseIllustrationInner() {
       </g>
 
       {/* Chimney stack with two terracotta pots. */}
-      <Box x0={0.8} x1={1.8} y0={2.5} y1={3.5} z0={6.8} z1={9} top={v('roof-line')} front={v('brick-front')} side={v('brick-side')} />
-      <Box x0={0.75} x1={1.85} y0={2.45} y1={3.55} z0={9} z1={9.2} top={v('roof-line')} front={v('canopy')} side={v('canopy')} />
+      <Box x0={CHIMNEY.x0 + 0.05} x1={CHIMNEY.x1 - 0.05} y0={CHIMNEY.y0 + 0.05} y1={CHIMNEY.y1 - 0.05} z0={CHIMNEY.z0} z1={9} top={v('roof-line')} front={v('brick-front')} side={v('brick-side')} />
+      <Box x0={CHIMNEY.x0} x1={CHIMNEY.x1} y0={CHIMNEY.y0} y1={CHIMNEY.y1} z0={9} z1={9.2} top={v('roof-line')} front={v('canopy')} side={v('canopy')} />
       <Box x0={0.95} x1={1.2} y0={2.85} y1={3.1} z0={9.2} z1={9.75} top={v('pot')} front={v('pot')} side={v('pot')} />
       <Box x0={1.4} x1={1.65} y0={2.85} y1={3.1} z0={9.2} z1={9.75} top={v('pot')} front={v('pot')} side={v('pot')} />
 
@@ -205,6 +207,17 @@ function HouseIllustrationInner() {
           b={w(x1 + INVERTER_BOX.depth + 0.01, INVERTER_BOX.y0 + 0.3, INVERTER_BOX.z1 - 0.3)}
           stroke={FLOW_COLORS.inverter}
           width={1.6}
+        />
+      </g>
+
+      {/* Consumer unit (fuse box): where the home cable goes into the house. */}
+      <g data-testid="house-consumer-unit">
+        <Box
+          x0={x1} x1={x1 + CONSUMER_UNIT.depth}
+          y0={CONSUMER_UNIT.y0} y1={CONSUMER_UNIT.y1}
+          z0={CONSUMER_UNIT.z0} z1={CONSUMER_UNIT.z1}
+          top={v('device')} front={v('device')} side={v('device')}
+          stroke={v('frame')} strokeWidth={0.8}
         />
       </g>
 

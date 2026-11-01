@@ -237,6 +237,8 @@ function EnergyFlowGroup() {
   const setGridMeterAddress = useInverterStore((s) => s.setGridMeterAddress);
   const energyFlowDisplay = useInverterStore((s) => s.energyFlowDisplay);
   const setEnergyFlowDisplay = useInverterStore((s) => s.setEnergyFlowDisplay);
+  const showTodayStats = useInverterStore((s) => s.showTodayStats);
+  const setShowTodayStats = useInverterStore((s) => s.setShowTodayStats);
   // External CT clamps (address >= 0x01) — offered as the grid-CT source for
   // AC-coupled systems whose grid isn't the built-in 0x00 meter. The meter
   // list is replaced each snapshot, so only its addresses are taken (as a
@@ -285,6 +287,14 @@ function EnergyFlowGroup() {
             );
           })}
         </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <span className={LABEL}>Show Today Statistics</span>
+          <span className={HINT}>Show today's energy totals under the diagram. Hidden by default with the house view.</span>
+        </div>
+        <Toggle checked={showTodayStats} ariaLabel="Show Today Statistics" onChange={setShowTodayStats} />
       </div>
 
       {/* The house view always shows its status pills, so the toggle only

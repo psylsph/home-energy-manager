@@ -20,6 +20,7 @@ import { formatPowerLimitLabel, percentToRawLimit, percentToWatts, rawLimitToPer
 import type { LimitDraft, LimitScale } from '../lib/powerLimit';
 import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
 import { fillScheduleSlots } from '../lib/scheduleSlots';
+import { unwrapTimedExportSchedule } from '../lib/timedExportSchedule';
 import {
   DEFAULT_ADAPTIVE_PERIOD,
   adaptiveSocFieldCaption,
@@ -151,36 +152,6 @@ const MODE_CONFIRMATION_TIMEOUT_MS = 90_000;
  * persisted HEM schedule stayed invisible (UI fell back to the physical
  * registers, which the re-arm fallback may have cleared).
  */
-function unwrapTimedExportSchedule(res: { ok: boolean; data: unknown } | null | undefined): {
-  schedule_enabled: boolean;
-  slots: ScheduleSlot[];
-  /** Legacy Debug-formatted state string, kept for backwards compatibility. */
-  state?: string;
-  /** Backend machine state name: Off / Configured / Active / Entering / Exiting / BlockedByPause / Error. */
-  machine_state?: unknown;
-  /** Whether the inverter was classified as HR59 re-arming firmware. */
-  device_rearm_confirmed?: boolean;
-} | null {
-  if (!res || typeof res !== 'object') return null;
-  const data = (res as { data?: unknown }).data;
-  if (!data || typeof data !== 'object') return null;
-  if (!('schedule_enabled' in data)) return null;
-  const schedule = data as {
-    schedule_enabled: boolean;
-    slots: ScheduleSlot[];
-    state?: string;
-    machine_state?: unknown;
-    device_rearm_confirmed?: boolean;
-  };
-  // Older backend builds exposed only the Debug-formatted `state` field.
-  // Normalize it here so transitional/error presentation keeps working
-  // during a rolling upgrade as well as with the current machine_state field.
-  return {
-    ...schedule,
-    machine_state: schedule.machine_state ?? schedule.state,
-  };
-}
-
 const RESERVE_SOC_MIN = 4;
 const RESERVE_SOC_MAX = 100;
 const RESERVE_SOC_STEP = 1;

@@ -500,7 +500,11 @@ function Layout() {
           {burgerNav && <NavDrawer items={navItems} />}
           <div className="min-w-0">
           <h1 className="text-base font-bold text-text-primary tracking-tight">
-            Home Energy Manager  <span className="text-text-secondary font-mono text-xs font-normal">v{__APP_VERSION__}</span>
+            {/* Phones show the short name to save header space; screen readers
+                always hear the full one, so the heading keeps its real name. */}
+            <span className="sm:hidden" aria-hidden="true" data-testid="app-title-short">HEM</span>
+            <span className="sr-only sm:not-sr-only">Home Energy Manager</span>{' '}
+            <span className="text-text-secondary font-mono text-xs font-normal">v{__APP_VERSION__}</span>
           </h1>
           <p className="hidden sm:block text-xs text-text-secondary">
             For GivEnergy Solar and Battery Systems

@@ -233,7 +233,8 @@ export function findNextTransition(
     return formatHHMM(((best % 1440) + 1440) % 1440);
 }
 
-function formatHHMM(minute: number): string {
+/** Minute of day as `"HH:MM"`, wrapping values outside 0–1439. */
+export function formatHHMM(minute: number): string {
     const m = ((minute % 1440) + 1440) % 1440;
     const h = Math.floor(m / 60);
     const mm = m % 60;

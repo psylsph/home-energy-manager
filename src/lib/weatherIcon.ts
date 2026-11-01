@@ -66,6 +66,7 @@ export interface LiveWeatherState {
   last_fetched_temperature_c: number | null;
   last_fetched_weather_code?: number | null;
   last_fetched_is_day?: boolean | null;
+  last_fetched_solar_w_m2?: number | null;
 }
 
 /** A reading older than this is hidden rather than shown as current. */
@@ -75,6 +76,23 @@ export interface CurrentWeather {
   temperatureC: number;
   kind: WeatherIconKind;
   description: string;
+  /** Solar irradiance (W/m²), or `null` when unknown or at night with none. */
+  solarWm2: number | null;
+}
+
+/** Bars in the solar-intensity gauge; each is 200 W/m² (clear midday sun is about 1000). */
+export const SOLAR_LEVEL_BARS = 5;
+const W_M2_PER_BAR = 200;
+
+/** Lit bars for an irradiance: any sun lights one, 1000 W/m² or more lights all five. */
+export function solarLevel(wM2: number): number {
+  if (!Number.isFinite(wM2) || wM2 <= 0) return 0;
+  return Math.min(SOLAR_LEVEL_BARS, Math.ceil(wM2 / W_M2_PER_BAR));
+}
+
+/** Irradiance as shown under the temperature, e.g. `"486 W/m²"`. */
+export function formatIrradiance(wM2: number): string {
+  return `${Math.round(wM2)} W/m²`;
 }
 
 /**
@@ -90,7 +108,13 @@ export function currentWeather(state: LiveWeatherState | null | undefined, now: 
   const fetchedAt = Date.parse(state.last_fetch_at);
   if (!Number.isFinite(fetchedAt) || Math.abs(now - fetchedAt) > WEATHER_MAX_AGE_MS) return null;
   const kind = weatherIconKind(state.last_fetched_weather_code, state.last_fetched_is_day);
-  return { temperatureC: temp, kind, description: weatherDescription(kind) };
+  const solar = state.last_fetched_solar_w_m2;
+  // Hide a bad value, and a zero unless it's known to be daytime (a zero at
+  // night, or with no day flag, says nothing); a daytime zero is real.
+  const solarWm2 = solar == null || !Number.isFinite(solar) || solar < 0 || (solar === 0 && state.last_fetched_is_day !== true)
+    ? null
+    : solar;
+  return { temperatureC: temp, kind, description: weatherDescription(kind), solarWm2 };
 }
 
 /** Temperature as shown next to the icon, e.g. `"10 °C"`. */

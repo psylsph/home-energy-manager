@@ -8,15 +8,16 @@
  * always agree. The static house is drawn once by `HouseIllustration`; this
  * component draws what changes with each poll on top of it.
  *
- * Sized so the whole Status page fits an iPhone 12 Pro screen without
- * scrolling.
+ * Sized so the Status page (house, its two cards, header) fits an iPhone 12
+ * Pro screen without scrolling while the Today statistics are hidden.
  */
-import { memo } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useEnergyFlowViewModel, type EnergyFlowSourceProps } from '../../hooks/useEnergyFlowViewModel';
 import { useLiveWeather } from '../../hooks/useLiveWeather';
 import type { ConnectionState } from '../../lib/types';
 import { FLOW_COLORS } from '../../lib/energyFlow';
 import {
+  READING_HIT_WIDTH,
   buildHouseScene,
   type GridTone,
   type HouseReading,
@@ -33,7 +34,14 @@ import {
   polygonPoints,
   type WorldPoint,
 } from '../../lib/houseGeometry';
-import { formatWeatherTemp, type CurrentWeather, type WeatherIconKind } from '../../lib/weatherIcon';
+import {
+  SOLAR_LEVEL_BARS,
+  formatIrradiance,
+  formatWeatherTemp,
+  solarLevel,
+  type CurrentWeather,
+  type WeatherIconKind,
+} from '../../lib/weatherIcon';
 import HouseIllustration from './HouseIllustration';
 
 export interface HouseEnergyViewProps extends EnergyFlowSourceProps {
@@ -163,24 +171,88 @@ function WeatherGlyph({ kind, x, y }: { kind: WeatherIconKind; x: number; y: num
 }
 
 function Weather({ weather }: { weather: CurrentWeather }) {
+  const { solarWm2 } = weather;
+  const lit = solarWm2 == null ? 0 : solarLevel(solarWm2);
+  const label = `${weather.description}, ${formatWeatherTemp(weather.temperatureC)}`
+    + (solarWm2 == null ? '' : `, sunlight ${formatIrradiance(solarWm2)}`);
   return (
-    <g data-testid="house-weather" data-kind={weather.kind} aria-label={`${weather.description}, ${formatWeatherTemp(weather.temperatureC)}`}>
+    <g data-testid="house-weather" data-kind={weather.kind} aria-label={label}>
       <WeatherGlyph kind={weather.kind} x={10} y={48} />
       <text x={44} y={68} fill={TEXT_PRIMARY} fontSize={16} fontWeight={600} fontFamily={MONO}>
         {formatWeatherTemp(weather.temperatureC)}
       </text>
+      {solarWm2 != null && (
+        // Solar intensity: five bars (200 W/m² each) plus the reading.
+        <g data-testid="house-solar-intensity" data-level={lit}>
+          {Array.from({ length: SOLAR_LEVEL_BARS }, (_, i) => (
+            <rect
+              key={i}
+              data-testid="house-solar-bar"
+              data-lit={i < lit}
+              x={14 + i * 5} y={86 - (i + 1) * 2.2} width={3.5} height={(i + 1) * 2.2} rx={0.8}
+              fill={i < lit ? FLOW_COLORS.solar : 'var(--color-bg-elevated)'}
+            />
+          ))}
+          <text x={44} y={86} fill={TEXT_SECONDARY} fontSize={11} fontFamily={MONO} data-testid="house-solar-value">
+            {formatIrradiance(solarWm2)}
+          </text>
+        </g>
+      )}
     </g>
   );
 }
 
-function Reading({ r }: { r: HouseReading }) {
+function Reading({ r, open, onShow, onHide, onToggle }: {
+  r: HouseReading;
+  open: boolean;
+  onShow: () => void;
+  onHide: () => void;
+  onToggle: () => void;
+}) {
   const { x, valueY } = r.slot;
   const leader = r.leader.map((p) => `${p.x},${p.y}`).join(' ');
+  // The pointer that pressed, recorded on pointerdown: not every engine the
+  // app runs in (older WebKitGTK) sends click as a PointerEvent.
+  const pressedWith = useRef('');
+  // Readings with volts / amps show them on hover, on tap (no hover on a
+  // phone), or from the keyboard: each is a focusable button.
+  const tip = r.detail
+    ? {
+        role: 'button',
+        tabIndex: 0,
+        'aria-label': `${r.label} volts and amps`,
+        'aria-expanded': open,
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggle();
+          } else if (e.key === 'Escape') {
+            onHide();
+          }
+        },
+        onBlur: onHide,
+        onPointerEnter: (e: React.PointerEvent) => { if (e.pointerType === 'mouse') onShow(); },
+        onPointerLeave: (e: React.PointerEvent) => { if (e.pointerType === 'mouse') onHide(); },
+        onPointerDown: (e: React.PointerEvent) => { pressedWith.current = e.pointerType; },
+        // A mouse has already opened it by hovering, so its click mustn't close
+        // it again; a tap (no hover) toggles.
+        onClick: (e: React.MouseEvent) => {
+          e.stopPropagation();
+          if (pressedWith.current === 'mouse') onShow();
+          else onToggle();
+        },
+        style: { cursor: 'pointer' },
+      }
+    : {};
   return (
-    <g data-testid={`house-reading-${r.id}`} data-active={r.active}>
+    <g data-testid={`house-reading-${r.id}`} data-active={r.active} {...tip}>
       <polyline points={leader} fill="none" stroke={r.color} strokeWidth={1.2} strokeOpacity={0.85} />
       <circle cx={r.anchor.x} cy={r.anchor.y} r={7} fill={r.color} opacity={0.22} />
       <circle cx={r.anchor.x} cy={r.anchor.y} r={3.5} fill={r.color} />
+      {/* Hit area over the value and label, so the gaps between letters still
+          count; narrow enough to stay clear of the next reading (Solar's would
+          otherwise reach over Home's text). */}
+      {r.detail && <rect x={x} y={valueY - 24} width={READING_HIT_WIDTH} height={46} fill="transparent" data-testid={`house-hit-${r.id}`} />}
       <text x={x + 6} y={valueY} fill={TEXT_PRIMARY} fontFamily={MONO} fontWeight={700} fontSize={22} data-testid={`house-value-${r.id}`}>
         {r.number}
         {r.unit && <tspan fontSize={12} fontWeight={500} fill={TEXT_SECONDARY} dx={3}>{r.unit}{r.suffix}</tspan>}
@@ -197,20 +269,41 @@ function Reading({ r }: { r: HouseReading }) {
         style={{ textTransform: 'uppercase' }}
       >
         {r.label}
+        {r.percent && (
+          <tspan fill={TEXT_SECONDARY} fontWeight={500} letterSpacing={0} dx={5} data-testid={`house-percent-${r.id}`}>
+            · {r.percent}
+          </tspan>
+        )}
       </text>
       {r.status && <Pill x={x + 4} y={valueY + 26} text={r.status} color={r.color} testId={`house-status-${r.id}`} />}
     </g>
   );
 }
 
+/** The volts / amps bubble: under a top-row reading, above a bottom-row one, kept inside the view. */
+function DetailTip({ r }: { r: HouseReading }) {
+  const fontSize = 12;
+  const width = textWidth(r.detail!, fontSize) + 20;
+  const height = 24;
+  const below = r.slot.edgeY > r.slot.valueY;
+  const x = Math.max(4, Math.min(r.slot.x + 4, HOUSE_VIEWBOX.width - width - 4));
+  const y = below ? r.slot.valueY + 24 : r.slot.valueY - 52;
+  return (
+    <g data-testid="house-detail-tip" data-for={r.id} pointerEvents="none">
+      <rect x={x} y={y} width={width} height={height} rx={6} fill="var(--app-bg-elevated, #21262D)" stroke={r.color} strokeOpacity={0.7} strokeWidth={1} />
+      <text x={x + 10} y={y + 16} fill={TEXT_PRIMARY} fontSize={fontSize} fontFamily={MONO}>{r.detail}</text>
+    </g>
+  );
+}
+
 function Route({ route, reduced }: { route: HouseRoute; reduced: boolean }) {
-  // Calm, length-independent pace: ~18 px/s for a trickle up to ~40 px/s at
-  // the largest flow, so a big export still looks busier than a 200 W one.
+  // Calm, length-independent pace: ~18 px/s up to ~40 px/s for the busiest
+  // cable, so the cable carrying the most power looks busiest.
   const speed = 18 + 22 * route.strength;
   const dur = `${((DASH + GAP) / speed).toFixed(2)}s`;
   const width = 2 + 1.5 * route.strength;
   return (
-    <g data-testid={`house-route-${route.id}`} data-color={route.color}>
+    <g data-testid={`house-route-${route.id}`} data-color={route.color} data-supplies={route.supplies}>
       <path d={route.d} fill="none" stroke={route.color} strokeWidth={width + 4} strokeOpacity={0.14} strokeLinecap="round" strokeLinejoin="round" />
       <path
         d={route.d}
@@ -280,6 +373,29 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
   const scene = buildHouseScene(vm, { connectionState, gridFault });
   const reduced = reducedMotion();
   const solarColor = FLOW_COLORS.solar;
+  const [tipFor, setTipFor] = useState<string | null>(null);
+  const tipReading = scene.readings.find((r) => r.id === tipFor && r.detail);
+  // The open reading lost its detail (e.g. one poll without a battery
+  // voltage): forget it, so the bubble can't reopen by itself when the detail
+  // returns. Adjusting state during render is React's pattern for this.
+  if (tipFor !== null && !tipReading) setTipFor(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  // A tap anywhere outside the diagram (the cards, the header) closes the
+  // bubble too; taps inside are handled by the svg's own onClick.
+  useEffect(() => {
+    if (tipFor === null) return;
+    const close = (e: PointerEvent) => {
+      if (!svgRef.current?.contains(e.target as Node)) setTipFor(null);
+    };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [tipFor]);
+  // The volts / amps only appear on hover or tap, so screen readers get them
+  // in the diagram's label instead.
+  const details = scene.readings
+    .filter((r) => r.detail)
+    .map((r) => `${r.label} ${r.detail}.`)
+    .join(' ');
 
   return (
     <div className="flex justify-center w-full" data-testid="house-energy-view">
@@ -287,8 +403,12 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
         viewBox={`0 0 ${HOUSE_VIEWBOX.width} ${HOUSE_VIEWBOX.height}`}
         className="w-full"
         style={{ maxWidth: '440px', fontFamily: SANS }}
-        role="img"
-        aria-label={`Energy flow. ${vm.summaryText}`}
+        ref={svgRef}
+        // A labelled group, not an image: an image hides everything inside it
+        // from assistive tech, and the readings are buttons.
+        role="group"
+        aria-label={[`Energy flow. ${vm.summaryText}`, details].filter(Boolean).join(' ')}
+        onClick={() => setTipFor(null)}
       >
         <TopPill pill={scene.pill} />
         {weather && <Weather weather={weather} />}
@@ -314,7 +434,7 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
         <BatteryCabinet barsLit={scene.battery.barsLit} color={scene.battery.color} />
         {source.showEvc && <EvPost />}
 
-        {/* Idle wiring, then one lane per active flow. */}
+        {/* Idle wiring, then one moving cable per part with power on it. */}
         <g data-testid="house-idle-tracks">
           {scene.idleTracks.map((d, i) => (
             <path key={i} d={d} fill="none" stroke="var(--app-text-secondary, #8B949E)" strokeOpacity={0.28} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
@@ -325,8 +445,17 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
         ))}
 
         {scene.readings.map((r) => (
-          <Reading key={r.id} r={r} />
+          <Reading
+            key={r.id}
+            r={r}
+            open={tipFor === r.id}
+            onShow={() => setTipFor(r.id)}
+            onHide={() => setTipFor((cur) => (cur === r.id ? null : cur))}
+            onToggle={() => setTipFor((cur) => (cur === r.id ? null : r.id))}
+          />
         ))}
+        {/* Drawn last so the bubble sits over the house and the lines. */}
+        {tipReading && <DetailTip r={tipReading} />}
       </svg>
     </div>
   );

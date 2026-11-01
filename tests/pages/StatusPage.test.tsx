@@ -21,6 +21,9 @@ vi.mock('../../src/components/BatteryPanel', () => ({
 vi.mock('../../src/components/SummaryTiles', () => ({
   default: () => <div data-testid="summary-tiles">SummaryTiles</div>,
 }));
+vi.mock('../../src/components/house/HouseStatusCards', () => ({
+  default: () => <div data-testid="house-status-cards">HouseStatusCards</div>,
+}));
 vi.mock('../../src/components/ColdBatteryWarning', () => ({
   default: () => <div data-testid="cold-battery-warning">ColdBatteryWarning</div>,
 }));
@@ -177,7 +180,7 @@ describe('StatusPage', () => {
 
   describe('energy flow display (issue #422)', () => {
     afterEach(() => {
-      useInverterStore.setState({ energyFlowDisplay: 'orbit' });
+      useInverterStore.setState({ energyFlowDisplay: 'orbit', showTodayStats: true });
     });
 
     it('shows the orbit by default', () => {
@@ -187,12 +190,29 @@ describe('StatusPage', () => {
       expect(container.querySelector('[data-testid="house-energy-view"]')).toBeNull();
     });
 
-    it('shows the house when chosen, with the summary tiles still beside it', () => {
-      useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'house' });
+    it('shows the house when chosen, with its cards and the summary tiles beside it', () => {
+      // Tiles are an explicit re-enable here: the house starts without them.
+      useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'house', showTodayStats: true });
       const { container } = render(<StatusPage />);
       expect(container.querySelector('[data-testid="house-energy-view"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="energy-orbit-diagram"]')).toBeNull();
+      expect(container.querySelector('[data-testid="house-status-cards"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
+    });
+
+    it('keeps the house cards off the orbit', () => {
+      useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'orbit' });
+      const { container } = render(<StatusPage />);
+      expect(container.querySelector('[data-testid="house-status-cards"]')).toBeNull();
+    });
+
+    it.each(['orbit', 'house'] as const)('hides the Today statistics when switched off (%s)', (display) => {
+      useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: display, showTodayStats: false });
+      const { container } = render(<StatusPage />);
+      expect(container.querySelector('[data-testid="summary-tiles"]')).toBeNull();
+      const grid = container.querySelector('[data-testid="status-landscape-grid"]')!;
+      // The orbit alone takes the full width; the house keeps a column for its cards.
+      expect(grid.className.includes('lg:grid-cols-2')).toBe(display === 'house');
     });
 
     it('passes the connection and grid-fault state to the house', () => {
