@@ -78,8 +78,26 @@ export interface CurrentWeather {
   description: string;
   /** Solar irradiance (W/m²), or `null` when unknown or at night with none. */
   solarWm2: number | null;
-  /** Where the weather is for (drives the sky's sun position), when known. */
-  location?: { latitude: number; longitude: number };
+}
+
+export interface WeatherLocation {
+  latitude: number;
+  longitude: number;
+}
+
+/**
+ * The configured weather location, for the sky's sun position: whenever
+ * weather is on and has coordinates, however old the last reading. The sun
+ * is worked out locally, so a failed fetch mustn't take it away.
+ */
+export function weatherLocation(state: LiveWeatherState | null | undefined): WeatherLocation | null {
+  if (!state?.config?.enabled) return null;
+  const { latitude, longitude } = state.config;
+  return typeof latitude === 'number' && typeof longitude === 'number'
+    && Number.isFinite(latitude) && Number.isFinite(longitude)
+    && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
+    ? { latitude, longitude }
+    : null;
 }
 
 /** Bars in the solar-intensity gauge; each is 200 W/m² (clear midday sun is about 1000). */
@@ -116,13 +134,7 @@ export function currentWeather(state: LiveWeatherState | null | undefined, now: 
   const solarWm2 = solar == null || !Number.isFinite(solar) || solar < 0 || (solar === 0 && state.last_fetched_is_day !== true)
     ? null
     : solar;
-  const { latitude, longitude } = state.config;
-  const location = typeof latitude === 'number' && typeof longitude === 'number'
-    && Number.isFinite(latitude) && Number.isFinite(longitude)
-    && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
-    ? { latitude, longitude }
-    : undefined;
-  return { temperatureC: temp, kind, description: weatherDescription(kind), solarWm2, ...(location ? { location } : {}) };
+  return { temperatureC: temp, kind, description: weatherDescription(kind), solarWm2 };
 }
 
 /** Temperature as shown next to the icon, e.g. `"10 °C"`. */

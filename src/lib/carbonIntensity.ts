@@ -2,10 +2,11 @@
  * Grid carbon intensity for the house view (issue #401).
  *
  * `GET /api/carbon-intensity` returns the NESO 24-hour forecast for the
- * weather postcode's region (or nationally); this picks what to show: the
+ * weather postcode's region; this picks what to show: the
  * current half hour's intensity and band, and the lowest half hour still to
  * come. Pure, so it's unit-tested without a backend.
  */
+import { formatClock } from './format';
 
 /** One half hour as the backend sends it. */
 export interface CarbonPeriod {
@@ -74,18 +75,12 @@ export function formatCarbon(g: number): string {
   return `${Math.round(g)} g/kWh`;
 }
 
-/** Local clock time of a period start, e.g. `"03:30"`. */
-export function formatCarbonTime(ms: number): string {
-  const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
 /** Accessible description, e.g. `"Grid carbon 183 g/kWh, high, South England. Lowest 03:30 at 92 g/kWh."`. */
 export function carbonLabel(c: CurrentCarbon): string {
   const parts = [`Grid carbon ${formatCarbon(c.intensity)}`];
   if (c.band) parts.push(c.band);
   if (c.region) parts.push(c.region);
   let label = `${parts.join(', ')}.`;
-  if (c.lowest) label += ` Lowest ${formatCarbonTime(c.lowest.at)} at ${formatCarbon(c.lowest.intensity)}.`;
+  if (c.lowest) label += ` Lowest ${formatClock(c.lowest.at)} at ${formatCarbon(c.lowest.intensity)}.`;
   return label;
 }

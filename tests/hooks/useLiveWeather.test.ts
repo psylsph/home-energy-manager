@@ -39,9 +39,9 @@ describe('useLiveWeather', () => {
   it('shows the fetched weather', async () => {
     vi.mocked(apiGet).mockResolvedValue(fresh());
     const { result } = renderHook(() => useLiveWeather());
-    expect(result.current).toBeNull();
+    expect(result.current.weather).toBeNull();
     await flush();
-    expect(result.current).toEqual({ temperatureC: 9.6, kind: 'cloudy', description: 'Cloudy', solarWm2: null });
+    expect(result.current.weather).toEqual({ temperatureC: 9.6, kind: 'cloudy', description: 'Cloudy', solarWm2: null });
     expect(apiGet).toHaveBeenCalledWith('/api/weather');
   });
 
@@ -49,38 +49,51 @@ describe('useLiveWeather', () => {
     vi.mocked(apiGet).mockResolvedValue(fresh({ config: { enabled: false } }));
     const { result } = renderHook(() => useLiveWeather());
     await flush();
-    expect(result.current).toBeNull();
+    expect(result.current.weather).toBeNull();
   });
 
   it('ignores a not-ok response', async () => {
     vi.mocked(apiGet).mockResolvedValue({ ok: false, data: null });
     const { result } = renderHook(() => useLiveWeather());
     await flush();
-    expect(result.current).toBeNull();
+    expect(result.current.weather).toBeNull();
   });
 
   it('refreshes every 15 minutes and keeps the last reading when a refresh fails', async () => {
     vi.mocked(apiGet).mockResolvedValueOnce(fresh()).mockRejectedValueOnce(new Error('offline'));
     const { result } = renderHook(() => useLiveWeather());
     await flush();
-    expect(result.current?.temperatureC).toBe(9.6);
+    expect(result.current.weather?.temperatureC).toBe(9.6);
 
     await act(async () => { vi.advanceTimersByTime(LIVE_WEATHER_POLL_MS); });
     await flush();
     expect(apiGet).toHaveBeenCalledTimes(2);
-    expect(result.current?.temperatureC).toBe(9.6);
+    expect(result.current.weather?.temperatureC).toBe(9.6);
   });
 
   it('drops the reading once it goes stale, even without a new fetch', async () => {
     vi.mocked(apiGet).mockResolvedValueOnce(fresh()).mockRejectedValue(new Error('offline'));
     const { result } = renderHook(() => useLiveWeather());
     await flush();
-    expect(result.current).not.toBeNull();
+    expect(result.current.weather).not.toBeNull();
 
     // 11:55 fetch + 61 minutes → stale; the minute clock notices.
     await act(async () => { vi.advanceTimersByTime(61 * 60 * 1000); });
     await flush();
-    expect(result.current).toBeNull();
+    expect(result.current.weather).toBeNull();
+  });
+
+  it('keeps the location for the sky after the reading goes stale', async () => {
+    vi.mocked(apiGet).mockResolvedValueOnce(fresh({ config: { enabled: true, latitude: 51.1, longitude: -1.05 } }))
+      .mockRejectedValue(new Error('offline'));
+    const { result } = renderHook(() => useLiveWeather());
+    await flush();
+    expect(result.current.location).toEqual({ latitude: 51.1, longitude: -1.05 });
+
+    await act(async () => { vi.advanceTimersByTime(61 * 60 * 1000); });
+    await flush();
+    expect(result.current.weather).toBeNull();
+    expect(result.current.location).toEqual({ latitude: 51.1, longitude: -1.05 });
   });
 
   it('stops polling and ignores a late reply after unmount', async () => {
@@ -89,7 +102,7 @@ describe('useLiveWeather', () => {
     const { result, unmount } = renderHook(() => useLiveWeather());
     unmount();
     await act(async () => { resolve(fresh()); await Promise.resolve(); });
-    expect(result.current).toBeNull();
+    expect(result.current.weather).toBeNull();
     vi.advanceTimersByTime(LIVE_WEATHER_POLL_MS * 2);
     expect(apiGet).toHaveBeenCalledTimes(1);
   });

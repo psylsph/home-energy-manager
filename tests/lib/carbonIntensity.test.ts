@@ -3,7 +3,6 @@ import {
   carbonLabel,
   currentCarbon,
   formatCarbon,
-  formatCarbonTime,
   type CarbonForecast,
   type CarbonPeriod,
 } from '../../src/lib/carbonIntensity';
@@ -88,10 +87,8 @@ describe('currentCarbon', () => {
 });
 
 describe('carbon formatting', () => {
-  it('formats the intensity and local times', () => {
+  it('formats the intensity', () => {
     expect(formatCarbon(182.6)).toBe('183 g/kWh');
-    const local = new Date(2026, 10, 2, 3, 5).getTime();
-    expect(formatCarbonTime(local)).toBe('03:05');
   });
 
   it('describes it for screen readers', () => {

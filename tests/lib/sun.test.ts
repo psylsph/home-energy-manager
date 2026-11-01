@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { skyPosition, sunTimes } from '../../src/lib/sun';
+import { sunTimes } from '../../src/lib/sun';
 
-/** Sun position for the house view's sky. */
+/** Sunrise and sunset for the house view's sky. */
 
 const LONDON = { lat: 51.5074, lon: -0.1278 };
 const EDINBURGH = { lat: 55.9533, lon: -3.1883 };
@@ -50,40 +50,5 @@ describe('sunTimes', () => {
     expect(sunTimes(at('2026-12-21T12:00:00Z'), 78.2, 15.6)).toBeNull();
     expect(sunTimes(Number.NaN, 51, 0)).toBeNull();
     expect(sunTimes(at('2026-06-21T12:00:00Z'), 91, 0)).toBeNull();
-  });
-});
-
-describe('skyPosition', () => {
-  const pos = (iso: string) => skyPosition(at(iso), LONDON.lat, LONDON.lon)!;
-
-  it('puts the sun along its arc between sunrise and sunset', () => {
-    const noon = pos('2026-11-01T11:44:00Z');
-    expect(noon.body).toBe('sun');
-    expect(noon.fraction).toBeCloseTo(0.5, 1);
-    expect(pos('2026-11-01T07:00:00Z').fraction).toBeLessThan(0.05);
-    expect(pos('2026-11-01T16:30:00Z').fraction).toBeGreaterThan(0.95);
-  });
-
-  it('sends the moon along the same arc through the night', () => {
-    const evening = pos('2026-11-01T17:00:00Z');
-    expect(evening.body).toBe('moon');
-    expect(evening.fraction).toBeGreaterThan(0);
-    expect(evening.fraction).toBeLessThan(0.05);
-    // Mid-way between sunset (~16:35) and the next sunrise (~06:56).
-    expect(pos('2026-11-01T23:45:00Z').fraction).toBeCloseTo(0.5, 1);
-    // Before dawn: last night's moon, nearly done.
-    const dawn = pos('2026-11-01T06:30:00Z');
-    expect(dawn.body).toBe('moon');
-    expect(dawn.fraction).toBeGreaterThan(0.95);
-  });
-
-  it("labels today's sunrise and sunset day and night", () => {
-    const night = pos('2026-11-01T22:00:00Z');
-    near(night.sunrise, '2026-11-01T06:54:00Z');
-    near(night.sunset, '2026-11-01T16:35:00Z');
-  });
-
-  it('is unknown where the sun never sets', () => {
-    expect(skyPosition(at('2026-06-21T12:00:00Z'), 78.2, 15.6)).toBeNull();
   });
 });

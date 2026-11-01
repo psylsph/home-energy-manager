@@ -11,12 +11,13 @@
  * Sized so the Status page (house, its two cards, header) fits an iPhone 12
  * Pro screen without scrolling while the Today statistics are hidden.
  */
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useEnergyFlowViewModel, type EnergyFlowSourceProps } from '../../hooks/useEnergyFlowViewModel';
 import { useLiveWeather } from '../../hooks/useLiveWeather';
 import { useCarbonIntensity } from '../../hooks/useCarbonIntensity';
 import { useNow } from '../../hooks/useNow';
-import { formatClock, skyPosition, type SkyPosition } from '../../lib/sun';
+import { moonLitPath, skyScene, type SkyScene } from '../../lib/moon';
+import { formatClock } from '../../lib/format';
 import {
   CARBON_BAND_COLORS,
   carbonLabel,
@@ -219,8 +220,8 @@ function Weather({ weather }: { weather: CurrentWeather }) {
 
 /**
  * Grid carbon intensity (issue #401) under the weather: a leaf in the band's
- * colour and the intensity now; when it is lowest ahead is in the label. Moves up into
- * the weather's place when the weather (or its solar line) isn't shown.
+ * colour and the intensity now; when it is lowest ahead is in the label.
+ * Takes the weather's place when there's no weather.
  */
 function Carbon({ carbon, y }: { carbon: CurrentCarbon; y: number }) {
   const color = carbon.band ? CARBON_BAND_COLORS[carbon.band] : TEXT_SECONDARY;
@@ -241,35 +242,65 @@ function Carbon({ carbon, y }: { carbon: CurrentCarbon; y: number }) {
   );
 }
 
-/**
- * The sun's path across the sky band under the status pill, with today's
- * sunrise and sunset beside its ends; the sun moves along it by day and the
- * moon by night.
- */
-function Sky({ sky }: { sky: SkyPosition }) {
-  const p = skyPoint(sky.fraction);
-  const { start, end } = SKY_ARC;
-  const rise = formatClock(sky.sunrise);
-  const set = formatClock(sky.sunset);
+/** The arc never changes, so its path is built once. */
+const SKY_ARC_D = skyArcD();
+
+const SUN_COLOR = '#FBBF24';
+/** The moon's outline and its time dots: visible on both themes' cards. */
+const MOON_EDGE = '#94A3B8';
+
+function SunGlyph({ x, y }: { x: number; y: number }) {
   return (
-    <g data-testid="house-sky" data-body={sky.body} aria-label={`Sunrise ${rise}, sunset ${set}`}>
-      <path d={skyArcD()} fill="none" stroke={TEXT_SECONDARY} strokeOpacity={0.35} strokeWidth={1} strokeDasharray="2 4" strokeLinecap="round" />
-      <text x={start.x - 8} y={start.y + 4} textAnchor="end" fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-sunrise">{rise}</text>
-      <text x={end.x + 8} y={end.y + 4} fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-sunset">{set}</text>
-      {sky.body === 'sun' ? (
-        <g data-testid="house-sun" transform={`translate(${p.x} ${p.y})`}>
-          <circle r={11} fill="#FBBF24" opacity={0.18} />
-          <circle r={6} fill="#FBBF24" />
-          {Array.from({ length: 8 }).map((_, i) => {
-            const a = (i * Math.PI) / 4;
-            return <line key={i} x1={Math.cos(a) * 8} y1={Math.sin(a) * 8} x2={Math.cos(a) * 10.5} y2={Math.sin(a) * 10.5} stroke="#FBBF24" strokeWidth={1.5} strokeLinecap="round" />;
-          })}
-        </g>
-      ) : (
-        <g data-testid="house-moon" transform={`translate(${p.x} ${p.y})`}>
-          <path d="M 2 -6 A 6 6 0 1 0 6 2.4 A 4.8 4.8 0 0 1 2 -6 Z" fill="#CBD5E1" />
-        </g>
-      )}
+    <g data-testid="house-sun" transform={`translate(${x} ${y})`}>
+      <circle r={11} fill={SUN_COLOR} opacity={0.18} />
+      <circle r={6} fill={SUN_COLOR} />
+      {Array.from({ length: 8 }).map((_, i) => {
+        const a = (i * Math.PI) / 4;
+        return <line key={i} x1={Math.cos(a) * 8} y1={Math.sin(a) * 8} x2={Math.cos(a) * 10.5} y2={Math.sin(a) * 10.5} stroke={SUN_COLOR} strokeWidth={1.5} strokeLinecap="round" />;
+      })}
+    </g>
+  );
+}
+
+/** The moon in its phase; mirrored south of the equator, where it's lit the other way. */
+function MoonGlyph({ x, y, phase, south }: { x: number; y: number; phase: number; south: boolean }) {
+  return (
+    <g data-testid="house-moon" transform={`translate(${x} ${y})${south ? ' scale(-1 1)' : ''}`}>
+      {/* Unlit disc, then the lit part over it, in theme colours: on the light
+          theme's white card the dark side carries the shape. */}
+      <circle r={6} fill="var(--app-house-moon-shadow)" stroke={MOON_EDGE} strokeWidth={0.75} />
+      <path data-testid="house-moon-lit" d={moonLitPath(phase, 6)} fill="var(--app-house-moon-lit)" />
+    </g>
+  );
+}
+
+/**
+ * The sky band under the status pill: an arc from rise to set with the
+ * times beside its ends — the sun's by day, the moon's real ones by night,
+ * marked by a dot in that body's colour at each end. The sun moves along it
+ * by day, the moon along its pass at night.
+ */
+function Sky({ sky }: { sky: SkyScene }) {
+  const { start, end } = SKY_ARC;
+  const { body } = sky.labels;
+  const rise = formatClock(sky.labels.rise);
+  const set = formatClock(sky.labels.set);
+  const dot = body === 'sun' ? SUN_COLOR : MOON_EDGE;
+  // The moon's ends may be sunset or sunrise (its path through the night),
+  // so it's described as a span, not as moonrise and moonset.
+  const label = body === 'sun' ? `Sunrise ${rise}, sunset ${set}` : `Moon tonight from ${rise} to ${set}`;
+  const sun = sky.sun == null ? null : skyPoint(sky.sun);
+  const moon = sky.moon && { ...skyPoint(sky.moon.fraction), ...sky.moon };
+  return (
+    <g data-testid="house-sky" data-labels={body} aria-label={label}>
+      <path d={SKY_ARC_D} fill="none" stroke={TEXT_SECONDARY} strokeOpacity={0.35} strokeWidth={1} strokeDasharray="2 4" strokeLinecap="round" />
+      <circle cx={start.x} cy={start.y} r={2.5} fill={dot} data-testid="house-rise-dot" />
+      <circle cx={end.x} cy={end.y} r={2.5} fill={dot} />
+      {/* Clear of the sun's glow (radius 11) when it sits at either end. */}
+      <text x={start.x - 14} y={start.y + 4} textAnchor="end" fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-rise-time">{rise}</text>
+      <text x={end.x + 14} y={end.y + 4} fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-set-time">{set}</text>
+      {moon && <MoonGlyph x={moon.x} y={moon.y} phase={moon.phase} south={moon.south} />}
+      {sun && <SunGlyph x={sun.x} y={sun.y} />}
     </g>
   );
 }
@@ -441,12 +472,17 @@ function EvPost() {
 
 function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEnergyViewProps) {
   const vm = useEnergyFlowViewModel(source);
-  const weather = useLiveWeather();
+  const { weather, location } = useLiveWeather();
   const carbon = useCarbonIntensity();
-  const carbonY = !weather ? 68 : weather.solarWm2 == null ? 86 : 104;
+  // Always the third row under the weather, so it never meets a weather
+  // icon's rain or snow (the solar line between them may be blank).
+  const carbonY = weather ? 104 : 68;
   // Moves the sun along its arc; a minute is a fraction of a pixel.
   const now = useNow(60_000);
-  const sky = weather?.location ? skyPosition(now, weather.location.latitude, weather.location.longitude) : null;
+  // Searching for the moon's rise and set takes a few hundred steps: once a minute, not every poll.
+  const lat = location?.latitude;
+  const lon = location?.longitude;
+  const sky = useMemo(() => (lat != null && lon != null ? skyScene(now, lat, lon) : null), [now, lat, lon]);
   // The sky band pushes everything under the pill down; without it, no gap.
   const band = sky ? SKY_BAND : 0;
   const scene = buildHouseScene(vm, { connectionState, gridFault });

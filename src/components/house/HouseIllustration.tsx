@@ -1,6 +1,6 @@
 /**
  * Static isometric illustration for the house view (issue #422): a British
- * two-storey brick house on its own plot — slate roof with white fascias,
+ * two-storey brick house on its own plot — slate roof with grey fascias,
  * chimney with two pots, grey-framed casement windows, a green front door under a
  * canopy, a path, lawn and hedges, and the inverter and consumer unit on the
  * gable wall.
@@ -171,7 +171,7 @@ function HouseIllustrationInner() {
       </g>
       <Box x0={2.45} x1={3.95} y0={y1} y1={y1 + 0.6} z0={2.42} z1={2.58} top={v('canopy')} front={v('fascia')} side={v('fascia')} />
 
-      {/* Front roof slope with tile courses, then the white fascias. */}
+      {/* Front roof slope with tile courses, then the grey fascias. */}
       <Poly points={[frontRoofPoint(roofX0, EAVE_V), frontRoofPoint(roofX1, EAVE_V), w(roofX1, RIDGE_Y, ridge), w(roofX0, RIDGE_Y, ridge)]} fill={v('roof')} />
       {tileLines}
       <Line a={w(roofX0, RIDGE_Y, ridge)} b={w(roofX1, RIDGE_Y, ridge)} stroke={v('roof-line')} width={2.4} />

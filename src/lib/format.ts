@@ -200,3 +200,9 @@ export function formatBatteryMode(mode: string | undefined | null): string {
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join('');
 }
+
+/** Local clock time, e.g. `"07:02"`. */
+export function formatClock(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}

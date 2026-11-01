@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
-import type { CurrentWeather, WeatherIconKind } from '../../src/lib/weatherIcon';
+import type { CurrentWeather, WeatherIconKind, WeatherLocation } from '../../src/lib/weatherIcon';
 import type { CurrentCarbon } from '../../src/lib/carbonIntensity';
 
 const weatherState: { value: CurrentWeather | null } = { value: null };
+const locationState: { value: WeatherLocation | null } = { value: null };
 vi.mock('../../src/hooks/useLiveWeather', () => ({
-  useLiveWeather: () => weatherState.value,
+  useLiveWeather: () => ({ weather: weatherState.value, location: locationState.value }),
 }));
 
 const carbonState: { value: CurrentCarbon | null } = { value: null };
@@ -16,6 +17,9 @@ vi.mock('../../src/hooks/useCarbonIntensity', () => ({
 import HouseEnergyView from '../../src/components/house/HouseEnergyView';
 import { buildEnergyFlows, FLOW_COLORS } from '../../src/lib/energyFlow';
 import { HOUSE, HOUSE_VIEWBOX, SKY_BAND, iso, skyPoint } from '../../src/lib/houseGeometry';
+import { moonLitPath, moonPass } from '../../src/lib/moon';
+import { sunTimes } from '../../src/lib/sun';
+import { formatClock } from '../../src/lib/format';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot } from '../../src/lib/types';
 
@@ -66,6 +70,7 @@ describe('<HouseEnergyView/>', () => {
 
   beforeEach(() => {
     weatherState.value = null;
+    locationState.value = null;
     carbonState.value = null;
     savedNoise = useInverterStore.getState().visualNoiseThreshold;
     useInverterStore.setState({ visualNoiseThreshold: 20 });
@@ -288,15 +293,16 @@ describe('<HouseEnergyView/>', () => {
       expect(tid('house-carbon-leaf')!.getAttribute('fill')).toBe('var(--app-text-secondary, #8B949E)');
     });
 
-    it('sits under the solar line, or moves up when the weather lines are missing', () => {
+    it('sits on the third weather row, or takes the weather\'s place without it', () => {
       carbonState.value = carbon;
       weatherState.value = { temperatureC: 14, kind: 'partly-day', description: 'Partly cloudy', solarWm2: 486 };
       view();
       expect(y()).toBe('104');
       cleanup();
-      weatherState.value = { temperatureC: 14, kind: 'clear-night', description: 'Clear', solarWm2: null };
+      // No solar line (night): still the third row, below a rain or snow icon.
+      weatherState.value = { temperatureC: 14, kind: 'rain', description: 'Rain', solarWm2: null };
       view();
-      expect(y()).toBe('86');
+      expect(y()).toBe('104');
       cleanup();
       weatherState.value = null;
       view();
@@ -306,10 +312,11 @@ describe('<HouseEnergyView/>', () => {
 
   describe('sky band', () => {
     const ALTON = { latitude: 51.1058, longitude: -1.048 };
-    const withSky = (iso: string, location: CurrentWeather['location'] | null = ALTON) => {
+    const withSky = (iso: string, location: WeatherLocation | null = ALTON) => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(Date.parse(iso));
-      weatherState.value = { temperatureC: 9, kind: 'cloudy', description: 'Cloudy', solarWm2: null, location: location ?? undefined };
+      weatherState.value = { temperatureC: 9, kind: 'cloudy', description: 'Cloudy', solarWm2: null };
+      locationState.value = location;
       return render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
     };
     const viewBoxHeight = () => Number(document.querySelector('svg')!.getAttribute('viewBox')!.split(' ')[3]);
@@ -337,7 +344,7 @@ describe('<HouseEnergyView/>', () => {
     it('puts the sun near the top of its arc at midday, with the day\'s times at the ends', () => {
       withSky('2026-11-01T11:45:00Z');
       const sky = tid('house-sky')!;
-      expect(sky.getAttribute('data-body')).toBe('sun');
+      expect(sky.getAttribute('data-labels')).toBe('sun');
       const [x, y] = at(tid('house-sun')!);
       const top = skyPoint(0.5);
       expect(Math.abs(x - top.x)).toBeLessThan(5);
@@ -347,16 +354,54 @@ describe('<HouseEnergyView/>', () => {
         return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
       };
       // Alton, 1 Nov: sunrise ~06:57, sunset ~16:39 UTC.
-      expect([local('2026-11-01T06:56:00Z'), local('2026-11-01T06:57:00Z'), local('2026-11-01T06:58:00Z')]).toContain(tid('house-sunrise')!.textContent);
-      expect([local('2026-11-01T16:38:00Z'), local('2026-11-01T16:39:00Z'), local('2026-11-01T16:40:00Z')]).toContain(tid('house-sunset')!.textContent);
+      expect([local('2026-11-01T06:56:00Z'), local('2026-11-01T06:57:00Z'), local('2026-11-01T06:58:00Z')]).toContain(tid('house-rise-time')!.textContent);
+      expect([local('2026-11-01T16:38:00Z'), local('2026-11-01T16:39:00Z'), local('2026-11-01T16:40:00Z')]).toContain(tid('house-set-time')!.textContent);
       expect(sky.getAttribute('aria-label')).toMatch(/^Sunrise \d\d:\d\d, sunset \d\d:\d\d$/);
     });
 
-    it('shows the moon at night, early on its path in the evening', () => {
+    it("switches the times to tonight's moonrise and moonset after sunset", () => {
       withSky('2026-11-01T18:00:00Z');
+      const sky = tid('house-sky')!;
+      expect(sky.getAttribute('data-labels')).toBe('moon');
+      expect(sky.getAttribute('aria-label')).toMatch(/^Moon tonight from \d\d:\d\d to \d\d:\d\d$/);
+      const pass = moonPass(Date.parse('2026-11-01T18:00:00Z'), ALTON.latitude, ALTON.longitude)!;
+      expect(tid('house-rise-time')!.textContent).toBe(formatClock(pass.rise));
+      // Sets at 14:07 tomorrow afternoon: the arc ends at sunrise instead.
+      expect(pass.set).toBeGreaterThan(Date.parse('2026-11-02T12:00:00Z'));
+      expect(tid('house-set-time')!.textContent).toBe(formatClock(sunTimes(Date.parse('2026-11-02T06:00:00Z'), ALTON.latitude, ALTON.longitude)!.sunrise));
+      // Not risen yet (about 22:25 UTC) and the sun has set: nothing on the arc.
       expect(tid('house-sun')).toBeNull();
-      const [x] = at(tid('house-moon')!);
-      expect(x).toBeLessThan(skyPoint(0.25).x);
+      expect(tid('house-moon')).toBeNull();
+    });
+
+    it('moves the moon along its pass, in its phase, once it has risen', () => {
+      withSky('2026-11-02T03:00:00Z');
+      const pass = moonPass(Date.parse('2026-11-02T03:00:00Z'), ALTON.latitude, ALTON.longitude)!;
+      const moon = tid('house-moon')!;
+      const [x, y] = at(moon);
+      const sunrise = sunTimes(Date.parse('2026-11-02T03:00:00Z'), ALTON.latitude, ALTON.longitude)!.sunrise;
+      const p = skyPoint((Date.parse('2026-11-02T03:00:00Z') - pass.rise) / (sunrise - pass.rise));
+      expect(Math.abs(x - p.x)).toBeLessThan(0.5);
+      expect(Math.abs(y - p.y)).toBeLessThan(0.5);
+      expect(tid('house-moon-lit')!.getAttribute('d')).toBe(moonLitPath(pass.phase, 6));
+      // Just past last quarter: lit on the left (waning), so not mirrored here.
+      expect(moon.getAttribute('transform')).not.toContain('scale');
+    });
+
+    it('draws only the sun by day, even with the moon up', () => {
+      expect(moonPass(Date.parse('2026-11-02T11:00:00Z'), ALTON.latitude, ALTON.longitude)!.up).toBe(true);
+      withSky('2026-11-02T11:00:00Z');
+      expect(tid('house-sky')!.getAttribute('data-labels')).toBe('sun');
+      expect(tid('house-sun')).not.toBeNull();
+      expect(tid('house-moon')).toBeNull();
+    });
+
+    it('mirrors the moon south of the equator', () => {
+      // Sydney, 05:00 local (before dawn): the waning moon is up.
+      const SYDNEY = { latitude: -33.87, longitude: 151.21 };
+      expect(moonPass(Date.parse('2026-11-02T18:00:00Z'), SYDNEY.latitude, SYDNEY.longitude)!.up).toBe(true);
+      withSky('2026-11-02T18:00:00Z', SYDNEY);
+      expect(tid('house-moon')!.getAttribute('transform')).toContain('scale(-1 1)');
     });
 
     it('keeps the sun clear of the status pill at the top of its arc', () => {
@@ -366,6 +411,31 @@ describe('<HouseEnergyView/>', () => {
       const pillBottom = Number(pill.getAttribute('y')) + Number(pill.getAttribute('height'));
       // Rays reach 10.5 from the centre.
       expect(y - 10.5).toBeGreaterThan(pillBottom);
+    });
+
+    it('keeps the sky, and the house where it is, when the weather reading goes stale', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.parse('2026-11-01T11:45:00Z'));
+      weatherState.value = null;
+      locationState.value = ALTON;
+      render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
+      expect(tid('house-weather')).toBeNull();
+      expect(tid('house-sky')).not.toBeNull();
+      expect(viewBoxHeight()).toBe(HOUSE_VIEWBOX.height + SKY_BAND);
+    });
+
+    it.each([
+      ['sunrise', '2026-11-01T06:58:00Z'],
+      ['sunset', '2026-11-01T16:37:00Z'],
+    ])('keeps the %s time clear of the sun beside it', (label, iso) => {
+      withSky(iso);
+      const [x] = at(tid('house-sun')!);
+      const text = tid(label === 'sunrise' ? 'house-rise-time' : 'house-set-time')!;
+      const tx = Number(text.getAttribute('x'));
+      // Mono 10 px: ~6 px per character, 5 characters.
+      const [left, right] = label === 'sunrise' ? [tx - 30, tx] : [tx, tx + 30];
+      const glow = 11;
+      expect(right < x - glow || left > x + glow).toBe(true);
     });
 
     it('draws no sky where the sun never sets', () => {

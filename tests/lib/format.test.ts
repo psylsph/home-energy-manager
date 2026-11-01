@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp, finiteAbs, formatCurrent, formatPower, formatSessionEnergy, formatPercent } from '../../src/lib/format';
+import { formatOperatingHours, formatBatteryMode, formatVisualPower, formatTimestamp, finiteAbs, formatCurrent, formatPower, formatSessionEnergy, formatPercent, formatClock } from '../../src/lib/format';
 
 /**
  * Tests for `formatOperatingHours` — the helper that turns a raw
@@ -371,6 +371,13 @@ describe('formatPercent', () => {
     expect(formatPercent(NaN)).toBe('—');
     expect(formatPercent(Infinity)).toBe('—');
     expect(formatPercent(-Infinity)).toBe('—');
+  });
+});
+
+describe('formatClock', () => {
+  it('shows local hours and minutes, zero-padded', () => {
+    expect(formatClock(new Date(2026, 10, 2, 3, 5).getTime())).toBe('03:05');
+    expect(formatClock(new Date(2026, 10, 2, 23, 59).getTime())).toBe('23:59');
   });
 });
 

@@ -3,6 +3,7 @@ import {
   SOLAR_LEVEL_BARS,
   WEATHER_MAX_AGE_MS,
   currentWeather,
+  weatherLocation,
   formatIrradiance,
   formatWeatherTemp,
   solarLevel,
@@ -81,15 +82,27 @@ describe('currentWeather', () => {
     expect(currentWeather(state(), NOW)).toEqual({ temperatureC: 10.4, kind: 'rain', description: 'Rain', solarWm2: null });
   });
 
-  it('carries the location for the sky, when it is a real one', () => {
-    const at = (latitude: unknown, longitude: unknown) =>
-      currentWeather(state({ config: { enabled: true, latitude, longitude } as LiveWeatherState['config'] }), NOW)?.location;
+  it('gives the location for the sky while weather is on, when it is a real one', () => {
+    const at = (latitude: unknown, longitude: unknown, enabled = true) =>
+      weatherLocation(state({ config: { enabled, latitude, longitude } as LiveWeatherState['config'] }));
     expect(at(51.1, -1.05)).toEqual({ latitude: 51.1, longitude: -1.05 });
-    expect(at(null, null)).toBeUndefined();
-    expect(at(51.1, undefined)).toBeUndefined();
-    expect(at(Number.NaN, 0)).toBeUndefined();
-    expect(at(95, 0)).toBeUndefined();
-    expect(at(51, 200)).toBeUndefined();
+    expect(at(51.1, -1.05, false)).toBeNull();
+    expect(at(null, null)).toBeNull();
+    expect(at(51.1, undefined)).toBeNull();
+    expect(at(Number.NaN, 0)).toBeNull();
+    expect(at(95, 0)).toBeNull();
+    expect(at(51, 200)).toBeNull();
+    expect(weatherLocation(null)).toBeNull();
+  });
+
+  it('keeps the location when the reading has gone stale', () => {
+    const stale = state({
+      config: { enabled: true, latitude: 51.1, longitude: -1.05 },
+      last_fetch_at: '2026-10-31T09:00:00Z',
+      last_fetched_temperature_c: null,
+    });
+    expect(currentWeather(stale, NOW)).toBeNull();
+    expect(weatherLocation(stale)).toEqual({ latitude: 51.1, longitude: -1.05 });
   });
 
   it('carries the solar irradiance, including a daytime zero', () => {
