@@ -476,6 +476,45 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     expect(within(section).queryByText('✓ Saved')).toBeNull();
   });
 
+  it('confirms switching a charge slot off once the cleared slot reads back', async () => {
+    // Switching a slot off clears its times on the inverter (HR 94/95 = 0),
+    // so the readback is a disabled 00:00–00:00 slot. The editor still holds
+    // the old window it was showing; a disabled slot has no window, so the
+    // old times must not be compared or the save never confirms.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(apiPost).mockResolvedValueOnce({ ok: true, data: {} });
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ enable_charge: true }),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    fireEvent.click(within(section).getByRole('switch', { name: 'Slot 1' }));
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/control/charge-slot',
+      expect.objectContaining({ slot: 1, enabled: false, start_hour: 2, end_hour: 5 }),
+    ));
+
+    act(() => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          enable_charge: false,
+          charge_slots: [{ enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 4 }],
+        }),
+      });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+
+    expect(within(section).queryByRole('alert')).toBeNull();
+    expect(within(section).getByText('✓ Saved')).toBeDefined();
+  });
+
   it('shows the planner-ownership banner on slot 1 when auto-refresh is on', async () => {
     // CODE_REVIEW.md Major 4 / Minor 7: with the Forecast plan's nightly
     // auto-refresh enabled, charge slot 1 is owned by the planner — the

@@ -294,12 +294,16 @@ function chargeSlotMatchesReadback(
 ): boolean {
   const actual = snapshot?.charge_slots[index];
   if (!actual) return false;
+  // Switching a slot off clears its times (they read back as a disabled
+  // 00:00–00:00 slot), so a disabled slot has no window to compare: the
+  // editor's leftover times would never match.
+  if (!desired.enabled) return !actual.enabled;
   return actual.enabled === desired.enabled
     && actual.start_hour === desired.start_hour
     && actual.start_minute === desired.start_minute
     && actual.end_hour === desired.end_hour
     && actual.end_minute === desired.end_minute
-    && (!desired.enabled || actual.target_soc === desired.target_soc);
+    && actual.target_soc === desired.target_soc;
 }
 
 /**
