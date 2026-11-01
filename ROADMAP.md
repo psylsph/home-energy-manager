@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 1 November 2026 (v1.3.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 1 November 2026 (v1.4.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 The order weighs three things: whether users are affected today, whether a later item depends on it, and how much it costs. Where it differs from the issue's own label, the reason is given.
 
@@ -17,7 +17,8 @@ The code is done for all of these. They stay open only until a release or a repl
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
-| 1 | [425](https://github.com/psylsph/home-energy-manager/issues/425) | House view: a garage for the EV charge point and a choice of house styles | M, then L | Picked up from gagenp01's ideas on the closed #422. The garage half is the useful one — it gives the EV charger a place in the house story (the post is currently bare), and the charger's offline states decide what gets drawn. A re-skin of the same anchors, so the flow model and tests don't move. Styles are breadth afterward. Supplier logos stay out (third-party branding). |
+| 1 | [426](https://github.com/psylsph/home-energy-manager/issues/426) | Optional charge cap: stop the battery charging above a set SOC | M | A user with AIOs behind a Gateway only fails over to island mode when the battery isn't full (their installer traced it to an AC-coupled Solax), and with GivEnergy gone no firmware fix is coming. The open question is how to stop charging through a Gateway, which has no pause registers; a zero charge rate needs confirming on real hardware first. It also needs a periodic full charge so the cells still balance (#418's calibration cycle could serve). |
+| 2 | [425](https://github.com/psylsph/home-energy-manager/issues/425) | House view: a garage for the EV charge point and a choice of house styles | M, then L | Picked up from gagenp01's ideas on the closed #422. The garage half is the useful one — it gives the EV charger a place in the house story (the post is currently bare), and the charger's offline states decide what gets drawn. A re-skin of the same anchors, so the flow model and tests don't move. Styles are breadth afterward. Supplier logos stay out (third-party branding). |
 
 ## Tier 3: smarter planning around Intelligent Octopus Go
 

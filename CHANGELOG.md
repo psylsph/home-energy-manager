@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-11-01
+
+### Added
+
+- **See your inverter's AC output and conversion loss.** The Inverter page now shows how much power the inverter is putting out on the AC side and how much is lost converting from the battery and panels. This explains why the battery figure is always a little higher than home plus grid, especially at low power.
+
+### Fixed
+
+- **Correct grid readings when HEM is connected to a Gateway.** Grid power now comes from the Gateway's own grid meter instead of being worked out from the other readings, so it no longer shows small exports or imports that aren't happening, and AC-coupled solar from another inverter no longer throws it off.
+
 ## [1.3.0] - 2026-11-01
 
 ### Added

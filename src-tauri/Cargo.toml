@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "1.3.0"
+version = "1.4.0"
 description = "Home Energy Manager — Monitor and control GivEnergy inverters"
 authors = ["Stuart Harding"]
 edition = "2021"
