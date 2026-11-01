@@ -50,17 +50,74 @@ pub fn dispatch_overlay(
     dispatches: &[Dispatch],
     add_load: impl Fn(i64) -> bool,
 ) -> DispatchOverlay {
-    let _ = (dispatches, &add_load);
-    DispatchOverlay {
-        hours: hour_starts
-            .iter()
-            .map(|&timestamp| DispatchHour {
-                timestamp,
-                ..Default::default()
-            })
-            .collect(),
+    let mut overlay = DispatchOverlay {
+        hours: Vec::with_capacity(hour_starts.len()),
         ..Default::default()
+    };
+    for &hour_start in hour_starts {
+        let hour_end = hour_start.saturating_add(HOUR_SECS);
+        let mut held: Vec<(i64, i64)> = Vec::new();
+        let mut ev_kwh = 0.0;
+        for dispatch in dispatches {
+            let (start, end) = (dispatch.start.timestamp(), dispatch.end.timestamp());
+            let overlap = (end.min(hour_end) - start.max(hour_start)).max(0);
+            if overlap == 0 {
+                continue;
+            }
+            // `Dispatch::holds_at` for every moment of the overlap: the
+            // overlap is inside the dispatch, so only its kind decides.
+            if dispatch.is_smart() {
+                held.push((start.max(hour_start), end.min(hour_end)));
+            }
+            let Some(energy) = believable_energy(dispatch) else {
+                overlay.energy_unknown = true;
+                continue;
+            };
+            if add_load(hour_start) {
+                ev_kwh += energy * overlap as f64 / (end - start) as f64;
+            } else {
+                overlay.load_not_added = true;
+            }
+        }
+        overlay.hours.push(DispatchHour {
+            timestamp: hour_start,
+            ev_kwh,
+            held_fraction: merged_secs(&mut held) as f64 / HOUR_SECS as f64,
+        });
     }
+    overlay
+}
+
+const HOUR_SECS: i64 = 3600;
+
+/// The dispatch's planned energy, if it's a finite, positive figure a home
+/// charger could deliver in the dispatch's time.
+fn believable_energy(dispatch: &Dispatch) -> Option<f64> {
+    let energy = dispatch.energy_added_kwh?;
+    let hours = (dispatch.end - dispatch.start).num_seconds() as f64 / HOUR_SECS as f64;
+    (energy.is_finite() && energy > 0.0 && energy <= MAX_CHARGER_KW * hours + 1e-9)
+        .then_some(energy)
+}
+
+/// Total length of `intervals` with overlaps counted once.
+fn merged_secs(intervals: &mut [(i64, i64)]) -> i64 {
+    intervals.sort_unstable();
+    let mut total = 0;
+    let mut current: Option<(i64, i64)> = None;
+    for &(start, end) in intervals.iter() {
+        match current {
+            Some((_, current_end)) if start <= current_end => {
+                current = current.map(|(s, e)| (s, e.max(end)));
+            }
+            _ => {
+                if let Some((s, e)) = current {
+                    total += e - s;
+                }
+                current = Some((start, end));
+            }
+        }
+    }
+    total + current.map_or(0, |(s, e)| e - s)
 }
 
 #[cfg(test)]
