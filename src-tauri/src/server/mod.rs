@@ -284,6 +284,10 @@ fn create_router_at(
         .route("/api/alerts/test", post(api::test_alerts))
         // Weather (Open-Meteo integration)
         .route("/api/weather", get(api::get_weather).post(api::set_weather))
+        .route(
+            "/api/carbon-intensity",
+            get(crate::carbon::get_carbon_intensity),
+        )
         .route("/api/weather/backfill", post(api::backfill_weather))
         .route("/api/forecast", forecast_route)
         .route("/api/forecast/plan", forecast_plan_route)

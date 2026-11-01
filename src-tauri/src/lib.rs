@@ -4,6 +4,7 @@
 
 pub mod alerts;
 pub mod backup;
+pub mod carbon;
 pub mod evc;
 pub mod forecast;
 pub mod history;

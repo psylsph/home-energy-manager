@@ -646,6 +646,9 @@ pub struct AppState {
     /// Ensures the daily weather backfill and a manually requested backfill
     /// cannot run at the same time.
     pub weather_backfill_lock: Arc<Mutex<()>>,
+    /// Grid carbon intensity forecast for the house view (issue #401),
+    /// fetched on demand by `GET /api/carbon-intensity`.
+    pub carbon: Arc<Mutex<crate::carbon::CarbonCache>>,
     /// Octopus customer-consumption synchronization status.
     pub octopus: Arc<Mutex<crate::octopus::OctopusState>>,
     /// Joined Octopus Saving Sessions found by the last check.
@@ -857,6 +860,7 @@ impl AppState {
                 ..Default::default()
             })),
             weather_backfill_lock: Arc::new(Mutex::new(())),
+            carbon: Arc::new(Mutex::new(crate::carbon::CarbonCache::default())),
             octopus: Arc::new(Mutex::new(crate::octopus::OctopusState::default())),
             octopus_sessions: Arc::new(Mutex::new(
                 crate::octopus_sessions::SessionsState::default(),

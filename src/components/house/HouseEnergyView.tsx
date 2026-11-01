@@ -14,6 +14,14 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { useEnergyFlowViewModel, type EnergyFlowSourceProps } from '../../hooks/useEnergyFlowViewModel';
 import { useLiveWeather } from '../../hooks/useLiveWeather';
+import { useCarbonIntensity } from '../../hooks/useCarbonIntensity';
+import {
+  CARBON_BAND_COLORS,
+  carbonLabel,
+  formatCarbon,
+  formatCarbonTime,
+  type CurrentCarbon,
+} from '../../lib/carbonIntensity';
 import type { ConnectionState } from '../../lib/types';
 import { FLOW_COLORS } from '../../lib/energyFlow';
 import {
@@ -202,6 +210,36 @@ function Weather({ weather }: { weather: CurrentWeather }) {
   );
 }
 
+/**
+ * Grid carbon intensity (issue #401) under the weather: a leaf in the band's
+ * colour, the intensity now, and when it is lowest ahead (`↓03:30`) — kept
+ * short so the row stays clear of the chimney. Moves up into
+ * the weather's place when the weather (or its solar line) isn't shown.
+ */
+function Carbon({ carbon, y }: { carbon: CurrentCarbon; y: number }) {
+  const color = carbon.band ? CARBON_BAND_COLORS[carbon.band] : TEXT_SECONDARY;
+  const cx = 20;
+  const cy = y - 4;
+  return (
+    <g data-testid="house-carbon" data-band={carbon.band ?? ''} aria-label={carbonLabel(carbon)}>
+      <path
+        data-testid="house-carbon-leaf"
+        d={`M ${cx - 6} ${cy + 5} C ${cx - 6} ${cy - 3} ${cx} ${cy - 6} ${cx + 6} ${cy - 6} C ${cx + 6} ${cy} ${cx + 2} ${cy + 5} ${cx - 6} ${cy + 5} Z`}
+        fill={color}
+      />
+      <line x1={cx - 6} y1={cy + 5} x2={cx + 2} y2={cy - 2} stroke="var(--app-bg-base, #0D1117)" strokeWidth={1} strokeLinecap="round" />
+      <text x={44} y={y} fill={TEXT_SECONDARY} fontSize={11} fontFamily={MONO} data-testid="house-carbon-value">
+        {formatCarbon(carbon.intensity)}
+        {carbon.lowest && (
+          <tspan fontSize={10} dx={4} data-testid="house-carbon-lowest">
+            ↓{formatCarbonTime(carbon.lowest.at)}
+          </tspan>
+        )}
+      </text>
+    </g>
+  );
+}
+
 function Reading({ r, open, onShow, onHide, onToggle }: {
   r: HouseReading;
   open: boolean;
@@ -370,6 +408,8 @@ function EvPost() {
 function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEnergyViewProps) {
   const vm = useEnergyFlowViewModel(source);
   const weather = useLiveWeather();
+  const carbon = useCarbonIntensity();
+  const carbonY = !weather ? 68 : weather.solarWm2 == null ? 86 : 104;
   const scene = buildHouseScene(vm, { connectionState, gridFault });
   const reduced = reducedMotion();
   const solarColor = FLOW_COLORS.solar;
@@ -412,6 +452,7 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
       >
         <TopPill pill={scene.pill} />
         {weather && <Weather weather={weather} />}
+        {carbon && <Carbon carbon={carbon} y={carbonY} />}
 
         <HouseIllustration />
 

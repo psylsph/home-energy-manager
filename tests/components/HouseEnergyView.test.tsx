@@ -1,10 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import type { CurrentWeather, WeatherIconKind } from '../../src/lib/weatherIcon';
+import type { CurrentCarbon } from '../../src/lib/carbonIntensity';
 
 const weatherState: { value: CurrentWeather | null } = { value: null };
 vi.mock('../../src/hooks/useLiveWeather', () => ({
   useLiveWeather: () => weatherState.value,
+}));
+
+const carbonState: { value: CurrentCarbon | null } = { value: null };
+vi.mock('../../src/hooks/useCarbonIntensity', () => ({
+  useCarbonIntensity: () => carbonState.value,
 }));
 
 import HouseEnergyView from '../../src/components/house/HouseEnergyView';
@@ -59,6 +65,7 @@ describe('<HouseEnergyView/>', () => {
 
   beforeEach(() => {
     weatherState.value = null;
+    carbonState.value = null;
     savedNoise = useInverterStore.getState().visualNoiseThreshold;
     useInverterStore.setState({ visualNoiseThreshold: 20 });
     setReducedMotion(false);
@@ -213,6 +220,66 @@ describe('<HouseEnergyView/>', () => {
     render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
     expect(tid('house-solar-value')!.textContent).toBe('0 W/m²');
     expect(tid('house-solar-intensity')!.getAttribute('data-level')).toBe('0');
+  });
+
+  describe('grid carbon intensity', () => {
+    const lowAt = new Date(2026, 10, 2, 3, 30).getTime();
+    const carbon: CurrentCarbon = { intensity: 183, band: 'high', region: 'South England', lowest: { at: lowAt, intensity: 92 } };
+    const view = () => render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
+    const y = () => tid('house-carbon-value')!.getAttribute('y');
+
+    it('hides when there is none to show', () => {
+      view();
+      expect(tid('house-carbon')).toBeNull();
+    });
+
+    it('shows the intensity in the band colour and the lowest time ahead', () => {
+      carbonState.value = carbon;
+      view();
+      const c = tid('house-carbon')!;
+      expect(c.getAttribute('data-band')).toBe('high');
+      expect(c.getAttribute('aria-label')).toBe('Grid carbon 183 g/kWh, high, South England. Lowest 03:30 at 92 g/kWh.');
+      expect(tid('house-carbon-leaf')!.getAttribute('fill')).toBe('#F97316');
+      expect(tid('house-carbon-value')!.textContent).toBe('183 g/kWh↓03:30');
+    });
+
+    it('leaves a clear gap above the EV reading', () => {
+      carbonState.value = carbon;
+      weatherState.value = { temperatureC: 14, kind: 'partly-day', description: 'Partly cloudy', solarWm2: 486 };
+      render(
+        <HouseEnergyView
+          snapshot={snap({ home_power: 7500, grid_power: -7500 })}
+          showEvc evcPower={7000} evcCharging evcConnected evcEverConnected evcChargingState="Charging"
+          connectionState="connected" gridFault={false}
+        />,
+      );
+      const carbonBaseline = Number(y());
+      const evBaseline = Number(tid('house-value-ev')!.getAttribute('y'));
+      // The EV value is 22 px tall: its top must sit well below the carbon line.
+      expect(evBaseline - 22 - carbonBaseline).toBeGreaterThanOrEqual(14);
+    });
+
+    it('leaves out the lowest time when now is lowest, and greys an unknown band', () => {
+      carbonState.value = { ...carbon, band: null, lowest: null };
+      view();
+      expect(tid('house-carbon-lowest')).toBeNull();
+      expect(tid('house-carbon-leaf')!.getAttribute('fill')).toBe('var(--app-text-secondary, #8B949E)');
+    });
+
+    it('sits under the solar line, or moves up when the weather lines are missing', () => {
+      carbonState.value = carbon;
+      weatherState.value = { temperatureC: 14, kind: 'partly-day', description: 'Partly cloudy', solarWm2: 486 };
+      view();
+      expect(y()).toBe('104');
+      cleanup();
+      weatherState.value = { temperatureC: 14, kind: 'clear-night', description: 'Clear', solarWm2: null };
+      view();
+      expect(y()).toBe('86');
+      cleanup();
+      weatherState.value = null;
+      view();
+      expect(y()).toBe('68');
+    });
   });
 
   it("shows Solar's share of the array on the label line", () => {

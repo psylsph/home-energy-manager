@@ -46,7 +46,8 @@ export const READING_SLOTS: Record<'solar' | 'home' | 'grid' | 'battery' | 'ev',
   // line clear of the chimney; Home moves right to make room.
   solar: { x: anchorX('solar'), valueY: 70, edgeY: 94 },
   home: { x: 302, valueY: 70, edgeY: 94 },
-  ev: { x: 24, valueY: 128, edgeY: 180 },
+  // Low enough to leave a gap under the carbon intensity line (issue #401).
+  ev: { x: 24, valueY: 142, edgeY: 194 },
   // Bottom readings sit close under their anchors so the leaders stay short
   // and don't cross the gable wall: Grid straight below the gate.
   grid: { x: anchorX('grid'), valueY: 446, edgeY: 424 },
