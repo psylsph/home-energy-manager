@@ -2,15 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.1.0] - 2026-11-01
 
 ### Added
 
-- **An illustrated house view for the Status page.** Choose House under Settings → Panel Controls → Energy Flow Display to see your solar, home, grid and battery readings around a drawing of a house, with the panels glowing while they generate, the battery filling as it charges and the same moving flows as the orbit diagram. The orbit stays the default. With the house chosen, the page bar along the bottom becomes a menu button in the top-left corner, and the whole Status page fits a phone screen without scrolling (#422).
-- **Current weather on the house view.** When weather is turned on in Settings, the house view shows the temperature and an icon for the current conditions.
+- **An illustrated house view for the Status page.** Choose House under Settings → Panel Controls → Energy Flow Display to see your solar, home, grid and battery readings around a drawing of a house, with the panels glowing while they generate, the battery filling as it charges, and moving lines that run through the inverter the way an inverter's own screen shows them. The orbit stays the default. With the house chosen, the page bar along the bottom becomes a menu button in the top-left corner (#422).
+- **Current weather on the house view.** When weather is turned on in Settings, the house view shows the temperature, an icon for the current conditions, and how strong the sunlight is (in W/m², with a five-bar gauge). Hover over or tap the Solar, Grid or Battery reading to see its volts and amps (or the grid frequency).
+- **Schedule and battery cards on the house view.** Under the house, one card shows whichever comes next, a charge or a Timed Export (for example Next Charge 23:30–05:30 or Next Export 16:00–19:00), and says Charging Now or Exporting Now with the battery icon pulsing while it runs. The other shows how many kWh are in the battery with a level bar.
+- **Hide the Today statistics.** A new Show Today Statistics switch under Settings → Panel Controls removes the Today tiles from the Status page. The house view starts with them hidden, so it fits a phone screen without scrolling straight away (#422).
+
+### Fixed
+
+- **Switching a charge slot off no longer reports that it failed.** The slot was switched off, but the Control page waited for the old times to read back and showed "Charge slot did not confirm the change" after 15 seconds.
 
 ### Changed
 
+- **A shorter header on phones.** The title reads HEM on narrow screens, leaving more room for the page.
 - **The battery card has moved off the Status page.** The diagram already shows the battery's power, charge and mode; voltage, current, temperature, reserve and today's totals are on the Battery page.
 - **The app opens faster.** Each page now loads the first time you open it instead of all at once, which helps most on a Raspberry Pi or a slow phone.
 
