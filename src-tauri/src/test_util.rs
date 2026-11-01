@@ -61,6 +61,24 @@ pub fn make_unique_test_dir(label: &str) -> std::path::PathBuf {
 }
 
 /// Run a synchronous test body with an isolated config directory.
+/// Save a free, OS-assigned port as the isolated settings' `api_port` and
+/// return it. Call inside `with_isolated_config_dir*` before a test generates
+/// or sets an API key: that starts the read-only API listener on `api_port`,
+/// and the default 7338 is taken whenever HEM runs on this machine or an
+/// earlier test's listener hasn't been torn down yet, which fails the request
+/// with a 502.
+pub fn seed_free_api_port() -> u16 {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("ephemeral port address")
+        .port();
+    let mut settings = crate::settings::Settings::load();
+    settings.api_port = port;
+    settings.save().expect("settings save");
+    port
+}
+
 pub fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
     let _isolation = IsolationGuard::enter();
     body()
