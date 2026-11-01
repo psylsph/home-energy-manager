@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - **The battery card has moved off the Status page.** The diagram already shows the battery's power, charge and mode; voltage, current, temperature, reserve and today's totals are on the Battery page.
+- **The app opens faster.** Each page now loads the first time you open it instead of all at once, which helps most on a Raspberry Pi or a slow phone.
 
 ## [1.0.1] - 2026-10-31
 

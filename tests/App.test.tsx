@@ -144,7 +144,7 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
     useInverterStore.setState({ developerMode: true });
     await navigate('/logs');
     render(<App />);
-    expect(screen.getByTestId('mock-Logs')).toBeDefined();
+    expect(await screen.findByTestId('mock-Logs')).toBeDefined();
 
     await act(async () => {
       useInverterStore.setState({ developerMode: false });
@@ -201,7 +201,8 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
   ] as const)('renders the %s route within its ErrorBoundary', async (route, testId) => {
     await navigate(route);
     render(<App />);
-    expect(screen.getByTestId(testId)).toBeDefined();
+    // Pages load on demand (lazyPage), so the route resolves asynchronously.
+    expect(await screen.findByTestId(testId)).toBeDefined();
   });
 });
 

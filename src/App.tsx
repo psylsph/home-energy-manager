@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import type { ComponentType, CSSProperties } from 'react';
-import MetersPage from './pages/MetersPage';
 import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useGridOutageNotifications } from './hooks/useGridOutageNotifications';
@@ -15,20 +14,25 @@ import { socColor } from './lib/energyFlow';
 import { visibleNavItems } from './lib/navItems';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
-import BatteryPage from './pages/BatteryPage';
-import ControlPage from './pages/ControlPage';
-import SettingsPage from './pages/SettingsPage';
-import HistoryPage from './pages/HistoryPage';
-import ForecastPage from './pages/ForecastPage';
-import OctopusPage from './pages/OctopusPage';
-import LogsPage from './pages/LogsPage';
-import SolarPage from './pages/SolarPage';
-import InverterPage from './pages/InverterPage';
-import PowerPage from './pages/PowerPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import UpdateBanner from './components/UpdateBanner';
 import CosySlotBlockedBanner from './components/CosySlotBlockedBanner';
 import NavDrawer, { type NavDrawerItem } from './components/NavDrawer';
+import { lazyPage } from './lib/lazyPage';
+
+// Status is the landing page, so it ships in the main bundle; every other page
+// loads when first opened (keeps the first load small, notably on a Pi).
+const BatteryPage = lazyPage(() => import('./pages/BatteryPage'));
+const ControlPage = lazyPage(() => import('./pages/ControlPage'));
+const SettingsPage = lazyPage(() => import('./pages/SettingsPage'));
+const HistoryPage = lazyPage(() => import('./pages/HistoryPage'));
+const ForecastPage = lazyPage(() => import('./pages/ForecastPage'));
+const OctopusPage = lazyPage(() => import('./pages/OctopusPage'));
+const LogsPage = lazyPage(() => import('./pages/LogsPage'));
+const SolarPage = lazyPage(() => import('./pages/SolarPage'));
+const InverterPage = lazyPage(() => import('./pages/InverterPage'));
+const PowerPage = lazyPage(() => import('./pages/PowerPage'));
+const MetersPage = lazyPage(() => import('./pages/MetersPage'));
 
 function ThemeToggle() {
   const { themeMode, setThemeMode } = useInverterStore();
@@ -476,7 +480,16 @@ function Layout() {
     // without the key React reuses the errored boundary across route changes
     // and a crashed page would keep the fallback (plus its 30s retry timer)
     // on screen even after the user navigates to a healthy tab.
-    return <Route path={path} element={<ErrorBoundary key={path}>{element}</ErrorBoundary>} />;
+    return (
+      <Route
+        path={path}
+        element={
+          <ErrorBoundary key={path}>
+            <Suspense fallback={<p className="text-sm text-text-secondary">Loading…</p>}>{element}</Suspense>
+          </ErrorBoundary>
+        }
+      />
+    );
   }
 
   return (
