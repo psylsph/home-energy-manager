@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { ComponentType, CSSProperties } from 'react';
 import MetersPage from './pages/MetersPage';
 import { HashRouter, Routes, Route, NavLink, Navigate, useSearchParams } from 'react-router';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -11,7 +11,8 @@ import { apiGet } from './lib/api';
 import { UPDATE_REFRESH_INTERVAL_MS } from './lib/updateCheck';
 import { formatPercent, formatTimestamp } from './lib/format';
 import { buildSystemAlerts } from './lib/gridFault';
-import { FLOW_COLORS, socColor } from './lib/energyFlow';
+import { socColor } from './lib/energyFlow';
+import { visibleNavItems } from './lib/navItems';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
 import BatteryPage from './pages/BatteryPage';
@@ -27,6 +28,7 @@ import PowerPage from './pages/PowerPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import UpdateBanner from './components/UpdateBanner';
 import CosySlotBlockedBanner from './components/CosySlotBlockedBanner';
+import NavDrawer, { type NavDrawerItem } from './components/NavDrawer';
 
 function ThemeToggle() {
   const { themeMode, setThemeMode } = useInverterStore();
@@ -173,20 +175,6 @@ export function ConnectionIndicator() {
   );
 }
 
-const NAV_ITEMS = [
-  { to: '/', label: 'Status', icon: StatusIcon, accent: FLOW_COLORS.home },
-  { to: '/power', label: 'Power', icon: PowerIcon, accent: FLOW_COLORS.home },
-  { to: '/battery', label: 'Battery', icon: BatteryIcon, accent: FLOW_COLORS.battery },
-  { to: '/solar', label: 'Solar', icon: SolarIcon, accent: FLOW_COLORS.solar },
-  { to: '/inverter', label: 'Inverter', icon: InverterIcon, accent: FLOW_COLORS.inverter },
-  { to: '/meters', label: 'Meters', icon: MeterIcon, accent: FLOW_COLORS.grid },
-  { to: '/history', label: 'History', icon: HistoryIcon, accent: undefined },
-  { to: '/forecast', label: 'Planner', icon: ForecastIcon, accent: FLOW_COLORS.solar },
-  { to: '/octopus', label: 'Octopus', icon: OctopusIcon, accent: '#ec4899' },
-  { to: '/control', label: 'Control', icon: ControlIcon, accent: undefined },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon, accent: undefined },
-] as const;
-
 function navAccentStyle(accent?: string): CSSProperties | undefined {
   return accent ? ({ '--nav-accent': accent } as CSSProperties) : undefined;
 }
@@ -294,6 +282,22 @@ function LogsIcon() {
   );
 }
 
+/** Nav icon per page path; the page list itself lives in `lib/navItems.ts`. */
+const NAV_ICONS: Record<string, ComponentType> = {
+  '/': StatusIcon,
+  '/power': PowerIcon,
+  '/battery': BatteryIcon,
+  '/solar': SolarIcon,
+  '/inverter': InverterIcon,
+  '/meters': MeterIcon,
+  '/history': HistoryIcon,
+  '/forecast': ForecastIcon,
+  '/octopus': OctopusIcon,
+  '/control': ControlIcon,
+  '/settings': SettingsIcon,
+  '/logs': LogsIcon,
+};
+
 /**
  * Returns true if the current URL carries the `?RO` read-only flag in
  * either the hash search params (e.g. `#/battery?RO`) or the URL search
@@ -315,7 +319,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, setHiddenPanels, setEvcHost, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
   const [octopusConfigured, setOctopusConfigured] = useState(false);
 
   // Load navigation-affecting settings on mount. The Octopus page is opt-in:
@@ -441,12 +445,20 @@ function Layout() {
   // (no one-frame flash of the Control/Settings tabs).
   const isReadOnly = readOnly || urlHasRO(searchParams);
 
-  const visibleItems = NAV_ITEMS.filter(item => {
-    const key = item.to.replace(/^\//, '');
-    if (isReadOnly && (key === 'control' || key === 'settings')) return false;
-    if (key === 'octopus' && !octopusConfigured) return false;
-    return !key || !hiddenPanels.includes(key);
-  });
+  // One page list for both the bottom bar and the house view's drawer
+  // (issue #422). The Battery link takes the live SOC colour.
+  const navItems: NavDrawerItem[] = visibleNavItems({
+    readOnly: isReadOnly,
+    hiddenPanels,
+    octopusConfigured,
+    developerMode,
+  }).map((item) => ({
+    ...item,
+    accent: item.to === '/battery' && snapshot ? socColor(snapshot.soc) : item.accent,
+    icon: NAV_ICONS[item.to],
+  }));
+  // The house display swaps the bottom bar for a burger menu in the header.
+  const burgerNav = energyFlowDisplay === 'house';
 
   // Build a <Route> for a page. Every page is wrapped in its own
   // <ErrorBoundary> here so a render or async-setState error on one page is
@@ -471,13 +483,16 @@ function Layout() {
     <div className="min-h-screen bg-bg-base flex flex-col">
       {/* Header */}
       <header className="bg-bg-surface/80 backdrop-blur-md border-b border-white/5 px-6 pt-[calc(env(safe-area-inset-top,0px)+0.75rem)] pb-3 flex items-center justify-between sticky top-0 z-30">
-        <div>
+        <div className="flex items-center gap-3 min-w-0">
+          {burgerNav && <NavDrawer items={navItems} />}
+          <div className="min-w-0">
           <h1 className="text-base font-bold text-text-primary tracking-tight">
             Home Energy Manager  <span className="text-text-secondary font-mono text-xs font-normal">v{__APP_VERSION__}</span>
           </h1>
           <p className="hidden sm:block text-xs text-text-secondary">
             For GivEnergy Solar and Battery Systems
           </p>
+          </div>
         </div>
         <div className="flex items-center gap-3">
           <ThemeToggle />
@@ -510,7 +525,7 @@ function Layout() {
         </Routes>
       </main>
 
-      {/* Bottom navigation
+      {/* Bottom navigation (hidden when the house display uses the burger menu)
           Each link uses flex-1 + min-w-0 so the row shares the full width
           equally and never overflows, no matter how narrow the viewport is.
           - <sm:  icon-only, 20px icon, tight vertical padding
@@ -519,17 +534,16 @@ function Layout() {
           On very narrow viewports the nav scrolls horizontally so items
           never get cut off. A title/aria-label keeps icon-only modes
           discoverable. */}
-      <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30 overflow-x-auto">
-        {visibleItems.map(({ to, label, icon: Icon, accent }) => {
-          const navAccent = to === '/battery' && snapshot ? socColor(snapshot.soc) : accent;
-          return (
+      {!burgerNav && (
+        <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30 overflow-x-auto">
+          {navItems.map(({ to, label, icon: Icon, accent }) => (
             <NavLink
               key={to}
               to={to}
               end={to === '/'}
               title={label}
               aria-label={label}
-              style={navAccentStyle(navAccent)}
+              style={navAccentStyle(accent)}
               className={({ isActive }) =>
                 `min-w-0 flex-1 flex flex-col items-center justify-center
                  gap-0 py-1.5 sm:py-2
@@ -537,7 +551,7 @@ function Layout() {
                  text-[10px] sm:text-xs font-medium transition-colors
                  ${
                    isActive
-                    ? navAccent ? 'text-[var(--nav-accent)]' : 'text-accent'
+                    ? accent ? 'text-[var(--nav-accent)]' : 'text-accent'
                     : 'text-text-secondary hover:text-text-primary'
                 }`
               }
@@ -545,30 +559,9 @@ function Layout() {
               <Icon />
               <span className="hidden md:inline">{label}</span>
             </NavLink>
-          );
-        })}
-        {developerMode && (
-          <NavLink
-            to="/logs"
-            title="Logs"
-            aria-label="Logs"
-            className={({ isActive }) =>
-              `min-w-0 flex-1 flex flex-col items-center justify-center
-               gap-0 py-1.5 sm:py-2
-               rounded-none
-               text-[10px] sm:text-xs font-medium transition-colors
-               ${
-                isActive
-                  ? 'text-accent'
-                  : 'text-text-secondary hover:text-text-primary'
-              }`
-            }
-          >
-            <LogsIcon />
-            <span className="hidden md:inline">Logs</span>
-          </NavLink>
-        )}
-      </nav>
+          ))}
+        </nav>
+      )}
     </div>
   );
 }

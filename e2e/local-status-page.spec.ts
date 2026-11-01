@@ -5,6 +5,7 @@
  * using the real GivEnergy simulator.
  */
 
+import type { Page } from '@playwright/test';
 import { test, expect } from './local-fixture.js';
 
 test.describe('Status Page - Loading', () => {
@@ -67,59 +68,15 @@ test.describe('Status Page - Energy Flow Diagram', () => {
   });
 });
 
-test.describe('Status Page - Battery Panel', () => {
-  test('should show Battery heading', async ({ page }) => {
+test.describe('Status Page - Battery Card', () => {
+  // The full battery card moved to the Battery page (issue #422); its rows
+  // are covered by local-battery-page.spec.ts.
+  test('should not show the Battery card', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
+    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible({ timeout: 5_000 });
 
-    await expect(page.locator('text=Battery').first()).toBeVisible();
-  });
-
-  test('should show battery state (Charging/Discharging/Idle)', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    await expect(page.locator('text=/Charging|Discharging|Idle/').first()).toBeVisible({ timeout: 5_000 });
-  });
-
-  test('should show battery SOC percentage', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    // SOC should be a percentage value (e.g., "75%")
-    await expect(page.locator('text=/\\d{1,3}%/').first()).toBeVisible({ timeout: 5_000 });
-  });
-
-  test('should show battery power value', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    // Power should show with W or kW suffix
-    await expect(page.locator('text=/[-+]?\\d+[Wk]/').first()).toBeVisible({ timeout: 5_000 });
-  });
-
-  test('should show battery voltage', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    // Voltage should show with V suffix
-    await expect(page.locator('text=/\\d+\\.\\d+V/').first()).toBeVisible({ timeout: 5_000 });
-  });
-
-  test('should show battery temperature', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    // Temperature should show with °C suffix
-    await expect(page.locator('text=/\\d+\\.\\d+°C/').first()).toBeVisible({ timeout: 5_000 });
-  });
-
-  test('should show capacity bar', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-
-    // Should show kWh values for available/capacity
-    await expect(page.locator('text=/\\d+\\.\\d+kWh/').first()).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('heading', { name: 'Battery', exact: true })).toHaveCount(0);
   });
 });
 
@@ -218,5 +175,80 @@ test.describe('Status Page - API Snapshot', () => {
     const data = await resp.json();
     expect(data.ok).toBe(true);
     expect(data.data.device_type).toBeDefined();
+  });
+});
+
+test.describe('Status Page - House View (issue #422)', () => {
+  const useHouse = async (page: Page, theme: 'dark' | 'light' = 'dark') => {
+    await page.addInitScript((t) => {
+      localStorage.setItem('energyFlowDisplay', 'house');
+      localStorage.setItem('themeMode', t);
+    }, theme);
+  };
+
+  for (const theme of ['dark', 'light'] as const) {
+    test(`fits an iPhone 12 Pro screen without scrolling (${theme})`, async ({ page }) => {
+      // 844 px tall minus the ~47 px / ~34 px safe areas Chromium doesn't emulate.
+      await page.setViewportSize({ width: 390, height: 763 });
+      await useHouse(page, theme);
+      await page.goto('/');
+      await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
+
+      await expect(page.getByTestId('house-energy-view')).toBeVisible();
+      await expect(page.getByTestId('house-reading-battery')).toBeVisible();
+      await expect(page.getByTestId('house-status-pill')).toBeVisible();
+      await expect(page.getByTestId('summary-tiles-grid')).toBeVisible();
+      await expect(page.locator('nav.sticky')).toHaveCount(0);
+
+      const dims = await page.evaluate(() => {
+        const main = document.querySelector('main') as HTMLElement;
+        return {
+          doc: document.documentElement.scrollHeight,
+          inner: window.innerHeight,
+          main: main.scrollHeight,
+          mainClient: main.clientHeight,
+        };
+      });
+      expect(dims.doc).toBeLessThanOrEqual(dims.inner);
+      expect(dims.main).toBeLessThanOrEqual(dims.mainClient);
+    });
+  }
+
+  test('navigates from the burger menu and closes it', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 763 });
+    await useHouse(page);
+    await page.goto('/');
+    await expect(page.getByTestId('house-energy-view')).toBeVisible({ timeout: 20_000 });
+
+    const menu = page.getByRole('button', { name: 'Menu' });
+    await menu.click();
+    const drawer = page.getByRole('dialog', { name: 'Pages' });
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByRole('link', { name: 'Status' })).toHaveAttribute('aria-current', 'page');
+
+    await page.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
+    await expect(menu).toBeFocused();
+
+    await menu.click();
+    await drawer.getByRole('link', { name: 'Battery' }).click();
+    await expect(page).toHaveURL(/#\/battery$/);
+    await expect(drawer).toBeHidden();
+  });
+
+  test('switches between Orbit and House from Settings without a reload', async ({ page }) => {
+    await page.goto('/#/settings');
+    const group = page.getByRole('group', { name: 'Energy Flow Display' });
+    await group.getByRole('button', { name: 'House' }).click();
+    await expect(page.locator('nav.sticky')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('dialog', { name: 'Pages' }).getByRole('link', { name: 'Status' }).click();
+    await expect(page.getByTestId('house-energy-view')).toBeVisible({ timeout: 20_000 });
+
+    await page.goto('/#/settings');
+    await page.getByRole('group', { name: 'Energy Flow Display' }).getByRole('button', { name: 'Orbit' }).click();
+    await expect(page.locator('nav.sticky')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Menu' })).toHaveCount(0);
   });
 });

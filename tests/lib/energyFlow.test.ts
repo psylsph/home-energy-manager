@@ -9,6 +9,7 @@ import {
   isAnySlotActive,
   FLOW_COLORS,
   BATTERY_OUTPUT_COLOR,
+  nodeStatus,
 } from '../../src/lib/energyFlow';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
@@ -1488,5 +1489,76 @@ describe('isAnySlotActive', () => {
     expect(isAnySlotActive(slots, new Date('2026-06-28T23:30:00'))).toBe(true);
     expect(isAnySlotActive(slots, new Date('2026-06-29T00:30:00'))).toBe(true);
     expect(isAnySlotActive(slots, new Date('2026-06-28T12:00:00'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared node semantics (issue #422): both the orbit and the house view read
+// status words, SOC and battery mode from the view model, never by parsing
+// the formatted `unit` string.
+// ---------------------------------------------------------------------------
+
+describe('nodeStatus', () => {
+  const NOON = new Date(2026, 9, 31, 12, 0);
+  const statusOf = (s: InverterSnapshot, id: string) => {
+    const vm = buildEnergyFlows(s, { noiseThresholdW: 20, now: NOON });
+    return nodeStatus(vm.nodes.find((n) => n.id === id)!);
+  };
+
+  it('reads Charging / Importing while the grid charges the battery', () => {
+    const s = snap({ battery_power: -3000, battery_state: 'charging', grid_power: -3200, home_power: 200 });
+    expect(statusOf(s, 'battery')).toBe('Charging');
+    expect(statusOf(s, 'grid')).toBe('Importing');
+  });
+
+  it('reads Discharging while the battery powers the home', () => {
+    const s = snap({ battery_power: 2000, battery_state: 'discharging', home_power: 2000 });
+    expect(statusOf(s, 'battery')).toBe('Discharging');
+    expect(statusOf(s, 'grid')).toBe('Idle');
+  });
+
+  it('reads Exporting when the battery exports to the grid', () => {
+    const s = snap({ battery_power: 3000, battery_state: 'discharging', grid_power: 2800, home_power: 200 });
+    expect(statusOf(s, 'grid')).toBe('Exporting');
+  });
+
+  it('reads Generating / Exporting for a solar surplus', () => {
+    const s = snap({ solar_power: 4000, pv1_power: 4000, grid_power: 3500, home_power: 500 });
+    expect(statusOf(s, 'solar')).toBe('Generating');
+    expect(statusOf(s, 'grid')).toBe('Exporting');
+  });
+
+  it('reads Idle everywhere for sub-threshold readings', () => {
+    const s = snap({ solar_power: 15, pv1_power: 15, battery_power: 15, grid_power: -15, home_power: 15 });
+    expect(statusOf(s, 'solar')).toBe('Idle');
+    expect(statusOf(s, 'battery')).toBe('Idle');
+    expect(statusOf(s, 'grid')).toBe('Idle');
+  });
+
+  it('falls back to the unit line for nodes without a status word', () => {
+    const vm = buildEnergyFlows(snap({ home_power: 500 }), { showEvc: true, evcLabel: 'Not Found' });
+    expect(nodeStatus(vm.nodes.find((n) => n.id === 'home')!)).toBe('Consumption');
+    expect(nodeStatus(vm.nodes.find((n) => n.id === 'ev')!)).toBe('Not Found');
+  });
+});
+
+describe('battery node structured fields', () => {
+  it('carries SOC text and the full mode label separately from the unit line', () => {
+    const vm = buildEnergyFlows(
+      snap({ soc: 33.5, battery_mode: 'timed_demand', enable_charge: true, charge_slots: [slot(11, 0, 13, 0)] }),
+      { now: new Date(2026, 9, 31, 12, 0) },
+    );
+    const battery = vm.nodes.find((n) => n.id === 'battery')!;
+    expect(battery.socText).toBe('34%');
+    expect(battery.mode).toBe('Timed Demand (Charging)');
+    expect(battery.unit).toBe('34% · Timed Demand (Charging)');
+  });
+
+  it('leaves the fields off the other nodes', () => {
+    const vm = buildEnergyFlows(snap(), { showEvc: true });
+    for (const n of vm.nodes.filter((x) => x.id !== 'battery')) {
+      expect(n.mode).toBeUndefined();
+      expect(n.socText).toBeUndefined();
+    }
   });
 });

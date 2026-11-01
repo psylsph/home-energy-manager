@@ -235,6 +235,8 @@ function EnergyFlowGroup() {
   const setVisualNoiseThreshold = useInverterStore((s) => s.setVisualNoiseThreshold);
   const gridMeterAddress = useInverterStore((s) => s.gridMeterAddress);
   const setGridMeterAddress = useInverterStore((s) => s.setGridMeterAddress);
+  const energyFlowDisplay = useInverterStore((s) => s.energyFlowDisplay);
+  const setEnergyFlowDisplay = useInverterStore((s) => s.setEnergyFlowDisplay);
   // External CT clamps (address >= 0x01) — offered as the grid-CT source for
   // AC-coupled systems whose grid isn't the built-in 0x00 meter. The meter
   // list is replaced each snapshot, so only its addresses are taken (as a
@@ -245,15 +247,59 @@ function EnergyFlowGroup() {
   const externalMeters = externalAddresses ? externalAddresses.split(',').map((a) => ({ address: Number(a) })) : [];
   return (
     <SettingsGroup title="Energy Flow Diagram">
-      <div className="flex items-center justify-between gap-3">
+      {/* Issue #422: the orbit stays the default; the house view also swaps
+          the bottom navigation bar for a burger menu. */}
+      <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-0.5">
-          <span className={LABEL}>Show Node Status Words</span>
-          <span className={HINT}>
-            Show short words like Generating, Importing, and Charging under the orbit nodes.
+          {/* The ⓘ sits outside the labelling span so the group's
+              accessible name stays the title. */}
+          <span className={LABEL}>
+            <span id="energy-flow-display-label">Energy Flow Display</span>{' '}
+            <HelpTip label="Energy Flow Display">
+              Orbit is the radial diagram. House shows the same readings around an illustration of a house, and
+              replaces the page bar along the bottom of the screen with a menu button in the top-left corner.
+            </HelpTip>
           </span>
+          <span className={HINT}>How the Status page draws your energy flows.</span>
         </div>
-        <Toggle checked={showFlowStatusWords} ariaLabel="Show Node Status Words" onChange={setShowFlowStatusWords} />
+        <div className="flex gap-2" role="group" aria-labelledby="energy-flow-display-label">
+          {([
+            ['orbit', 'Orbit'],
+            ['house', 'House'],
+          ] as const).map(([key, label]) => {
+            const selected = energyFlowDisplay === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setEnergyFlowDisplay(key)}
+                aria-pressed={selected}
+                className={`flex-1 py-2 rounded-lg text-sm font-sans transition ${
+                  selected
+                    ? 'bg-accent text-on-accent font-semibold'
+                    : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
       </div>
+
+      {/* The house view always shows its status pills, so the toggle only
+          applies to the orbit. */}
+      {energyFlowDisplay === 'orbit' && (
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col gap-0.5">
+            <span className={LABEL}>Show Node Status Words</span>
+            <span className={HINT}>
+              Show short words like Generating, Importing, and Charging under the orbit nodes.
+            </span>
+          </div>
+          <Toggle checked={showFlowStatusWords} ariaLabel="Show Node Status Words" onChange={setShowFlowStatusWords} />
+        </div>
+      )}
 
       {/* Grid CT meter source (issue #192): which CT clamp measures the grid
           point, so the wheel can show grid amps instead of frequency. "Auto"

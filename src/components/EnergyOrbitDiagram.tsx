@@ -14,35 +14,11 @@
 import { memo, useId } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useInverterStore } from '../store/useInverterStore';
-import type { InverterSnapshot } from '../lib/types';
 import type { EnergyFlow, FlowNode, FlowNodeId } from '../types/energyFlow';
-import { buildEnergyFlows, FLOW_COLORS, visualEndpoints } from '../lib/energyFlow';
-import { evcNodeLabel } from '../lib/evcLabel';
+import { FLOW_COLORS, nodeStatus, visualEndpoints } from '../lib/energyFlow';
+import { useEnergyFlowViewModel, type EnergyFlowSourceProps } from '../hooks/useEnergyFlowViewModel';
 
-interface Props {
-  snapshot: InverterSnapshot;
-  /** EV Charger active power in watts. 0 = not charging or no data. */
-  evcPower?: number;
-  /** Raw EV Charger charging-state string from HR 0 (issue #139). */
-  evcChargingState?: string;
-  /** Whether the EV Charger is actively charging. */
-  evcCharging?: boolean;
-  /** Whether the EV Charger is connected/responding. */
-  evcConnected?: boolean;
-  /** EV Charger physical cable plugged in (HR 2 `connection_status`). */
-  evcCableConnected?: boolean;
-  /**
-   * EV Charger session energy (kWh) for the current/most-recent charge
-   * session (issue #189). Counts up live while charging, then latches at
-   * the final total after the session ends. Passed through to
-   * `buildEnergyFlows` to render as part of the EV node sub-label.
-   */
-  evcSessionEnergyKwh?: number;
-  /** Latch: true once a valid EVC snapshot has ever arrived (issue #138). */
-  evcEverConnected?: boolean;
-  /** Whether EV Charger is configured (non-empty host). When falsy, EV node is hidden. */
-  showEvc?: boolean;
-}
+type Props = EnergyFlowSourceProps;
 
 // ---------------------------------------------------------------------------
 // Geometry — tuned to match the reference image: a large outer orbit, a
@@ -117,33 +93,6 @@ function nodeFill(id: FlowNodeId): string {
 
 function displayValue(node: FlowNode): string {
   return node.value;
-}
-
-function statusFor(node: FlowNode, flows: EnergyFlow[]): string {
-  if (node.status) return node.status;
-  if (node.id === 'solar') return node.active ? 'Generating' : 'Idle';
-  if (node.id === 'grid') {
-    // Status word driven by rendered flows first, falling back to the raw
-    // grid_power direction. The visible `export` spoke is suppressed when
-    // solar ≤ home load (issue #170 final fix), but the grid node should
-    // still read "Exporting" so the user knows the *battery* is exporting
-    // (or pure grid export with no solar at all).
-    if (flows.some((f) => f.direction === 'import')) return 'Importing';
-    if (flows.some((f) => f.direction === 'export')) return 'Exporting';
-    if (flows.some((f) => f.direction === 'discharge')) return 'Exporting';
-    return 'Idle';
-  }
-  if (node.id === 'battery') {
-    if (flows.some((f) => f.direction === 'charge')) return 'Charging';
-    if (flows.some((f) => f.direction === 'discharge')) return 'Discharging';
-    return 'Idle';
-  }
-  if (node.id === 'ev') return node.unit;
-  return node.unit;
-}
-
-function batterySocText(node: FlowNode): string {
-  return node.unit.split(' · ')[0] ?? node.unit;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +398,6 @@ interface NodeProps {
   x: number;
   y: number;
   r: number;
-  flows: EnergyFlow[];
   hub?: boolean;
   mobile?: boolean;
   showStatusWords?: boolean;
@@ -552,8 +500,8 @@ function HubNode({ node, x, y, r, mobile }: NodeProps) {
   );
 }
 
-function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodeProps) {
-  const status = statusFor(node, flows);
+function SatelliteNode({ node, x, y, r, mobile, showStatusWords }: NodeProps) {
+  const status = nodeStatus(node);
   const value = displayValue(node);
   const isBattery = node.id === 'battery';
   const isEv = node.id === 'ev';
@@ -606,7 +554,7 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
             fontWeight={800}
             fontFamily="var(--font-mono, monospace)"
           >
-            {batterySocText(node)}
+            {node.socText ?? node.unit}
           </text>
         </>
       ) : (
@@ -657,48 +605,18 @@ function SatelliteNode({ node, x, y, r, flows, mobile, showStatusWords }: NodePr
 // Component
 // ---------------------------------------------------------------------------
 
-function EnergyOrbitDiagramInner({
-  snapshot,
-  evcPower = 0,
-  evcChargingState = '',
-  evcCharging = false,
-  evcConnected = false,
-  evcCableConnected = false,
-  evcSessionEnergyKwh = 0,
-  evcEverConnected,
-  showEvc = false,
-}: Props) {
+function EnergyOrbitDiagramInner(props: Props) {
+  const showEvc = !!props.showEvc;
   const mobile = useIsMobile();
   const orbitMaskId = useId().replace(/:/g, '');
   const showFlowStatusWords = useInverterStore((st) => st.showFlowStatusWords);
-  const noise = useInverterStore((st) => st.visualNoiseThreshold);
-  const gridMeterAddress = useInverterStore((st) => st.gridMeterAddress);
   // Reduced-motion users get static flow dots (no SMIL animation).
   const reduced =
     typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  const evcLabel = showEvc
-    ? evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected, evcChargingState)
-    : undefined;
-  // Cable indicator under the kW value (HR 2 `connection_status`). It's
-  // only meaningful while we have a *fresh* frame — when the charger is
-  // offline or never reached we genuinely can't see the cable, so we omit
-  // the sub-label rather than assert a state. Gating on `evcConnected`
-  // (network) keeps the last good cable value from lingering after a drop.
-  const evcCableLabel =
-    showEvc && evcConnected ? (evcCableConnected ? 'Cable In' : 'No Cable') : undefined;
-
-  const vm = buildEnergyFlows(snapshot, {
-    noiseThresholdW: noise,
-    evcPowerW: evcPower,
-    showEvc,
-    evcLabel,
-    evcCableLabel,
-    evcSessionEnergyKwh,
-    gridMeterAddress,
-  });
+  const vm = useEnergyFlowViewModel(props);
 
   const positions = satellitePositions(showEvc);
   const posOf = (id: FlowNodeId): { x: number; y: number } =>
@@ -709,7 +627,7 @@ function EnergyOrbitDiagramInner({
   const home = nodeById('home')!;
   const battery = nodeById('battery');
   const inverter = nodeById('inverter');
-  const batteryMode = battery?.unit.split(' · ')[1] ?? '—';
+  const batteryMode = battery?.mode ?? '—';
 
   const satelliteIds: FlowNodeId[] = showEvc
     ? ['solar', 'ev', 'battery', 'grid']
@@ -776,7 +694,7 @@ function EnergyOrbitDiagramInner({
             />
           ))}
 
-          <HubNode node={home} x={CX} y={CY} r={HUB_R} flows={vm.flows} hub mobile={mobile} />
+          <HubNode node={home} x={CX} y={CY} r={HUB_R} hub mobile={mobile} />
 
           {satelliteIds.map((id) => {
             const node = nodeById(id);
@@ -789,7 +707,6 @@ function EnergyOrbitDiagramInner({
                 x={p.x}
                 y={p.y}
                 r={radiusFor(id)}
-                flows={vm.flows}
                 mobile={mobile}
                 showStatusWords={showFlowStatusWords}
               />

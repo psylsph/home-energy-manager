@@ -66,6 +66,14 @@ export interface FlowNode {
    * of `unit` (the charger's operational-status word).
    */
   subLabel?: string;
+  /** Battery node only: formatted state of charge, e.g. `"34%"`. */
+  socText?: string;
+  /**
+   * Battery node only: the full battery-mode label from
+   * `batteryModeDisplayLabel`, e.g. `"Timed Demand (Charging)"`. Renderers
+   * show this rather than parsing it back out of `unit`.
+   */
+  mode?: string;
 }
 
 /**

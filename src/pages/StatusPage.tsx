@@ -2,7 +2,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import { useReconnect } from '../hooks/useReconnect';
 import { useNow } from '../hooks/useNow';
 import EnergyOrbitDiagram from '../components/EnergyOrbitDiagram';
-import BatteryPanel from '../components/BatteryPanel';
+import HouseEnergyView from '../components/house/HouseEnergyView';
 import SummaryTiles from '../components/SummaryTiles';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import AwaitingConnection from '../components/AwaitingConnection';
@@ -43,6 +43,7 @@ export default function StatusPage() {
     evcCableConnected,
     evcSessionEnergyKwh,
     evcEverConnected,
+    energyFlowDisplay,
   } = useInverterStore();
 
   // Re-compute uptime every second while connected.
@@ -72,6 +73,18 @@ export default function StatusPage() {
       />
     );
   }
+
+  const flowProps = {
+    snapshot,
+    evcPower,
+    evcChargingState,
+    evcCharging,
+    evcConnected,
+    evcCableConnected,
+    evcSessionEnergyKwh,
+    evcEverConnected,
+    showEvc: !!evcHost,
+  };
 
   return (
     <div className="flex flex-col gap-3 mx-auto w-full max-w-4xl lg:max-w-6xl">
@@ -130,36 +143,32 @@ export default function StatusPage() {
       <ColdBatteryWarning />
 
       {/* Landscape layout on lg+ (≥1024px): energy diagram on the left
-          with the summary + battery panels stacked on the right, so the
-          whole status page fits in roughly 800px tall instead of stacking
-          past 900px and forcing a scroll. Below lg the diagram stays
-          full-width and the panels go side-by-side on md, matching the
-          original layout. */}
+          with the summary tiles on the right, so the whole status page
+          fits in roughly 800px tall instead of forcing a scroll. Below lg
+          the diagram stays full-width with the tiles under it. The full
+          battery card lives on the Battery page (issue #422); the diagram
+          already shows battery power, SOC and mode. */}
       <div
         className="grid grid-cols-1 lg:grid-cols-2 gap-3 lg:gap-4 items-start"
         data-testid="status-landscape-grid"
       >
-        {/* Energy flow diagram — full width card (left column on lg+) */}
+        {/* Energy flow diagram — full width card (left column on lg+).
+            Orbit by default; the illustrated house when chosen in Settings →
+            Panel Controls (issue #422). Both render the same view model. */}
         <section className="bg-bg-surface rounded-lg p-1">
-          <EnergyOrbitDiagram
-            snapshot={snapshot}
-            evcPower={evcPower}
-            evcChargingState={evcChargingState}
-            evcCharging={evcCharging}
-            evcConnected={evcConnected}
-            evcCableConnected={evcCableConnected}
-            evcSessionEnergyKwh={evcSessionEnergyKwh}
-            evcEverConnected={evcEverConnected}
-            showEvc={!!evcHost}
-          />
+          {energyFlowDisplay === 'house' ? (
+            <HouseEnergyView
+              {...flowProps}
+              connectionState={connectionState}
+              gridFault={hasGridFault(snapshot)}
+            />
+          ) : (
+            <EnergyOrbitDiagram {...flowProps} />
+          )}
         </section>
 
-        {/* Battery + Summary: side-by-side on md, stacked in the right
-            column on lg+ */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-2 md:gap-3 items-stretch">
-          <SummaryTiles snapshot={snapshot} />
-          <BatteryPanel snapshot={snapshot} />
-        </div>
+        {/* Summary tiles: under the diagram, or the right column on lg+ */}
+        <SummaryTiles snapshot={snapshot} />
       </div>
 
     </div>

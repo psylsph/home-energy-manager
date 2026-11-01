@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, act } from '@testing-library/react';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import StatusPage from '../../src/pages/StatusPage';
 import type { InverterSnapshot } from '../../src/lib/types';
@@ -7,6 +7,13 @@ import type { InverterSnapshot } from '../../src/lib/types';
 // Mock child components to avoid deep rendering issues
 vi.mock('../../src/components/EnergyOrbitDiagram', () => ({
   default: () => <div data-testid="energy-orbit-diagram">EnergyOrbitDiagram</div>,
+}));
+const houseProps = vi.fn();
+vi.mock('../../src/components/house/HouseEnergyView', () => ({
+  default: (props: unknown) => {
+    houseProps(props);
+    return <div data-testid="house-energy-view">HouseEnergyView</div>;
+  },
 }));
 vi.mock('../../src/components/BatteryPanel', () => ({
   default: () => <div data-testid="battery-panel">BatteryPanel</div>,
@@ -165,13 +172,68 @@ describe('StatusPage', () => {
     });
     const { container } = render(<StatusPage />);
     expect(container.querySelector('[data-testid="energy-orbit-diagram"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="battery-panel"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
+  });
+
+  describe('energy flow display (issue #422)', () => {
+    afterEach(() => {
+      useInverterStore.setState({ energyFlowDisplay: 'orbit' });
+    });
+
+    it('shows the orbit by default', () => {
+      useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'orbit' });
+      const { container } = render(<StatusPage />);
+      expect(container.querySelector('[data-testid="energy-orbit-diagram"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="house-energy-view"]')).toBeNull();
+    });
+
+    it('shows the house when chosen, with the summary tiles still beside it', () => {
+      useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'house' });
+      const { container } = render(<StatusPage />);
+      expect(container.querySelector('[data-testid="house-energy-view"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="energy-orbit-diagram"]')).toBeNull();
+      expect(container.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
+    });
+
+    it('passes the connection and grid-fault state to the house', () => {
+      houseProps.mockClear();
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ grid_loss: true, grid_online: false }),
+        connectionState: 'reconnecting',
+        energyFlowDisplay: 'house',
+      });
+      render(<StatusPage />);
+      expect(houseProps).toHaveBeenLastCalledWith(expect.objectContaining({
+        connectionState: 'reconnecting',
+        gridFault: true,
+        showEvc: false,
+      }));
+    });
+
+    it('switches view live when the setting changes', async () => {
+      useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'orbit' });
+      const { container } = render(<StatusPage />);
+      await act(async () => useInverterStore.getState().setEnergyFlowDisplay('house'));
+      expect(container.querySelector('[data-testid="house-energy-view"]')).not.toBeNull();
+      await act(async () => useInverterStore.getState().setEnergyFlowDisplay('orbit'));
+      expect(container.querySelector('[data-testid="energy-orbit-diagram"]')).not.toBeNull();
+    });
+  });
+
+  it('leaves the battery details to the Battery page (issue #422)', () => {
+    // The diagram already shows battery power, SOC and mode, so the Status
+    // page no longer repeats the full battery card under it.
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      connectionState: 'connected',
+    });
+    const { container } = render(<StatusPage />);
+    expect(container.querySelector('[data-testid="battery-panel"]')).toBeNull();
   });
 
   it('places the diagram beside the panels in a landscape grid', () => {
     // The status page arranges the energy-flow diagram next to the summary
-    // + battery panels (rather than stacked) so the whole page fits in
+    // tiles (rather than stacked) so the whole page fits in
     // ~800px tall on wide viewports. The layout is driven by responsive
     // Tailwind classes on this grid container; here we assert the
     // structure (diagram section + panels column are siblings inside the
@@ -186,9 +248,8 @@ describe('StatusPage', () => {
     expect(grid).not.toBeNull();
     // The diagram lives in a <section> that is a direct child of the grid.
     expect(grid!.querySelector(':scope > section')).not.toBeNull();
-    // Both panels render inside the grid's panels column.
+    // The summary tiles render inside the grid, beside the diagram.
     expect(grid!.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
-    expect(grid!.querySelector('[data-testid="battery-panel"]')).not.toBeNull();
   });
 
   it('shows connection status bar when not connected even with snapshot', () => {

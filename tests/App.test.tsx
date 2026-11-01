@@ -553,3 +553,68 @@ describe('<App/> latest-version periodic refresh (issue #296)', () => {
     expect(useInverterStore.getState().latestVersionInfo?.latest_version).toBe('0.70.3');
   });
 });
+
+describe('<App/> navigation follows the energy flow display (issue #422)', () => {
+  beforeEach(() => {
+    silenceConsoleError();
+    window.location.hash = '';
+    useInverterStore.setState({ developerMode: false, energyFlowDisplay: 'orbit', readOnly: false, hiddenPanels: [] });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+    window.location.hash = '';
+    useInverterStore.setState({ developerMode: false, energyFlowDisplay: 'orbit', readOnly: false, hiddenPanels: [] });
+  });
+
+  const bottomBar = () => document.querySelector('nav.sticky');
+
+  it('keeps the bottom bar and no burger with the orbit', () => {
+    render(<App />);
+    expect(bottomBar()).not.toBeNull();
+    expect(screen.queryByRole('button', { name: 'Menu' })).toBeNull();
+  });
+
+  it('swaps the bottom bar for a burger menu with the house, and back, without a reload', async () => {
+    render(<App />);
+    await act(async () => useInverterStore.getState().setEnergyFlowDisplay('house'));
+    expect(bottomBar()).toBeNull();
+    expect(screen.getByRole('button', { name: 'Menu' })).toBeDefined();
+
+    await act(async () => useInverterStore.getState().setEnergyFlowDisplay('orbit'));
+    expect(bottomBar()).not.toBeNull();
+    expect(screen.queryByRole('button', { name: 'Menu' })).toBeNull();
+  });
+
+  it('lists the same pages in the drawer as the bar, with Octopus and Logs rules', async () => {
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_account_number: 'A-123', octopus_api_key_configured: true, hidden_panels: ['meters'] } }
+      : { ok: true, data: {} });
+    useInverterStore.setState({ developerMode: true });
+    render(<App />);
+    await screen.findByRole('link', { name: 'Octopus' });
+    const barLabels = Array.from(bottomBar()!.querySelectorAll('a')).map((a) => a.getAttribute('aria-label'));
+
+    await act(async () => useInverterStore.getState().setEnergyFlowDisplay('house'));
+    fireEvent.click(screen.getByRole('button', { name: 'Menu' }));
+    const drawer = screen.getByRole('dialog', { name: 'Pages' });
+    const drawerLabels = Array.from(drawer.querySelectorAll('a')).map((a) => a.textContent);
+
+    expect(drawerLabels).toEqual(barLabels);
+    expect(drawerLabels).toContain('Octopus');
+    expect(drawerLabels[drawerLabels.length - 1]).toBe('Logs');
+    expect(drawerLabels).not.toContain('Meters');
+  });
+
+  it('hides Control and Settings from the drawer in read-only mode', async () => {
+    useInverterStore.setState({ readOnly: true, energyFlowDisplay: 'house' });
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Menu' }));
+    const drawer = screen.getByRole('dialog', { name: 'Pages' });
+    const labels = Array.from(drawer.querySelectorAll('a')).map((a) => a.textContent);
+    expect(labels).not.toContain('Control');
+    expect(labels).not.toContain('Settings');
+    expect(labels).toContain('Status');
+  });
+});

@@ -49,6 +49,28 @@
   --app-flow-node-battery-bg: #332A16;
   --app-flow-node-ev-bg: #2B1E3A;
   --app-flow-node-inverter-bg: #132C34;
+  /* House view illustration (issue #422): muted so the flow colours lead. */
+  --app-house-plot-top: #1A2028;
+  --app-house-plot-side: #11151B;
+  --app-house-plot-edge: #30363D;
+  --app-house-lawn: #1B3326;
+  --app-house-path: #262C34;
+  --app-house-hedge-top: #2C5537;
+  --app-house-hedge-side: #20402A;
+  --app-house-shadow: rgba(0, 0, 0, 0.35);
+  --app-house-brick-front: #55291F;
+  --app-house-brick-side: #45221A;
+  --app-house-mortar: rgba(0, 0, 0, 0.28);
+  --app-house-roof: #2A2F37;
+  --app-house-roof-line: #3B424C;
+  --app-house-fascia: #D0D7DE;
+  --app-house-glass: #12463F;
+  --app-house-frame: #E6EDF3;
+  --app-house-door: #1D5236;
+  --app-house-canopy: #4A525C;
+  --app-house-pot: #B4683E;
+  --app-house-panel: #2B2A22;
+  --app-house-device: #161B22;
 }
 
 [data-theme="light"] {
@@ -79,6 +101,27 @@
   --app-flow-node-battery-bg: #FEF3C7;
   --app-flow-node-ev-bg: #F3E8FF;
   --app-flow-node-inverter-bg: #CFFAFE;
+  --app-house-plot-top: #E4E9EE;
+  --app-house-plot-side: #C9D1D9;
+  --app-house-plot-edge: #AFB8C1;
+  --app-house-lawn: #CDE6D1;
+  --app-house-path: #D3D9DF;
+  --app-house-hedge-top: #6FA77A;
+  --app-house-hedge-side: #5A8F65;
+  --app-house-shadow: rgba(31, 35, 40, 0.12);
+  --app-house-brick-front: #A65A45;
+  --app-house-brick-side: #8E4B39;
+  --app-house-mortar: rgba(255, 255, 255, 0.22);
+  --app-house-roof: #5B6470;
+  --app-house-roof-line: #717B87;
+  --app-house-fascia: #FFFFFF;
+  --app-house-glass: #A8D8D0;
+  --app-house-frame: #FFFFFF;
+  --app-house-door: #2E7D52;
+  --app-house-canopy: #8C959F;
+  --app-house-pot: #C77A4A;
+  --app-house-panel: #2F3540;
+  --app-house-device: #F6F8FA;
 }
 
 body {

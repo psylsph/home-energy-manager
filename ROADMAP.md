@@ -12,13 +12,13 @@ The code is done for all of these. They stay open only until a release or a repl
 |---|---|---|---|
 | [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps were posted on the issue (30 Oct) and are now in `INSTALL.md`, linked from the issue (31 Oct). The reporter has thanked us and is reworking their own backup script around it (31 Oct), so nothing is left on HEM's side. Ready to close. |
 | [419](https://github.com/psylsph/home-energy-manager/issues/419) | Solar Graph puzzle | S | Fixed in v0.97.0. The overnight climb was the inverter's output counter standing in for solar while the panel counters read zero, not a clock problem; solar now comes only from the panel counters, so the drop at sunrise and the inflated Generated total are gone. Days already recorded keep their old values. Explained on the issue (31 Oct); waiting for the reporter to confirm on v0.97.0, then close. |
+| [422](https://github.com/psylsph/home-energy-manager/issues/422) | Optional illustrated house view for the Status page | L | Built on the `issue-422-house-view` branch: House under Settings → Panel Controls draws the same view model as the orbit (orbit colours, SOC-coloured battery bars, live weather icon), swaps the bottom bar for a burger drawer, and fits an iPhone 12 Pro without scrolling; the battery card left the Status page. Waiting to merge and release, then reply to the reporter (gagenp01): a garage when an EV charger is configured is a reasonable follow-up, supplier logos stay out (third-party branding). |
 
 ## Tier 2: user-facing gaps and polish
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
 | 1 | [417](https://github.com/psylsph/home-energy-manager/issues/417) | Alert formatting in ntfy and Pushover | S | `<b>` tags show as literal text in ntfy and Pushover messages. Every existing HEM alert does this, so it's better fixed for all of them as a separate change. Telegram is sent with HTML parse mode and is fine. |
-| 2 | [422](https://github.com/psylsph/home-energy-manager/issues/422) | Optional illustrated house view for the Status page | L | Stuart's own design, now unblocked: the Settings split (#402, v0.99.0) gives the "Energy flow display: Orbit / House" choice a home in Panel Controls. It is a second renderer over `EnergyFlowViewModel`, so the numbers can't drift from the orbit diagram, plus a burger-menu drawer that replaces the bottom bar only when House is chosen. Orbit stays the default. Most of the cost is the illustration and the test matrix (five flow states, both themes, drawer focus handling). A reporter has suggested a choice of house styles, a garage when an EV charger is set up, and supplier mascots. Ship the single house first; a garage drawn when the EV charger is configured is a reasonable follow-up, but leave supplier logos out (third-party branding). |
 
 ## Tier 3: smarter planning around Intelligent Octopus Go
 
@@ -52,5 +52,5 @@ These come from #403 (now closed), where Brian and Stuart split the original dis
 ```text
 #400 EV out of profile (done) ─► #406 dispatch as load ─► #404 re-plan on moved slot
                                        └─────────► #405 export surplus ◄── #407 back-stop
-#402 Settings split (done) ─► #397 reset detection + checklist, #396 MQTT, #422 display option
+#402 Settings split (done) ─► #397 reset detection + checklist, #396 MQTT, #422 display option (built)
 ```

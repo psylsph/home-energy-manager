@@ -5,6 +5,9 @@ import type { InverterTemperatureAlertConfig } from '../lib/gridFault';
 
 type ThemeMode = 'dark' | 'light';
 
+/** Which Status page energy-flow renderer to show (issue #422). */
+export type EnergyFlowDisplay = 'orbit' | 'house';
+
 /**
  * Which battery-mode control the user last toggled. Lives in the store (not
  * `ControlPage` state) so the "Applying…" banner, its confirmation watchdog
@@ -164,6 +167,12 @@ interface InverterState {
    */
   showFlowStatusWords: boolean;
   /**
+   * Status page energy-flow display (issue #422): the radial orbit diagram
+   * (default) or the illustrated house. Choosing the house also swaps the
+   * bottom navigation bar for a burger menu. Per device, in localStorage.
+   */
+  energyFlowDisplay: EnergyFlowDisplay;
+  /**
    * Noise floor in watts for the energy flow diagram. Flows below this
    * value are treated as zero — no animated line, no arrow, displayed
    * value rounds to "0W". Default: 20W.
@@ -244,6 +253,7 @@ interface InverterState {
    */
   resetEvc: () => void;
   setShowFlowStatusWords: (enabled: boolean) => void;
+  setEnergyFlowDisplay: (display: EnergyFlowDisplay) => void;
   setVisualNoiseThreshold: (threshold: number) => void;
   setGridMeterAddress: (address: number) => void;
   /**
@@ -369,6 +379,17 @@ function loadShowFlowStatusWords(): boolean {
   }
 }
 
+function loadEnergyFlowDisplay(): EnergyFlowDisplay {
+  try {
+    // Only the literal 'house' selects the house view; anything else
+    // (missing, a typo, a value from a future build) keeps the orbit so
+    // nobody's Status page changes under them.
+    return localStorage.getItem('energyFlowDisplay') === 'house' ? 'house' : 'orbit';
+  } catch {
+    return 'orbit';
+  }
+}
+
 function loadVisualNoiseThreshold(): number {
   try {
     const stored = localStorage.getItem('visualNoiseThreshold');
@@ -469,6 +490,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   panelGraphsYLock: loadPanelGraphsYLock(),
   panelGraphsYLockMax: 0,
   showFlowStatusWords: loadShowFlowStatusWords(),
+  energyFlowDisplay: loadEnergyFlowDisplay(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
@@ -554,6 +576,13 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('showFlowStatusWords', String(enabled));
     } catch { /* ignore */ }
     set({ showFlowStatusWords: enabled });
+  },
+  setEnergyFlowDisplay: (display) => {
+    if (display !== 'orbit' && display !== 'house') return;
+    try {
+      localStorage.setItem('energyFlowDisplay', display);
+    } catch { /* ignore */ }
+    set({ energyFlowDisplay: display });
   },
   setVisualNoiseThreshold: (threshold) => {
     try {

@@ -76,6 +76,16 @@ pub struct WeatherState {
     /// Temperature returned by the most recent successful live fetch.
     #[serde(default)]
     pub last_fetched_temperature_c: Option<f32>,
+    /// WMO weather interpretation code from the most recent live fetch
+    /// (0 = clear sky … 99 = thunderstorm with hail), drawn as an icon on the
+    /// Status page house view (issue #422). `None` when the response lacked
+    /// it — the temperature is still recorded.
+    #[serde(default)]
+    pub last_fetched_weather_code: Option<u16>,
+    /// Whether it was daytime at the location for the most recent live
+    /// fetch (Open-Meteo `is_day`), so the icon can show a sun or a moon.
+    #[serde(default)]
+    pub last_fetched_is_day: Option<bool>,
     /// Grid-cell latitude actually used by Open-Meteo (may differ from
     /// the requested coords by several km).
     #[serde(default)]
@@ -138,6 +148,8 @@ fn derive_archive_base_url(forecast_base: &str) -> String {
 struct WeatherObservation {
     timestamp: i64,
     temperature_c: f32,
+    weather_code: Option<u16>,
+    is_day: Option<bool>,
     grid_lat: Option<f32>,
     grid_lon: Option<f32>,
 }
@@ -148,12 +160,7 @@ async fn fetch_current(
     latitude: f64,
     longitude: f64,
 ) -> Result<WeatherObservation, String> {
-    let url = format!(
-        "{base}/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m&timezone=UTC",
-        base = base_url.trim_end_matches('/'),
-        lat = latitude,
-        lon = longitude,
-    );
+    let url = live_fetch_url(base_url, latitude, longitude);
 
     let result: Result<serde_json::Value, String> = tokio::task::spawn_blocking(move || {
         let mut resp = weather_agent()
@@ -171,6 +178,18 @@ async fn fetch_current(
 
     let json = result?;
     parse_current_response(&json)
+}
+
+/// Open-Meteo forecast URL for the live fetch: the temperature for history
+/// and the forecast, plus the weather code and day flag for the house-view
+/// icon (issue #422).
+fn live_fetch_url(base_url: &str, latitude: f64, longitude: f64) -> String {
+    format!(
+        "{base}/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code,is_day&timezone=UTC",
+        base = base_url.trim_end_matches('/'),
+        lat = latitude,
+        lon = longitude,
+    )
 }
 
 /// Parse Open-Meteo's forecast `current` response into a single observation.
@@ -197,6 +216,22 @@ fn parse_current_response(json: &serde_json::Value) -> Result<WeatherObservation
         .and_utc()
         .timestamp();
 
+    // The condition code and day flag only drive the house-view icon, so a
+    // missing or malformed value is dropped rather than failing the fetch:
+    // the temperature is what the history and forecast rely on.
+    let weather_code = current
+        .get("weather_code")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok());
+    let is_day = current
+        .get("is_day")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| match v {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        });
+
     // Open-Meteo also echoes the resolved coords at the top level — we
     // persist them so the Settings UI can show what grid cell was used.
     let grid_lat = json
@@ -211,6 +246,8 @@ fn parse_current_response(json: &serde_json::Value) -> Result<WeatherObservation
     Ok(WeatherObservation {
         timestamp: ts,
         temperature_c: temperature as f32,
+        weather_code,
+        is_day,
         grid_lat,
         grid_lon,
     })
@@ -311,6 +348,9 @@ fn parse_archive_response(json: &serde_json::Value) -> Result<Vec<WeatherObserva
         out.push(WeatherObservation {
             timestamp: ts,
             temperature_c: temp as f32,
+            // Historical archive rows carry only the temperature.
+            weather_code: None,
+            is_day: None,
             grid_lat,
             grid_lon,
         });
@@ -643,6 +683,8 @@ fn apply_live_fetch_state(
 ) {
     state.last_fetch_at = Some(fetched_at);
     state.last_fetched_temperature_c = Some(observation.temperature_c);
+    state.last_fetched_weather_code = observation.weather_code;
+    state.last_fetched_is_day = observation.is_day;
     state.grid_cell_latitude = observation.grid_lat;
     state.grid_cell_longitude = observation.grid_lon;
     state.last_error = None;
@@ -971,6 +1013,8 @@ mod tests {
                 .unwrap()
                 .timestamp(),
             temperature_c: 18.5,
+            weather_code: Some(3),
+            is_day: Some(true),
             grid_lat: Some(51.25),
             grid_lon: Some(-0.5),
         };
@@ -987,7 +1031,111 @@ mod tests {
             Some(observation.timestamp)
         );
         assert_eq!(state.last_fetched_temperature_c, Some(18.5));
+        assert_eq!(state.last_fetched_weather_code, Some(3));
+        assert_eq!(state.last_fetched_is_day, Some(true));
         assert_eq!(state.grid_cell_latitude, Some(51.25));
         assert_eq!(state.grid_cell_longitude, Some(-0.5));
+    }
+
+    // ================================================================
+    // Weather code + day flag for the house view (issue #422)
+    // ================================================================
+
+    fn current_with(extra: serde_json::Value) -> serde_json::Value {
+        let mut current = serde_json::json!({ "time": "2024-06-21T12:00", "temperature_2m": 10.5 });
+        for (k, v) in extra.as_object().unwrap() {
+            current[k] = v.clone();
+        }
+        serde_json::json!({ "current": current })
+    }
+
+    #[test]
+    fn parse_current_response_reads_weather_code_and_day_flag() {
+        let obs = parse_current_response(&current_with(
+            serde_json::json!({ "weather_code": 61, "is_day": 1 }),
+        ))
+        .unwrap();
+        assert_eq!(obs.temperature_c, 10.5);
+        assert_eq!(obs.weather_code, Some(61));
+        assert_eq!(obs.is_day, Some(true));
+
+        let night = parse_current_response(&current_with(
+            serde_json::json!({ "weather_code": 0, "is_day": 0 }),
+        ))
+        .unwrap();
+        assert_eq!(night.weather_code, Some(0));
+        assert_eq!(night.is_day, Some(false));
+    }
+
+    #[test]
+    fn parse_current_response_keeps_temperature_without_weather_code() {
+        let obs = parse_current_response(&current_with(serde_json::json!({}))).unwrap();
+        assert_eq!(obs.temperature_c, 10.5);
+        assert_eq!(obs.weather_code, None);
+        assert_eq!(obs.is_day, None);
+    }
+
+    #[test]
+    fn parse_current_response_drops_malformed_weather_code_and_day_flag() {
+        for (code, day) in [
+            (serde_json::json!(-1), serde_json::json!(2)),
+            (serde_json::json!(70_000), serde_json::json!(-1)),
+            (serde_json::json!("rain"), serde_json::json!(true)),
+            (serde_json::json!(3.5), serde_json::json!(null)),
+        ] {
+            let obs = parse_current_response(&current_with(
+                serde_json::json!({ "weather_code": code, "is_day": day }),
+            ))
+            .unwrap();
+            assert_eq!(
+                obs.temperature_c, 10.5,
+                "temperature kept for {code} / {day}"
+            );
+            assert_eq!(obs.weather_code, None, "code {code}");
+            assert_eq!(obs.is_day, None, "day {day}");
+        }
+    }
+
+    #[test]
+    fn live_fetch_state_clears_a_previous_weather_code_when_the_new_reply_lacks_one() {
+        let mut state = WeatherState {
+            last_fetched_weather_code: Some(95),
+            last_fetched_is_day: Some(false),
+            ..WeatherState::default()
+        };
+        let observation = WeatherObservation {
+            timestamp: 0,
+            temperature_c: 12.0,
+            weather_code: None,
+            is_day: None,
+            grid_lat: None,
+            grid_lon: None,
+        };
+        apply_live_fetch_state(&mut state, &observation, chrono::Utc::now());
+        // A stale thunderstorm icon must not outlive the reading it came with.
+        assert_eq!(state.last_fetched_weather_code, None);
+        assert_eq!(state.last_fetched_is_day, None);
+        assert_eq!(state.last_fetched_temperature_c, Some(12.0));
+    }
+
+    #[test]
+    fn weather_state_from_an_older_build_loads_without_the_new_fields() {
+        let json = serde_json::json!({
+            "config": serde_json::to_value(WeatherConfig::default()).unwrap(),
+            "last_fetch_at": null,
+            "last_fetched_temperature_c": 9.0
+        });
+        let state: WeatherState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.last_fetched_temperature_c, Some(9.0));
+        assert_eq!(state.last_fetched_weather_code, None);
+        assert_eq!(state.last_fetched_is_day, None);
+    }
+
+    #[test]
+    fn live_fetch_url_asks_for_the_weather_code_and_day_flag() {
+        assert_eq!(
+            live_fetch_url("https://api.open-meteo.com/", 51.5, -0.12),
+            "https://api.open-meteo.com/v1/forecast?latitude=51.5&longitude=-0.12&current=temperature_2m,weather_code,is_day&timezone=UTC"
+        );
     }
 }

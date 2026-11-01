@@ -67,6 +67,17 @@ export function visualEndpoints(flow: EnergyFlow, flows: EnergyFlow[]): { from: 
   return { from: flow.from, to: flow.to };
 }
 
+/**
+ * The status word shown for a node. Solar, grid and battery always carry a
+ * derived `status` (Generating / Importing / Exporting / Charging /
+ * Discharging / Idle); the other nodes fall back to their unit line (Home's
+ * "Consumption", the EV charger's operational state). Shared by every
+ * renderer so the orbit and the house view (issue #422) always agree.
+ */
+export function nodeStatus(node: FlowNode): string {
+  return node.status ?? node.unit;
+}
+
 /** Default noise floor — matches the store's `visualNoiseThreshold` default. */
 export const DEFAULT_NOISE_THRESHOLD_W = 20;
 
@@ -726,6 +737,8 @@ export function buildEnergyFlows(
       // label made it look like a bug.
       value: formatVisualPower(absBattery, noise),
       unit: `${formatPercent(s.soc)} · ${modeLabel}`,
+      socText: formatPercent(s.soc),
+      mode: modeLabel,
       subLabel: batteryMeasurements,
       color: batteryColor,
       ringPercent: s.soc,

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **An illustrated house view for the Status page.** Choose House under Settings → Panel Controls → Energy Flow Display to see your solar, home, grid and battery readings around a drawing of a house, with the panels glowing while they generate, the battery filling as it charges and the same moving flows as the orbit diagram. The orbit stays the default. With the house chosen, the page bar along the bottom becomes a menu button in the top-left corner, and the whole Status page fits a phone screen without scrolling (#422).
+- **Current weather on the house view.** When weather is turned on in Settings, the house view shows the temperature and an icon for the current conditions.
+
+### Changed
+
+- **The battery card has moved off the Status page.** The diagram already shows the battery's power, charge and mode; voltage, current, temperature, reserve and today's totals are on the Battery page.
+
 ## [1.0.0] - 2026-10-31
 
 ### Changed
