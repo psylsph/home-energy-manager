@@ -445,19 +445,6 @@ pub(crate) fn decode_snapshot_with_solar_position(
         snap.home_power = snap.solar_power + snap.battery_power - snap.grid_power;
     }
 
-    // Gateway: derive grid power from the energy balance. The gateway measures
-    // solar (`p_pv`) and house load (`p_load`, excludes EV) directly, plus
-    // battery power from `p_aio_total` (IR 1702), which is negated on decode to
-    // HEM's + = discharge convention (see `decode_gateway_1660_1719`). Grid
-    // power has no dedicated register — it is the residual that balances:
-    //   grid_export(HEM, +) = solar + battery_discharge - home
-    //                        = solar + battery_power(+discharge) - home
-    if snap.device_type.needs_gateway_input_blocks()
-        && gateway_is_valid(&snap.gateway_software_version)
-    {
-        snap.grid_power = snap.solar_power + snap.battery_power - snap.home_power;
-    }
-
     // Populate the synthetic built-in grid CT meter (address 0x00) with
     // import/export energy totals. The three-phase meter decoder sets these
     // to 0.0 because the power-only registers IR(1079-1082) carry no energy
@@ -707,6 +694,10 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     // bit is set the firmware is misbehaving and we'll clamp in the
     // sanitizer rather than display a meaningless negative number.
     snap.eps_power_w = get_reg(data, 31) as u32;
+
+    // IR(24): p_inverter_out — AC-side inverter power (int16 W, + = out).
+    // battery_power above is the DC side; the gap is conversion loss.
+    snap.inverter_output_power = Some(signed(get_reg(data, 24)));
 
     // -- Home load --
     // IR(42): p_load_demand — house consumption at the busbar, independently
@@ -2196,8 +2187,8 @@ pub fn validate_hv_bcu(data: &[u16]) -> bool {
 //     GivTCP confirms this by negating (`read.py:1556`:
 //     `Battery_Power = -GEInv.p_aio_total`). We negate on decode so HEM's
 //     convention (+ = discharge) matches the rest of the app.
-//   * Grid power has no dedicated register — it is derived in `decode_snapshot`
-//     from the energy balance (solar + battery_discharge − home).
+//   * Grid power is metered at IR(1616) `p_ac1`, + = export (HEM's convention,
+//     decoded verbatim; GivTCP `read.py:1550`: `Grid_Power = GEInv.p_ac1`).
 //
 // V1/V2 variant: selected by IR(1603) (the last register of the version
 // string). `< 10` → V1 (uint32 totals high-register-first, AIO serials @
@@ -2337,9 +2328,14 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     snap.solar_power = p_pv;
     snap.pv1_power = p_pv;
 
+    // IR(1616) p_ac1 — metered grid flow, + = export, − = import (HEM's
+    // convention, so verbatim). GivTCP publishes it as Grid_Power. Never derive
+    // grid from solar + battery − home here: that folds AIO conversion losses
+    // and any AC source the Gateway doesn't count in p_pv into the grid figure.
+    snap.grid_power = signed(get_reg(data, 16));
+
     // IR(1618) p_load — house load, EXCLUDES the EV charger (gateway defining
-    // property). This is the authoritative home_power; decode_snapshot keeps
-    // it and derives grid_power from the energy balance instead.
+    // property). This is the authoritative home_power.
     snap.home_power = get_reg(data, 18) as i32;
 
     // --- Daily energy totals (÷10 kWh) ---

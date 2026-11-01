@@ -12,6 +12,7 @@ import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import { cosyBlockedMessage } from '../lib/cosyBlocked';
 import { agileBlockedMessage } from '../lib/agileBlocked';
 import HelpTip from '../components/HelpTip';
+import { conversionLossW } from '../lib/inverterOutput';
 
 export default function InverterPage() {
   const { snapshot, connectionState } = useInverterStore();
@@ -233,6 +234,14 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{formatTemp(s.inverter_temperature)}</span>
           <span className="text-text-secondary">Active Power Rate</span>
           <span className="text-text-primary font-mono text-right">{formatPercent(s.active_power_rate)}</span>
+          {typeof s.inverter_output_power === 'number' && (
+            <>
+              <span className="text-text-secondary">AC Output</span>
+              <span className="text-text-primary font-mono text-right">{formatPower(finiteAbs(s.inverter_output_power))}</span>
+              <span className="text-text-secondary">Conversion Loss</span>
+              <span className="text-text-primary font-mono text-right">{formatPower(conversionLossW(s) ?? Number.NaN)}</span>
+            </>
+          )}
         </div>
       </section>
 

@@ -980,11 +980,11 @@ pub(crate) struct PowerFieldState {
 ///   [`POWER_BALANCE_RESIDUAL_W`]. If zero or more than one candidate
 ///   resolves the imbalance, we leave the snapshot alone — likely a real
 ///   multi-field transition.
-/// - **Skipped on gateway / EMS** (`snap.device_type.needs_gateway_input_blocks()`).
-///   The gateway decoder *derives* `grid_power` from the same identity
-///   (`grid = solar + battery - home`, see `decoder.rs`), so applying the
-///   formula would be tautological. The home / solar / battery readings
-///   are the authoritative ones on gateway.
+/// - **Skipped on gateway** (`snap.device_type.needs_gateway_input_blocks()`).
+///   The gateway's battery figure is the AIOs' AC power and its `p_pv` may not
+///   count an AC-coupled third-party inverter on the site, so its four
+///   readings needn't balance. A residual there says nothing about which
+///   field was misread.
 /// - **Skipped during the connect grace period** (the `skip_delta` flag).
 ///   During grace, only absolute-range checks apply, and the prev readings
 ///   are unreliable baselines.
@@ -1899,6 +1899,22 @@ pub(crate) fn sanitize_snapshot(
     }
     sanitized |= eps_was_sanitized;
     sanitized |= eps_rate_sanitized;
+
+    // -- Inverter AC output (IR(24) p_inverter_out) --
+    // Display-only, so a value beyond the inverter's rating (15 kW when the
+    // rating is unknown) falls back to the previous good reading, else none,
+    // without flagging the snapshot for an immediate re-poll.
+    if let Some(output) = snap.inverter_output_power {
+        let limit = match snap.max_ac_power_w {
+            0 => 15_000,
+            rated => rated.min(i32::MAX as u32) as i32,
+        };
+        if output.abs() > limit {
+            snap.inverter_output_power = prev
+                .and_then(|p| p.inverter_output_power)
+                .filter(|p| p.abs() <= limit);
+        }
+    }
 
     // -- Operating hours (IR(47-48) work_time_total) --
     // Monotonically non-decreasing lifetime counter. Three failure modes to
@@ -7813,9 +7829,8 @@ mod tests {
 
     #[test]
     fn cross_check_is_skipped_on_gateway_device() {
-        // On gateway / EMS, grid_power is derived from the balance
-        // identity itself, so applying the formula is tautological and
-        // would corrupt the snapshot. The cross-check must skip.
+        // On a gateway the four readings needn't balance (AIO AC power,
+        // possibly unmetered AC-coupled solar), so the cross-check must skip.
         // We use a gateway DeviceType and assert the home jump is held
         // (rate-rejected, not restored).
         let mut prev = cross_check_snap(3_100, -5_800, 0, 1_165, 100);
