@@ -292,6 +292,9 @@ fn graphql_errors(response: &Value) -> Result<(), String> {
 struct Known {
     token: Option<String>,
     devices: Option<Vec<String>>,
+    /// The last device list, used when a due refresh fails. Empty when
+    /// there is none to fall back on.
+    previous_devices: Vec<String>,
 }
 
 /// What one check found. `token` is set when a new one was obtained and
@@ -321,16 +324,26 @@ fn fetch_blocking(settings: &Settings, known: Known) -> Result<Fetched, String> 
     let (devices, new_devices) = match known.devices {
         Some(devices) => (devices, None),
         None => {
-            let response = post_graphql(
+            let read = post_graphql(
                 &query_url,
                 Some(&token),
                 &json!({
                     "query": DEVICES_QUERY,
                     "variables": { "account": settings.octopus_account_number.trim() },
                 }),
-            )?;
-            let devices = parse_devices(&response)?;
-            (devices.clone(), Some(devices))
+            )
+            .and_then(|response| parse_devices(&response));
+            match read {
+                Ok(devices) => (devices.clone(), Some(devices)),
+                // The cars on an account rarely change, so a failed
+                // refresh (Octopus's KT-CT-4360, say) keeps the last list
+                // rather than stopping the hold. It is retried next check.
+                Err(error) if !known.previous_devices.is_empty() => {
+                    tracing::debug!("Intelligent Octopus devices: {error}; using the last list");
+                    (known.previous_devices, None)
+                }
+                Err(error) => return Err(error),
+            }
         }
     };
     let mut dispatches = Vec::new();
@@ -383,7 +396,19 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
             .devices_checked_at
             .filter(|at| (now - *at).abs() < Duration::hours(DEVICE_REFRESH_HOURS))
             .map(|_| current.devices.clone());
-        (current.generation, Known { token, devices })
+        let previous_devices = if devices.is_none() {
+            current.devices.clone()
+        } else {
+            Vec::new()
+        };
+        (
+            current.generation,
+            Known {
+                token,
+                devices,
+                previous_devices,
+            },
+        )
     };
     let settings = Settings::load_async().await;
     if !wanted(&settings) {
