@@ -24,7 +24,7 @@ function formFrom(status: Status): BackupForm {
 
 /**
  * Settings → History Backup (issue #379): scheduled, verified copies of
- * history.db, a "Back up now" button and the last result.
+ * history.db, a "Back Up Now" button and the last result.
  */
 export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
   const [status, setStatus] = useState<Status | null>(null);
@@ -302,7 +302,7 @@ export default function HistoryBackupPanel({ id }: { id?: string } = {}) {
               disabled={busy}
               className="bg-bg-elevated text-text-primary text-sm font-sans font-semibold px-4 py-1.5 rounded-md hover:bg-bg-elevated/70 transition-colors disabled:opacity-50"
             >
-              {busy ? 'Backing up…' : 'Back up now'}
+              {busy ? 'Backing Up…' : 'Back Up Now'}
             </button>
             {message && (
               <span

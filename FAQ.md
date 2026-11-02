@@ -342,7 +342,7 @@ works too: open the file, paste the statements into the **Execute SQL** tab and
 click **Write Changes**.
 
 1. **Back up first, while the app is running.** In **Settings → History
-   Backup**, click **Back up now**. This makes a checked copy of the whole
+   Backup**, click **Back Up Now**. This makes a checked copy of the whole
    database, named `history-<date>-<time>.db`, in the backup folder shown
    there. Copy that file somewhere else too, because older backups are deleted
    as new ones are made.
