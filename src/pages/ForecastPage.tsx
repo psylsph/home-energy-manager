@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import {
   Area,
+  Bar,
   CartesianGrid,
   ComposedChart,
   Customized,
@@ -22,6 +23,11 @@ import LoadAboveSetting from '../components/LoadAboveSetting';
 import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
+import {
+  CAR_CHARGING_FILL,
+  CAR_CHARGING_NAME,
+  solidLegendLabel,
+} from '../lib/carChargingLegend';
 import { getHistoryChartGridProps } from '../lib/historyRangeConfig';
 import {
   anchorSeriesAtNow,
@@ -34,6 +40,7 @@ import {
   chargeTargetReadBack,
   holdTargetPct,
   forecastStatusMessages,
+  carChargingNote,
   consumptionExclusionNote,
   forecastXAxisTicks,
   forecastYAxisScale,
@@ -48,6 +55,7 @@ import {
   toConsumptionChartData,
   toSolarChartData,
   tomorrowSummary,
+  withCarCharging,
 } from '../lib/forecast';
 import type { ForecastData, PlanResponse, PlanStrategy } from '../lib/forecast';
 import {
@@ -976,11 +984,18 @@ export default function ForecastPage() {
       : forwardHourTimestamps(FORECAST_HORIZON_HOURS);
   const consumptionChart = consumptionEmpty
     ? []
-    : toConsumptionChartData(
-        data.consumption_weekday,
-        data.consumption_weekend,
-        consumptionTimestamps,
+    : withCarCharging(
+        toConsumptionChartData(
+          data.consumption_weekday,
+          data.consumption_weekend,
+          consumptionTimestamps,
+        ),
+        data.ev_dispatch_hours,
       );
+  // Planned Intelligent Octopus car charging (issue #406).
+  const hasCarCharging = consumptionChart.some((point) => point.car != null);
+  const carNote = carChargingNote(data);
+
   const forecastAxisDomain: [number, number] = [
     data.generated_at,
     data.generated_at + FORECAST_HORIZON_HOURS * 3600,
@@ -1011,6 +1026,7 @@ export default function ForecastPage() {
       ...consumptionChart.flatMap((point) => [
         point.weekdayP75 ?? 0,
         point.weekendP75 ?? 0,
+        point.car ?? 0,
       ]),
     ),
   );
@@ -1166,6 +1182,11 @@ export default function ForecastPage() {
           )}
           {plan.recommendation.kind === 'no_plan' && (
             <p className="text-xs text-text-secondary">{plan.recommendation.reason}</p>
+          )}
+          {carNote && (
+            <p data-testid="forecast-plan-car" className="text-xs text-text-secondary">
+              {carNote}
+            </p>
           )}
           {plan.apply && plan.recommendation.kind === 'charge' && (
             <div className="flex items-center gap-2">
@@ -1897,7 +1918,16 @@ export default function ForecastPage() {
                 dot={false}
                 name="Weekend Median"
               />
-              <Legend />
+              {hasCarCharging && (
+                <Bar
+                  dataKey="car"
+                  // The legend icon takes this colour, so it is drawn as
+                  // translucent as the bars rather than as a solid block.
+                  fill={CAR_CHARGING_FILL}
+                  name={CAR_CHARGING_NAME}
+                />
+              )}
+              <Legend formatter={solidLegendLabel} />
             </ComposedChart>
           </ResponsiveContainer>
         )}

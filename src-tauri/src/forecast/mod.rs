@@ -27,7 +27,8 @@ use crate::forecast::consumption::ConsumptionProfile;
 use crate::forecast::consumption::{build_consumption_profile_excluding, ConsumptionExclusions};
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
 use crate::forecast::dispatch_load::{
-    apply_dispatch_hours, believable_kwh, dispatch_overlay, DispatchHour, DispatchWindow,
+    apply_dispatch_hours, believable_energy, believable_kwh, dispatch_overlay, DispatchHour,
+    DispatchWindow,
 };
 use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
@@ -376,7 +377,23 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         .map(|hour| hour.ev_kwh)
         .sum();
     let dispatches_checked_at = planning.checked_at.map(|at| at.timestamp());
-    let ev_dispatch_windows: Vec<DispatchWindow> = Vec::new();
+    // The same 72 h the forecast covers, solar data or not.
+    let horizon_end = now_ts + 72 * 3600;
+    let mut ev_dispatch_windows: Vec<DispatchWindow> = planning
+        .dispatches
+        .iter()
+        .filter(|d| {
+            let (start, end) = (d.start.timestamp(), d.end.timestamp());
+            end > now_ts && end > start && start < horizon_end
+        })
+        .map(|d| DispatchWindow {
+            start: d.start.timestamp(),
+            end: d.end.timestamp(),
+            held: d.is_smart() && planning.hold_applies,
+            kwh: believable_energy(d),
+        })
+        .collect();
+    ev_dispatch_windows.sort_by_key(|w| (w.start, w.end));
 
     let consumption_weekday = consumption_series(&profile, false);
     let consumption_weekend = consumption_series(&profile, true);

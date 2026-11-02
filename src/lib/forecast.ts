@@ -1,3 +1,5 @@
+import { formatSessionWindow } from './savingSessions';
+
 /**
  * Pure helpers and types for the Forecast page (issue #283).
  *
@@ -306,14 +308,36 @@ export function withCarCharging(
   points: ConsumptionChartPoint[],
   hours: ForecastDispatchHour[] | undefined,
 ): ConsumptionChartPoint[] {
-  void hours;
-  return points;
+  const byTimestamp = new Map<number, number>();
+  for (const hour of hours ?? []) {
+    if (Number.isFinite(hour.ev_kwh) && hour.ev_kwh > 0) {
+      byTimestamp.set(hour.timestamp, hour.ev_kwh);
+    }
+  }
+  return points.map((point) => ({ ...point, car: byTimestamp.get(point.timestamp) ?? null }));
 }
 
-/** One line for the plan (issue #406): the next car charge. */
+/**
+ * One line for the plan (issue #406): the next car charge as Octopus
+ * planned it, in the Octopus page's format, and how many more there are.
+ * Null without planned charges.
+ */
 export function carChargingNote(data: ForecastData): string | null {
-  void data;
-  return null;
+  const windows = data.ev_dispatch_windows ?? [];
+  const next = windows[0];
+  if (!next) return null;
+  const when = formatSessionWindow(
+    new Date(next.start * 1000).toISOString(),
+    new Date(next.end * 1000).toISOString(),
+  );
+  const energy =
+    next.kwh != null && Number.isFinite(next.kwh) && next.kwh > 0
+      ? `, ${next.kwh.toFixed(1)} kWh`
+      : '';
+  const how = next.held ? 'battery held' : 'from the battery';
+  const more = windows.length - 1;
+  const tail = more > 0 ? ` ${more} more planned.` : '';
+  return `Next car charge ${when}${energy}, ${how}.${tail}`;
 }
 
 const FORECAST_X_AXIS_TICK_INTERVAL_SECONDS = 12 * 60 * 60;
@@ -763,7 +787,10 @@ export function parseLoadAboveKw(
 
 /** How much EV charging the prediction left out, or null for none. */
 export function consumptionExclusionNote(data: ForecastData): string | null {
-  const kwh = (data.consumption_excluded_ev_kwh ?? 0) + (data.consumption_excluded_above_kwh ?? 0);
+  const kwh =
+    (data.consumption_excluded_ev_kwh ?? 0) +
+    (data.consumption_excluded_above_kwh ?? 0) +
+    (data.consumption_excluded_dispatch_kwh ?? 0);
   if (!(kwh >= 0.05)) return null;
   return `${kwh.toFixed(1)} kWh of EV charging left out of the last ${CONSUMPTION_WINDOW_DAYS} days`;
 }

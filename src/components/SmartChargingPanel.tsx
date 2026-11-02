@@ -73,7 +73,8 @@ export default function SmartChargingPanel() {
             grid. When the charge ends the battery goes back to Eco with your previous reserve.
             Boost charges are billed at the peak rate, so the battery is left to help with those.
             If HEM cannot read your charges, the battery behaves as normal. HEM must be running and
-            connected to the inverter at the time.
+            connected to the inverter at the time. The Planner uses the same list to plan around the
+            hold, and adds the car&apos;s energy once your usage history no longer includes the car.
           </HelpTip>
           <span className="mt-1 block text-xs text-text-secondary">
             Stops the battery emptying into the car during smart charges. Boosts are left alone.

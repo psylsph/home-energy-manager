@@ -11,5 +11,9 @@ export const CAR_CHARGING_FILL = 'rgba(192, 132, 252, 0.6)';
 /** Legend formatter: keeps the Car Charging label as solid as the others,
  *  as its translucent fill would otherwise dim the text too. */
 export function solidLegendLabel(value: string) {
-  return value;
+  return value === CAR_CHARGING_NAME ? (
+    <span style={{ color: CAR_CHARGING_COLOR }}>{value}</span>
+  ) : (
+    value
+  );
 }
