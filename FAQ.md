@@ -250,6 +250,16 @@ each figure at a different point:
 - **Home** and **Grid** are measured on the AC side, by the inverter's own load
   reading and the grid CT clamp.
 
+```mermaid
+flowchart LR
+    B["Battery<br/>600 W<br/>(DC side)"] --> I["Inverter<br/>DC to AC"]
+    I --> A["AC Output<br/>525 W"]
+    A --> H["Home<br/>500 W"]
+    G["Grid<br/>0 W"] --- H
+    I -.-> L1(["about 75 W<br/>conversion loss"])
+    A -.-> L2(["about 25 W<br/>inverter's own use and<br/>measuring differences"])
+```
+
 Converting between the two costs power. Most of the gap is that conversion
 loss, and the rest is the inverter's own running load and small differences
 between its measuring points. The loss is a fairly fixed few tens of watts, so

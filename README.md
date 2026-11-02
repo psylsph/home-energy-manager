@@ -6,8 +6,6 @@ Home Energy Manager connects directly to your inverter over your home network an
 
 > 💬 **Got a question or hit a snag?** [**Ask the AI assistant**](https://deepwiki.com/psylsph/home-energy-manager) first — it has read HEM's code and docs, so it can answer most "how do I…" and "why is it doing…" questions. If you don't get your answer, feel free to [raise an issue](https://github.com/psylsph/home-energy-manager/issues).
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/psylsph/home-energy-manager)
-
 <div align="center">
 
 <a href="https://www.buymeacoffee.com/psylsph" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" alt="Buy Me a Coffee" style="height: 80px !important;width: 275px !important;" ></a>
