@@ -120,6 +120,8 @@ pub struct DispatchesState {
     /// After a restart mid-hold: keep holding until this time or until the
     /// first check finishes, whichever is first.
     restart_hold_until: Option<DateTime<Utc>>,
+    /// Why the last dispatch log write failed, so it's reported once.
+    pub log_error: Option<String>,
 }
 
 impl DispatchesState {
@@ -1249,6 +1251,192 @@ mod tests {
             let current = state.octopus_dispatches.lock().await.clone();
             assert!(current.dispatches.is_empty(), "the late answer is dropped");
             assert!(!current.hold_now(utc(NOW)));
+        })
+        .await;
+    }
+
+    // ---- the dispatch log (issue #406) ----
+
+    fn log_db(name: &str) -> (Arc<crate::history::HistoryDb>, std::path::PathBuf) {
+        let path = crate::test_util::make_unique_test_dir(name).join("h.db");
+        (
+            Arc::new(crate::history::HistoryDb::open(&path).unwrap()),
+            path,
+        )
+    }
+
+    fn logged(db: &crate::history::HistoryDb) -> Vec<crate::history::dispatch_log::LoggedDispatch> {
+        db.logged_dispatches_since(0, POLL_INTERVAL.as_secs() as i64)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_check_logs_the_dispatches_that_have_started() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(dispatches_response(json!([
+                dispatch(
+                    "2026-10-17T11:30:00+00:00",
+                    "2026-10-17T12:30:00+00:00",
+                    json!("SMART"),
+                    json!("-6.0")
+                ),
+                dispatch(
+                    "2026-10-17T14:00:00+00:00",
+                    "2026-10-17T15:00:00+00:00",
+                    json!("SMART"),
+                    json!("-7.0")
+                ),
+            ])))
+            .await;
+            let state = configure(&mock, true).await;
+            let (db, _path) = log_db("dispatch-log-check");
+            *state.history.lock().await = Some(db.clone());
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.seen().len(), 3, "no extra Octopus requests");
+
+            // The running one, so far: 11:30 to one check after 12:00.
+            let start = utc("2026-10-17T11:30:00+00:00").timestamp();
+            let ran_until = utc("2026-10-17T12:03:00+00:00").timestamp();
+            let rows = logged(&db);
+            assert_eq!(rows.len(), 1, "the 14:00 one hasn't started: {rows:?}");
+            assert_eq!(rows[0].device, CAR);
+            assert_eq!((rows[0].start, rows[0].end), (start, ran_until));
+            assert_eq!(rows[0].kind.as_deref(), Some("SMART"));
+            assert_eq!(rows[0].energy_kwh, Some(6.0 * 33.0 / 60.0));
+            assert_eq!(db.dispatch_log_since(), Some(utc(NOW).timestamp()));
+
+            // The next check carries it on.
+            check_once(&state, utc("2026-10-17T12:15:00+00:00")).await;
+            let rows = logged(&db);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].end, utc("2026-10-17T12:18:00+00:00").timestamp());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_log_that_cannot_be_written_leaves_the_hold_alone() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            let (db, path) = log_db("dispatch-log-broken");
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute_batch("DROP TABLE IF EXISTS octopus_dispatch_log")
+                .unwrap();
+            *state.history.lock().await = Some(db);
+            for at in [NOW, "2026-10-17T12:03:00+00:00"] {
+                check_once(&state, utc(at)).await;
+                let current = state.octopus_dispatches.lock().await.clone();
+                assert_eq!(current.checked_at, Some(utc(at)));
+                assert_eq!(current.error, None);
+                assert_eq!(current.dispatches.len(), 1);
+                assert!(current.hold_now(utc(at)));
+                let error = current.log_error.clone().unwrap();
+                assert!(error.contains("octopus_dispatch_log"), "{error}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn turning_the_hold_off_forgets_when_the_log_started() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            let (db, _path) = log_db("dispatch-log-off");
+            *state.history.lock().await = Some(db.clone());
+            check_once(&state, utc(NOW)).await;
+            assert!(db.dispatch_log_since().is_some());
+
+            // Car charging while the hold is off isn't logged, so the log
+            // no longer covers its window.
+            let (status, _) =
+                set_hold(State(state.clone()), Json(HoldRequest { enabled: false })).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(db.dispatch_log_since(), None);
+            assert_eq!(logged(&db).len(), 1, "what ran stays logged");
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            assert_eq!(db.dispatch_log_since(), None);
+
+            let (status, _) =
+                set_hold(State(state.clone()), Json(HoldRequest { enabled: true })).await;
+            assert_eq!(status, StatusCode::OK);
+            check_once(&state, utc("2026-10-17T12:06:00+00:00")).await;
+            assert_eq!(
+                db.dispatch_log_since(),
+                Some(utc("2026-10-17T12:06:00+00:00").timestamp())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_gap_in_the_checks_starts_the_log_again() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            let (db, _path) = log_db("dispatch-log-gap");
+            *state.history.lock().await = Some(db.clone());
+            check_once(&state, utc(NOW)).await;
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            assert_eq!(db.dispatch_log_since(), Some(utc(NOW).timestamp()));
+
+            // Octopus fails for three-quarters of an hour: a car could have
+            // charged unseen in that time.
+            mock.set_dispatches(json!({
+                "errors": [{ "message": "Unable to fetch planned dispatches.",
+                             "extensions": { "errorCode": "KT-CT-4340" } }],
+                "data": { "flexPlannedDispatches": null }
+            }));
+            for minute in (6..=45).step_by(3) {
+                let at = utc(NOW) + Duration::minutes(minute);
+                check_once(&state, at).await;
+            }
+            assert_eq!(db.dispatch_log_since(), Some(utc(NOW).timestamp()));
+            mock.set_dispatches(one_dispatch());
+            let back = utc("2026-10-17T12:48:00+00:00");
+            check_once(&state, back).await;
+            assert_eq!(db.dispatch_log_since(), Some(back.timestamp()));
+
+            // The hold switched off in the settings file, not through the
+            // page, for an hour: also a gap.
+            Settings::update(|s| s.octopus_dispatch_hold = false).unwrap();
+            check_once(&state, utc("2026-10-17T12:51:00+00:00")).await;
+            Settings::update(|s| s.octopus_dispatch_hold = true).unwrap();
+            let on = utc("2026-10-17T13:51:00+00:00");
+            check_once(&state, on).await;
+            assert_eq!(db.dispatch_log_since(), Some(on.timestamp()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_answer_dropped_by_a_hold_switch_is_not_logged() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            mock.dispatches_delay_ms
+                .store(400, std::sync::atomic::Ordering::Relaxed);
+            let state = configure(&mock, true).await;
+            let (db, _path) = log_db("dispatch-log-dropped");
+            *state.history.lock().await = Some(db.clone());
+
+            let checking = tokio::spawn({
+                let state = state.clone();
+                async move { check_once(&state, utc(NOW)).await }
+            });
+            for _ in 0..200 {
+                if mock.count("flexPlannedDispatches") > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let (status, _) =
+                set_hold(State(state.clone()), Json(HoldRequest { enabled: false })).await;
+            assert_eq!(status, StatusCode::OK);
+            checking.await.unwrap();
+            assert!(logged(&db).is_empty());
+            assert_eq!(db.dispatch_log_since(), None);
         })
         .await;
     }

@@ -7,6 +7,7 @@
 pub mod backup;
 pub mod battery_health;
 pub mod battery_health_trend;
+pub mod dispatch_log;
 pub mod evc_power;
 pub mod minute;
 
