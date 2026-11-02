@@ -12,16 +12,20 @@
 //! in full.
 //!
 //! The log only helps once it covers the whole profile window, so it keeps
-//! when it started without a break. A gap in the checks (Octopus failing,
-//! the hold off, a database error) or a clock that steps restarts that.
-//! HEM being closed is not a gap: no usage is recorded then either.
+//! when it started without a break. Any gap in the writes restarts that:
+//! Octopus failing, the hold off, a database error, a clock that steps, or
+//! HEM being closed (the profile bridges short closures, and a dispatch
+//! that ran while HEM was closed was never seen).
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use super::HistoryDb;
 
 /// When the log started without a break, Unix seconds.
 pub const DISPATCH_LOG_SINCE_KEY: &str = "octopus_dispatch_log_since";
+
+/// When the log was last written, Unix seconds.
+pub const DISPATCH_LOG_LAST_WRITE_KEY: &str = "octopus_dispatch_log_last_write";
 
 /// How long logged dispatches are kept: the 28-day profile window with a
 /// week's margin.
@@ -57,24 +61,30 @@ pub struct LoggedDispatch {
 
 impl HistoryDb {
     /// Log what a check at `seen_at` found, in one transaction: the
-    /// dispatches that have started, and when the log started.
-    /// `previous_write` is this process's last successful write; `None` for
-    /// the first, which allows for HEM having been closed.
+    /// dispatches that have started, and when the log started and was last
+    /// written.
     pub fn log_dispatches(
         &self,
         sightings: &[DispatchSighting],
         seen_at: i64,
-        previous_write: Option<i64>,
     ) -> Result<(), String> {
-        let unbroken =
-            previous_write.map(|previous| (0..=MAX_LOG_GAP_SECS).contains(&(seen_at - previous)));
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
         let fail = |e: rusqlite::Error| format!("Failed to log Octopus dispatches: {e}");
         let tx = conn.transaction().map_err(fail)?;
-        if let (Some(previous), Some(true)) = (previous_write, unbroken) {
+        let previous_write = tx
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?1",
+                params![DISPATCH_LOG_LAST_WRITE_KEY],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(fail)?;
+        let unbroken = previous_write
+            .filter(|previous| (0..=MAX_LOG_GAP_SECS).contains(&(seen_at - previous)));
+        if let Some(previous) = unbroken {
             // Seen at the last check and past its planned end now: it ran
             // to the end rather than being cancelled in the last moments.
             tx.execute(
@@ -118,18 +128,22 @@ impl HistoryDb {
                     .map_err(fail)?;
             }
         }
-        let since = if unbroken == Some(false) {
-            // A gap or a step in the clock: start again from now.
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)"
-        } else {
-            // Keep the start, unless it's later than now (the clock is
-            // behind where it was).
-            "INSERT INTO meta (key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value \
-             WHERE CAST(value AS INTEGER) > CAST(excluded.value AS INTEGER)"
-        };
-        tx.execute(since, params![DISPATCH_LOG_SINCE_KEY, seen_at.to_string()])
+        if unbroken.is_none() {
+            // The first write, a gap or a step in the clock: keep the start
+            // unless it's later than now.
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value \
+                 WHERE CAST(value AS INTEGER) > CAST(excluded.value AS INTEGER)",
+                params![DISPATCH_LOG_SINCE_KEY, seen_at.to_string()],
+            )
             .map_err(fail)?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![DISPATCH_LOG_LAST_WRITE_KEY, seen_at.to_string()],
+        )
+        .map_err(fail)?;
         tx.commit().map_err(fail)
     }
 
@@ -205,15 +219,16 @@ impl HistoryDb {
         self.get_meta_value(DISPATCH_LOG_SINCE_KEY)?.parse().ok()
     }
 
-    /// Forget when the log started, as when the hold is turned off.
+    /// Forget when the log started and was last written, as when the hold
+    /// is turned off: the next write starts it again.
     pub fn forget_dispatch_log_since(&self) -> Result<(), String> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
         conn.execute(
-            "DELETE FROM meta WHERE key = ?1",
-            params![DISPATCH_LOG_SINCE_KEY],
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![DISPATCH_LOG_SINCE_KEY, DISPATCH_LOG_LAST_WRITE_KEY],
         )
         .map_err(|e| format!("Failed to reset the Octopus dispatch log: {e}"))?;
         Ok(())
@@ -253,21 +268,16 @@ mod tests {
     }
 
     /// Checks every three minutes from `from` to `to`, all seeing
-    /// `sightings`, as one unbroken run after `previous`.
-    fn checks(
-        db: &HistoryDb,
-        sightings: &[DispatchSighting],
-        from: i64,
-        to: i64,
-        mut previous: Option<i64>,
-    ) -> Option<i64> {
+    /// `sightings`. Returns the last check's time.
+    fn checks(db: &HistoryDb, sightings: &[DispatchSighting], from: i64, to: i64) -> i64 {
         let mut at = from;
+        let mut last = from;
         while at <= to {
-            db.log_dispatches(sightings, at, previous).unwrap();
-            previous = Some(at);
+            db.log_dispatches(sightings, at).unwrap();
+            last = at;
             at += GAP;
         }
-        previous
+        last
     }
 
     #[test]
@@ -280,7 +290,7 @@ mod tests {
         drop(conn);
 
         let db = HistoryDb::open(&path).unwrap();
-        db.log_dispatches(&[sighting("car", T, T + 3600, Some(7.0))], T + 3600, None)
+        db.log_dispatches(&[sighting("car", T, T + 3600, Some(7.0))], T + 3600)
             .unwrap();
         assert_eq!(
             db.logged_dispatches_since(0, GAP).unwrap(),
@@ -291,20 +301,13 @@ mod tests {
     #[test]
     fn a_dispatch_the_list_repeats_is_one_row_with_its_latest_shape() {
         let (db, _path) = test_db();
-        let last = checks(
-            &db,
-            &[sighting("car", T, T + 3600, Some(7.0))],
-            T,
-            T + 1800,
-            None,
-        );
+        checks(&db, &[sighting("car", T, T + 3600, Some(7.0))], T, T + 1800);
         // Octopus stretches it and raises the energy part way through.
         checks(
             &db,
             &[sighting("car", T, T + 5400, Some(10.5))],
             T + 1980,
             T + 5400,
-            last,
         );
         assert_eq!(
             db.logged_dispatches_since(0, GAP).unwrap(),
@@ -321,7 +324,6 @@ mod tests {
                 sighting("car-a", T, T + 3600, Some(7.0)),
             ],
             T + 3600,
-            None,
         )
         .unwrap();
         assert_eq!(
@@ -337,14 +339,10 @@ mod tests {
     fn a_dispatch_that_has_not_started_is_not_logged() {
         let (db, _path) = test_db();
         // Planned for later, then moved before it began: never logged.
-        db.log_dispatches(&[sighting("car", T + 3600, T + 7200, Some(7.0))], T, None)
+        db.log_dispatches(&[sighting("car", T + 3600, T + 7200, Some(7.0))], T)
             .unwrap();
-        db.log_dispatches(
-            &[sighting("car", T + 7200, T + 10800, Some(7.0))],
-            T + 600,
-            Some(T),
-        )
-        .unwrap();
+        db.log_dispatches(&[sighting("car", T + 7200, T + 10800, Some(7.0))], T + 600)
+            .unwrap();
         assert!(db.logged_dispatches_since(0, GAP).unwrap().is_empty());
         assert_eq!(db.dispatch_log_since(), Some(T), "the log is running");
     }
@@ -353,14 +351,8 @@ mod tests {
     fn a_dispatch_cancelled_mid_run_counts_until_just_after_it_was_last_seen() {
         let (db, _path) = test_db();
         // Seen from its start to 15 minutes in, then gone from the list.
-        let last = checks(
-            &db,
-            &[sighting("car", T, T + 3600, Some(8.0))],
-            T,
-            T + 900,
-            None,
-        );
-        checks(&db, &[], T + 1080, T + 3900, last);
+        checks(&db, &[sighting("car", T, T + 3600, Some(8.0))], T, T + 900);
+        checks(&db, &[], T + 1080, T + 3900);
         // 15 minutes plus one check interval of the planned hour.
         assert_eq!(
             db.logged_dispatches_since(0, GAP).unwrap(),
@@ -373,15 +365,9 @@ mod tests {
         let (db, _path) = test_db();
         // Last seen 6 minutes before its end; the next check, after the
         // end, no longer lists it.
-        let last = checks(
-            &db,
-            &[sighting("car", T, T + 3600, Some(8.0))],
-            T,
-            T + 3240,
-            None,
-        );
-        assert_eq!(last, Some(T + 3240));
-        checks(&db, &[], T + 3700, T + 3700, last);
+        let last = checks(&db, &[sighting("car", T, T + 3600, Some(8.0))], T, T + 3240);
+        assert_eq!(last, T + 3240);
+        checks(&db, &[], T + 3700, T + 3700);
         assert_eq!(
             db.logged_dispatches_since(0, GAP).unwrap(),
             vec![logged("car", T, T + 3600, Some(8.0))]
@@ -391,10 +377,10 @@ mod tests {
     #[test]
     fn a_dispatch_last_seen_before_a_gap_is_not_assumed_to_have_run_in_full() {
         let (db, _path) = test_db();
-        db.log_dispatches(&[sighting("car", T, T + 3600, Some(8.0))], T + 900, None)
+        db.log_dispatches(&[sighting("car", T, T + 3600, Some(8.0))], T + 900)
             .unwrap();
         // The next good check is an hour later: it may have been cancelled.
-        db.log_dispatches(&[], T + 4500, Some(T + 900)).unwrap();
+        db.log_dispatches(&[], T + 4500).unwrap();
         assert_eq!(
             db.logged_dispatches_since(0, GAP).unwrap(),
             vec![logged("car", T, T + 1080, Some(8.0 * 1080.0 / 3600.0))]
@@ -404,20 +390,13 @@ mod tests {
     #[test]
     fn a_running_dispatch_octopus_moves_ends_where_the_new_one_starts() {
         let (db, _path) = test_db();
-        let last = checks(
-            &db,
-            &[sighting("car", T, T + 7200, Some(8.0))],
-            T,
-            T + 1800,
-            None,
-        );
+        checks(&db, &[sighting("car", T, T + 7200, Some(8.0))], T, T + 1800);
         // Re-planned half an hour in to 00:30-02:30.
         checks(
             &db,
             &[sighting("car", T + 1800, T + 9000, Some(8.0))],
             T + 1980,
             T + 9000,
-            last,
         );
         assert_eq!(
             db.logged_dispatches_since(0, GAP).unwrap(),
@@ -431,15 +410,11 @@ mod tests {
     #[test]
     fn a_dispatch_never_runs_past_its_planned_end_and_a_backwards_clock_cannot_shorten_it() {
         let (db, _path) = test_db();
-        db.log_dispatches(&[sighting("car", T, T + 3600, None)], T + 3590, None)
+        db.log_dispatches(&[sighting("car", T, T + 3600, None)], T + 3590)
             .unwrap();
         // The clock steps back: the dispatch was still seen at T + 3590.
-        db.log_dispatches(
-            &[sighting("car", T, T + 3600, None)],
-            T + 60,
-            Some(T + 3590),
-        )
-        .unwrap();
+        db.log_dispatches(&[sighting("car", T, T + 3600, None)], T + 60)
+            .unwrap();
         assert_eq!(
             db.logged_dispatches_since(0, GAP).unwrap(),
             vec![logged("car", T, T + 3600, None)]
@@ -449,14 +424,10 @@ mod tests {
     #[test]
     fn only_dispatches_still_running_after_the_start_are_read() {
         let (db, _path) = test_db();
-        db.log_dispatches(&[sighting("car", T, T + 3600, Some(7.0))], T + 3600, None)
+        db.log_dispatches(&[sighting("car", T, T + 3600, Some(7.0))], T + 3600)
             .unwrap();
-        db.log_dispatches(
-            &[sighting("car", T + 7200, T + 9000, Some(3.5))],
-            T + 9000,
-            None,
-        )
-        .unwrap();
+        db.log_dispatches(&[sighting("car", T + 7200, T + 9000, Some(3.5))], T + 9000)
+            .unwrap();
         let read = db.logged_dispatches_since(T + 3600, GAP).unwrap();
         assert_eq!(read, vec![logged("car", T + 7200, T + 9000, Some(3.5))]);
         assert_eq!(db.logged_dispatches_since(T + 3599, GAP).unwrap().len(), 2);
@@ -465,18 +436,16 @@ mod tests {
     #[test]
     fn dispatches_older_than_the_keep_window_are_dropped_on_an_unbroken_run() {
         let (db, _path) = test_db();
-        db.log_dispatches(&[sighting("car", T, T + 3600, Some(7.0))], T + 3600, None)
+        db.log_dispatches(&[sighting("car", T, T + 3600, Some(7.0))], T + 3600)
             .unwrap();
         let keep = DISPATCH_LOG_KEEP_DAYS * 86_400;
-        // A first write with the clock far ahead (wrong at start-up) keeps it.
-        db.log_dispatches(&[], T + 3601 + keep, None).unwrap();
+        // A write after a jump (a clock wrong at start-up) keeps it.
+        db.log_dispatches(&[], T + 3600 + keep - GAP).unwrap();
         assert_eq!(db.logged_dispatches_since(0, GAP).unwrap().len(), 1);
-
-        db.log_dispatches(&[], T + 3600 + keep, Some(T + 3600 + keep - GAP))
-            .unwrap();
+        // Unbroken from there: dropped once it ended more than the window ago.
+        db.log_dispatches(&[], T + 3600 + keep).unwrap();
         assert_eq!(db.logged_dispatches_since(0, GAP).unwrap().len(), 1);
-        db.log_dispatches(&[], T + 3601 + keep, Some(T + 3601 + keep - GAP))
-            .unwrap();
+        db.log_dispatches(&[], T + 3601 + keep).unwrap();
         assert!(db.logged_dispatches_since(0, GAP).unwrap().is_empty());
     }
 
@@ -484,10 +453,10 @@ mod tests {
     fn the_log_keeps_its_start_while_the_checks_are_unbroken() {
         let (db, _path) = test_db();
         assert_eq!(db.dispatch_log_since(), None);
-        checks(&db, &[], T, T + 86_400, None);
+        checks(&db, &[], T, T + 86_400);
         assert_eq!(db.dispatch_log_since(), Some(T));
         // Half an hour between writes is still unbroken.
-        db.log_dispatches(&[], T + 86_400 + MAX_LOG_GAP_SECS, Some(T + 86_400))
+        db.log_dispatches(&[], T + 86_400 + MAX_LOG_GAP_SECS)
             .unwrap();
         assert_eq!(db.dispatch_log_since(), Some(T));
     }
@@ -495,47 +464,56 @@ mod tests {
     #[test]
     fn a_gap_in_the_checks_starts_the_log_again() {
         let (db, _path) = test_db();
-        let last = checks(&db, &[], T, T + 3600, None).unwrap();
-        // Octopus failed for over half an hour, or the hold was off.
+        let last = checks(&db, &[], T, T + 3600);
+        // Octopus failed for over half an hour, the hold was off, or HEM
+        // was closed.
         let after = last + MAX_LOG_GAP_SECS + 1;
-        db.log_dispatches(&[], after, Some(last)).unwrap();
+        db.log_dispatches(&[], after).unwrap();
         assert_eq!(db.dispatch_log_since(), Some(after));
     }
 
     #[test]
     fn a_clock_step_starts_the_log_again() {
         let (db, _path) = test_db();
-        checks(&db, &[], T, T + 600, None);
+        let last = checks(&db, &[], T, T + 600);
         // Stepped back a minute.
-        db.log_dispatches(&[], T + 540, Some(T + 600)).unwrap();
-        assert_eq!(db.dispatch_log_since(), Some(T + 540));
+        db.log_dispatches(&[], last - 60).unwrap();
+        assert_eq!(db.dispatch_log_since(), Some(last - 60));
         // Stepped forward a month.
-        db.log_dispatches(&[], T + 30 * 86_400, Some(T + 540))
-            .unwrap();
+        db.log_dispatches(&[], T + 30 * 86_400).unwrap();
         assert_eq!(db.dispatch_log_since(), Some(T + 30 * 86_400));
     }
 
     #[test]
-    fn hem_being_closed_is_not_a_gap_unless_the_clock_went_back() {
-        let (db, _path) = test_db();
-        checks(&db, &[], T, T + 600, None);
-        // Closed overnight: the first write of the new run keeps the start.
-        db.log_dispatches(&[], T + 43_200, None).unwrap();
+    fn a_quick_restart_keeps_the_log_and_a_longer_closure_starts_it_again() {
+        // The last write is in the database, so a restarted HEM knows how
+        // long it was gone.
+        let (db, path) = test_db();
+        let last = checks(&db, &[], T, T + 600);
+        drop(db);
+        let db = HistoryDb::open(&path).unwrap();
+        let restarted = last + MAX_LOG_GAP_SECS;
+        db.log_dispatches(&[], restarted).unwrap();
         assert_eq!(db.dispatch_log_since(), Some(T));
-        // A start recorded with a clock that was ahead is brought back.
-        db.log_dispatches(&[], T - 3600, None).unwrap();
-        assert_eq!(db.dispatch_log_since(), Some(T - 3600));
+        // Closed for an hour and a half: the profile still bridges it, and a
+        // dispatch could have run unseen.
+        drop(db);
+        let db = HistoryDb::open(&path).unwrap();
+        let back = restarted + 5400;
+        db.log_dispatches(&[], back).unwrap();
+        assert_eq!(db.dispatch_log_since(), Some(back));
     }
 
     #[test]
     fn forgetting_the_start_keeps_the_rows() {
         let (db, _path) = test_db();
-        db.log_dispatches(&[sighting("car", T, T + 60, None)], T + 600, None)
+        db.log_dispatches(&[sighting("car", T, T + 60, None)], T + 600)
             .unwrap();
         db.forget_dispatch_log_since().unwrap();
         assert_eq!(db.dispatch_log_since(), None);
         assert_eq!(db.logged_dispatches_since(0, GAP).unwrap().len(), 1);
-        db.log_dispatches(&[], T + 900, Some(T + 600)).unwrap();
+        // Back on within half an hour still starts again.
+        db.log_dispatches(&[], T + 900).unwrap();
         assert_eq!(db.dispatch_log_since(), Some(T + 900));
     }
 
@@ -548,7 +526,6 @@ mod tests {
         let writer = {
             let db = db.clone();
             std::thread::spawn(move || {
-                let mut previous = None;
                 for round in 1..=300 {
                     let kwh = Some(round as f64);
                     let at = T + 3600 + round;
@@ -558,10 +535,8 @@ mod tests {
                             sighting("car-b", T, T + 3600, kwh),
                         ],
                         at,
-                        previous,
                     )
                     .unwrap();
-                    previous = Some(at);
                 }
             })
         };

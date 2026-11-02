@@ -29,6 +29,11 @@ use crate::settings::Settings;
 /// How often dispatches are read. Octopus allows about five dispatch queries
 /// a minute; this stays far below that.
 const POLL_INTERVAL: StdDuration = StdDuration::from_secs(3 * 60);
+
+/// How long after its last sighting a logged dispatch counts as still
+/// running: one check, as one that vanished was cancelled before the next.
+pub const LOG_SEEN_GAP_SECS: i64 = POLL_INTERVAL.as_secs() as i64;
+
 /// A dispatch list older than this is not trusted to hold the battery.
 pub const STALE_AFTER_MINUTES: i64 = 15;
 /// How often the account's car and charger list is re-read.
@@ -121,10 +126,6 @@ pub struct DispatchesState {
     /// After a restart mid-hold: keep holding until this time or until the
     /// first check finishes, whichever is first.
     restart_hold_until: Option<DateTime<Utc>>,
-    /// This process's last successful dispatch log write, so the log can
-    /// tell an unbroken run from a gap. Kept when the hold is switched: an
-    /// off spell is a gap.
-    last_log_write: Option<i64>,
     /// Why the last dispatch log write failed, so it's reported once.
     pub log_error: Option<String>,
 }
@@ -200,7 +201,6 @@ impl DispatchesState {
     pub(crate) fn reset(&mut self) {
         *self = Self {
             generation: self.generation.wrapping_add(1),
-            last_log_write: self.last_log_write,
             ..Self::default()
         };
     }
@@ -492,19 +492,12 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         }
     }
     // The hold is decided; the log is written after, off the lock.
-    let previous_write = current.last_log_write;
     drop(current);
     let Some(sightings) = sightings else {
         return;
     };
     let seen_at = now.timestamp();
-    let written = write_log(state, move |db| {
-        db.log_dispatches(&sightings, seen_at, previous_write)
-    })
-    .await;
-    if written {
-        state.octopus_dispatches.lock().await.last_log_write = Some(seen_at);
-    }
+    write_log(state, move |db| db.log_dispatches(&sightings, seen_at)).await;
 }
 
 /// Run a dispatch log write on the blocking pool, reporting a failure once
@@ -1344,8 +1337,7 @@ mod tests {
     }
 
     fn logged(db: &crate::history::HistoryDb) -> Vec<crate::history::dispatch_log::LoggedDispatch> {
-        db.logged_dispatches_since(0, POLL_INTERVAL.as_secs() as i64)
-            .unwrap()
+        db.logged_dispatches_since(0, LOG_SEEN_GAP_SECS).unwrap()
     }
 
     #[tokio::test]
@@ -1485,6 +1477,40 @@ mod tests {
             let on = utc("2026-10-17T13:51:00+00:00");
             check_once(&state, on).await;
             assert_eq!(db.dispatch_log_since(), Some(on.timestamp()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn octopus_failing_from_start_up_starts_the_log_again() {
+        // A restarted HEM whose first checks fail for six hours records the
+        // house all that time; a car could have charged unseen in it.
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let (db, path) = log_db("dispatch-log-start-up");
+            {
+                let state = configure(&mock, true).await;
+                *state.history.lock().await = Some(db.clone());
+                check_once(&state, utc(NOW)).await;
+            }
+            mock.set_dispatches(json!({
+                "errors": [{ "message": "Unable to fetch planned dispatches.",
+                             "extensions": { "errorCode": "KT-CT-4340" } }],
+                "data": { "flexPlannedDispatches": null }
+            }));
+            drop(db);
+            let db = Arc::new(crate::history::HistoryDb::open(&path).unwrap());
+            let state = configure(&mock, true).await;
+            *state.history.lock().await = Some(db.clone());
+            let restarted = utc(NOW) + Duration::minutes(10);
+            for minute in (0..=360).step_by(3) {
+                check_once(&state, restarted + Duration::minutes(minute)).await;
+            }
+            assert_eq!(db.dispatch_log_since(), Some(utc(NOW).timestamp()));
+            mock.set_dispatches(one_dispatch());
+            let back = restarted + Duration::minutes(363);
+            check_once(&state, back).await;
+            assert_eq!(db.dispatch_log_since(), Some(back.timestamp()));
         })
         .await;
     }
