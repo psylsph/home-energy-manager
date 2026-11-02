@@ -143,13 +143,13 @@ describe('HistoryBackupPanel', () => {
       serve(status(), status({ running: true }), done);
       apiPost.mockResolvedValue({ ok: true, data: { running: true } });
       render(<HistoryBackupPanel />);
-      fireEvent.click(await screen.findByRole('button', { name: 'Back up now' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Back Up Now' }));
       await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/backup/run'));
-      const busy = await screen.findByRole('button', { name: 'Backing up…' });
+      const busy = await screen.findByRole('button', { name: 'Backing Up…' });
       expect((busy as HTMLButtonElement).disabled).toBe(true);
       await vi.advanceTimersByTimeAsync(3000);
       expect(await screen.findByText(/2\.0 KB/)).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Back up now' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Back Up Now' })).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
@@ -164,23 +164,23 @@ describe('HistoryBackupPanel', () => {
     }));
     apiPost.mockResolvedValue({ ok: true, data: { running: true } });
     render(<HistoryBackupPanel />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Back up now' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Back Up Now' }));
     expect(await screen.findByText(/disk full/)).toBeTruthy();
   });
 
-  it('shows a failed "Back up now" and still refreshes the status', async () => {
+  it('shows a failed "Back Up Now" and still refreshes the status', async () => {
     serve(status());
     apiPost.mockRejectedValue(new Error('A backup is already running'));
     render(<HistoryBackupPanel />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Back up now' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Back Up Now' }));
     expect((await screen.findByRole('alert')).textContent).toBe('A backup is already running');
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
   });
 
-  it('disables "Back up now" while a scheduled backup is running', async () => {
+  it('disables "Back Up Now" while a scheduled backup is running', async () => {
     serve(status({ running: true }));
     render(<HistoryBackupPanel />);
-    const button = await screen.findByRole('button', { name: 'Backing up…' });
+    const button = await screen.findByRole('button', { name: 'Backing Up…' });
     expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -233,9 +233,9 @@ describe('HistoryBackupPanel', () => {
     try {
       serve(status({ running: true }), status({ running: false }));
       render(<HistoryBackupPanel />);
-      expect(await screen.findByRole('button', { name: 'Backing up…' })).toBeTruthy();
+      expect(await screen.findByRole('button', { name: 'Backing Up…' })).toBeTruthy();
       await vi.advanceTimersByTimeAsync(3000);
-      expect(await screen.findByRole('button', { name: 'Back up now' })).toBeTruthy();
+      expect(await screen.findByRole('button', { name: 'Back Up Now' })).toBeTruthy();
       const calls = apiGet.mock.calls.length;
       await vi.advanceTimersByTimeAsync(10_000);
       expect(apiGet.mock.calls.length).toBe(calls);
