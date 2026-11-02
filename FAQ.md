@@ -322,6 +322,8 @@ corrupt, which would split a battery's history in two). Adding a Gen 3 battery
 to a Gen 2 system makes the new Gen 3 the master and the Gen 2 the second
 battery, so the Gen 2's earlier history ends up under the Gen 3. Your main
 history (power, SOC, daily totals) covers the whole system and isn't affected.
+See [issue #427](https://github.com/psylsph/home-energy-manager/issues/427)
+for the background.
 
 You can move the old rows across with the SQLite command-line tool:
 
