@@ -25482,6 +25482,7 @@ pub(crate) mod tests {
             consumption_tomorrow_kwh: 12.0,
             consumption_excluded_ev_kwh: 0.0,
             consumption_excluded_above_kwh: 0.0,
+            consumption_excluded_dispatch_kwh: 0.0,
             battery: None,
             import_tomorrow_kwh: 0.0,
             export_tomorrow_kwh: 0.0,

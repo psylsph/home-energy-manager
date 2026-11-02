@@ -121,8 +121,19 @@ const HOUR_SECS: i64 = 3600;
 /// The dispatch's planned energy, if it's a finite, positive figure a home
 /// charger could deliver in the dispatch's time.
 fn believable_energy(dispatch: &Dispatch) -> Option<f64> {
-    let energy = dispatch.energy_added_kwh?;
-    let hours = (dispatch.end - dispatch.start).num_seconds() as f64 / HOUR_SECS as f64;
+    believable_kwh(
+        dispatch.start.timestamp(),
+        dispatch.end.timestamp(),
+        dispatch.energy_added_kwh,
+    )
+}
+
+/// `energy_kwh` over `[start, end)` (Unix seconds), if it's a finite,
+/// positive figure a home charger could deliver in that time. Shared with
+/// the profile, so both trust the same Octopus figures.
+pub(crate) fn believable_kwh(start: i64, end: i64, energy_kwh: Option<f64>) -> Option<f64> {
+    let energy = energy_kwh?;
+    let hours = (end - start) as f64 / HOUR_SECS as f64;
     (energy.is_finite() && energy > 0.0 && energy <= MAX_CHARGER_KW * hours + 1e-9)
         .then_some(energy)
 }
