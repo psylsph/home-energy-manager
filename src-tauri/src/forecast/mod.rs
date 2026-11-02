@@ -176,7 +176,7 @@ pub struct ForecastInputs<'a> {
     pub weather_coords: Option<(f64, f64)>,
     pub now: DateTime<Local>,
     /// The account's planned car charging, when the dispatch hold is on
-    /// ([`crate::octopus_dispatches::NO_DISPATCHES`] otherwise).
+    /// (no dispatches otherwise).
     pub dispatches: &'a PlanningDispatches,
 }
 
@@ -353,10 +353,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         })
         .map(|hour| hour.ev_kwh)
         .sum();
-    let dispatches_checked_at = (!planning.stale)
-        .then_some(planning.checked_at)
-        .flatten()
-        .map(|at| at.timestamp());
+    let dispatches_checked_at = planning.checked_at.map(|at| at.timestamp());
 
     let consumption_weekday = consumption_series(&profile, false);
     let consumption_weekend = consumption_series(&profile, true);
@@ -403,7 +400,11 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                         }
                     })
                     .collect();
-                apply_dispatch_hours(&mut sim_hours, &ev_dispatch_hours, ev_dispatch_net_of_profile);
+                apply_dispatch_hours(
+                    &mut sim_hours,
+                    &ev_dispatch_hours,
+                    ev_dispatch_net_of_profile,
+                );
                 let params = SimulationParams {
                     capacity_kwh: snap.battery_capacity_kwh as f64,
                     start_soc_pct: snap.soc as f64,
@@ -707,7 +708,7 @@ mod tests {
     use super::*;
     use crate::forecast::solar::SolarForecastSample;
     use crate::inverter::model::InverterSnapshot;
-    use crate::octopus_dispatches::{Dispatch, PlanningDispatches, NO_DISPATCHES};
+    use crate::octopus_dispatches::{Dispatch, PlanningDispatches};
     use crate::settings::{Settings, SolarArrayConfig, WeatherConfig};
     use chrono::TimeZone;
     use std::path::PathBuf;
@@ -1355,6 +1356,14 @@ mod tests {
         }
     }
 
+    /// No dispatches, borrowed for as long as the inputs need.
+    static NO_DISPATCHES: PlanningDispatches = PlanningDispatches {
+        dispatches: Vec::new(),
+        checked_at: None,
+        stale: false,
+        hold_applies: false,
+    };
+
     fn full_forecast_inputs<'a>(
         db: &'a HistoryDb,
         snapshot: Option<&'a InverterSnapshot>,
@@ -1368,7 +1377,7 @@ mod tests {
             weather_enabled: true,
             weather_coords: Some((51.5, -0.13)),
             now,
-            dispatches: &crate::octopus_dispatches::NO_DISPATCHES,
+            dispatches: &NO_DISPATCHES,
         }
     }
 
@@ -1840,7 +1849,7 @@ mod tests {
             weather_enabled: false,
             weather_coords: None,
             now,
-            dispatches: &crate::octopus_dispatches::NO_DISPATCHES,
+            dispatches: &PlanningDispatches::default(),
         };
         let payload = build_forecast_payload(&inputs);
         for code in [
@@ -2150,7 +2159,7 @@ mod tests {
     fn a_held_evening_dispatch_keeps_the_house_off_the_battery() {
         let db = test_db();
         let settings = seed_car_free_state(&db, car_now());
-        let without = car_payload(&db, &settings, &NO_DISPATCHES);
+        let without = car_payload(&db, &settings, &PlanningDispatches::default());
         let tonight = fresh(vec![car_dispatch(
             local_ts(15, 19),
             local_ts(15, 21),
@@ -2192,7 +2201,7 @@ mod tests {
     fn a_boost_runs_from_the_battery() {
         let db = test_db();
         let settings = seed_car_free_state(&db, car_now());
-        let without = car_payload(&db, &settings, &NO_DISPATCHES);
+        let without = car_payload(&db, &settings, &PlanningDispatches::default());
         let boost = fresh(vec![car_dispatch(
             local_ts(15, 19),
             local_ts(15, 20),
@@ -2214,10 +2223,10 @@ mod tests {
     fn a_stale_list_changes_nothing_but_the_status() {
         let db = test_db();
         let settings = seed_car_free_state(&db, car_now());
-        let without = car_payload(&db, &settings, &NO_DISPATCHES);
+        let without = car_payload(&db, &settings, &PlanningDispatches::default());
+        // As `for_planning` gives it: stale, so no list and no time.
         let stale = PlanningDispatches {
             stale: true,
-            checked_at: Some(car_now().with_timezone(&chrono::Utc) - chrono::Duration::hours(1)),
             ..PlanningDispatches::default()
         };
         let mut with = car_payload(&db, &settings, &stale);
@@ -2332,10 +2341,7 @@ mod tests {
             soc_after(&without, after)
         );
         // The chart still shows what Octopus plans for the car.
-        assert_eq!(
-            with.ev_dispatch_hours.first().map(|h| h.ev_kwh),
-            Some(3.0)
-        );
+        assert_eq!(with.ev_dispatch_hours.first().map(|h| h.ev_kwh), Some(3.0));
     }
 
     #[test]

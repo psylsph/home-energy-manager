@@ -73,12 +73,13 @@ impl Dispatch {
     }
 }
 
-/// What the planner gets from the dispatch list (issue #406).
+/// What the planner gets from the dispatch list (issue #406). The default
+/// is no dispatches, as with the hold off.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlanningDispatches {
     /// Dispatches not yet over, from a list fresh enough to trust.
     pub dispatches: Vec<Dispatch>,
-    /// When that list was read.
+    /// When that list was read; none unless it is fresh.
     pub checked_at: Option<DateTime<Utc>>,
     /// The hold is on but the list is missing or too old to plan with.
     pub stale: bool,
@@ -87,14 +88,6 @@ pub struct PlanningDispatches {
     /// battery then.
     pub hold_applies: bool,
 }
-
-/// No dispatches: what the planner sees with the hold off.
-pub static NO_DISPATCHES: PlanningDispatches = PlanningDispatches {
-    dispatches: Vec::new(),
-    checked_at: None,
-    stale: false,
-    hold_applies: false,
-};
 
 /// An Octopus access token. Its `Debug` output is redacted so logging the
 /// state never leaks it.
@@ -179,7 +172,6 @@ impl DispatchesState {
         }
         if !self.fresh(now) {
             return PlanningDispatches {
-                checked_at: self.checked_at,
                 stale: true,
                 ..PlanningDispatches::default()
             };
@@ -859,11 +851,7 @@ mod tests {
             let got = state.for_planning(utc(now), true, false);
             assert!(got.stale, "{now}");
             assert!(got.dispatches.is_empty(), "{now}");
-            assert_eq!(
-                got.checked_at,
-                Some(utc("2026-10-17T13:00:00+00:00")),
-                "{now}"
-            );
+            assert_eq!(got.checked_at, None, "{now}");
         }
     }
 

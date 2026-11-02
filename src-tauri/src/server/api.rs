@@ -25557,7 +25557,10 @@ pub(crate) mod tests {
                 get_forecast_at(state.clone(), now + chrono::Duration::hours(1)).await;
             let status: Vec<_> = body["data"]["status"].as_array().unwrap().clone();
             assert!(status.contains(&json!("dispatches_stale")), "{status:?}");
-            assert!(body["data"]["ev_dispatch_hours"].as_array().unwrap().is_empty());
+            assert!(body["data"]["ev_dispatch_hours"]
+                .as_array()
+                .unwrap()
+                .is_empty());
         })
         .await;
     }

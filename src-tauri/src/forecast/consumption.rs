@@ -360,11 +360,9 @@ pub fn build_consumption_profile_excluding(
     let mut weekday_days = std::collections::BTreeSet::new();
     let mut weekend_days = std::collections::BTreeSet::new();
     let mut excluded = Excluded::default();
-    let (history_secs, charger_secs) = hour_sums
-        .values()
-        .fold((0, 0), |(all, charger), sum| {
-            (all + sum.secs, charger + sum.ev_secs.min(sum.secs))
-        });
+    let (history_secs, charger_secs) = hour_sums.values().fold((0, 0), |(all, charger), sum| {
+        (all + sum.secs, charger + sum.ev_secs.min(sum.secs))
+    });
     for ((day, hour), sum) in hour_sums {
         let sum = household_kwh(&sum, exclusions, &mut excluded);
         all_buckets[hour as usize].push(sum);

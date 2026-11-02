@@ -378,7 +378,11 @@ mod tests {
                 held_fraction: 0.5,
             },
         ];
-        let base = vec![sim_hour(T0, 0.5), sim_hour(T0 + H, 0.5), sim_hour(T0 + 2 * H, 0.5)];
+        let base = vec![
+            sim_hour(T0, 0.5),
+            sim_hour(T0 + H, 0.5),
+            sim_hour(T0 + 2 * H, 0.5),
+        ];
 
         let mut whole = base.clone();
         apply_dispatch_hours(&mut whole, &dispatch_hours, false);
