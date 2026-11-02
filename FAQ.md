@@ -314,6 +314,76 @@ Two things it needs:
 
 ---
 
+### I added a battery and my old battery's health history now shows under the new one
+
+The **Battery Health** panel on the Battery page records each battery by its
+position in the stack, not by its serial number (serials sometimes read back
+corrupt, which would split a battery's history in two). Adding a Gen 3 battery
+to a Gen 2 system makes the new Gen 3 the master and the Gen 2 the second
+battery, so the Gen 2's earlier history ends up under the Gen 3. Your main
+history (power, SOC, daily totals) covers the whole system and isn't affected.
+
+You can move the old rows across with the SQLite command-line tool:
+
+- **Linux / Raspberry Pi**: `sudo apt install sqlite3`
+- **macOS**: already installed
+- **Windows**: download the "sqlite-tools" zip from
+  [sqlite.org/download.html](https://sqlite.org/download.html) and unzip
+  `sqlite3.exe` somewhere handy
+
+If you'd rather not type commands, [DB Browser for SQLite](https://sqlitebrowser.org/)
+works too: open the file, paste the statements into the **Execute SQL** tab and
+click **Write Changes**.
+
+1. **Close Home Energy Manager completely** (on headless installs, stop the
+   service). It writes its battery figures out on shutdown.
+2. **Back up the database.** It lives at `~/.givenergy-local/history.db`, or
+   `%USERPROFILE%\.givenergy-local\history.db` on Windows:
+
+   ```sh
+   cd ~/.givenergy-local
+   cp history.db history-before-fix.db
+   sqlite3 history.db
+   ```
+
+3. **Check the switch-over day.** `module_index` 0 is the first battery (the
+   master) and 1 is the second. The first day with a `module_index` 1 row is
+   the day the second battery appeared:
+
+   ```sql
+   SELECT MIN(day) FROM battery_health_daily WHERE module_index = 1;
+   ```
+
+4. **Move the old rows.** The delete removes the first battery's row for the
+   day you fitted the new one, because it mixes both batteries. The update
+   then moves everything before that day to the second battery. Run them in
+   this order, because once the update has run the old rows are under
+   `module_index` 1 too and the day lookup no longer finds the switch-over:
+
+   ```sql
+   DELETE FROM battery_health_daily
+   WHERE module_index = 0
+     AND day = (SELECT MIN(day) FROM battery_health_daily WHERE module_index = 1);
+
+   UPDATE battery_health_daily SET module_index = 1
+   WHERE module_index = 0
+     AND day < (SELECT MIN(day) FROM battery_health_daily WHERE module_index = 1);
+
+   .quit
+   ```
+
+   If there are no `module_index` 1 rows, both statements do nothing.
+
+5. **Start the app again.** Each battery should now show its own history. If
+   anything looks wrong, close the app and copy `history-before-fix.db` back
+   over `history.db`.
+
+This assumes you went from one battery to two. With more batteries, or if a
+battery was replaced in the same position, open an issue and we'll work out
+the right statements with you.
+
+---
+
 ### Something else?
 
 Open an issue on [GitHub](https://github.com/psylsph/home-energy-manager/issues) and we'll help you out.

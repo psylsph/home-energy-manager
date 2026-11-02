@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-11-02
+
+### Added
+
+- **The forecast plans around Intelligent Octopus Go's car charging.** With the Octopus dispatch hold turned on, the forecast and the charge plan now know when Octopus has scheduled the car to charge. During a smart charge they keep the house off the battery, as the hold does, and a boost is counted as drawing from the battery. The car's energy is added to the forecast only where your usage history doesn't already include it: when the GivEnergy EV charger has been recording, or the part above your Leave Out Load Above setting on the Forecast page. The Forecast page says when the car charging is left out and why.
+
+### Fixed
+
+- **The Octopus page shows car charge energy as a positive figure.** Planned charges no longer show as "-3.6 kWh".
+- **Fewer "Couldn't check planned charges" errors.** When Octopus briefly can't report the car's status, the dispatch hold keeps working from the last list of cars instead of stopping until the next successful check.
+
 ## [1.4.0] - 2026-11-01
 
 ### Added
