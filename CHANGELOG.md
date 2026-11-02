@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-11-02
+
+### Added
+
+- **The forecast leaves Intelligent Octopus car charging out of your usage, even without a GivEnergy EV charger.** With the Octopus dispatch hold turned on, HEM now keeps a record of the car charges Octopus ran and takes their energy out of the usage history the forecast learns from. Once that record covers your whole usage history, about four weeks with the hold on, the forecast adds the car's planned charging in full, as it already does with a GivEnergy charger. Closing HEM for more than half an hour starts the four weeks again, since a charge could have run unseen.
+
 ## [1.5.0] - 2026-11-02
 
 ### Added
