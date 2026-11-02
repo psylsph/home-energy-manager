@@ -4,7 +4,9 @@
 
 Home Energy Manager connects directly to your inverter over your home network and shows you live data in real time. You can check your solar generation, battery charge, and energy costs, set charge schedules, and automate your battery — all without sending any data to the internet.
 
-> 💬 **Got a question or hit a snag?** Try asking your favourite AI assistant first — just point it at the [**installation guide**](https://github.com/psylsph/home-energy-manager/blob/master/INSTALL.md) and ask your question. If you don't get your answer, feel free to [raise an issue](https://github.com/psylsph/home-energy-manager/issues).
+> 💬 **Got a question or hit a snag?** [**Ask the AI assistant**](https://deepwiki.com/psylsph/home-energy-manager) first — it has read HEM's code and docs, so it can answer most "how do I…" and "why is it doing…" questions. If you don't get your answer, feel free to [raise an issue](https://github.com/psylsph/home-energy-manager/issues).
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/psylsph/home-energy-manager)
 
 <div align="center">
 

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a Question (AI Assistant)
+    url: https://deepwiki.com/psylsph/home-energy-manager
+    about: "Not sure if it's a bug, or how something works? Ask the AI assistant that has read HEM's code and docs. Answers can be wrong, so raise an issue if it doesn't help."

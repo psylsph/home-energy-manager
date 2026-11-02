@@ -6,6 +6,8 @@ labels: bug
 assignees: ''
 ---
 
+> Not sure it's a bug, or how a feature works? [Ask the AI assistant](https://deepwiki.com/psylsph/home-energy-manager) first; it has read HEM's code and docs. If it doesn't sort it, carry on below.
+
 **Describe the bug**
 
 **To Reproduce**
