@@ -964,6 +964,10 @@ mod tests {
         fn set_dispatches(&self, body: Value) {
             *self.dispatches_body.lock().unwrap() = body.to_string();
         }
+
+        fn set_devices(&self, body: Value) {
+            *self.devices_body.lock().unwrap() = body.to_string();
+        }
     }
 
     impl Drop for MockOctopus {
@@ -1039,6 +1043,60 @@ mod tests {
             assert_eq!(mock.count("devices("), 1);
             check_once(&state, utc("2026-10-17T18:00:00+00:00")).await;
             assert_eq!(mock.count("devices("), 2);
+        })
+        .await;
+    }
+
+    fn device_status_error() -> Value {
+        // Seen live after switching the hold off and on (2026-11-01).
+        json!({
+            "errors": [{ "message": "Device status could not be fetched.",
+                         "extensions": { "errorCode": "KT-CT-4360" } }],
+            "data": { "devices": null }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_failed_device_refresh_keeps_reading_dispatches_for_the_known_devices() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            check_once(&state, utc(NOW)).await;
+
+            // Six hours on the list is re-read, and Octopus fails it. The
+            // cars on an account rarely change, so the old list still reads
+            // the dispatches and the hold keeps working.
+            mock.set_devices(device_status_error());
+            let later = utc("2026-10-17T18:00:00+00:00");
+            check_once(&state, later).await;
+            assert_eq!(mock.count("flexPlannedDispatches"), 2);
+            let current = state.octopus_dispatches.lock().await.clone();
+            assert_eq!(current.error, None);
+            assert_eq!(current.checked_at, Some(later));
+            assert_eq!(current.devices, vec![CAR.to_string()]);
+
+            // The refresh is retried at the next check until it works.
+            check_once(&state, utc("2026-10-17T18:03:00+00:00")).await;
+            assert_eq!(mock.count("devices("), 3);
+            mock.set_devices(devices_response());
+            check_once(&state, utc("2026-10-17T18:06:00+00:00")).await;
+            check_once(&state, utc("2026-10-17T18:09:00+00:00")).await;
+            assert_eq!(mock.count("devices("), 4, "a good refresh is reused");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_device_read_is_reported() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            mock.set_devices(device_status_error());
+            let state = configure(&mock, true).await;
+            check_once(&state, utc(NOW)).await;
+            let current = state.octopus_dispatches.lock().await.clone();
+            assert!(current.error.as_deref().unwrap().contains("KT-CT-4360"));
+            assert_eq!(current.checked_at, None);
+            assert_eq!(mock.count("flexPlannedDispatches"), 0);
         })
         .await;
     }
