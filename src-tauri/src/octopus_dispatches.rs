@@ -629,6 +629,30 @@ mod tests {
     }
 
     #[test]
+    fn energy_octopus_sends_as_a_negative_import_is_read_as_the_energy_added() {
+        // A live account's list (2026-11-01): Octopus signs the energy the
+        // car draws as negative. 3.642 kWh in half an hour is a 7.3 kW
+        // charger, so the size is right and only the sign is backwards.
+        let parsed = parse_dispatches(&dispatches_response(json!([
+            dispatch(
+                "2026-11-01T23:00:00+00:00",
+                "2026-11-01T23:30:00+00:00",
+                json!("SMART"),
+                json!("-3.642")
+            ),
+            dispatch(
+                "2026-11-02T03:30:00+00:00",
+                "2026-11-02T04:30:00+00:00",
+                json!("SMART"),
+                json!(-7.284)
+            ),
+        ])))
+        .unwrap();
+        assert_eq!(parsed[0].energy_added_kwh, Some(3.642));
+        assert_eq!(parsed[1].energy_added_kwh, Some(7.284));
+    }
+
+    #[test]
     fn a_failed_dispatch_read_is_an_error_not_an_empty_list() {
         // Octopus's intermittent KT-CT-4340 failure.
         let error = parse_dispatches(&json!({
