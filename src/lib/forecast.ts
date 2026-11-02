@@ -54,9 +54,39 @@ export type ForecastData = {
    *  Absent from older backends. */
   consumption_excluded_ev_kwh?: number;
   consumption_excluded_above_kwh?: number;
+  /** Car charging the Octopus dispatch log took out (issue #406), kWh. */
+  consumption_excluded_dispatch_kwh?: number;
   battery: ForecastBattery | null;
   import_tomorrow_kwh: number;
   export_tomorrow_kwh: number;
+  /** Planned Intelligent Octopus car charging per forecast hour (issue
+   *  #406): only hours with car energy or a battery hold. Absent from older
+   *  backends and plan history. */
+  ev_dispatch_hours?: ForecastDispatchHour[];
+  ev_dispatch_tomorrow_kwh?: number;
+  dispatches_checked_at?: number | null;
+  ev_dispatch_net_of_profile?: boolean;
+  /** The planned car charges as Octopus gave them, by start. */
+  ev_dispatch_windows?: ForecastDispatchWindow[];
+};
+
+/** One planned car charge. */
+export type ForecastDispatchWindow = {
+  start: number;
+  end: number;
+  /** Whether the battery is held while it runs. */
+  held: boolean;
+  /** Octopus's planned energy, when believable, kWh. */
+  kwh: number | null;
+};
+
+/** One forecast hour's planned car charging. */
+export type ForecastDispatchHour = {
+  timestamp: number;
+  /** The car's planned energy in the hour, kWh. */
+  ev_kwh: number;
+  /** Share of the hour the battery is held for a smart charge, 0 to 1. */
+  held_fraction: number;
 };
 
 /**
@@ -235,6 +265,8 @@ export type ConsumptionChartPoint = {
   weekend: number | null;
   weekendP25: number | null;
   weekendP75: number | null;
+  /** Planned car charging in the hour, kWh; null for none. */
+  car?: number | null;
 };
 
 /** Tile weekday/weekend profiles onto the forward timestamps so the
@@ -267,6 +299,21 @@ export function toConsumptionChartData(
       weekendP75: isWeekend ? c?.p75 ?? 0 : null,
     };
   });
+}
+
+/** Add each hour's planned car energy (issue #406) to the chart points. */
+export function withCarCharging(
+  points: ConsumptionChartPoint[],
+  hours: ForecastDispatchHour[] | undefined,
+): ConsumptionChartPoint[] {
+  void hours;
+  return points;
+}
+
+/** One line for the plan (issue #406): the next car charge. */
+export function carChargingNote(data: ForecastData): string | null {
+  void data;
+  return null;
 }
 
 const FORECAST_X_AXIS_TICK_INTERVAL_SECONDS = 12 * 60 * 60;

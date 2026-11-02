@@ -26,6 +26,19 @@ pub struct DispatchHour {
     pub held_fraction: f64,
 }
 
+/// One planned car charge as Octopus gave it (issue #406), for the page to
+/// say when it runs; the hours above are what the plan simulates.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct DispatchWindow {
+    /// Start and end, unix seconds.
+    pub start: i64,
+    pub end: i64,
+    /// Whether the battery is held while it runs.
+    pub held: bool,
+    /// The planned energy, when Octopus gave a believable figure, kWh.
+    pub kwh: Option<f64>,
+}
+
 /// [`dispatch_overlay`]'s answer: one entry per hour asked about, in order.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DispatchOverlay {
@@ -120,7 +133,7 @@ const HOUR_SECS: i64 = 3600;
 
 /// The dispatch's planned energy, if it's a finite, positive figure a home
 /// charger could deliver in the dispatch's time.
-fn believable_energy(dispatch: &Dispatch) -> Option<f64> {
+pub(crate) fn believable_energy(dispatch: &Dispatch) -> Option<f64> {
     believable_kwh(
         dispatch.start.timestamp(),
         dispatch.end.timestamp(),

@@ -25490,6 +25490,7 @@ pub(crate) mod tests {
             ev_dispatch_tomorrow_kwh: 0.0,
             dispatches_checked_at: None,
             ev_dispatch_net_of_profile: false,
+            ev_dispatch_windows: Vec::new(),
         }
     }
 

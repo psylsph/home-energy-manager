@@ -27,7 +27,7 @@ use crate::forecast::consumption::ConsumptionProfile;
 use crate::forecast::consumption::{build_consumption_profile_excluding, ConsumptionExclusions};
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
 use crate::forecast::dispatch_load::{
-    apply_dispatch_hours, believable_kwh, dispatch_overlay, DispatchHour,
+    apply_dispatch_hours, believable_kwh, dispatch_overlay, DispatchHour, DispatchWindow,
 };
 use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
@@ -169,6 +169,8 @@ pub struct ForecastPayload {
     /// The profile may still hold part of the car (only the threshold trims
     /// it), so each hour adds just the car energy above its own load.
     pub ev_dispatch_net_of_profile: bool,
+    /// The planned car charges in the forecast horizon, by start.
+    pub ev_dispatch_windows: Vec<DispatchWindow>,
 }
 
 /// Everything [`build_forecast_payload`] needs, so the assembly is a pure
@@ -374,6 +376,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         .map(|hour| hour.ev_kwh)
         .sum();
     let dispatches_checked_at = planning.checked_at.map(|at| at.timestamp());
+    let ev_dispatch_windows: Vec<DispatchWindow> = Vec::new();
 
     let consumption_weekday = consumption_series(&profile, false);
     let consumption_weekend = consumption_series(&profile, true);
@@ -492,6 +495,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         ev_dispatch_tomorrow_kwh,
         dispatches_checked_at,
         ev_dispatch_net_of_profile,
+        ev_dispatch_windows,
     }
 }
 
@@ -2240,6 +2244,79 @@ mod tests {
         );
         assert_eq!(with.dispatches_checked_at, Some(car_now().timestamp()));
         assert!(without.ev_dispatch_hours.is_empty());
+    }
+
+    #[test]
+    fn the_payload_lists_the_planned_charges_as_octopus_gave_them() {
+        let db = test_db();
+        let settings = seed_car_free_state(&db, car_now());
+        let half = 1800;
+        let list = fresh(vec![
+            // Already over: not listed.
+            car_dispatch(local_ts(15, 9), local_ts(15, 10), "SMART", Some(7.0)),
+            car_dispatch(
+                local_ts(15, 20) + half,
+                local_ts(15, 21),
+                "BOOST",
+                Some(3.5),
+            ),
+            car_dispatch(local_ts(15, 19) + half, local_ts(15, 20), "SMART", None),
+            // Beyond the forecast horizon: not listed.
+            car_dispatch(local_ts(20, 1), local_ts(20, 2), "SMART", Some(7.0)),
+        ]);
+        let payload = car_payload(&db, &settings, &list);
+        assert_eq!(
+            payload.ev_dispatch_windows,
+            vec![
+                DispatchWindow {
+                    start: local_ts(15, 19) + half,
+                    end: local_ts(15, 20),
+                    held: true,
+                    kwh: None,
+                },
+                DispatchWindow {
+                    start: local_ts(15, 20) + half,
+                    end: local_ts(15, 21),
+                    held: false,
+                    kwh: Some(3.5),
+                },
+            ]
+        );
+
+        // During a calibration run nothing is held.
+        let unheld = PlanningDispatches {
+            hold_applies: false,
+            ..list
+        };
+        let payload = car_payload(&db, &settings, &unheld);
+        assert!(payload.ev_dispatch_windows.iter().all(|w| !w.held));
+        assert!(car_payload(&db, &settings, &PlanningDispatches::default())
+            .ev_dispatch_windows
+            .is_empty());
+    }
+
+    #[test]
+    fn the_planned_charges_are_listed_without_solar_data() {
+        // Weather off: no forecast hours, but the charges are still known.
+        let db = test_db();
+        seed_consumption_history(&db, car_now());
+        let list = fresh(vec![car_dispatch(
+            local_ts(15, 19),
+            local_ts(15, 20),
+            "SMART",
+            Some(7.0),
+        )]);
+        let payload = car_payload(&db, &five_kwp_settings(), &list);
+        assert!(payload.solar.is_empty());
+        assert_eq!(
+            payload.ev_dispatch_windows,
+            vec![DispatchWindow {
+                start: local_ts(15, 19),
+                end: local_ts(15, 20),
+                held: true,
+                kwh: Some(7.0),
+            }]
+        );
     }
 
     #[test]

@@ -69,6 +69,18 @@ describe('SmartChargingPanel', () => {
     expect(apiGet).toHaveBeenCalledWith('/api/octopus/dispatches');
   });
 
+  it("says in the ⓘ that the Planner uses the list", async () => {
+    apiGet.mockResolvedValue(reply({ dispatches: [smart, boost] }));
+    render(<SmartChargingPanel />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'More about holding the battery during smart charges' }),
+    );
+    const tip = screen.getByRole('tooltip').textContent;
+    expect(tip).toMatch(/Planner uses the same list/);
+    // The car's energy goes in only once it isn't already in the history.
+    expect(tip).toMatch(/once your usage history no longer includes the car/);
+  });
+
   it('turns the hold on and reloads', async () => {
     apiGet.mockResolvedValue(reply({ enabled: false }));
     apiPost.mockResolvedValue({ ok: true, enabled: true });

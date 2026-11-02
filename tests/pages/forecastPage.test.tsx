@@ -149,6 +149,7 @@ vi.mock('recharts', () => ({
     <div data-testid="forecast-composed-chart">{children}</div>
   ),
   Area: ({ name }: { name?: string }) => <div>{name}</div>,
+  Bar: ({ name }: { name?: string }) => <div>{name}</div>,
   Line: ({ name, stroke, strokeWidth, isAnimationActive }: {
     name?: string;
     stroke?: string;
@@ -388,6 +389,42 @@ describe('ForecastPage', () => {
     const weekend = screen.getByText('Weekend Median');
     expect(weekday.compareDocumentPosition(weekend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByText('Median consumption')).toBeNull();
+  });
+
+  it('draws planned car charging on the home-use chart and notes it in the plan', async () => {
+    const at = 1_700_003_600;
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') {
+        return {
+          ok: true,
+          data: {
+            ...fullPayload(),
+            ev_dispatch_hours: [{ timestamp: at, ev_kwh: 3.5, held_fraction: 1 }],
+            ev_dispatch_windows: [{ start: at, end: at + 3600, held: true, kwh: 3.5 }],
+          },
+        };
+      }
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    const note = await screen.findByTestId('forecast-plan-car');
+    expect(note.textContent).toMatch(/^Next car charge .*, 3\.5 kWh, battery held\.$/);
+    const panel = document.getElementById('forecast-chart-panel-consumption')!;
+    expect(within(panel).getByText('Car Charging')).toBeTruthy();
+  });
+
+  it('shows no car charging without planned dispatches', async () => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan');
+    await screen.findByText('Weekday Median');
+    expect(screen.queryByTestId('forecast-plan-car')).toBeNull();
+    expect(screen.queryByText('Car Charging')).toBeNull();
   });
 
   it('uses a composed chart so both consumption median lines render and join the tooltip', async () => {

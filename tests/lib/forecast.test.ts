@@ -23,6 +23,8 @@ import {
   tomorrowSummary,
   parseLoadAboveKw,
   consumptionExclusionNote,
+  carChargingNote,
+  withCarCharging,
 } from '../../src/lib/forecast';
 import type { ForecastData, ForecastBattery, PlanRecommendation } from '../../src/lib/forecast';
 
@@ -795,5 +797,100 @@ describe('consumptionExclusionNote', () => {
         consumption_excluded_above_kwh: 4.2,
       }),
     ).toBe('14.2 kWh of EV charging left out of the last 28 days');
+  });
+
+  it('counts the car charging the Octopus dispatch log took out', () => {
+    expect(
+      consumptionExclusionNote({
+        ...data,
+        consumption_excluded_ev_kwh: 1,
+        consumption_excluded_above_kwh: 2,
+        consumption_excluded_dispatch_kwh: 3.04,
+      }),
+    ).toBe('6.0 kWh of EV charging left out of the last 28 days');
+    expect(
+      consumptionExclusionNote({ consumption_excluded_dispatch_kwh: 7 } as ForecastData),
+    ).toBe('7.0 kWh of EV charging left out of the last 28 days');
+  });
+});
+
+describe('withCarCharging', () => {
+  const point = (timestamp: number) => ({
+    timestamp,
+    weekday: 0.5,
+    weekdayP25: 0.4,
+    weekdayP75: 0.6,
+    weekend: null,
+    weekendP25: null,
+    weekendP75: null,
+  });
+
+  it("adds each hour's planned car energy by timestamp", () => {
+    const points = withCarCharging([point(0), point(3600), point(7200)], [
+      { timestamp: 3600, ev_kwh: 3.5, held_fraction: 1 },
+      // An hour off the chart's axis is ignored.
+      { timestamp: 99_999, ev_kwh: 7, held_fraction: 1 },
+    ]);
+    expect(points.map((p) => p.car)).toEqual([null, 3.5, null]);
+    expect(points[1].weekday).toBe(0.5);
+  });
+
+  it('leaves hours with only a hold, or nonsense figures, without a bar', () => {
+    const points = withCarCharging([point(0), point(3600), point(7200)], [
+      { timestamp: 0, ev_kwh: 0, held_fraction: 1 },
+      { timestamp: 3600, ev_kwh: Number.NaN, held_fraction: 0 },
+      { timestamp: 7200, ev_kwh: -1, held_fraction: 0 },
+    ]);
+    expect(points.map((p) => p.car)).toEqual([null, null, null]);
+  });
+
+  it('draws no car for an older payload without dispatch hours', () => {
+    expect(withCarCharging([point(0)], undefined).map((p) => p.car)).toEqual([null]);
+  });
+});
+
+describe('carChargingNote', () => {
+  // Summer, so UK time is UTC + 1 (the Octopus page's format and zone).
+  const utc = (iso: string) => Date.parse(iso) / 1000;
+  const data = (
+    windows: { start: number; end: number; held: boolean; kwh: number | null }[] | undefined,
+  ) => ({ status: [], ev_dispatch_windows: windows }) as unknown as ForecastData;
+
+  it('says nothing without planned charges, or for an older backend', () => {
+    expect(carChargingNote(data(undefined))).toBeNull();
+    expect(carChargingNote(data([]))).toBeNull();
+  });
+
+  it('gives the next charge in UK time with its energy and hold', () => {
+    expect(
+      carChargingNote(
+        data([
+          {
+            start: utc('2026-06-15T18:30:00Z'),
+            end: utc('2026-06-15T19:00:00Z'),
+            held: true,
+            kwh: 3.5,
+          },
+          {
+            start: utc('2026-06-15T19:30:00Z'),
+            end: utc('2026-06-15T20:00:00Z'),
+            held: false,
+            kwh: 3.5,
+          },
+        ]),
+      ),
+    ).toBe('Next car charge Mon 15 Jun, 19:30–20:00, 3.5 kWh, battery held. 1 more planned.');
+  });
+
+  it('says a boost runs from the battery and leaves out an unknown energy', () => {
+    const boost = (kwh: number | null) =>
+      data([
+        { start: utc('2026-06-15T18:00:00Z'), end: utc('2026-06-15T19:00:00Z'), held: false, kwh },
+      ]);
+    for (const kwh of [null, 0, -2, Number.NaN]) {
+      expect(carChargingNote(boost(kwh))).toBe(
+        'Next car charge Mon 15 Jun, 19:00–20:00, from the battery.',
+      );
+    }
   });
 });
