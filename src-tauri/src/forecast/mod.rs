@@ -23,7 +23,7 @@ pub(crate) mod time_windows;
 use chrono::{DateTime, Datelike, Local, Timelike};
 
 use crate::forecast::calibration::calibrate_performance_ratio_detailed;
-use crate::forecast::consumption::EvPowerMinute;
+use crate::forecast::consumption::ConsumptionProfile;
 use crate::forecast::consumption::{build_consumption_profile_excluding, ConsumptionExclusions};
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
 use crate::forecast::dispatch_load::{apply_dispatch_hours, dispatch_overlay, DispatchHour};
@@ -315,15 +315,25 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         status.push("insufficient_consumption_history".to_string());
     }
     // --- planned car charging (issue #406) --------------------------------
-    // The car's load goes in only where the profile is free of it, so it is
-    // never counted twice; the hold goes in regardless.
-    let car_free = profile_free_of_car(inputs.settings, &ev_minutes, since_ts);
+    // The car's load goes in only as far as the profile is free of it, so
+    // it is never counted twice; the hold goes in regardless.
+    let car = car_in_profile(inputs.settings, &profile);
     let planning = inputs.dispatches;
     if planning.stale {
         status.push("dispatches_stale".to_string());
     }
     let hour_starts: Vec<i64> = solar.iter().map(|hour| hour.timestamp).collect();
-    let overlay = dispatch_overlay(&hour_starts, &planning.dispatches, |_| car_free);
+    let mut overlay = dispatch_overlay(&hour_starts, &planning.dispatches, |_| {
+        car != CarInProfile::Unknown
+    });
+    if !planning.hold_applies {
+        // The poll loop won't hold the battery (a calibration run), so a
+        // smart charge runs from it like a boost.
+        for hour in &mut overlay.hours {
+            hour.held_fraction = 0.0;
+        }
+    }
+    let ev_dispatch_net_of_profile = car == CarInProfile::Trimmed;
     if overlay.energy_unknown {
         status.push("dispatch_energy_unknown".to_string());
     }
@@ -393,7 +403,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                         }
                     })
                     .collect();
-                apply_dispatch_hours(&mut sim_hours, &ev_dispatch_hours, false);
+                apply_dispatch_hours(&mut sim_hours, &ev_dispatch_hours, ev_dispatch_net_of_profile);
                 let params = SimulationParams {
                     capacity_kwh: snap.battery_capacity_kwh as f64,
                     start_soc_pct: snap.soc as f64,
@@ -459,21 +469,41 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         ev_dispatch_hours,
         ev_dispatch_tomorrow_kwh,
         dispatches_checked_at,
-        ev_dispatch_net_of_profile: false,
+        ev_dispatch_net_of_profile,
     }
 }
 
-/// Whether the consumption profile is free of car charging (issue #406):
-/// the "leave out load above" threshold clips it, or the GivEnergy
-/// charger's power was recorded from the start of the profile's window (a
-/// day's slack), so #400 took it out. Until then planned car charging is
-/// left out of the forecast instead, or the car would count twice.
-fn profile_free_of_car(settings: &Settings, ev_minutes: &[EvPowerMinute], since_ts: i64) -> bool {
+/// How much of the car the consumption profile still holds (issue #406),
+/// which decides how planned car charging is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarInProfile {
+    /// The GivEnergy charger recorded (nearly) all of the history, so #400
+    /// took the car out: add its planned energy in full.
+    Removed,
+    /// Only the "leave out load above" threshold trims it, which leaves up
+    /// to the threshold of the car in each heavy hour: add just the car
+    /// energy above each hour's own load.
+    Trimmed,
+    /// Nothing takes it out: add none of it.
+    Unknown,
+}
+
+/// The share of the history the charger must have recorded for the car to
+/// count as taken out. The profile is a median, so a missed day or two
+/// can't bring the car back into it.
+const CHARGER_COVERAGE_FOR_CAR_FREE: f64 = 0.95;
+
+fn car_in_profile(settings: &Settings, profile: &ConsumptionProfile) -> CarInProfile {
     let threshold = settings
         .forecast_exclude_load_above_kw
         .is_some_and(|kw| kw.is_finite() && kw > 0.0);
-    let charger_since = ev_minutes.iter().map(|minute| minute.timestamp).min();
-    threshold || charger_since.is_some_and(|first| first <= since_ts + 86_400)
+    if profile.charger_covered_fraction >= CHARGER_COVERAGE_FOR_CAR_FREE {
+        CarInProfile::Removed
+    } else if threshold {
+        CarInProfile::Trimmed
+    } else {
+        CarInProfile::Unknown
+    }
 }
 
 /// Battery AC rate limits in kW derived from snapshot registers, using

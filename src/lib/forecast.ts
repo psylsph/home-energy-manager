@@ -86,6 +86,12 @@ export function forecastStatusMessages(status: string[]): string[] {
         return 'Battery capacity unknown — connect to the inverter so it can be read.';
       case 'invalid_battery_configuration':
         return 'Battery projection unavailable — check the battery capacity and forecast efficiency settings.';
+      case 'dispatches_stale':
+        return "Octopus's planned car charging is out of date — the forecast leaves it out until it updates.";
+      case 'dispatch_energy_unknown':
+        return "Octopus didn't give a believable charge energy, so only the battery hold is planned.";
+      case 'dispatch_load_not_added':
+        return 'Planned car charging is left out: your usage history may already include the car.';
       default:
         return code;
     }

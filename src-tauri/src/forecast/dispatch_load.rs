@@ -91,17 +91,26 @@ pub fn dispatch_overlay(
 /// Put the car and the hold onto the simulator's hours, matched by start
 /// time. The forecast and the plan both build their hours through this, so
 /// they always agree.
+///
+/// `net_of_profile`: the profile may still hold part of the car (only the
+/// threshold trimmed it), so an hour adds just the car energy above its own
+/// load. That can leave out some of the house during a dispatch, but never
+/// counts the car twice.
 pub fn apply_dispatch_hours(
     hours: &mut [crate::forecast::simulate::SimHourInput],
     dispatch_hours: &[DispatchHour],
-    _net_of_profile: bool,
+    net_of_profile: bool,
 ) {
     for hour in hours {
         if let Some(found) = dispatch_hours
             .iter()
             .find(|dispatch_hour| dispatch_hour.timestamp == hour.timestamp)
         {
-            hour.ev_kwh = found.ev_kwh;
+            hour.ev_kwh = if net_of_profile {
+                (found.ev_kwh - hour.consumption_kwh).max(0.0)
+            } else {
+                found.ev_kwh
+            };
             hour.held_fraction = found.held_fraction;
         }
     }

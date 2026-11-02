@@ -166,12 +166,13 @@ impl DispatchesState {
 
     /// The dispatches the planner may use (issue #406): the ones not yet
     /// over, from a fresh list, while the hold is wanted. Otherwise none;
-    /// `stale` says a wanted list couldn't be trusted.
+    /// `stale` says a wanted list couldn't be trusted. The hold sits out a
+    /// calibration run, so `calibrating` clears `hold_applies`.
     pub fn for_planning(
         &self,
         now: DateTime<Utc>,
         wanted: bool,
-        _calibrating: bool,
+        calibrating: bool,
     ) -> PlanningDispatches {
         if !wanted {
             return PlanningDispatches::default();
@@ -192,7 +193,7 @@ impl DispatchesState {
                 .collect(),
             checked_at: self.checked_at,
             stale: false,
-            hold_applies: true,
+            hold_applies: !calibrating,
         }
     }
 
@@ -385,11 +386,13 @@ pub async fn planning_dispatches(
     settings: &Settings,
     now: DateTime<Utc>,
 ) -> PlanningDispatches {
+    // The poll loop's hold sits out a calibration run.
+    let calibrating = state.calibration_run.lock().await.is_some();
     state
         .octopus_dispatches
         .lock()
         .await
-        .for_planning(now, wanted(settings), false)
+        .for_planning(now, wanted(settings), calibrating)
 }
 
 /// One pass: read the dispatches and publish them.
