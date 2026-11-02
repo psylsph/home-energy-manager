@@ -238,6 +238,42 @@ Alternatively, use the **Scan Network** button on the Settings page.
 
 ---
 
+### Home, grid and battery power don't add up
+
+Running off the battery with no solar, you might see something like Battery
+**600 W**, Home **500 W** and Grid **0 W**, and wonder where the other 100 W
+went. Nothing is wrong. HEM shows what the inverter measures, and it measures
+each figure at a different point:
+
+- **Battery** is measured on the battery side, before the inverter converts it
+  to the AC your house uses.
+- **Home** and **Grid** are measured on the AC side, by the inverter's own load
+  reading and the grid CT clamp.
+
+Converting between the two costs power. Most of the gap is that conversion
+loss, and the rest is the inverter's own running load and small differences
+between its measuring points. The loss is a fairly fixed few tens of watts, so
+it looks large at low loads (10–20% at 500 W) and shrinks to a few percent when
+the house is busy.
+
+To see the split, open the **Inverter** page: **AC Output** is what the inverter
+delivers after conversion, and **Conversion Loss** is the difference. Compare
+**AC Output** with Home and Grid and the gap is usually only 20–30 W.
+
+Some apps work out one of the figures from the other two, usually home as
+battery + solar − grid, so their numbers always balance exactly. That hides the
+loss rather than removing it. On a **Gateway**, the battery figure is already
+measured on the AC side, so the gap is smaller there; older versions of HEM
+worked out the Gateway's grid figure the same way, which is why it used to add
+up exactly.
+
+The flow threshold (**Settings → Panel Controls → Energy Flow Diagram**)
+doesn't cause this. It only shows readings below the threshold as 0 W, and HEM's filtering of
+bad readings only steps in for impossible values or sudden jumps of several
+kilowatts.
+
+---
+
 ---
 
 ### How do I set up Telegram, ntfy, or Pushover notifications?
