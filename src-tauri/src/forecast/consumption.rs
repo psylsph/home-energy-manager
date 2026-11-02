@@ -62,6 +62,9 @@ pub struct ConsumptionProfile {
     pub excluded_ev_kwh: f64,
     /// Energy left out above the "leave out load above" threshold, kWh.
     pub excluded_above_kwh: f64,
+    /// Share of the history's time the EV charger was recording (0 to 1),
+    /// so its charging was taken out (issue #406). 0 with no history.
+    pub charger_covered_fraction: f64,
 }
 
 /// One minute of EV charger power (issue #400): the average of the
@@ -397,6 +400,7 @@ pub fn build_consumption_profile_excluding(
         weekend_days_observed: weekend_days.len() as u32,
         excluded_ev_kwh: excluded.ev_kwh,
         excluded_above_kwh: excluded.above_kwh,
+        charger_covered_fraction: 0.0,
     }
 }
 
@@ -718,6 +722,60 @@ mod tests {
         );
         assert!((hour_median(&profile, 18) - 2.5).abs() < 1e-6);
         assert_eq!(profile.excluded_above_kwh, 0.0);
+    }
+
+    #[test]
+    fn the_profile_says_how_much_of_its_history_the_charger_recorded() {
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 120, 1.0);
+        let none = build_consumption_profile_excluding(&rows, &ConsumptionExclusions::default());
+        assert_eq!(none.charger_covered_fraction, 0.0);
+
+        // Recorded for the first of the two hours only (offline after).
+        let ev = ev_minutes(start, 60, 0.0);
+        let half = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: None,
+            },
+        );
+        assert!((half.charger_covered_fraction - 0.5).abs() < 1e-9);
+
+        // Recorded throughout, idle or charging: all of it.
+        let ev = ev_minutes(start - 600, 140, 0.0);
+        let all = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: None,
+            },
+        );
+        assert!((all.charger_covered_fraction - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn charger_coverage_counts_only_the_history_there_is() {
+        // Ten days of history, all recorded by the charger: a new install's
+        // profile is car-free from the start, not after four weeks.
+        let start = local_ts(2026, 10, 1, 0, 0);
+        let rows: Vec<_> = (0..10 * 24)
+            .map(|h| row(start + h * 3600, 0.5 * (h % 24) as f64))
+            .collect();
+        let ev = ev_minutes(start, 10 * 24 * 60, 0.0);
+        let profile = build_consumption_profile_excluding(
+            &rows,
+            &ConsumptionExclusions {
+                ev_minutes: &ev,
+                load_above_kw: None,
+            },
+        );
+        assert!((profile.charger_covered_fraction - 1.0).abs() < 1e-9);
+        assert_eq!(empty_profile().charger_covered_fraction, 0.0);
+    }
+
+    fn empty_profile() -> ConsumptionProfile {
+        build_consumption_profile(&[])
     }
 
     #[test]

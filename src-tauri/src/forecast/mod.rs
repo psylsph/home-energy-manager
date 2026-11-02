@@ -161,6 +161,9 @@ pub struct ForecastPayload {
     pub ev_dispatch_tomorrow_kwh: f64,
     /// When the dispatch list behind `ev_dispatch_hours` was read.
     pub dispatches_checked_at: Option<i64>,
+    /// The profile may still hold part of the car (only the threshold trims
+    /// it), so each hour adds just the car energy above its own load.
+    pub ev_dispatch_net_of_profile: bool,
 }
 
 /// Everything [`build_forecast_payload`] needs, so the assembly is a pure
@@ -390,7 +393,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                         }
                     })
                     .collect();
-                apply_dispatch_hours(&mut sim_hours, &ev_dispatch_hours);
+                apply_dispatch_hours(&mut sim_hours, &ev_dispatch_hours, false);
                 let params = SimulationParams {
                     capacity_kwh: snap.battery_capacity_kwh as f64,
                     start_soc_pct: snap.soc as f64,
@@ -456,6 +459,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         ev_dispatch_hours,
         ev_dispatch_tomorrow_kwh,
         dispatches_checked_at,
+        ev_dispatch_net_of_profile: false,
     }
 }
 
@@ -2038,15 +2042,45 @@ mod tests {
             dispatches,
             checked_at: Some(car_now().with_timezone(&chrono::Utc)),
             stale: false,
+            hold_applies: true,
         }
     }
 
-    /// Settings whose usage history counts as free of the car: the
-    /// "leave out load above" threshold is set.
-    fn car_free_settings() -> Settings {
+    /// Settings with the "leave out load above" threshold set, which trims
+    /// the car out of the history only above the threshold.
+    fn threshold_settings() -> Settings {
         Settings {
             forecast_exclude_load_above_kw: Some(3.0),
             ..five_kwp_settings()
+        }
+    }
+
+    /// The seeded history and a GivEnergy charger recording all of it, so
+    /// #400 took the car out and the profile is free of it.
+    fn seed_car_free_state(db: &HistoryDb, now: DateTime<Local>) -> Settings {
+        seed_dark_forecast_state(db, now);
+        let from = (now.date_naive() - chrono::Duration::days(7))
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        record_charger_minutes(db, from, now.timestamp());
+        five_kwp_settings()
+    }
+
+    fn record_charger_minutes(db: &HistoryDb, from: i64, to: i64) {
+        let rows: Vec<_> = (from..to)
+            .step_by(60)
+            .map(|timestamp| crate::history::evc_power::EvcMinuteRow {
+                timestamp,
+                power_w: 0.0,
+                samples: 1,
+            })
+            .collect();
+        for row in &rows {
+            db.record_evc_power_minute(row).unwrap();
         }
     }
 
@@ -2085,8 +2119,7 @@ mod tests {
     #[test]
     fn a_held_evening_dispatch_keeps_the_house_off_the_battery() {
         let db = test_db();
-        seed_dark_forecast_state(&db, car_now());
-        let settings = car_free_settings();
+        let settings = seed_car_free_state(&db, car_now());
         let without = car_payload(&db, &settings, &NO_DISPATCHES);
         let tonight = fresh(vec![car_dispatch(
             local_ts(15, 19),
@@ -2128,8 +2161,7 @@ mod tests {
     #[test]
     fn a_boost_runs_from_the_battery() {
         let db = test_db();
-        seed_dark_forecast_state(&db, car_now());
-        let settings = car_free_settings();
+        let settings = seed_car_free_state(&db, car_now());
         let without = car_payload(&db, &settings, &NO_DISPATCHES);
         let boost = fresh(vec![car_dispatch(
             local_ts(15, 19),
@@ -2151,8 +2183,7 @@ mod tests {
     #[test]
     fn a_stale_list_changes_nothing_but_the_status() {
         let db = test_db();
-        seed_dark_forecast_state(&db, car_now());
-        let settings = car_free_settings();
+        let settings = seed_car_free_state(&db, car_now());
         let without = car_payload(&db, &settings, &NO_DISPATCHES);
         let stale = PlanningDispatches {
             stale: true,
@@ -2198,11 +2229,36 @@ mod tests {
     }
 
     #[test]
-    fn charger_history_for_the_whole_window_lets_the_car_load_in() {
+    fn charger_history_covering_the_profile_lets_the_car_load_in() {
+        // Only a week of history, all of it recorded by the charger: a new
+        // install's profile is free of the car, without waiting four weeks.
+        let db = test_db();
+        let settings = seed_car_free_state(&db, car_now());
+        let tonight = fresh(vec![car_dispatch(
+            local_ts(15, 19),
+            local_ts(15, 20),
+            "SMART",
+            Some(7.0),
+        )]);
+        let payload = car_payload(&db, &settings, &tonight);
+        assert!(!payload
+            .status
+            .contains(&"dispatch_load_not_added".to_string()));
+        assert!(!payload.ev_dispatch_net_of_profile);
+        assert_eq!(
+            payload.ev_dispatch_hours.first().map(|h| h.ev_kwh),
+            Some(7.0)
+        );
+    }
+
+    #[test]
+    fn a_charger_that_stopped_recording_keeps_the_car_load_out() {
+        // Recorded at the start of the history, then offline for the rest:
+        // those nights still hold the car.
         let db = test_db();
         seed_dark_forecast_state(&db, car_now());
-        let window_start = car_now().timestamp() - CONSUMPTION_WINDOW_DAYS * 86_400;
-        record_charger_minute(&db, window_start + 3600);
+        let from = car_now().timestamp() - 7 * 86_400;
+        record_charger_minutes(&db, from, from + 86_400);
         let tonight = fresh(vec![car_dispatch(
             local_ts(15, 19),
             local_ts(15, 20),
@@ -2210,12 +2266,79 @@ mod tests {
             Some(7.0),
         )]);
         let payload = car_payload(&db, &five_kwp_settings(), &tonight);
-        assert!(!payload
+        assert!(payload
             .status
             .contains(&"dispatch_load_not_added".to_string()));
         assert_eq!(
             payload.ev_dispatch_hours.first().map(|h| h.ev_kwh),
-            Some(7.0)
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn with_only_the_threshold_the_car_adds_what_the_profile_lacks() {
+        // The threshold leaves up to its limit of the car in each heavy
+        // hour, so only the car energy above the profile's hour goes in:
+        // a 3 kWh boost on a 0.5 kWh hour adds 2.5, never the car twice.
+        let db = test_db();
+        seed_dark_forecast_state(&db, car_now());
+        let settings = threshold_settings();
+        let without = car_payload(&db, &settings, &PlanningDispatches::default());
+        let boost = fresh(vec![car_dispatch(
+            local_ts(15, 19),
+            local_ts(15, 20),
+            "BOOST",
+            Some(3.0),
+        )]);
+        let with = car_payload(&db, &settings, &boost);
+        assert!(!with.status.contains(&"dispatch_load_not_added".to_string()));
+        assert!(with.ev_dispatch_net_of_profile);
+        let drawn = 2.5 / 0.95 / 10.0 * 100.0;
+        let after = local_ts(15, 19);
+        assert!(
+            (soc_after(&without, after) - soc_after(&with, after) - drawn).abs() < 1e-6,
+            "with {} without {}",
+            soc_after(&with, after),
+            soc_after(&without, after)
+        );
+        // The chart still shows what Octopus plans for the car.
+        assert_eq!(
+            with.ev_dispatch_hours.first().map(|h| h.ev_kwh),
+            Some(3.0)
+        );
+    }
+
+    #[test]
+    fn a_smart_dispatch_the_hold_will_not_apply_to_runs_from_the_battery() {
+        // During a calibration run the poll loop doesn't hold the battery,
+        // so the car's smart charge comes out of it like a boost.
+        let db = test_db();
+        let settings = seed_car_free_state(&db, car_now());
+        let without = car_payload(&db, &settings, &PlanningDispatches::default());
+        let unheld = PlanningDispatches {
+            hold_applies: false,
+            ..fresh(vec![car_dispatch(
+                local_ts(15, 19),
+                local_ts(15, 20),
+                "SMART",
+                Some(3.0),
+            )])
+        };
+        let with = car_payload(&db, &settings, &unheld);
+        assert_eq!(
+            with.ev_dispatch_hours
+                .iter()
+                .map(|h| (h.ev_kwh, h.held_fraction))
+                .collect::<Vec<_>>(),
+            vec![(3.0, 0.0)]
+        );
+        let drawn = 3.0 / 0.95 / 10.0 * 100.0;
+        let after = local_ts(15, 19);
+        assert!(
+            (soc_after(&without, after) - soc_after(&with, after) - drawn).abs() < 1e-6,
+            "with {} without {}",
+            soc_after(&with, after),
+            soc_after(&without, after)
         );
     }
 
@@ -2243,14 +2366,14 @@ mod tests {
     #[test]
     fn a_dispatch_without_believable_energy_is_reported() {
         let db = test_db();
-        seed_dark_forecast_state(&db, car_now());
+        let settings = seed_car_free_state(&db, car_now());
         let tonight = fresh(vec![car_dispatch(
             local_ts(15, 19),
             local_ts(15, 20),
             "SMART",
             None,
         )]);
-        let payload = car_payload(&db, &car_free_settings(), &tonight);
+        let payload = car_payload(&db, &settings, &tonight);
         assert!(payload
             .status
             .contains(&"dispatch_energy_unknown".to_string()));
@@ -2263,12 +2386,12 @@ mod tests {
     #[test]
     fn tomorrows_car_energy_counts_only_tomorrows_hours() {
         let db = test_db();
-        seed_dark_forecast_state(&db, car_now());
+        let settings = seed_car_free_state(&db, car_now());
         let both = fresh(vec![
             car_dispatch(local_ts(15, 22), local_ts(15, 23), "SMART", Some(5.0)),
             car_dispatch(local_ts(16, 1), local_ts(16, 3), "SMART", Some(7.0)),
         ]);
-        let payload = car_payload(&db, &car_free_settings(), &both);
+        let payload = car_payload(&db, &settings, &both);
         assert!((payload.ev_dispatch_tomorrow_kwh - 7.0).abs() < 1e-9);
     }
 }

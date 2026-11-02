@@ -82,6 +82,10 @@ pub struct PlanningDispatches {
     pub checked_at: Option<DateTime<Utc>>,
     /// The hold is on but the list is missing or too old to plan with.
     pub stale: bool,
+    /// Whether the poll loop would hold the battery for these dispatches.
+    /// It doesn't during a calibration run, so the car runs from the
+    /// battery then.
+    pub hold_applies: bool,
 }
 
 /// No dispatches: what the planner sees with the hold off.
@@ -89,6 +93,7 @@ pub static NO_DISPATCHES: PlanningDispatches = PlanningDispatches {
     dispatches: Vec::new(),
     checked_at: None,
     stale: false,
+    hold_applies: false,
 };
 
 /// An Octopus access token. Its `Debug` output is redacted so logging the
@@ -162,7 +167,12 @@ impl DispatchesState {
     /// The dispatches the planner may use (issue #406): the ones not yet
     /// over, from a fresh list, while the hold is wanted. Otherwise none;
     /// `stale` says a wanted list couldn't be trusted.
-    pub fn for_planning(&self, now: DateTime<Utc>, wanted: bool) -> PlanningDispatches {
+    pub fn for_planning(
+        &self,
+        now: DateTime<Utc>,
+        wanted: bool,
+        _calibrating: bool,
+    ) -> PlanningDispatches {
         if !wanted {
             return PlanningDispatches::default();
         }
@@ -182,6 +192,7 @@ impl DispatchesState {
                 .collect(),
             checked_at: self.checked_at,
             stale: false,
+            hold_applies: true,
         }
     }
 
@@ -378,7 +389,7 @@ pub async fn planning_dispatches(
         .octopus_dispatches
         .lock()
         .await
-        .for_planning(now, wanted(settings))
+        .for_planning(now, wanted(settings), false)
 }
 
 /// One pass: read the dispatches and publish them.
@@ -799,7 +810,7 @@ mod tests {
             )],
         );
         assert_eq!(
-            state.for_planning(utc("2026-10-17T13:05:00+00:00"), false),
+            state.for_planning(utc("2026-10-17T13:05:00+00:00"), false, false),
             PlanningDispatches::default()
         );
     }
@@ -813,10 +824,21 @@ mod tests {
             "2026-10-17T13:00:00+00:00",
             vec![over, running.clone(), later.clone()],
         );
-        let got = state.for_planning(utc("2026-10-17T13:05:00+00:00"), true);
+        let got = state.for_planning(utc("2026-10-17T13:05:00+00:00"), true, false);
         assert_eq!(got.dispatches, vec![running, later]);
         assert_eq!(got.checked_at, Some(utc("2026-10-17T13:00:00+00:00")));
         assert!(!got.stale);
+    }
+
+    #[test]
+    fn the_planner_is_told_the_hold_sits_out_a_calibration_run() {
+        let later = smart("2026-10-17T19:00:00+00:00", "2026-10-17T20:00:00+00:00");
+        let state = checked("2026-10-17T13:00:00+00:00", vec![later.clone()]);
+        let now = utc("2026-10-17T13:05:00+00:00");
+        assert!(state.for_planning(now, true, false).hold_applies);
+        let calibrating = state.for_planning(now, true, true);
+        assert!(!calibrating.hold_applies);
+        assert_eq!(calibrating.dispatches, vec![later], "the car still charges");
     }
 
     #[test]
@@ -826,12 +848,12 @@ mod tests {
             dispatches: vec![later.clone()],
             ..Default::default()
         };
-        let got = never.for_planning(utc("2026-10-17T13:00:00+00:00"), true);
+        let got = never.for_planning(utc("2026-10-17T13:00:00+00:00"), true, false);
         assert!(got.stale && got.dispatches.is_empty() && got.checked_at.is_none());
 
         let state = checked("2026-10-17T13:00:00+00:00", vec![later]);
         for now in ["2026-10-17T13:15:01+00:00", "2026-10-17T12:44:59+00:00"] {
-            let got = state.for_planning(utc(now), true);
+            let got = state.for_planning(utc(now), true, false);
             assert!(got.stale, "{now}");
             assert!(got.dispatches.is_empty(), "{now}");
             assert_eq!(

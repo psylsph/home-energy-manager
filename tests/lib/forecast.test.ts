@@ -53,6 +53,20 @@ describe('forecastStatusMessages', () => {
     expect(messages[9]).toMatch(/future|refresh/i);
   });
 
+  it('explains the planned car charging codes (issue #406)', () => {
+    const [stale, unknown, notAdded] = forecastStatusMessages([
+      'dispatches_stale',
+      'dispatch_energy_unknown',
+      'dispatch_load_not_added',
+    ]);
+    expect(stale).toMatch(/car charging.*out of date/i);
+    expect(unknown).toMatch(/charge energy/i);
+    expect(notAdded).toMatch(/history may already include/i);
+    for (const message of [stale, unknown, notAdded]) {
+      expect(message).not.toMatch(/_/);
+    }
+  });
+
   it('passes through unknown codes verbatim so new backend codes stay visible', () => {
     expect(forecastStatusMessages(['something_new'])).toEqual([
       'something_new',

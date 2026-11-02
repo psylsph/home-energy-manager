@@ -1712,6 +1712,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_recorded_plan_sees_the_live_dispatch_list() {
+        // Issue #406, through AppState: the plan reads the poller's list
+        // with the hold on, and records what it saw.
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let now = local_dt(2026, 8, 31, 1, 50);
+            {
+                let db = state.history.lock().await.clone().unwrap();
+                let hour = now.timestamp() - now.timestamp().rem_euclid(3600);
+                let rows: Vec<_> = (0..72)
+                    .map(|h| crate::history::ForecastValueRow {
+                        timestamp: hour + h * 3600,
+                        variable: "shortwave_radiation".to_string(),
+                        value: 0.0,
+                        source: "open-meteo".to_string(),
+                        fetched_at: now.timestamp(),
+                    })
+                    .collect();
+                db.insert_forecast_values(&rows).unwrap();
+            }
+            let utc = |dt: DateTime<Local>| dt.with_timezone(&chrono::Utc);
+            {
+                let mut list = state.octopus_dispatches.lock().await;
+                list.checked_at = Some(utc(now));
+                list.dispatches = vec![crate::octopus_dispatches::Dispatch {
+                    start: utc(local_dt(2026, 8, 31, 2, 0)),
+                    end: utc(local_dt(2026, 8, 31, 4, 0)),
+                    kind: Some("SMART".to_string()),
+                    energy_added_kwh: Some(7.0),
+                }];
+            }
+            let settings = Settings {
+                octopus_api_key: "sk_live_test".to_string(),
+                octopus_account_number: "A-TEST1".to_string(),
+                octopus_dispatch_hold: true,
+                ..snapshot_settings()
+            };
+            run_plan_snapshot(&state, &settings, &gen2(), now).await;
+            let rows = recorded(&state).await;
+            assert_eq!(rows.len(), 1);
+            let forecast: serde_json::Value = serde_json::from_str(&rows[0].forecast_json).unwrap();
+            assert_eq!(forecast["dispatches_checked_at"], now.timestamp());
+            let held: Vec<(i64, f64)> = forecast["ev_dispatch_hours"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| {
+                    (
+                        h["timestamp"].as_i64().unwrap(),
+                        h["held_fraction"].as_f64().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                held,
+                vec![
+                    (local_dt(2026, 8, 31, 2, 0).timestamp(), 1.0),
+                    (local_dt(2026, 8, 31, 3, 0).timestamp(), 1.0)
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn no_decision_is_recorded_outside_the_lead_window() {
         with_isolated_config_dir_async(|| async {
             let state = state_with_history().await;

@@ -94,6 +94,7 @@ pub fn dispatch_overlay(
 pub fn apply_dispatch_hours(
     hours: &mut [crate::forecast::simulate::SimHourInput],
     dispatch_hours: &[DispatchHour],
+    _net_of_profile: bool,
 ) {
     for hour in hours {
         if let Some(found) = dispatch_hours
@@ -344,6 +345,44 @@ mod tests {
         assert!(close(overlay.hours[0].held_fraction, 1.0));
         assert!(close(overlay.hours[1].ev_kwh, 7.0));
         assert!(overlay.load_not_added);
+    }
+
+    fn sim_hour(timestamp: i64, consumption_kwh: f64) -> crate::forecast::simulate::SimHourInput {
+        crate::forecast::simulate::SimHourInput {
+            timestamp,
+            consumption_kwh,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hours_get_their_car_and_hold_whole_or_net_of_the_profile() {
+        let dispatch_hours = [
+            DispatchHour {
+                timestamp: T0,
+                ev_kwh: 3.0,
+                held_fraction: 1.0,
+            },
+            DispatchHour {
+                timestamp: T0 + H,
+                ev_kwh: 0.4,
+                held_fraction: 0.5,
+            },
+        ];
+        let base = vec![sim_hour(T0, 0.5), sim_hour(T0 + H, 0.5), sim_hour(T0 + 2 * H, 0.5)];
+
+        let mut whole = base.clone();
+        apply_dispatch_hours(&mut whole, &dispatch_hours, false);
+        let got: Vec<_> = whole.iter().map(|h| (h.ev_kwh, h.held_fraction)).collect();
+        assert_eq!(got, vec![(3.0, 1.0), (0.4, 0.5), (0.0, 0.0)]);
+
+        // Net of the profile: only the car above the hour's own load, and
+        // never below nothing; the hold is unchanged.
+        let mut net = base;
+        apply_dispatch_hours(&mut net, &dispatch_hours, true);
+        let got: Vec<_> = net.iter().map(|h| (h.ev_kwh, h.held_fraction)).collect();
+        assert_eq!(got, vec![(2.5, 1.0), (0.0, 0.5), (0.0, 0.0)]);
+        assert!(net.iter().all(|h| h.consumption_kwh == 0.5));
     }
 
     #[test]

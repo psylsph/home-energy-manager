@@ -8982,7 +8982,11 @@ pub(crate) fn forecast_sim_hours(
         .collect();
     // Planned car charging and dispatch holds (issue #406), the same way
     // the forecast applied them.
-    crate::forecast::dispatch_load::apply_dispatch_hours(&mut hours, &forecast.ev_dispatch_hours);
+    crate::forecast::dispatch_load::apply_dispatch_hours(
+        &mut hours,
+        &forecast.ev_dispatch_hours,
+        forecast.ev_dispatch_net_of_profile,
+    );
     hours
 }
 
@@ -25484,7 +25488,78 @@ pub(crate) mod tests {
             ev_dispatch_hours: Vec::new(),
             ev_dispatch_tomorrow_kwh: 0.0,
             dispatches_checked_at: None,
+            ev_dispatch_net_of_profile: false,
         }
+    }
+
+    #[tokio::test]
+    async fn the_forecast_routes_read_the_live_dispatch_list_on_their_clock() {
+        // Issue #406: both handlers take the poller's list with the hold on.
+        // The pinned clock a harness uses judges the list's age, so a list
+        // stamped on that clock is fresh.
+        with_isolated_config_dir_async(|| async {
+            let now = chrono::Local
+                .with_ymd_and_hms(2026, 8, 31, 18, 0, 0)
+                .earliest()
+                .unwrap();
+            let state = test_state();
+            let dir = crate::test_util::make_unique_test_dir("forecast-dispatch");
+            let db = crate::history::HistoryDb::open(&dir.join("history.db")).unwrap();
+            let rows: Vec<_> = (0..72)
+                .map(|h| crate::history::ForecastValueRow {
+                    timestamp: now.timestamp() + h * 3600,
+                    variable: "shortwave_radiation".to_string(),
+                    value: 0.0,
+                    source: "open-meteo".to_string(),
+                    fetched_at: now.timestamp(),
+                })
+                .collect();
+            db.insert_forecast_values(&rows).unwrap();
+            *state.history.lock().await = Some(Arc::new(db));
+            {
+                let mut ws = state.weather.lock().await;
+                ws.config.enabled = true;
+                ws.config.latitude = Some(51.5);
+                ws.config.longitude = Some(-0.13);
+            }
+            crate::settings::Settings::update(|s| {
+                s.octopus_api_key = "sk_live_test".to_string();
+                s.octopus_account_number = "A-TEST1".to_string();
+                s.octopus_dispatch_hold = true;
+            })
+            .unwrap();
+            let utc = now.with_timezone(&chrono::Utc);
+            {
+                let mut list = state.octopus_dispatches.lock().await;
+                list.checked_at = Some(utc);
+                list.dispatches = vec![crate::octopus_dispatches::Dispatch {
+                    start: utc + chrono::Duration::hours(1),
+                    end: utc + chrono::Duration::hours(2),
+                    kind: Some("SMART".to_string()),
+                    energy_added_kwh: Some(7.0),
+                }];
+            }
+
+            let (status, Json(body)) = get_forecast_at(state.clone(), now).await;
+            assert_eq!(status, StatusCode::OK);
+            let data = &body["data"];
+            assert_eq!(data["dispatches_checked_at"], now.timestamp());
+            let hours = data["ev_dispatch_hours"].as_array().unwrap();
+            assert_eq!(hours.len(), 1, "{data}");
+            assert_eq!(hours[0]["timestamp"], now.timestamp() + 3600);
+            assert_eq!(hours[0]["held_fraction"], 1.0);
+
+            let (status, Json(body)) = get_forecast_plan_at(state.clone(), now).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            // An hour later by the same clock the list is too old to use.
+            let (_, Json(body)) =
+                get_forecast_at(state.clone(), now + chrono::Duration::hours(1)).await;
+            let status: Vec<_> = body["data"]["status"].as_array().unwrap().clone();
+            assert!(status.contains(&json!("dispatches_stale")), "{status:?}");
+            assert!(body["data"]["ev_dispatch_hours"].as_array().unwrap().is_empty());
+        })
+        .await;
     }
 
     #[test]
@@ -25501,6 +25576,16 @@ pub(crate) mod tests {
             let hours = forecast_sim_hours(&forecast, band);
             let got: Vec<(f64, f64)> = hours.iter().map(|h| (h.ev_kwh, h.held_fraction)).collect();
             assert_eq!(got, vec![(0.0, 0.0), (3.5, 0.5), (0.0, 0.0)], "{band:?}");
+        }
+
+        // A profile only the threshold trimmed adds the car above its load.
+        forecast.ev_dispatch_net_of_profile = true;
+        for band in [SolarBand::Median, SolarBand::Low] {
+            let hours = forecast_sim_hours(&forecast, band);
+            let house = hours[1].consumption_kwh;
+            assert!(house > 0.0, "the fixture has house load");
+            assert!((hours[1].ev_kwh - (3.5 - house)).abs() < 1e-9, "{band:?}");
+            assert_eq!(hours[1].held_fraction, 0.5);
         }
     }
 
