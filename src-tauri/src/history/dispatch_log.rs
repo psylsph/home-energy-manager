@@ -129,12 +129,9 @@ impl HistoryDb {
             }
         }
         if unbroken.is_none() {
-            // The first write, a gap or a step in the clock: keep the start
-            // unless it's later than now.
+            // The first write, a gap or a step in the clock: start again.
             tx.execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value \
-                 WHERE CAST(value AS INTEGER) > CAST(excluded.value AS INTEGER)",
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
                 params![DISPATCH_LOG_SINCE_KEY, seen_at.to_string()],
             )
             .map_err(fail)?;
