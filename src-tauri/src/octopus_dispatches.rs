@@ -239,11 +239,14 @@ pub fn parse_dispatches(response: &Value) -> Result<Vec<Dispatch>, String> {
                 (Some(start), Some(end)) if start < end => (start, end),
                 _ => return Err(unexpected()),
             };
+            // Octopus signs the energy the car draws as negative (an import),
+            // so the energy added is its size.
             let energy_added_kwh = match &item["energyAddedKwh"] {
                 Value::Number(number) => number.as_f64(),
                 Value::String(text) => text.trim().parse::<f64>().ok(),
                 _ => None,
-            };
+            }
+            .map(f64::abs);
             Ok(Dispatch {
                 start,
                 end,
