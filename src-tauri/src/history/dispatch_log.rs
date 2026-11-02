@@ -514,6 +514,82 @@ mod tests {
         assert_eq!(db.dispatch_log_since(), Some(T + 900));
     }
 
+    #[test]
+    fn a_poisoned_lock_is_an_error_not_a_panic() {
+        let (db, _path) = test_db();
+        let db = std::sync::Arc::new(db);
+        let poisoner = db.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.conn.lock().unwrap();
+            panic!("poison the connection lock");
+        })
+        .join();
+        for result in [
+            db.log_dispatches(&[], T),
+            db.logged_dispatches_since(0, GAP).map(|_| ()),
+            db.forget_dispatch_log_since(),
+        ] {
+            assert!(result.unwrap_err().contains("lock poisoned"));
+        }
+    }
+
+    #[test]
+    fn a_broken_database_is_reported_by_each_call() {
+        let drop_table = |db: &HistoryDb, table: &str| {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .unwrap();
+        };
+        let (db, _path) = test_db();
+        drop_table(&db, "octopus_dispatch_log");
+        let error = db
+            .log_dispatches(&[sighting("car", T, T + 60, None)], T + 60)
+            .unwrap_err();
+        assert!(
+            error.starts_with("Failed to log Octopus dispatches"),
+            "{error}"
+        );
+        let error = db.logged_dispatches_since(0, GAP).unwrap_err();
+        assert!(
+            error.starts_with("Failed to read Octopus dispatches"),
+            "{error}"
+        );
+
+        let (db, _path) = test_db();
+        drop_table(&db, "meta");
+        let error = db.forget_dispatch_log_since().unwrap_err();
+        assert!(
+            error.starts_with("Failed to reset the Octopus dispatch log"),
+            "{error}"
+        );
+        let error = db.log_dispatches(&[], T).unwrap_err();
+        assert!(
+            error.starts_with("Failed to log Octopus dispatches"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_row_that_cannot_be_read_is_reported() {
+        let (db, _path) = test_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO octopus_dispatch_log (device, start, end, last_seen_at) \
+                 VALUES ('car', 1, 2, 'later')",
+                [],
+            )
+            .unwrap();
+        let error = db.logged_dispatches_since(0, GAP).unwrap_err();
+        assert!(
+            error.starts_with("Failed to read Octopus dispatches"),
+            "{error}"
+        );
+    }
+
     /// A check's write races profile reads on the blocking pool: a reader
     /// sees all of a check's rows or none, never half of them.
     #[test]
