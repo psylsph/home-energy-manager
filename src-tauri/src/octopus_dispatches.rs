@@ -21,6 +21,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::history::dispatch_log::DispatchSighting;
 use crate::inverter::poll::AppState;
 use crate::octopus_sessions::{endpoints, obtain_token, post_graphql};
 use crate::settings::Settings;
@@ -120,6 +121,10 @@ pub struct DispatchesState {
     /// After a restart mid-hold: keep holding until this time or until the
     /// first check finishes, whichever is first.
     restart_hold_until: Option<DateTime<Utc>>,
+    /// This process's last successful dispatch log write, so the log can
+    /// tell an unbroken run from a gap. Kept when the hold is switched: an
+    /// off spell is a gap.
+    last_log_write: Option<i64>,
     /// Why the last dispatch log write failed, so it's reported once.
     pub log_error: Option<String>,
 }
@@ -195,6 +200,7 @@ impl DispatchesState {
     pub(crate) fn reset(&mut self) {
         *self = Self {
             generation: self.generation.wrapping_add(1),
+            last_log_write: self.last_log_write,
             ..Self::default()
         };
     }
@@ -308,7 +314,8 @@ struct Known {
 struct Fetched {
     token: Option<String>,
     devices: Option<Vec<String>>,
-    dispatches: Vec<Dispatch>,
+    /// With the car or charger each is for.
+    dispatches: Vec<(String, Dispatch)>,
 }
 
 /// Where the device and dispatch queries go: the public Kraken API, the same
@@ -359,9 +366,13 @@ fn fetch_blocking(settings: &Settings, known: Known) -> Result<Fetched, String> 
             Some(&token),
             &json!({ "query": DISPATCHES_QUERY, "variables": { "device": device } }),
         )?;
-        dispatches.extend(parse_dispatches(&response)?);
+        dispatches.extend(
+            parse_dispatches(&response)?
+                .into_iter()
+                .map(|dispatch| (device.clone(), dispatch)),
+        );
     }
-    dispatches.sort_by_key(|dispatch| dispatch.start);
+    dispatches.sort_by_key(|(_, dispatch)| dispatch.start);
     Ok(Fetched {
         token: new_token,
         devices: new_devices,
@@ -440,8 +451,22 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
     // The first check has finished, worked or not: from here the list (or
     // its absence) decides, as it does in normal running.
     current.restart_hold_until = None;
+    let mut sightings = None;
     match fetched {
         Ok(fetched) => {
+            sightings = Some(
+                fetched
+                    .dispatches
+                    .iter()
+                    .map(|(device, dispatch)| DispatchSighting {
+                        device: device.clone(),
+                        start: dispatch.start.timestamp(),
+                        end: dispatch.end.timestamp(),
+                        kind: dispatch.kind.clone(),
+                        energy_kwh: dispatch.energy_added_kwh,
+                    })
+                    .collect::<Vec<_>>(),
+            );
             if let Some(token) = fetched.token {
                 current.token = Some((Token(token), now));
             }
@@ -449,7 +474,11 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
                 current.devices = devices;
                 current.devices_checked_at = Some(now);
             }
-            current.dispatches = fetched.dispatches;
+            current.dispatches = fetched
+                .dispatches
+                .into_iter()
+                .map(|(_, dispatch)| dispatch)
+                .collect();
             current.checked_at = Some(now);
             current.error = None;
         }
@@ -460,6 +489,50 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
             // The token may be what failed; get a fresh one next time.
             current.token = None;
             current.error = Some(error);
+        }
+    }
+    // The hold is decided; the log is written after, off the lock.
+    let previous_write = current.last_log_write;
+    drop(current);
+    let Some(sightings) = sightings else {
+        return;
+    };
+    let seen_at = now.timestamp();
+    let written = write_log(state, move |db| {
+        db.log_dispatches(&sightings, seen_at, previous_write)
+    })
+    .await;
+    if written {
+        state.octopus_dispatches.lock().await.last_log_write = Some(seen_at);
+    }
+}
+
+/// Run a dispatch log write on the blocking pool, reporting a failure once
+/// per change of error. It never affects the hold. Returns whether it was
+/// written; with no history database there's nothing to write.
+async fn write_log<F>(state: &AppState, write: F) -> bool
+where
+    F: FnOnce(&crate::history::HistoryDb) -> Result<(), String> + Send + 'static,
+{
+    let Some(db) = state.history.lock().await.clone() else {
+        return false;
+    };
+    let result = tokio::task::spawn_blocking(move || write(&db))
+        .await
+        .map_err(|error| format!("dispatch log worker failed: {error}"))
+        .and_then(|result| result);
+    let mut current = state.octopus_dispatches.lock().await;
+    match result {
+        Ok(()) => {
+            current.log_error = None;
+            true
+        }
+        Err(error) => {
+            if current.log_error.as_deref() != Some(error.as_str()) {
+                tracing::warn!("Intelligent Octopus dispatch log: {error}");
+            }
+            current.log_error = Some(error);
+            false
         }
     }
 }
@@ -544,6 +617,11 @@ pub async fn set_hold(
     // and on starts from a fresh read.
     state.octopus_dispatches.lock().await.reset();
     state.octopus_dispatches_wake.notify_one();
+    if !enabled {
+        // Car charging isn't logged while the hold is off, so the log no
+        // longer covers its window.
+        write_log(&state, |db| db.forget_dispatch_log_since()).await;
+    }
     (
         StatusCode::OK,
         Json(json!({ "ok": true, "enabled": enabled })),

@@ -16,6 +16,8 @@
 //! the hold off, a database error) or a clock that steps restarts that.
 //! HEM being closed is not a gap: no usage is recorded then either.
 
+use rusqlite::params;
+
 use super::HistoryDb;
 
 /// When the log started without a break, Unix seconds.
@@ -60,29 +62,160 @@ impl HistoryDb {
     /// the first, which allows for HEM having been closed.
     pub fn log_dispatches(
         &self,
-        _sightings: &[DispatchSighting],
-        _seen_at: i64,
-        _previous_write: Option<i64>,
+        sightings: &[DispatchSighting],
+        seen_at: i64,
+        previous_write: Option<i64>,
     ) -> Result<(), String> {
-        Ok(())
+        let unbroken =
+            previous_write.map(|previous| (0..=MAX_LOG_GAP_SECS).contains(&(seen_at - previous)));
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let fail = |e: rusqlite::Error| format!("Failed to log Octopus dispatches: {e}");
+        let tx = conn.transaction().map_err(fail)?;
+        if let (Some(previous), Some(true)) = (previous_write, unbroken) {
+            // Seen at the last check and past its planned end now: it ran
+            // to the end rather than being cancelled in the last moments.
+            tx.execute(
+                "UPDATE octopus_dispatch_log SET last_seen_at = end \
+                 WHERE last_seen_at >= ?1 AND end <= ?2 AND end > last_seen_at",
+                params![previous, seen_at],
+            )
+            .map_err(fail)?;
+            // Pruned only on an unbroken run, so a clock that is wrong at
+            // start-up can't delete the log.
+            tx.execute(
+                "DELETE FROM octopus_dispatch_log WHERE end < ?1",
+                params![seen_at - DISPATCH_LOG_KEEP_DAYS * 86_400],
+            )
+            .map_err(fail)?;
+        }
+        {
+            // A clock stepped back can't make a dispatch seen earlier than
+            // it was, so `last_seen_at` only moves forward.
+            let mut upsert = tx
+                .prepare(
+                    "INSERT INTO octopus_dispatch_log \
+                       (device, start, end, kind, energy_kwh, last_seen_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                     ON CONFLICT(device, start) DO UPDATE SET \
+                       end = excluded.end, kind = excluded.kind, \
+                       energy_kwh = excluded.energy_kwh, \
+                       last_seen_at = MAX(last_seen_at, excluded.last_seen_at)",
+                )
+                .map_err(fail)?;
+            for sighting in sightings.iter().filter(|s| s.start <= seen_at) {
+                upsert
+                    .execute(params![
+                        sighting.device,
+                        sighting.start,
+                        sighting.end,
+                        sighting.kind,
+                        sighting.energy_kwh,
+                        seen_at,
+                    ])
+                    .map_err(fail)?;
+            }
+        }
+        let since = if unbroken == Some(false) {
+            // A gap or a step in the clock: start again from now.
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)"
+        } else {
+            // Keep the start, unless it's later than now (the clock is
+            // behind where it was).
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value \
+             WHERE CAST(value AS INTEGER) > CAST(excluded.value AS INTEGER)"
+        };
+        tx.execute(since, params![DISPATCH_LOG_SINCE_KEY, seen_at.to_string()])
+            .map_err(fail)?;
+        tx.commit().map_err(fail)
     }
 
-    /// Logged dispatches still running after `since_ts`, oldest first.
+    /// Logged dispatches still running after `since_ts`, oldest first. One
+    /// counts until `seen_gap_secs` after it was last seen, or its planned
+    /// end if that's sooner, and a car's dispatch ends where its next one
+    /// starts (Octopus moved it).
     pub fn logged_dispatches_since(
         &self,
-        _since_ts: i64,
-        _seen_gap_secs: i64,
+        since_ts: i64,
+        seen_gap_secs: i64,
     ) -> Result<Vec<LoggedDispatch>, String> {
-        Ok(Vec::new())
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let fail = |e: rusqlite::Error| format!("Failed to read Octopus dispatches: {e}");
+        let mut stmt = conn
+            .prepare(
+                "SELECT device, start, end, kind, energy_kwh, last_seen_at \
+                 FROM octopus_dispatch_log ORDER BY device ASC, start ASC",
+            )
+            .map_err(fail)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<f64>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(fail)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(fail)?;
+        drop(stmt);
+        drop(conn);
+
+        let mut logged = Vec::new();
+        for (i, (device, start, planned_end, kind, energy_kwh, last_seen_at)) in
+            rows.iter().enumerate()
+        {
+            let mut end = (*planned_end).min(last_seen_at.saturating_add(seen_gap_secs));
+            if let Some((next_device, next_start, ..)) = rows.get(i + 1) {
+                if next_device == device {
+                    end = end.min(*next_start);
+                }
+            }
+            if end <= since_ts || end <= *start {
+                continue;
+            }
+            // Octopus's dispatches always end after they start; a row that
+            // doesn't has no energy to share out.
+            let energy_kwh = energy_kwh
+                .filter(|_| *planned_end > *start)
+                .map(|kwh| kwh * (end - start) as f64 / (planned_end - start) as f64);
+            logged.push(LoggedDispatch {
+                device: device.clone(),
+                start: *start,
+                end,
+                kind: kind.clone(),
+                energy_kwh,
+            });
+        }
+        logged.sort_by(|a, b| (a.start, &a.device).cmp(&(b.start, &b.device)));
+        Ok(logged)
     }
 
     /// When the log started without a break, if it has.
     pub fn dispatch_log_since(&self) -> Option<i64> {
-        None
+        self.get_meta_value(DISPATCH_LOG_SINCE_KEY)?.parse().ok()
     }
 
     /// Forget when the log started, as when the hold is turned off.
     pub fn forget_dispatch_log_since(&self) -> Result<(), String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.execute(
+            "DELETE FROM meta WHERE key = ?1",
+            params![DISPATCH_LOG_SINCE_KEY],
+        )
+        .map_err(|e| format!("Failed to reset the Octopus dispatch log: {e}"))?;
         Ok(())
     }
 }

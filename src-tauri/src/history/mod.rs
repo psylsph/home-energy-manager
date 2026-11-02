@@ -1033,6 +1033,17 @@ CREATE TABLE IF NOT EXISTS evc_power_minutes (
     power_w   REAL NOT NULL,
     samples   INTEGER NOT NULL
 );
+-- Intelligent Octopus dispatches that have started (issue #406), one row
+-- per car and start, updated while the list repeats them.
+CREATE TABLE IF NOT EXISTS octopus_dispatch_log (
+    device       TEXT NOT NULL,
+    start        INTEGER NOT NULL,
+    end          INTEGER NOT NULL,
+    kind         TEXT,
+    energy_kwh   REAL,
+    last_seen_at INTEGER NOT NULL,
+    PRIMARY KEY (device, start)
+);
 ";
 
 /// One local day's actual solar generation total (issue #283, Phase 0):
