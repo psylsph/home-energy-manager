@@ -325,64 +325,93 @@ history (power, SOC, daily totals) covers the whole system and isn't affected.
 See [issue #427](https://github.com/psylsph/home-energy-manager/issues/427)
 for the background.
 
+This assumes you went from **one battery to two**. With more batteries, or if a
+battery was replaced in the same position, don't run the statements below:
+open an issue and we'll work out the right ones with you.
+
 You can move the old rows across with the SQLite command-line tool:
 
 - **Linux / Raspberry Pi**: `sudo apt install sqlite3`
 - **macOS**: already installed
 - **Windows**: download the "sqlite-tools" zip from
-  [sqlite.org/download.html](https://sqlite.org/download.html) and unzip
-  `sqlite3.exe` somewhere handy
+  [sqlite.org/download.html](https://sqlite.org/download.html) and put
+  `sqlite3.exe` in your `%USERPROFILE%\.givenergy-local` folder
 
 If you'd rather not type commands, [DB Browser for SQLite](https://sqlitebrowser.org/)
 works too: open the file, paste the statements into the **Execute SQL** tab and
 click **Write Changes**.
 
-1. **Close Home Energy Manager completely** (on headless installs, stop the
-   service). It writes its battery figures out on shutdown.
-2. **Back up the database.** It lives at `~/.givenergy-local/history.db`, or
-   `%USERPROFILE%\.givenergy-local\history.db` on Windows:
+1. **Back up first, while the app is running.** In **Settings → History
+   Backup**, click **Back up now**. This makes a checked copy of the whole
+   database, named `history-<date>-<time>.db`, in the backup folder shown
+   there. Copy that file somewhere else too, because older backups are deleted
+   as new ones are made.
+2. **Close Home Energy Manager completely.** It writes its battery figures out
+   on shutdown. On Proxmox, stop the service with
+   `systemctl stop home-energy-manager`; with Docker, stop the container.
+3. **Open the database.** Where it lives depends on how you run HEM:
+
+   | Install | Folder |
+   |---|---|
+   | Desktop app on Linux or macOS | `~/.givenergy-local` |
+   | Desktop app on Windows | `%USERPROFILE%\.givenergy-local` |
+   | Proxmox LXC (inside the container) | `/var/lib/givenergy-local` |
+   | Docker with our `docker-compose.yml` | `~/.givenergy-local` on the host |
+
+   With a plain `docker run`, or your own volume mapping, it's the host
+   folder you mapped to `/root/.givenergy-local`.
+
+   On Linux, macOS, Proxmox or Docker (on Proxmox, as root in the
+   container's console):
 
    ```sh
-   cd ~/.givenergy-local
-   cp history.db history-before-fix.db
+   cd ~/.givenergy-local    # or the folder from the table
    sqlite3 history.db
    ```
 
-3. **Check the switch-over day.** `module_index` 0 is the first battery (the
-   master) and 1 is the second. The first day with a `module_index` 1 row is
-   the day the second battery appeared:
+   On Windows, in PowerShell:
 
-   ```sql
-   SELECT MIN(day) FROM battery_health_daily WHERE module_index = 1;
+   ```powershell
+   cd $env:USERPROFILE\.givenergy-local
+   .\sqlite3.exe history.db
    ```
 
-4. **Move the old rows.** The delete removes the first battery's row for the
-   day you fitted the new one, because it mixes both batteries. The update
-   then moves everything before that day to the second battery. Run them in
-   this order, because once the update has run the old rows are under
-   `module_index` 1 too and the day lookup no longer finds the switch-over:
+4. **Check what's recorded.** `module_index` 0 is the first battery (the
+   master) and 1 is the second:
+
+   ```sql
+   SELECT module_index, MIN(day), MAX(day), COUNT(*)
+   FROM battery_health_daily GROUP BY module_index;
+   ```
+
+   Carry on only if you see exactly two rows, `0` and `1`, and the first day
+   for `1` is the day you fitted the new battery. If it says
+   `no such table`, you're in the wrong folder: type `.quit` and check the
+   table above. Anything else, type `.quit` and open an issue.
+
+5. **Move the old rows.** Put the first day for `1` from step 4 in place of
+   `2026-10-20` in both statements. The delete removes the first battery's row
+   for that day, because it mixes both batteries. The update moves everything
+   before that day to the second battery. The last statement clears the cell
+   spread alerts, which are also kept by position; any battery still flagged
+   is alerted once more at the next daily check:
 
    ```sql
    DELETE FROM battery_health_daily
-   WHERE module_index = 0
-     AND day = (SELECT MIN(day) FROM battery_health_daily WHERE module_index = 1);
+   WHERE module_index = 0 AND day = '2026-10-20';
 
    UPDATE battery_health_daily SET module_index = 1
-   WHERE module_index = 0
-     AND day < (SELECT MIN(day) FROM battery_health_daily WHERE module_index = 1);
+   WHERE module_index = 0 AND day < '2026-10-20';
+
+   DELETE FROM meta WHERE key = 'battery_health_alerts';
 
    .quit
    ```
 
-   If there are no `module_index` 1 rows, both statements do nothing.
-
-5. **Start the app again.** Each battery should now show its own history. If
-   anything looks wrong, close the app and copy `history-before-fix.db` back
-   over `history.db`.
-
-This assumes you went from one battery to two. With more batteries, or if a
-battery was replaced in the same position, open an issue and we'll work out
-the right statements with you.
+6. **Start the app again.** Each battery should now show its own history. If
+   anything looks wrong, close the app, delete `history.db-wal` and
+   `history.db-shm` from the database folder if they're there, and copy your
+   backup from step 1 over `history.db`.
 
 ---
 
