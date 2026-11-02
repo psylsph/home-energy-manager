@@ -26,7 +26,9 @@ use crate::forecast::calibration::calibrate_performance_ratio_detailed;
 use crate::forecast::consumption::ConsumptionProfile;
 use crate::forecast::consumption::{build_consumption_profile_excluding, ConsumptionExclusions};
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
-use crate::forecast::dispatch_load::{apply_dispatch_hours, dispatch_overlay, DispatchHour};
+use crate::forecast::dispatch_load::{
+    apply_dispatch_hours, believable_kwh, dispatch_overlay, DispatchHour,
+};
 use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
 use crate::forecast::solar::{OpenMeteoSolarProvider, SolarForecast, SolarForecastProvider};
 use crate::history::dispatch_log::LoggedDispatch;
@@ -526,8 +528,21 @@ fn car_in_profile(
     let threshold = settings
         .forecast_exclude_load_above_kw
         .is_some_and(|kw| kw.is_finite() && kw > 0.0);
-    let _ = (dispatch_log_since, logged);
-    if profile.charger_covered_fraction >= CHARGER_COVERAGE_FOR_CAR_FREE {
+    let logged_throughout = match (dispatch_log_since, profile.history_start) {
+        (Some(since), Some(start)) => {
+            since <= start
+                && logged
+                    .iter()
+                    .filter(|d| d.end > start)
+                    // Nothing added leaves nothing in the history either.
+                    .all(|d| {
+                        d.energy_kwh == Some(0.0)
+                            || believable_kwh(d.start, d.end, d.energy_kwh).is_some()
+                    })
+        }
+        _ => false,
+    };
+    if profile.charger_covered_fraction >= CHARGER_COVERAGE_FOR_CAR_FREE || logged_throughout {
         CarInProfile::Removed
     } else if threshold {
         CarInProfile::Trimmed

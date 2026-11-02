@@ -15,6 +15,7 @@
 
 use chrono::{Datelike, TimeZone, Timelike};
 
+use crate::forecast::dispatch_load::believable_kwh;
 use crate::history::dispatch_log::LoggedDispatch;
 
 /// Minimum distinct days of consumption history before the profile is
@@ -195,8 +196,16 @@ fn ev_energy_kwh(minutes: &[EvPowerMinute], start_ts: i64, end_ts: i64) -> (f64,
 /// over each dispatch's time. Only figures the planner would believe count.
 /// `dispatches` is sorted by start.
 fn dispatch_energy_kwh(dispatches: &[LoggedDispatch], start_ts: i64, end_ts: i64) -> f64 {
-    let _ = (dispatches, start_ts, end_ts);
-    0.0
+    dispatches
+        .iter()
+        .take_while(|d| d.start < end_ts)
+        .filter(|d| d.end > start_ts && d.end > d.start)
+        .filter_map(|d| {
+            let kwh = believable_kwh(d.start, d.end, d.energy_kwh)?;
+            let overlap = d.end.min(end_ts) - d.start.max(start_ts);
+            Some(kwh * overlap as f64 / (d.end - d.start) as f64)
+        })
+        .sum()
 }
 
 /// One local hour of one day, before EV charging is taken out.
@@ -282,7 +291,8 @@ fn add_delta_at_midpoint(
     sum.ev_secs += ev_secs;
     sum.dispatch_kwh += dispatch_kwh;
     days.insert(key.0);
-    let _ = history_start;
+    let earliest = history_start.get_or_insert(start_ts);
+    *earliest = (*earliest).min(start_ts);
 }
 
 /// Build the hour-of-day profile from counter samples (any ordering; the
