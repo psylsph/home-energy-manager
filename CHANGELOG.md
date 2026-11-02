@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-11-02
+
+### Added
+
+- **See your Intelligent Octopus car charging on the Planner.** The Expected Home Use chart shows the car's planned charging as Car Charging bars, and the plan says when the next charge runs, how much energy Octopus plans and whether the battery is held through it. The note under House Consumption now also counts the car charging left out of your usage history using the record of charges Octopus ran.
+
 ## [1.6.0] - 2026-11-02
 
 ### Added

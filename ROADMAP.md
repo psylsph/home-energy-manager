@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 2 November 2026 (v1.6.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 2 November 2026 (v1.7.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 The order weighs three things: whether users are affected today, whether a later item depends on it, and how much it costs. Where it differs from the issue's own label, the reason is given.
 
@@ -11,6 +11,7 @@ The code is done for all of these. They stay open only until a release or a repl
 | # | Issue | Effort | What is left |
 |---|---|---|---|
 | [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps were posted on the issue (30 Oct) and are now in `INSTALL.md`, linked from the issue (31 Oct). The reporter has thanked us and is reworking their own backup script around it (31 Oct), so nothing is left on HEM's side. Ready to close. |
+| [406](https://github.com/psylsph/home-energy-manager/issues/406) | Use Octopus dispatch slots as known load | S | Done in v1.5.0–v1.7.0. The Planner holds the battery through smart charges and counts boosts as battery load; a smart charge is grid load at the off-peak rate. The car's charging comes out of the usage history from the GivEnergy charger or, without one, from a log of the charges Octopus ran, and its planned energy is added once that history is free of it. Reply to the reporter, then close. The reporter's idea of charging the house battery during a dispatch's cheap rate is worth its own ticket. |
 | [419](https://github.com/psylsph/home-energy-manager/issues/419) | Solar Graph puzzle | S | Fixed in v0.97.0. The overnight climb was the inverter's output counter standing in for solar while the panel counters read zero, not a clock problem; solar now comes only from the panel counters, so the drop at sunrise and the inflated Generated total are gone. Days already recorded keep their old values. Explained on the issue (31 Oct); waiting for the reporter to confirm on v0.97.0, then close. |
 
 ## Tier 2: user-facing gaps and polish
@@ -26,10 +27,9 @@ These come from #403 (now closed), where Brian and Stuart split the original dis
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
-| 1 | [406](https://github.com/psylsph/home-energy-manager/issues/406) | Use Octopus dispatch slots as known load | M | The dispatch list is already polled every 3 minutes for the battery hold, so the data exists. Its profile half builds on #400, now done. Decide whether a smart charge outside the cheap window counts as peak-rate load. The reporter also suggests using an EV slot's cheap rate to charge the house battery. That is worth its own ticket once this lands. |
-| 2 | [404](https://github.com/psylsph/home-energy-manager/issues/404) | Re-plan and notify when Octopus moves a dispatch slot | M | Octopus keeps moving slots through the evening, so a plan sized against an old slot goes stale. It reuses #406's dispatch-as-load handling and the existing "what the automatic plan did" reporting. The ownership rules for the shared Eco Paused state must keep winning over a running smart charge. |
-| 3 | [407](https://github.com/psylsph/home-energy-manager/issues/407) | Planner minimum battery level as an overridable floor | M | The reporter has now said what they meant: a back-stop that stops optimised exporting from emptying the battery before the cheap window, tightened as HEM learns the household's evening discharge rate. That is a guard for #405 rather than a change to the existing floor, so design it with #405 and don't ship it alone. |
-| 4 | [405](https://github.com/psylsph/home-energy-manager/issues/405) | Export surplus charge before the cheap window | L | The riskiest item here. It needs #406 and #407 first (#400 is done), and cannot export while the car is charging. Start as Planner advice (as the other export advice is) and consider acting on its own only after real-world use. |
+| 1 | [404](https://github.com/psylsph/home-energy-manager/issues/404) | Re-plan and notify when Octopus moves a dispatch slot | M | Octopus keeps moving slots through the evening, so a plan sized against an old slot goes stale. It reuses #406's dispatch-as-load handling (done in v1.7.0) and the existing "what the automatic plan did" reporting. The ownership rules for the shared Eco Paused state must keep winning over a running smart charge. |
+| 2 | [407](https://github.com/psylsph/home-energy-manager/issues/407) | Planner minimum battery level as an overridable floor | M | The reporter has now said what they meant: a back-stop that stops optimised exporting from emptying the battery before the cheap window, tightened as HEM learns the household's evening discharge rate. That is a guard for #405 rather than a change to the existing floor, so design it with #405 and don't ship it alone. |
+| 3 | [405](https://github.com/psylsph/home-energy-manager/issues/405) | Export surplus charge before the cheap window | L | The riskiest item here. It needs #406 and #407 first (#400 is done), and cannot export while the car is charging. Start as Planner advice (as the other export advice is) and consider acting on its own only after real-world use. |
 
 ## Tier 4: protecting users and widening reach
 
@@ -49,7 +49,7 @@ These come from #403 (now closed), where Brian and Stuart split the original dis
 ## Dependencies at a glance
 
 ```text
-#400 EV out of profile (done) ─► #406 dispatch as load ─► #404 re-plan on moved slot
-                                       └─────────► #405 export surplus ◄── #407 back-stop
+#400 EV out of profile (done) ─► #406 dispatch as load (done) ─► #404 re-plan on moved slot
+                                              └─────────► #405 export surplus ◄── #407 back-stop
 #402 Settings split (done) ─► #397 reset detection + checklist, #396 MQTT
 ```
