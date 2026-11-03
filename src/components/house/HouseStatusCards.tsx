@@ -12,6 +12,7 @@ import { BATTERY_BARS } from '../../lib/houseGeometry';
 import { formatPercent } from '../../lib/format';
 import { BATTERY_OUTPUT_COLOR, SOC_MID_COLOR, socColor } from '../../lib/energyFlow';
 import { useInverterStore } from '../../store/useInverterStore';
+import { deviceHasBatteryControls } from '../../lib/deviceCapabilities';
 
 const CHARGE_GREEN = BATTERY_OUTPUT_COLOR;
 const EXPORT_AMBER = SOC_MID_COLOR;
@@ -103,6 +104,20 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
   );
 }
 
+/**
+ * On a Gateway (issue #428): its schedule registers are its own copy, not the
+ * AIO's, so they can't say when the battery will next charge or export.
+ */
+function ScheduleCardUnavailable() {
+  return (
+    <section className={CARD} data-testid="house-charge-card" data-kind="none" data-state="unavailable">
+      <BatteryGlyph kind="none" pulsing={false} />
+      <span className={LABEL}>Schedule</span>
+      <span className="text-sm text-text-secondary" data-testid="house-charge-window">Not available on a Gateway</span>
+    </section>
+  );
+}
+
 /** Until the Timed Export schedule has loaded, so the card doesn't flick from Charge to Export. */
 function ScheduleCardLoading() {
   return (
@@ -114,7 +129,8 @@ function ScheduleCardLoading() {
   );
 }
 
-export default function HouseStatusCards({ snapshot, now = new Date() }: { snapshot: InverterSnapshot; now?: Date }) {
+/** The schedule card once the Timed Export schedule is fetched (not on a Gateway, where it isn't shown). */
+function LiveScheduleCard({ snapshot, now }: { snapshot: InverterSnapshot; now: Date }) {
   const { schedule, loaded } = useTimedExportSchedule();
   // Slots are in inverter local time and HEM may run in a UTC container, so
   // the minute comes from the inverter's clock. The browser clock is only
@@ -122,9 +138,17 @@ export default function HouseStatusCards({ snapshot, now = new Date() }: { snaps
   // backend), where it's all we have — windows may be off if the two
   // disagree.
   const nowMinute = inverterMinuteOfDay(snapshot) ?? now.getHours() * 60 + now.getMinutes();
+  return loaded
+    ? <ScheduleCard snapshot={snapshot} timedExport={schedule} nowMinute={nowMinute} />
+    : <ScheduleCardLoading />;
+}
+
+export default function HouseStatusCards({ snapshot, now = new Date() }: { snapshot: InverterSnapshot; now?: Date }) {
   return (
     <div className="grid grid-cols-2 gap-3" data-testid="house-status-cards">
-      {loaded ? <ScheduleCard snapshot={snapshot} timedExport={schedule} nowMinute={nowMinute} /> : <ScheduleCardLoading />}
+      {deviceHasBatteryControls(snapshot.device_type_code)
+        ? <LiveScheduleCard snapshot={snapshot} now={now} />
+        : <ScheduleCardUnavailable />}
       <BatteryCard snapshot={snapshot} />
     </div>
   );

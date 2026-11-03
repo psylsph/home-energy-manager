@@ -44,6 +44,7 @@ import {
   formatSessionEnergy,
 } from './format';
 import { solarOverallPercent } from './solarArrays';
+import { deviceHasBatteryControls } from './deviceCapabilities';
 import { gridMeterCurrentA, GRID_CT_AUTO } from './meters';
 
 /**
@@ -293,7 +294,9 @@ export function buildEnergyFlows(
   const evcPower = opts.evcPowerW ?? 0;
   const evcActive = !!opts.showEvc && evcPower > noise;
 
-  const modeLabel = batteryModeDisplayLabel(
+  // A Gateway's mode registers are its own copy, not the AIO's (issue #428),
+  // so they say nothing about what the battery is doing: leave the mode out.
+  const modeLabel = !deviceHasBatteryControls(s.device_type_code) ? undefined : batteryModeDisplayLabel(
     s.battery_mode,
     s.cosy_active,
     s.cosy_enabled,
@@ -736,7 +739,7 @@ export function buildEnergyFlows(
       // the energy is flowing. Showing "-839W" alongside a "Discharging"
       // label made it look like a bug.
       value: formatVisualPower(absBattery, noise),
-      unit: `${formatPercent(s.soc)} · ${modeLabel}`,
+      unit: modeLabel ? `${formatPercent(s.soc)} · ${modeLabel}` : formatPercent(s.soc),
       socText: formatPercent(s.soc),
       mode: modeLabel,
       subLabel: batteryMeasurements,

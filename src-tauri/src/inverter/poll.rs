@@ -1752,6 +1752,10 @@ impl ModelIdentity {
             client.set_inter_request_delay(ModbusClient::INTER_REQUEST_DELAY_3PH);
         }
 
+        // A Gateway keeps its own copy of the battery settings (issue #428):
+        // from here on the client refuses the writes it wouldn't pass on.
+        client.set_write_device(snapshot.device_type);
+
         self.device_type = Some(snapshot.device_type);
         self.code = Some(snapshot.device_type_code.clone());
 
@@ -2231,6 +2235,14 @@ async fn retry_stalled_force_restorations_at(state: &Arc<AppState>, now_ms: i64)
     // The retry must obey the same identity rule as an explicit Stop: a stale
     // baseline is never re-queued onto a different inverter.
     let snapshot = state.latest_snapshot.lock().await.clone();
+    // A Gateway refuses the restoration writes (issue #428), so a restoration
+    // owed there could never be confirmed: don't re-queue it every 30 s.
+    if snapshot
+        .as_ref()
+        .is_some_and(|s| !s.device_type.battery_controls_reach_battery())
+    {
+        return;
+    }
 
     let charge_request = state.force_charge_restoration.lock().await.clone();
     if let Some(request) = charge_request {
@@ -2909,12 +2921,22 @@ async fn drain_write_batches_with_gap(
                 );
                 break;
             }
+            // A write the client refused (issue #428) never reached the
+            // dongle, so it needs no recovery gap; the client logged it.
+            let mut refused = false;
             match client.write_register(w.address, w.value).await {
                 Ok(()) => {
                     tracing::info!("Wrote register {} = {}", w.address, w.value);
                 }
                 Err(e) => {
-                    tracing::error!("Failed to write register {} = {}: {e}", w.address, w.value);
+                    refused = matches!(e, crate::modbus::client::ClientError::WriteRefused(_));
+                    if !refused {
+                        tracing::error!(
+                            "Failed to write register {} = {}: {e}",
+                            w.address,
+                            w.value
+                        );
+                    }
                     if first_failure.is_none() {
                         first_failure = Some(WriteOutcome::Failed {
                             address: w.address,
@@ -2939,7 +2961,7 @@ async fn drain_write_batches_with_gap(
             // registers (up to 13s observed for exception-67 recovery). The
             // trailing gap after the final write is skipped when a caller is
             // awaiting the outcome.
-            if !(awaiting && i == last_idx) {
+            if !refused && !(awaiting && i == last_idx) {
                 tokio::time::sleep(inter_write_gap).await;
             }
         }
@@ -3202,22 +3224,22 @@ pub(crate) async fn drop_pending_writes_for_reconnect(state: &Arc<AppState>) {
 }
 
 /// The device a poll session confirmed, and the address it was reached at.
-#[allow(dead_code)]
 struct ConfirmedDevice {
     host: String,
     port: u16,
     device_type: DeviceType,
 }
 
-/// Stub (issue #428): a new session doesn't remember write limits yet.
-#[allow(dead_code)]
+/// The write limits a new session starts with: those of the device last
+/// confirmed at the same address, or none (a new address may be a different
+/// device, and identification sets them within a poll).
 fn remembered_write_device(
     last: Option<&ConfirmedDevice>,
     host: &str,
     port: u16,
 ) -> Option<DeviceType> {
-    let _ = (last, host, port);
-    None
+    last.filter(|d| d.host == host && d.port == port)
+        .map(|d| d.device_type)
 }
 
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
@@ -3244,6 +3266,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
     // Connect-failure counter for the auto-discovery subsystem (separate
     // from ReconnectController, which owns the dead-session/flap gates).
     let mut consecutive_connect_failures: u32 = 0;
+    // The device last confirmed, and where (issue #428): a reconnect to the
+    // same address keeps its write limits until the model is identified again.
+    let mut last_confirmed: Option<ConfirmedDevice> = None;
     // In-memory CT-solar recovery tracking (issue #294): per-meter last
     // accepted same-day delta and consecutive-rejection count for the
     // staged counter-corruption recovery. Loop-scoped (not persisted) so
@@ -3290,6 +3315,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
         // ---- Create client and connect ----
         let mut client = ModbusClient::new(&settings.host, settings.port, &settings.serial);
+        // HR(0) can take several polls to read back after a reconnect, and
+        // queued writes are drained before it does: until then a Gateway must
+        // still refuse battery writes (issue #428).
+        if let Some(device) =
+            remembered_write_device(last_confirmed.as_ref(), &settings.host, settings.port)
+        {
+            client.set_write_device(device);
+        }
 
         match client.connect().await {
             Ok(()) => {
@@ -4134,13 +4167,20 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // hold) sit out while it runs. Cosy, Agile and Timed
                                 // Export defer to its arbiter claim.
                                 let calibrating = state.calibration_run.lock().await.is_some();
+                                // A Gateway keeps its own copy of the battery settings
+                                // and doesn't pass writes on to the AIO (issue #428):
+                                // there every battery automation sits out, picking up
+                                // again once HEM is connected to the AIO.
+                                let reaches_battery =
+                                    snapshot.device_type.battery_controls_reach_battery();
+                                let sit_out = calibrating || !reaches_battery;
 
                                 // ---- Auto winter mode ----
                                 {
                                     let config = state.auto_winter_config.lock().await;
                                     let mut aw_state = state.auto_winter_state.lock().await;
                                     let mut saved = state.auto_winter_saved.lock().await;
-                                    let writes = if calibrating {
+                                    let writes = if sit_out {
                                         None
                                     } else {
                                         check_auto_winter_with_outcome(
@@ -4226,7 +4266,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     let mut adaptive_saved =
                                         state.adaptive_charge_saved.lock().await;
                                     let saved_before = adaptive_saved.clone();
-                                    let outcome = if calibrating {
+                                    let outcome = if sit_out {
                                         crate::inverter::state_machines::AdaptiveChargeOutcome {
                                             write: None,
                                             desired_rate_percent: None,
@@ -4301,7 +4341,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // the plan-to-writes translation and the once-a-day
                                 // Adaptive Charge warnings are in `forecast_plan`.
                                 let plan_now = chrono::Local::now();
-                                if !calibrating {
+                                if !sit_out {
                                     crate::inverter::forecast_plan::run_plan_refresh(
                                         &state,
                                         &poll_settings,
@@ -4392,7 +4432,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // run yet: keep holding rather than restore Eco and
                                     // re-pause when the list arrives.
                                     (dispatches.hold_now(now) || dispatches.holding_for_restart(now))
-                                        && !calibrating
+                                        && !sit_out
                                 };
                                 let safety_demand = {
                                     let load_config =
@@ -4427,7 +4467,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         inverter_minute,
                                         false,
                                     );
-                                    already_pausing || !preview_writes.is_empty()
+                                    reaches_battery
+                                        && (already_pausing || !preview_writes.is_empty())
                                 };
                                 if safety_demand {
                                     discharge_arbiter.request(DischargeControlOwner::Safety);
@@ -4491,24 +4532,26 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // ---- Force Charge / Force Discharge auto-revert ----
                                 // Bounded force actions restore their captured baseline
                                 // once the slot closes (see the functions' docs).
-                                run_force_charge_auto_revert(
-                                    &state,
-                                    &mut client,
-                                    &snapshot,
-                                    &mut discharge_arbiter,
-                                    write_gap,
-                                )
-                                .await;
-                                if let Some(may_override) = run_force_discharge_auto_revert(
-                                    &state,
-                                    &mut client,
-                                    &snapshot,
-                                    &mut discharge_arbiter,
-                                    write_gap,
-                                )
-                                .await
-                                {
-                                    discharge_control_may_override_pause = may_override;
+                                if reaches_battery {
+                                    run_force_charge_auto_revert(
+                                        &state,
+                                        &mut client,
+                                        &snapshot,
+                                        &mut discharge_arbiter,
+                                        write_gap,
+                                    )
+                                    .await;
+                                    if let Some(may_override) = run_force_discharge_auto_revert(
+                                        &state,
+                                        &mut client,
+                                        &snapshot,
+                                        &mut discharge_arbiter,
+                                        write_gap,
+                                    )
+                                    .await
+                                    {
+                                        discharge_control_may_override_pause = may_override;
+                                    }
                                 }
 
                                 // ---- Battery calibration cycle (issue #418) ----
@@ -4585,10 +4628,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // window.
                                     let managed_schedule_live =
                                         state.timed_export_config.lock().await.schedule_enabled;
-                                    if timed_export_machine_allowed(
-                                        discharge_arbiter,
-                                        managed_schedule_live,
-                                    ) {
+                                    if reaches_battery
+                                        && timed_export_machine_allowed(
+                                            discharge_arbiter,
+                                            managed_schedule_live,
+                                        )
+                                    {
                                         // Short-lived guards: clone the inputs and
                                         // drop every guard before any I/O.
                                         let (
@@ -4803,7 +4848,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 if !timed_export_owns_discharge {
                                     let force_discharge_in_progress =
                                         state.force_discharge_revert.lock().await.is_some()
-                                            || calibrating;
+                                            || sit_out;
                                     let invalid_timed_export = should_repair_timed_export(
                                         snapshot.enable_discharge,
                                         &snapshot.discharge_slots,
@@ -4949,7 +4994,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                     None => {}
                                 }
-                                if cosy_blocker.is_none() {
+                                if cosy_blocker.is_none() && reaches_battery {
                                     let cosy_active = *state.cosy_active.lock().await;
                                     let step = crate::inverter::cosy::plan_cosy_step(
                                         &crate::inverter::cosy::CosyInputs {
@@ -4988,7 +5033,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // whether a slot is currently firing — we just write
                                 // the slot 1 start/end times and let the inverter's
                                 // native schedule mechanism run the rest.
-                                {
+                                if reaches_battery {
                                     let settings = &poll_settings;
                                     let configured_scope = crate::settings::agile_scope_for_settings(settings);
                                     let scope = if settings.cosy_enabled {
@@ -5189,7 +5234,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // and the dispatch hold share the saved pre-pause reserve; each
                                 // releases only its own ownership, and the final owner to clear
                                 // performs the Eco restore.
-                                {
+                                if reaches_battery {
                                     let load_config = state.load_limiter_config.lock().await;
                                     let mut load_state = state.load_limiter_state.lock().await;
                                     let temperature_config =
@@ -5294,7 +5339,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // Runs after the limiters so their pause
                                 // writes land first; the guard never touches
                                 // mode registers so it cannot fight them.
-                                let floor_writes = if calibrating {
+                                let floor_writes = if sit_out {
                                     None
                                 } else {
                                     evaluate_discharge_floor(&state, &snapshot, inverter_minute).await
@@ -5490,6 +5535,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                             }
                         }
                     }.await;
+                    if let Some(device_type) = identity.device_type {
+                        last_confirmed = Some(ConfirmedDevice {
+                            host: settings.host.clone(),
+                            port: settings.port,
+                            device_type,
+                        });
+                    }
 
                     let step = decide_after_cycle(
                         outcome,

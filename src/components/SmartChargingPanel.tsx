@@ -5,6 +5,8 @@ import { dispatchLabel, readDispatchesResponse } from '../lib/smartCharging';
 import type { SmartChargingResponse } from '../lib/types';
 import Toggle from './Toggle';
 import HelpTip from './HelpTip';
+import { useInverterStore } from '../store/useInverterStore';
+import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 
 const REFRESH_MS = 60_000;
 
@@ -19,6 +21,7 @@ export default function SmartChargingPanel() {
   const [saveError, setSaveError] = useState<string | null>(null);
   // Bumped after the hold is switched to reload straight away.
   const [reloadTick, setReloadTick] = useState(0);
+  const batteryControls = useInverterStore((s) => deviceHasBatteryControls(s.snapshot?.device_type_code));
 
   useEffect(() => {
     let cancelled = false;
@@ -56,6 +59,10 @@ export default function SmartChargingPanel() {
       setSaving(false);
     }
   }
+
+  // A Gateway doesn't pass a discharge pause on to the AIO (issue #428): the
+  // hold sits out there, so it isn't shown. It picks up again on the AIO.
+  if (!batteryControls) return null;
 
   const watching = data.enabled && data.configured;
   const noDevice = watching && data.checked_at !== null && data.devices === 0;

@@ -1,6 +1,8 @@
 import { useEffect, useId, useState } from 'react';
 import { apiGet, apiPost } from '../lib/api';
 import Toggle from './Toggle';
+import { useInverterStore } from '../store/useInverterStore';
+import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 import HelpTip, { HeadingWithHelp } from './HelpTip';
 import { exportStatusLabel, formatReward, formatSessionWindow, readSessionsResponse } from '../lib/savingSessions';
 import type { SavingSessionsMode, SavingSessionsResponse } from '../lib/types';
@@ -38,6 +40,7 @@ export default function SavingSessionsPanel() {
   const [floorDraft, setFloorDraft] = useState<number | null>(null);
   // Bumped after the mode changes to reload straight away.
   const [reloadTick, setReloadTick] = useState(0);
+  const batteryControls = useInverterStore((s) => deviceHasBatteryControls(s.snapshot?.device_type_code));
 
   useEffect(() => {
     let cancelled = false;
@@ -128,6 +131,9 @@ export default function SavingSessionsPanel() {
 
   const watching = data.mode !== 'off';
   const exporting = data.mode === 'export';
+  // A Gateway doesn't pass an export on to the AIO (issue #428): Alert and
+  // Export isn't offered there unless it's already chosen, so it can be left.
+  const modes = batteryControls || exporting ? MODES : MODES.filter((item) => item.value !== 'export');
   // Joining only happens with a working login to an account known to be
   // signed up; a failed check keeps the last enrolment answer, so check both.
   const quietJoinOnly =
@@ -159,7 +165,7 @@ export default function SavingSessionsPanel() {
             For Sessions You Have Joined · Off also stops joining
           </span>
           <div className="flex flex-wrap gap-1" role="group" aria-labelledby={modesLabelId}>
-            {MODES.map((item) => (
+            {modes.map((item) => (
               <button
                 key={item.value}
                 type="button"

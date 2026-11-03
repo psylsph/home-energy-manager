@@ -515,7 +515,11 @@ pub(crate) async fn run_plan_refresh(
     snapshot: &InverterSnapshot,
     now: DateTime<Local>,
 ) {
-    if !settings.forecast_plan_auto_refresh || settings.forecast_plan_auto_apply_enabled {
+    // A Gateway doesn't pass the charge slot on to the AIO (issue #428).
+    if !settings.forecast_plan_auto_refresh
+        || settings.forecast_plan_auto_apply_enabled
+        || !snapshot.device_type.battery_controls_reach_battery()
+    {
         return;
     }
     let adaptive_owns_rate = adaptive_owns_rate(settings);
@@ -554,7 +558,10 @@ pub(crate) async fn run_plan_auto_apply(
     snapshot: &InverterSnapshot,
     now: DateTime<Local>,
 ) {
-    if !settings.forecast_plan_auto_apply_enabled {
+    // A Gateway doesn't pass the charge slot on to the AIO (issue #428).
+    if !settings.forecast_plan_auto_apply_enabled
+        || !snapshot.device_type.battery_controls_reach_battery()
+    {
         return;
     }
     let adaptive_owns_rate = adaptive_owns_rate(settings);

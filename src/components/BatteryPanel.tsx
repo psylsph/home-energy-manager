@@ -3,6 +3,7 @@ import type { InverterSnapshot } from '../lib/types';
 import { formatPower, formatPercent, formatVoltage, formatCurrent, formatTemp, formatEnergy, finiteAbs } from '../lib/format';
 import { batteryModeDisplayLabel } from '../lib/energyFlow';
 import BatteryGauge from './BatteryGauge';
+import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 
 interface Props {
   snapshot: InverterSnapshot;
@@ -84,10 +85,15 @@ function BatteryPanelInner({ snapshot: s }: Props) {
           <span className="text-text-primary font-mono text-right">{formatCurrent(finiteAbs(s.battery_current))}</span>
           <span className="text-text-secondary">Temperature</span>
           <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
-          <span className="text-text-secondary">Mode</span>
-          <span className="text-text-primary font-mono text-right">{modeLabel}</span>
-          <span className="text-text-secondary">Reserve</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
+          {/* A Gateway's mode and reserve are its own copy, not the AIO's (issue #428). */}
+          {deviceHasBatteryControls(s.device_type_code) && (
+            <>
+              <span className="text-text-secondary">Mode</span>
+              <span className="text-text-primary font-mono text-right">{modeLabel}</span>
+              <span className="text-text-secondary">Reserve</span>
+              <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
+            </>
+          )}
           <span className="text-text-secondary">Charged Today</span>
           <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_charge_kwh)}</span>
           <span className="text-text-secondary">Discharged Today</span>

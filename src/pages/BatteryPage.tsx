@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useInverterStore } from '../store/useInverterStore';
 import { formatPercent, formatVoltage, formatTemp } from '../lib/format';
 import { cellSpreadMv } from '../lib/batteryHealth';
+import { isGatewayDevice } from '../lib/deviceCapabilities';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryPanel from '../components/BatteryPanel';
 import BatteryHealthPanel from '../components/BatteryHealthPanel';
@@ -322,8 +323,8 @@ export default function BatteryPage() {
               No battery module data available.
             </p>
             <p className="text-text-secondary/60 text-xs mt-2">
-              {s.device_type_code?.startsWith('70')
-                ? 'The Gateway does not expose per-cell telemetry. Battery cell data requires a direct connection to each AIO unit (not yet supported).'
+              {isGatewayDevice(s.device_type_code)
+                ? 'The Gateway does not expose per-cell telemetry: connect HEM to the AIO itself to see its battery cells.'
                 : 'Battery module data will appear once detected by the inverter.'}
             </p>
           </div>

@@ -76,6 +76,7 @@ import {
 } from '../lib/planHistory';
 import type { HistoryPoint, PastRange, PlanHistorySnapshot } from '../lib/planHistory';
 import type { InverterSnapshot } from '../lib/types';
+import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 import { useInverterStore } from '../store/useInverterStore';
 import HelpTip from '../components/HelpTip';
 
@@ -437,6 +438,9 @@ export default function ForecastPage() {
     consumption: null,
   });
   const snapshot = useInverterStore((s) => s.snapshot);
+  // A Gateway doesn't pass a charge slot on to the AIO (issue #428): the plan
+  // is shown, but neither applied by hand nor automatically.
+  const batteryControls = deviceHasBatteryControls(snapshot?.device_type_code);
   const gridLineWeight = useInverterStore((state) => state.gridLineWeight);
   const lastRefetchRef = useRef<number>(0);
   const lastTriggerRef = useRef<{
@@ -1188,7 +1192,7 @@ export default function ForecastPage() {
               {carNote}
             </p>
           )}
-          {plan.apply && plan.recommendation.kind === 'charge' && (
+          {batteryControls && plan.apply && plan.recommendation.kind === 'charge' && (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -1211,6 +1215,8 @@ export default function ForecastPage() {
               )}
             </div>
           )}
+          {/* Automatic planning sits out on a Gateway (issue #428). */}
+          {batteryControls && (
           <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-3">
             <div>
               <div className="text-xs font-medium text-text-primary">Automatic Planning</div>
@@ -1232,6 +1238,7 @@ export default function ForecastPage() {
               {planAutoHandling ? 'On' : 'Off'}
             </span>
           </div>
+          )}
           <details className="group rounded-lg bg-bg-elevated/50">
             <summary className="cursor-pointer list-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs font-medium text-text-primary">
               <span>Plan Settings</span>
@@ -1337,6 +1344,7 @@ export default function ForecastPage() {
               folded in here rather than shown as a second toggle: turning
               the control on or editing the lead upgrades it to auto-apply,
               turning the control off clears both. */}
+          {batteryControls && (
           <div className="border-t border-white/10 pt-2 mt-1 flex flex-col gap-1">
             <div className="flex items-center gap-3 flex-wrap">
               <span
@@ -1448,6 +1456,7 @@ export default function ForecastPage() {
               )}
             </p>
           </div>
+          )}
           {/* Battery efficiencies — planner inputs (issue #283). Moved here
               from the Settings page so all Forecast settings live on the
               Forecast page. They save together. */}

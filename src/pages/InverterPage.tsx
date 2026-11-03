@@ -2,7 +2,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import { formatPower, formatVoltage, formatCurrent, formatTemp, formatEnergy, formatPercent, formatFrequency, formatOperatingHours, finiteAbs } from '../lib/format';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import BatteryModeSummary from '../components/BatteryModeSummary';
-import { deviceSupportsExportLimit, usesDirectChargeLimit } from '../lib/deviceCapabilities';
+import { deviceHasBatteryControls, deviceSupportsExportLimit, isGatewayDevice, usesDirectChargeLimit } from '../lib/deviceCapabilities';
 import { rawLimitToPercent } from '../lib/powerLimit';
 import type { LimitScale } from '../lib/powerLimit';
 import { hasGridFault, hasInverterTrip, hasBatteryOverTemp, gridFaultTitle } from '../lib/gridFault';
@@ -25,6 +25,10 @@ export default function InverterPage() {
   }
 
   const s = snapshot;
+  // A Gateway keeps its own copy of the schedule and battery settings and
+  // doesn't pass them to the AIO (issue #428): its values aren't the AIO's, so
+  // they and the automations that act on them are left out.
+  const batteryControls = deviceHasBatteryControls(s.device_type_code);
 
   // Charge/discharge limits are shown as a percentage of the inverter's
   // maximum. The DC-hybrid HR 111/112 registers hold a percentage of battery
@@ -134,7 +138,7 @@ export default function InverterPage() {
       </section>
 
       {/* Gateway detail — only for Gateway devices */}
-      {s.device_type_code.startsWith('70') && (
+      {isGatewayDevice(s.device_type_code) && (
         <section className="bg-bg-surface rounded-2xl p-5">
           <div className="flex items-center gap-3 mb-4">
             <h2 className="text-text-primary font-semibold text-lg">Gateway</h2>
@@ -218,8 +222,8 @@ export default function InverterPage() {
               Battery cell data isn&apos;t available through the Gateway.{' '}
               <HelpTip label="Gateway battery data">
                 The Gateway aggregates battery telemetry from its child AIO(s) — only aggregate SOC,
-                power and energy totals are reported. Per-cell voltages and module temperatures
-                require a direct connection to each AIO (not yet supported).
+                power and energy totals are reported. For per-cell voltages and module temperatures,
+                connect HEM to the AIO itself.
               </HelpTip>
             </p>
           </div>
@@ -232,8 +236,12 @@ export default function InverterPage() {
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <span className="text-text-secondary">Temperature</span>
           <span className="text-text-primary font-mono text-right">{formatTemp(s.inverter_temperature)}</span>
-          <span className="text-text-secondary">Active Power Rate</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(s.active_power_rate)}</span>
+          {batteryControls && (
+            <>
+              <span className="text-text-secondary">Active Power Rate</span>
+              <span className="text-text-primary font-mono text-right">{formatPercent(s.active_power_rate)}</span>
+            </>
+          )}
           {typeof s.inverter_output_power === 'number' && (
             <>
               <span className="text-text-secondary">AC Output</span>
@@ -307,10 +315,14 @@ export default function InverterPage() {
       <section className="bg-bg-surface rounded-2xl p-5">
         <h2 className="text-text-primary font-semibold text-lg mb-4">Battery</h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-          <span className="text-text-secondary col-span-2 sm:col-span-1">Modes</span>
-          <div className="text-text-primary col-span-2 sm:col-span-1 sm:text-right">
-            <BatteryModeSummary snapshot={s} />
-          </div>
+          {batteryControls && (
+            <>
+              <span className="text-text-secondary col-span-2 sm:col-span-1">Modes</span>
+              <div className="text-text-primary col-span-2 sm:col-span-1 sm:text-right">
+                <BatteryModeSummary snapshot={s} />
+              </div>
+            </>
+          )}
           <span className="text-text-secondary">SOC</span>
           <span className="text-text-primary font-mono text-right">{formatPercent(s.soc)}</span>
           <span className="text-text-secondary">Voltage</span>
@@ -323,20 +335,24 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
           <span className="text-text-secondary">Capacity</span>
           <span className="text-text-primary font-mono text-right">{s.battery_capacity_kwh.toFixed(1)} kWh</span>
-          <span className="text-text-secondary">SOC Reserve</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
-          <span className="text-text-secondary">Target SOC</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(s.target_soc)}</span>
-          <span className="text-text-secondary">Charge Rate</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(rawLimitToPercent(s.charge_rate, limitScale))}</span>
-          <span className="text-text-secondary">Discharge Rate</span>
-          <span className="text-text-primary font-mono text-right">{formatPercent(rawLimitToPercent(s.discharge_rate, limitScale))}</span>
-          <span className="text-text-secondary">Enable Charge</span>
-          <span className={`font-mono text-right ${s.enable_charge ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_charge ? 'Yes' : 'No'}</span>
-          <span className="text-text-secondary">Enable Charge Target</span>
-          <span className={`font-mono text-right ${s.enable_charge_target ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_charge_target ? 'Yes' : 'No'}</span>
-          <span className="text-text-secondary">Enable Discharge</span>
-          <span className={`font-mono text-right ${s.enable_discharge ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_discharge ? 'Yes' : 'No'}</span>
+          {batteryControls && (
+            <>
+              <span className="text-text-secondary">SOC Reserve</span>
+              <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
+              <span className="text-text-secondary">Target SOC</span>
+              <span className="text-text-primary font-mono text-right">{formatPercent(s.target_soc)}</span>
+              <span className="text-text-secondary">Charge Rate</span>
+              <span className="text-text-primary font-mono text-right">{formatPercent(rawLimitToPercent(s.charge_rate, limitScale))}</span>
+              <span className="text-text-secondary">Discharge Rate</span>
+              <span className="text-text-primary font-mono text-right">{formatPercent(rawLimitToPercent(s.discharge_rate, limitScale))}</span>
+              <span className="text-text-secondary">Enable Charge</span>
+              <span className={`font-mono text-right ${s.enable_charge ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_charge ? 'Yes' : 'No'}</span>
+              <span className="text-text-secondary">Enable Charge Target</span>
+              <span className={`font-mono text-right ${s.enable_charge_target ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_charge_target ? 'Yes' : 'No'}</span>
+              <span className="text-text-secondary">Enable Discharge</span>
+              <span className={`font-mono text-right ${s.enable_discharge ? 'text-accent' : 'text-text-secondary'}`}>{s.enable_discharge ? 'Yes' : 'No'}</span>
+            </>
+          )}
           <span className="text-text-secondary">Modules</span>
           <span className="text-text-primary font-mono text-right">{s.battery_modules.length > 0 ? s.battery_modules.length : '—'}</span>
           <span className="text-text-secondary">Charge Today</span>
@@ -348,6 +364,7 @@ export default function InverterPage() {
 
 
       {/* Features & Status */}
+      {batteryControls && (
       <section className="bg-bg-surface rounded-2xl p-5">
         <h2 className="text-text-primary font-semibold text-lg mb-4">Features & Status</h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
@@ -388,6 +405,7 @@ export default function InverterPage() {
           <AgileBlockedNotice blockedBy={s.agile_blocked_by} enabled={s.agile_enabled} />
         </div>
       </section>
+      )}
     </div>
   );
 }

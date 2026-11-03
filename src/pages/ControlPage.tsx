@@ -6,6 +6,7 @@ import type { BatteryModeKind } from '../store/useInverterStore';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import {
+  deviceHasBatteryControls,
   deviceSupportsEps,
   deviceSupportsTimedDischarge,
   deviceUsesHr50ActivePowerRate,
@@ -3655,6 +3656,41 @@ export default function ControlPage() {
         showRetry
         extraNote="Controls are disabled while the inverter is unreachable. They will reappear automatically once the connection is restored."
       />
+    );
+  }
+
+  // A Gateway keeps its own copy of the schedule and battery settings and
+  // doesn't pass them to the AIO (issue #428), so the backend refuses those
+  // controls. Offer only what still works: the clock, and Reboot.
+  if (!deviceHasBatteryControls(snapshot.device_type_code)) {
+    return (
+      <div className="flex flex-col gap-6 max-w-2xl mx-auto px-4 py-6">
+        <section className="space-y-3">
+          <h2 className="text-text-primary font-semibold text-lg">Gateway</h2>
+          <p className="text-text-secondary text-sm">
+            Battery controls aren&apos;t available here: connect HEM to the AIO to control the battery.{' '}
+            <HelpTip label="Gateway battery controls">
+              The Gateway keeps its own copy of the charge schedule and battery settings and
+              doesn&apos;t pass changes on to the AIO, so a change made here would never reach the
+              battery. Point HEM at the AIO&apos;s own address to see and change its schedule,
+              reserve and power limits. Automations you&apos;ve set up wait until HEM is connected to
+              the AIO again.
+            </HelpTip>
+          </p>
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+            <ActionButton label="Sync Clock" icon="🕐" path="/api/control/sync-clock" />
+          </div>
+        </section>
+        {developerMode && (
+          <section className="space-y-4 border-t border-bg-elevated pt-4 mt-4">
+            <div className="flex items-center gap-2">
+              <h2 className="text-text-primary font-semibold text-lg">Developer Controls</h2>
+              <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
+            </div>
+            <RebootInverterSection />
+          </section>
+        )}
+      </div>
     );
   }
 

@@ -62,7 +62,7 @@ pub enum ClientError {
     InvalidResponse(String),
 
     /// The connected device doesn't pass this register to the battery, so the
-    /// write was not sent (issue #428).
+    /// write was not sent (issue #428: a Gateway keeps its own copy).
     #[error("Write to HR {0} refused: this device doesn't pass it to the battery")]
     WriteRefused(u16),
 }
@@ -333,6 +333,10 @@ pub struct ModbusClient {
     pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
     /// Set to `true` when connected, `false` on disconnect or consumer error.
     connected: Arc<AtomicBool>,
+    /// The detected model, once known: writes it doesn't accept
+    /// ([`crate::inverter::model::DeviceType::accepts_write`]) are refused
+    /// before anything is sent. `None` until model detection.
+    write_device: Option<crate::inverter::model::DeviceType>,
     /// Instant the consumer task last received a complete frame from the
     /// dongle. Drives the inactivity watchdog in the poll loop: a "zombie"
     /// dongle (TCP alive, Modbus hung) keeps the socket open and keepalives
@@ -380,6 +384,7 @@ impl ModbusClient {
             connected: Arc::new(AtomicBool::new(false)),
             last_rx_instant: Arc::new(std::sync::Mutex::new(None)),
             consumer_handle: None,
+            write_device: None,
         }
     }
 
@@ -393,9 +398,10 @@ impl ModbusClient {
         self.slave = slave;
     }
 
-    /// Record the detected model. Stub (issue #428): writes aren't limited yet.
+    /// Record the detected model so [`Self::write_register`] refuses the
+    /// registers it doesn't accept (issue #428).
     pub fn set_write_device(&mut self, device: crate::inverter::model::DeviceType) {
-        let _ = device;
+        self.write_device = Some(device);
     }
 
     /// Return the current Modbus slave address used for operational reads.
@@ -1394,6 +1400,17 @@ impl ModbusClient {
     /// Handles stale read responses and dongle-busy exceptions (code 67)
     /// with automatic retries.
     pub async fn write_register(&mut self, register: u16, value: u16) -> Result<(), ClientError> {
+        if self
+            .write_device
+            .is_some_and(|device| !device.accepts_write(register))
+        {
+            tracing::warn!(
+                register,
+                value,
+                "Write refused: this device doesn't pass it to the battery"
+            );
+            return Err(ClientError::WriteRefused(register));
+        }
         let inner_function: u8 = 6;
         let request = Self::build_write_register_request(&self.serial, self.slave, register, value);
         let key = ResponseKey::from_request(self.slave, inner_function, register, 1);

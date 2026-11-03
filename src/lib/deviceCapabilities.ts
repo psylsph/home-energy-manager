@@ -41,7 +41,7 @@ export function isThreePhaseLimitModel(code: string | null | undefined): boolean
  * Mirrors the backend's `DeviceType::uses_ac_limit_registers`.
  */
 export function usesAcLimitRegisters(code: string | null | undefined): boolean {
-  return isAcCoupledDevice(code) || (!!code && code.startsWith('70'));
+  return isAcCoupledDevice(code) || isGatewayDevice(code);
 }
 
 /**
@@ -220,9 +220,13 @@ export function isGatewayDevice(code: string | null | undefined): boolean {
 
 /**
  * Whether battery settings written to this device reach the battery.
- * Stub (issue #428): not yet implemented.
+ *
+ * False for the Gateway (0x70xx, issue #428): it keeps its own copy of the
+ * schedule and battery settings and doesn't pass writes to the AIO, so the
+ * backend refuses those controls. True before the device type is known, as on
+ * the backend, which only refuses once the model is identified.
+ * Mirrors the backend's `DeviceType::battery_controls_reach_battery`.
  */
 export function deviceHasBatteryControls(code: string | null | undefined): boolean {
-  void code;
-  return true;
+  return !isGatewayDevice(code);
 }

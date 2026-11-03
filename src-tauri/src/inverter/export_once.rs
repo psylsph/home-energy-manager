@@ -775,9 +775,15 @@ async fn release_edited_events(
 
 /// Run one pass: apply, revert and expire whatever is due.
 pub async fn tick(state: &Arc<AppState>) {
-    if state.latest_snapshot.lock().await.is_none()
-        || *state.connection_state.lock().await != ConnectionState::Connected
-    {
+    // A Gateway doesn't pass the discharge slots on to the AIO (issue #428):
+    // events wait, as they do while HEM isn't connected.
+    let reaches_battery = state
+        .latest_snapshot
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|s| s.device_type.battery_controls_reach_battery());
+    if !reaches_battery || *state.connection_state.lock().await != ConnectionState::Connected {
         return;
     }
     // Most households never book an export: do nothing, and read the settings

@@ -465,11 +465,12 @@ impl DeviceType {
     pub fn uses_three_phase_schedule_slots(&self) -> bool {
         // NOTE: Gateway is deliberately excluded. Although it shares the
         // Gateway/EMS *telemetry* bank (IR 1600-1859) with three-phase models,
-        // for control purposes it is a single-phase-class device: it forwards
-        // standard charge/discharge slot + SOC writes (HR 94/95, 56/57, 96,
-        // 116) to its child AIO(s) and has no registers in the three-phase
-        // control bank (HR 1080-1124). Routing it through the three-phase
-        // path caused quick actions to silently do nothing (issue #149).
+        // its schedule registers keep the single-phase layout (HR 94/95,
+        // 56/57, 96, 116) and it has no registers in the three-phase control
+        // bank (HR 1080-1124); routing it there caused quick actions to
+        // silently do nothing (issue #149). Those single-phase registers are
+        // the Gateway's own copy and don't reach the AIO either (issue #428),
+        // so HEM refuses battery writes to a Gateway.
         // Mirrors dewet22/givenergy-modbus `slot_map` (Gateway →
         // SINGLE_PHASE_SLOTS) and GivTCP ("gateway" is not "3ph" for write
         // routing).
@@ -621,16 +622,34 @@ impl DeviceType {
     }
 
     /// Whether battery settings written to this device reach the battery.
-    /// Stub (issue #428): not yet implemented.
+    ///
+    /// False for the Gateway (issue #428): it keeps its own copy of the
+    /// schedule and battery registers and doesn't pass writes to the AIO. A
+    /// real install read slot 1, reserve, AC limits, power rate and EPS on the
+    /// Gateway that all differed from the AIO's, and a charge slot saved
+    /// through the Gateway read back there while the AIO kept its old one.
     pub fn battery_controls_reach_battery(&self) -> bool {
-        true
+        !matches!(self, Self::Gateway)
     }
 
     /// Whether HEM may write `register` on this device.
-    /// Stub (issue #428): not yet implemented.
+    ///
+    /// On a Gateway only the clock (HR 35-40, HR 166), reboot (HR 163) and
+    /// plant export limit (HR 2071) are allowed: every other write would land
+    /// on the Gateway's own copy and never reach the AIO (issue #428). Every
+    /// other device accepts any register (the encoder's whitelist still
+    /// applies).
     pub fn accepts_write(&self, register: u16) -> bool {
-        let _ = register;
-        true
+        use crate::modbus::registers::{
+            HR_EMS_EXPORT_POWER_LIMIT, HR_ENABLE_RTC, HR_INVERTER_REBOOT, HR_SYSTEM_TIME_SECOND,
+            HR_SYSTEM_TIME_YEAR,
+        };
+        self.battery_controls_reach_battery()
+            || (HR_SYSTEM_TIME_YEAR..=HR_SYSTEM_TIME_SECOND).contains(&register)
+            || matches!(
+                register,
+                HR_ENABLE_RTC | HR_INVERTER_REBOOT | HR_EMS_EXPORT_POWER_LIMIT
+            )
     }
 
     /// Whether this device has no directly-attached battery.
@@ -792,19 +811,23 @@ impl DeviceType {
     ///
     /// Force actions require both a battery-capable control path and confirmed
     /// schedule-slot writes because authenticated starts always carry a finite
-    /// duration. Gateway is the deliberate batteryless exception: its standard
-    /// controls are forwarded to the child AIO plant. Native pause modes are
-    /// separate operation variants so evidence can diverge per mode later
-    /// without changing callers or accidentally broadening support.
+    /// duration. Batteryless devices are excluded, the Gateway included: it
+    /// keeps its own copy of the battery settings and doesn't pass writes to
+    /// the AIO (issue #428). Native pause modes are separate operation variants
+    /// so evidence can diverge per mode later without changing callers or
+    /// accidentally broadening support.
     pub fn supports_external_control(
         &self,
         operation: ExternalControlOperation,
         arm_fw: u16,
     ) -> bool {
+        if !self.battery_controls_reach_battery() {
+            return false;
+        }
         match operation {
             ExternalControlOperation::ForceCharge | ExternalControlOperation::ForceDischarge => {
                 self.supports_schedule_slots()
-                    && (!self.is_batteryless() || matches!(self, Self::Gateway))
+                    && !self.is_batteryless()
                     && !matches!(self, Self::Unknown(_))
             }
             ExternalControlOperation::PauseCharge

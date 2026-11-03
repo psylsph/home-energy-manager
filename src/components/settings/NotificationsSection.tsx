@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { apiGet, apiPost } from '../../lib/api';
 import { openExternal } from '../../lib/openExternal';
 import { useInverterStore } from '../../store/useInverterStore';
+import { isGatewayDevice } from '../../lib/deviceCapabilities';
 import Toggle from '../Toggle';
 import AlertThresholds from './notifications/AlertThresholds';
 import AlertTriggers from './notifications/AlertTriggers';
@@ -35,7 +36,7 @@ export default function NotificationsSection({
   // Only these two snapshot fields matter here, so the form doesn't
   // re-render on every poll.
   const inverterSerial = useInverterStore((s) => s.snapshot?.inverter_serial ?? '');
-  const isGateway = useInverterStore((s) => s.snapshot?.device_type_code?.startsWith('70') ?? false);
+  const isGateway = useInverterStore((s) => isGatewayDevice(s.snapshot?.device_type_code));
   const [config, setConfig] = useState<AlertsConfig>(DEFAULT_ALERTS_CONFIG);
   // The form renders before the saved config arrives, so Save waits for it:
   // saving the defaults would blank the saved tokens. A failed load leaves

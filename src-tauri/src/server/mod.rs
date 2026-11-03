@@ -67,8 +67,7 @@ pub struct AuthenticatedIdentity {
 }
 
 /// Routes that write battery settings directly; refused on a device whose
-/// battery settings don't reach the battery (issue #428). Stub: not yet guarded.
-#[allow(dead_code)]
+/// battery settings don't reach the battery (issue #428).
 const BATTERY_CONTROL_PATHS: &[&str] = &[
     "/api/control/mode",
     "/api/control/eco",
@@ -92,6 +91,40 @@ const BATTERY_CONTROL_PATHS: &[&str] = &[
     "/api/battery/calibration",
     "/api/export-once",
 ];
+
+/// Refuse a write to [`BATTERY_CONTROL_PATHS`] while connected to a device
+/// whose battery settings don't reach the battery (issue #428: a Gateway
+/// keeps its own copy and doesn't pass writes to the AIO). Reads, and every
+/// request before the first snapshot, go through: the Modbus client still
+/// refuses the writes once it has identified a Gateway, or remembers one at
+/// the same address after a reconnect. The automations' own settings aren't
+/// listed: saving them writes nothing, and they sit out on a Gateway.
+async fn refuse_battery_controls_on_gateway(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if req.method() == axum::http::Method::POST && BATTERY_CONTROL_PATHS.contains(&req.uri().path())
+    {
+        let unreachable = state
+            .latest_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.device_type.battery_controls_reach_battery());
+        if unreachable {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "error": "Not available on a Gateway: it keeps its own battery settings and doesn't pass them to the AIO. Connect HEM to the AIO to control the battery."
+                })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     create_router_at(state, None)
@@ -336,6 +369,10 @@ fn create_router_at(
         )
         // WebSocket real-time stream
         .route("/ws", get(ws::ws_handler))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            refuse_battery_controls_on_gateway,
+        ))
         .layer(cors)
         .with_state(state)
         // Unknown /api/* paths should return 404, not serve index.html.
