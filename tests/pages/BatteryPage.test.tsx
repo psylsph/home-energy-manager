@@ -373,6 +373,9 @@ describe('BatteryPage', () => {
       });
       render(<BatteryPage />);
       expect(screen.getByText(/Gateway does not expose per-cell telemetry/)).toBeDefined();
+      // Issue #428: a direct connection to the AIO is how to see its cells.
+      expect(screen.getByText(/connect HEM to the AIO itself/)).toBeDefined();
+      expect(screen.queryByText(/not yet supported/)).toBeNull();
     });
   });
 });

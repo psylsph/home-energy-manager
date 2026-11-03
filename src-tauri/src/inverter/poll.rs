@@ -3201,6 +3201,25 @@ pub(crate) async fn drop_pending_writes_for_reconnect(state: &Arc<AppState>) {
     }
 }
 
+/// The device a poll session confirmed, and the address it was reached at.
+#[allow(dead_code)]
+struct ConfirmedDevice {
+    host: String,
+    port: u16,
+    device_type: DeviceType,
+}
+
+/// Stub (issue #428): a new session doesn't remember write limits yet.
+#[allow(dead_code)]
+fn remembered_write_device(
+    last: Option<&ConfirmedDevice>,
+    host: &str,
+    port: u16,
+) -> Option<DeviceType> {
+    let _ = (last, host, port);
+    None
+}
+
 /// Runs the polling loop indefinitely (spawn as a Tokio task).
 ///
 /// ## Behaviour
@@ -8527,6 +8546,41 @@ mod tests {
         assert_eq!(client.slave_address(), 0x11, "slave must not change");
     }
 
+    #[tokio::test]
+    async fn identify_limits_a_gateway_client_to_the_writes_it_passes_on() {
+        // Issue #428: once a Gateway is confirmed, battery writes are refused
+        // before anything is sent; the clock still goes through.
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x7001, 13);
+        identity.identify(&mut snap, &mut client);
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gateway, "7001")));
+        assert!(matches!(
+            client.write_register(96, 1).await,
+            Err(crate::modbus::client::ClientError::WriteRefused(96))
+        ));
+        assert!(matches!(
+            client.write_register(35, 26).await,
+            Err(crate::modbus::client::ClientError::NotConnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn identify_leaves_an_aio_client_unrestricted() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x8001, 620);
+        identity.identify(&mut snap, &mut client);
+        assert_eq!(
+            identity.confirmed(),
+            Some((DeviceType::AllInOne6kW, "8001"))
+        );
+        assert!(matches!(
+            client.write_register(96, 1).await,
+            Err(crate::modbus::client::ClientError::NotConnected)
+        ));
+    }
+
     #[test]
     fn identify_switches_the_client_slave_and_asks_for_a_repoll() {
         let mut identity = ModelIdentity::default();
@@ -11539,6 +11593,53 @@ mod tests {
         .await;
     }
 
+    /// Issue #428: a Gateway refuses battery writes, so a restoration owed
+    /// there (captured before the Gateway guard existed) can never be
+    /// confirmed. Re-queueing it every 30 s would only log refusals forever.
+    #[tokio::test]
+    async fn stalled_force_restoration_is_not_requeued_on_a_gateway() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let now_ms = FIXED_NOW_MS;
+            *state.force_charge_revert.lock().await = Some(ForceChargeRevert {
+                started_at_ms: now_ms - 120_000,
+                external_owner: None,
+                force_charge_slot_end_ms: None,
+                enable_charge: false,
+                enable_charge_target: false,
+                device_type: DeviceType::Gateway,
+                inverter_serial: "GW-1".into(),
+                firmware_version: "13".into(),
+                enable_discharge: false,
+                target_soc: 100,
+                charge_slot_1_target_soc: None,
+                battery_power_mode: 1,
+                charge_rate: None,
+                charge_slot_1_start: Some((2, 0)),
+                charge_slot_1_end: Some((4, 0)),
+                three_phase_force_charge_enable: None,
+                three_phase_ac_charge_enable: None,
+                battery_pause_mode: Some(0),
+            });
+            *state.force_charge_restoration.lock().await = Some(ForceRestorationRequest {
+                requested_at_ms: now_ms - 31_000,
+                device_type: DeviceType::Gateway,
+                inverter_serial: "GW-1".into(),
+                firmware_version: "13".into(),
+            });
+            *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+                device_type: DeviceType::Gateway,
+                inverter_serial: "GW-1".into(),
+                firmware_version: "13".into(),
+                ..Default::default()
+            });
+
+            retry_stalled_force_restorations_at(&state, now_ms).await;
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
     /// The bounded retry must obey the same identity rule as an explicit Stop:
     /// a stale baseline must never be re-queued onto a different inverter just
     /// because the retry timer came due.
@@ -12245,6 +12346,40 @@ mod tests {
         drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
     }
 
+    /// Issue #428: a write the client refuses (a Gateway battery register)
+    /// never reached the dongle, so it needs no recovery gap. Sleeping one
+    /// per refused write would stall the poll loop for nothing.
+    #[tokio::test(start_paused = true)]
+    async fn drain_skips_the_gap_after_a_refused_write() {
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::poll::{drain_write_batches_with_gap, PendingWriteBatch};
+
+        let mut client = ModbusClient::new("127.0.0.1", 8899, "TEST123456");
+        client.set_write_device(DeviceType::Gateway);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let batch = PendingWriteBatch {
+            command_id: None,
+            writes: [110, 111, 116]
+                .into_iter()
+                .map(|address| RegisterWrite { address, value: 50 })
+                .collect(),
+            completion: Some(tx),
+            policy: WriteBatchPolicy::ContinueOnError,
+            owner: None,
+        };
+        let start = tokio::time::Instant::now();
+        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_secs(10)).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "slept {:?} for writes that were never sent",
+            start.elapsed()
+        );
+        assert!(matches!(
+            rx.await.unwrap(),
+            WriteOutcome::Failed { address: 110, .. }
+        ));
+    }
+
     #[tokio::test]
     async fn drain_skips_trailing_sleep_when_outcome_awaited() {
         // The trailing inter-write gap after the final write is skipped for an
@@ -12781,6 +12916,148 @@ mod tests {
             assert_eq!(count_logs(&ring, "HR(0)/ARM firmware decoded"), 0);
             assert_eq!(count_logs(&ring, "Device model identified"), 0);
             assert!(count_logs(&ring, "0x4101") >= 1);
+        })
+        .await;
+    }
+
+    /// Healthy Gateway registers: its DTC plus a grid voltage in the Gateway
+    /// aggregation bank, so the sanitizer has nothing to reject.
+    fn gateway_registers(req: &ReadRequest) -> Vec<u16> {
+        let mut data = healthy_registers(req, 0x7001, 0);
+        if req.function == 4 && req.base == 1600 && data.len() > 8 {
+            data[8] = 2410; // IR(1608) v_grid = 241.0 V
+        }
+        data
+    }
+
+    /// Issue #428: on a Gateway the battery automations sit out, as they do
+    /// while a calibration cycle runs. Cosy is on with a slot covering the
+    /// whole day, so on any other model it writes the charge slot at once;
+    /// here it must not even try (the client would refuse every write, and
+    /// the user would be told it worked).
+    #[tokio::test]
+    async fn poll_loop_runs_no_battery_automation_on_a_gateway() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            crate::settings::Settings::update(|s| {
+                s.cosy_enabled = true;
+                s.cosy_slots = vec![crate::settings::CosySlot {
+                    enabled: true,
+                    start_hour: 0,
+                    start_minute: 0,
+                    end_hour: 23,
+                    end_minute: 59,
+                    target_soc: 80,
+                }];
+            })
+            .unwrap();
+            let script: RegisterScript = Arc::new(gateway_registers);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let snaps = next_snapshots(&mut rx, 3).await;
+            poll_task.abort();
+            server.abort();
+
+            assert_eq!(snaps.last().unwrap().device_type, DeviceType::Gateway);
+            assert_eq!(
+                count_logs(&ring, "Write refused"),
+                0,
+                "no automation may attempt a battery write on a Gateway"
+            );
+            assert_eq!(count_logs(&ring, "Cosy: entering slot"), 0);
+        })
+        .await;
+    }
+
+    /// A new address may be a different device: it starts unrestricted, and
+    /// identification sets its limits within a poll.
+    #[test]
+    fn remembered_write_device_needs_the_same_address() {
+        let last = ConfirmedDevice {
+            host: "192.168.1.20".into(),
+            port: 8899,
+            device_type: DeviceType::Gateway,
+        };
+        assert_eq!(
+            remembered_write_device(Some(&last), "192.168.1.20", 8899),
+            Some(DeviceType::Gateway)
+        );
+        assert_eq!(
+            remembered_write_device(Some(&last), "192.168.1.21", 8899),
+            None
+        );
+        assert_eq!(
+            remembered_write_device(Some(&last), "192.168.1.20", 8898),
+            None
+        );
+        assert_eq!(remembered_write_device(None, "192.168.1.20", 8899), None);
+    }
+
+    /// Issue #428: a reconnect starts a new client, and the Gateway is only
+    /// re-identified once HR(0) reads back. Until then the client keeps the
+    /// write limits of the device last confirmed at the same address, so a
+    /// battery write queued in that window is refused rather than sent.
+    #[tokio::test]
+    async fn poll_loop_keeps_the_gateway_write_limits_across_a_reconnect() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            let forget_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let script: RegisterScript = {
+                let forget_model = forget_model.clone();
+                Arc::new(move |req: &ReadRequest| {
+                    if forget_model.load(std::sync::atomic::Ordering::Relaxed) {
+                        // HR(0) reads 0: the model can't be identified yet.
+                        healthy_registers(req, 0, 0)
+                    } else {
+                        gateway_registers(req)
+                    }
+                })
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            tokio::time::timeout(Duration::from_secs(40), async {
+                while next_snapshots(&mut rx, 1).await[0].device_type != DeviceType::Gateway {}
+            })
+            .await
+            .expect("the Gateway was never identified");
+
+            // Same address, new session that can't identify the model.
+            forget_model.store(true, std::sync::atomic::Ordering::Relaxed);
+            state.settings.lock().await.version += 1;
+            tokio::time::timeout(Duration::from_secs(40), async {
+                while next_snapshots(&mut rx, 1).await[0].device_type_code != "0000" {}
+            })
+            .await
+            .expect("the reconnected session never published a snapshot");
+
+            crate::server::api::queue_writes(
+                &state,
+                vec![crate::inverter::encoder::RegisterWrite {
+                    address: crate::modbus::registers::HR_BATTERY_SOC_RESERVE,
+                    value: 4,
+                }],
+            )
+            .await;
+            next_snapshots(&mut rx, 2).await;
+            poll_task.abort();
+            server.abort();
+
+            assert!(
+                count_logs(&ring, "Write refused") >= 1,
+                "the reserve write must be refused, not sent"
+            );
         })
         .await;
     }

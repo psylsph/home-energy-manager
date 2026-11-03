@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import fixture from '../fixtures/device-limit-matrix.json';
 import {
+  deviceHasBatteryControls,
+  isGatewayDevice,
   deviceSupportsEps,
   deviceSupportsExportLimit,
   deviceSupportsTimedDischarge,
@@ -377,5 +379,38 @@ describe('usesAcLimitRegisters', () => {
   it('returns false when the code is missing', () => {
     expect(usesAcLimitRegisters(undefined)).toBe(false);
     expect(usesAcLimitRegisters(null)).toBe(false);
+  });
+});
+
+/**
+ * Issue #428: a Gateway keeps its own copy of the battery settings and doesn't
+ * pass writes to the AIO. Mirrors `DeviceType::battery_controls_reach_battery`.
+ */
+describe('isGatewayDevice', () => {
+  it.each([['7001'], ['70FF']])('returns true for %s', (code) => {
+    expect(isGatewayDevice(code)).toBe(true);
+  });
+
+  it.each([['2001'], ['8001'], ['5001'], [''], [null], [undefined]])('returns false for %s', (code) => {
+    expect(isGatewayDevice(code)).toBe(false);
+  });
+});
+
+describe('deviceHasBatteryControls', () => {
+  it.each([['7001'], ['70FF']])('returns false for a Gateway (%s)', (code) => {
+    expect(deviceHasBatteryControls(code)).toBe(false);
+  });
+
+  it.each([['2001'], ['3001'], ['8001'], ['8201'], ['4001'], ['5001']])(
+    'returns true for %s',
+    (code) => {
+      expect(deviceHasBatteryControls(code)).toBe(true);
+    },
+  );
+
+  it('returns true before the device type is known, like the backend', () => {
+    expect(deviceHasBatteryControls(undefined)).toBe(true);
+    expect(deviceHasBatteryControls(null)).toBe(true);
+    expect(deviceHasBatteryControls('')).toBe(true);
   });
 });

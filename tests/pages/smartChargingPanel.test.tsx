@@ -10,6 +10,7 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 import SmartChargingPanel from '../../src/components/SmartChargingPanel';
+import { useInverterStore } from '../../src/store/useInverterStore';
 
 function reply(overrides: Partial<SmartChargingResponse> = {}): SmartChargingResponse {
   return {
@@ -48,6 +49,30 @@ describe('SmartChargingPanel', () => {
     apiPost.mockReset();
   });
   afterEach(cleanup);
+
+  describe('on a Gateway', () => {
+    // Issue #428: a pause written to a Gateway never reaches the AIO.
+    afterEach(() => useInverterStore.setState({ snapshot: null }));
+
+    it("doesn't offer the battery hold", async () => {
+      useInverterStore.setState({ snapshot: { device_type_code: '7001' } as never });
+      apiGet.mockResolvedValue(reply({ enabled: false }));
+      const { container } = render(<SmartChargingPanel />);
+      await waitFor(() => expect(apiGet).toHaveBeenCalled());
+      await act(async () => {});
+      expect(screen.queryByRole('switch', { name: /Hold the Battery/ })).toBeNull();
+      expect(container.textContent).toBe('');
+    });
+
+    it("doesn't offer it while the hold is on either: the hold sits out on a Gateway", async () => {
+      useInverterStore.setState({ snapshot: { device_type_code: '7001' } as never });
+      apiGet.mockResolvedValue(reply({ enabled: true }));
+      const { container } = render(<SmartChargingPanel />);
+      await waitFor(() => expect(apiGet).toHaveBeenCalled());
+      await act(async () => {});
+      expect(container.textContent).toBe('');
+    });
+  });
 
   it('keeps the hold explanation behind an ⓘ, with a one-line hint (issue #423)', async () => {
     apiGet.mockResolvedValue(reply());

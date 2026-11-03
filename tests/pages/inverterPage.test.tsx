@@ -214,15 +214,6 @@ describe('<InverterPage/> charge/discharge rate scale', () => {
     expect(rowValue(container, 'Discharge Rate')).toBe('100%');
   });
 
-  it('passes the Gateway HR 313/314 register through unchanged', () => {
-    useInverterStore.setState({
-      snapshot: makeSnapshot({ device_type_code: '7001', charge_rate: 66, discharge_rate: 40 }),
-    });
-    const { container } = render(<InverterPage />);
-    expect(rowValue(container, 'Charge Rate')).toBe('66%');
-    expect(rowValue(container, 'Discharge Rate')).toBe('40%');
-  });
-
   it('clamps a corrupt half-scale register to 100%', () => {
     useInverterStore.setState({
       snapshot: makeSnapshot({ device_type_code: '2201', charge_rate: 200 }),
@@ -328,5 +319,40 @@ describe('<InverterPage/> AC output and conversion loss', () => {
     const { container } = render(<InverterPage />);
     expect(rowValue(container, 'AC Output')).toBeUndefined();
     expect(rowValue(container, 'Conversion Loss')).toBeUndefined();
+  });
+});
+
+describe('<InverterPage/> on a Gateway', () => {
+  // Issue #428: a Gateway's schedule and battery settings are its own copy,
+  // not the AIO's, and automations can't act through it.
+  const GATEWAY_SETTING_ROWS = [
+    'Active Power Rate',
+    'SOC Reserve',
+    'Target SOC',
+    'Charge Rate',
+    'Discharge Rate',
+    'Enable Charge',
+    'Enable Charge Target',
+    'Enable Discharge',
+  ];
+  const labels = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('span.text-text-secondary')).map((n) => n.textContent);
+
+  beforeEach(() => cleanup());
+
+  it("leaves out the Gateway's own battery settings and the automations", () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ device_type_code: '7001' }) });
+    const { container, queryByRole } = render(<InverterPage />);
+    for (const row of GATEWAY_SETTING_ROWS) expect(labels(container), row).not.toContain(row);
+    expect(queryByRole('heading', { name: 'Features & Status' })).toBeNull();
+    // Live readings stay.
+    expect(labels(container)).toContain('Capacity');
+  });
+
+  it('shows them on an AIO', () => {
+    useInverterStore.setState({ snapshot: makeSnapshot({ device_type_code: '8001' }) });
+    const { container, getByRole } = render(<InverterPage />);
+    for (const row of GATEWAY_SETTING_ROWS) expect(labels(container), row).toContain(row);
+    expect(getByRole('heading', { name: 'Features & Status' })).toBeDefined();
   });
 });

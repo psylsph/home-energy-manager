@@ -620,6 +620,19 @@ impl DeviceType {
         matches!(self, Self::Gateway)
     }
 
+    /// Whether battery settings written to this device reach the battery.
+    /// Stub (issue #428): not yet implemented.
+    pub fn battery_controls_reach_battery(&self) -> bool {
+        true
+    }
+
+    /// Whether HEM may write `register` on this device.
+    /// Stub (issue #428): not yet implemented.
+    pub fn accepts_write(&self, register: u16) -> bool {
+        let _ = register;
+        true
+    }
+
     /// Whether this device has no directly-attached battery.
     ///
     /// Used to skip the LV pack BMS read (slave 0x32) and the HV BCU/BMU stack
@@ -2620,6 +2633,65 @@ mod tests {
     }
 
     #[test]
+    fn gateway_battery_controls_do_not_reach_the_battery() {
+        // Issue #428: the Gateway keeps its own copy of the battery settings.
+        assert!(!DeviceType::Gateway.battery_controls_reach_battery());
+        for dt in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::ACCoupled,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOneHybrid,
+            DeviceType::ThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::Ems,
+            DeviceType::Unknown(0x1234),
+        ] {
+            assert!(dt.battery_controls_reach_battery(), "{dt:?}");
+        }
+    }
+
+    #[test]
+    fn gateway_accepts_only_clock_reboot_and_export_limit_writes() {
+        use crate::modbus::registers::{
+            HR_EMS_EXPORT_POWER_LIMIT, HR_ENABLE_RTC, HR_INVERTER_REBOOT, HR_SYSTEM_TIME_SECOND,
+            HR_SYSTEM_TIME_YEAR,
+        };
+        let gw = DeviceType::Gateway;
+        for reg in [
+            HR_SYSTEM_TIME_YEAR,
+            36,
+            37,
+            38,
+            39,
+            HR_SYSTEM_TIME_SECOND,
+            HR_ENABLE_RTC,
+            HR_INVERTER_REBOOT,
+            HR_EMS_EXPORT_POWER_LIMIT,
+        ] {
+            assert!(gw.accepts_write(reg), "Gateway must accept HR {reg}");
+        }
+        // Schedule, enable flags, mode, reserve, limits, EPS, pause, extended
+        // slots, calibration and the neighbouring plant registers.
+        for reg in [
+            20, 27, 29, 31, 32, 34, 41, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112, 116,
+            162, 164, 243, 246, 272, 313, 314, 317, 318, 319, 320, 2040, 2053, 2070, 2072,
+        ] {
+            assert!(!gw.accepts_write(reg), "Gateway must refuse HR {reg}");
+        }
+        // Every other device is unrestricted here.
+        for dt in [
+            DeviceType::AllInOne6kW,
+            DeviceType::Gen3Hybrid,
+            DeviceType::Ems,
+        ] {
+            for reg in [94, 96, 110, 313, 2071] {
+                assert!(dt.accepts_write(reg), "{dt:?} HR {reg}");
+            }
+        }
+    }
+
+    #[test]
     fn is_batteryless_covers_batteryless_models() {
         // Gateway aggregates battery data from child AIOs — no direct battery.
         assert!(DeviceType::Gateway.is_batteryless());
@@ -2768,7 +2840,6 @@ mod tests {
             DeviceType::ACCoupledMk2,
             DeviceType::ThreePhase,
             DeviceType::ACThreePhase,
-            DeviceType::Gateway,
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,
@@ -2776,6 +2847,8 @@ mod tests {
             DeviceType::AllInOneHybrid,
         ];
         let unsupported = [
+            // Issue #428: writes to a Gateway don't reach the AIO.
+            DeviceType::Gateway,
             DeviceType::PvInverter,
             DeviceType::Ems,
             DeviceType::Gen4Hybrid,
@@ -3028,9 +3101,9 @@ mod tests {
             DeviceType::AllInOne5kW,
             DeviceType::Gen4Hybrid,
             DeviceType::Ems,
-            // Gateway is single-phase-class for control (issue #149): it
-            // forwards standard HR 94/95/56/57/96/116 writes to its child
-            // AIO(s) and has no three-phase control bank.
+            // Gateway keeps the single-phase register layout (issue #149) and
+            // has no three-phase control bank. Its copies don't reach the AIO
+            // (issue #428), so HEM refuses those writes anyway.
             DeviceType::Gateway,
         ];
         for dt in single_phase {

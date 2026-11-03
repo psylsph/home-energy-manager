@@ -15,10 +15,10 @@ import { render, screen, cleanup, fireEvent, act } from '@testing-library/react'
 // what it SHOWS for a register value, with expectations taken from the GivTCP
 // formulas rather than from this app's own arithmetic.
 //
-// Also covered: the Gateway uses the direct 1-100% AC-limit bank (HR 313/314,
-// as GivTCP writes it), and the Inverter Active Power Limit is not offered on
-// the 1000-range-layout families, where HEM reads the value back from HR 1002
-// but writes HR 50.
+// Also covered: the Inverter Active Power Limit is not offered on the
+// 1000-range-layout families, where HEM reads the value back from HR 1002 but
+// writes HR 50. A Gateway gets no battery controls at all (issue #428; see
+// controlPageGateway.test.tsx).
 // ---------------------------------------------------------------------------
 
 /** GivTCP `write.py` for a DC hybrid: the register that requests `watts`. */
@@ -359,22 +359,6 @@ describe('<ControlPage/> — power-limit kW readouts (issue #346)', () => {
     const slider = powerSliders()[CHARGE];
     expect(readoutFor(slider)).toBe('66% (2.0 kW)');
     expect(captionFor(slider)).toBe('AC Charge Power Limit');
-  });
-
-  it('treats the Gateway limit register as a direct 1-100%, like GivTCP writes it', () => {
-    // GivTCP routes the Gateway's charge rate through
-    // set_battery_charge_limit_ac (HR 313/314, 1-100%) and reads it back from
-    // there, so the register is neither doubled nor halved.
-    renderWith(makeSnapshot({ device_type_code: '7001', charge_rate: 66, max_battery_power_w: 0 }));
-    const slider = powerSliders()[CHARGE];
-
-    expect(slider.getAttribute('min')).toBe('1');
-    expect(slider.getAttribute('step')).toBe('1');
-    expect(readoutFor(slider)).toBe('66%');
-
-    fireEvent.change(slider, { target: { value: '80' } });
-    fireEvent.click(slider.parentElement?.querySelector('button') as HTMLButtonElement);
-    expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 80 });
   });
 
   it('moves the half-scale DC-hybrid sliders in 1% steps', () => {
@@ -800,7 +784,6 @@ describe('<ControlPage/> — charge-limit readout across every device family', (
     { code: '4001', family: 'Three-phase', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
     { code: '5001', family: 'EMS', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 25, expected: '50%', showsActivePower: true },
     { code: '6001', family: 'AC three-phase', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
-    { code: '7001', family: 'Gateway', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 0, chargeRegister: 66, expected: '66%', showsActivePower: true },
     { code: '8001', family: 'AIO 6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
     { code: '8002', family: 'AIO 3.6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 3600, chargeRegister: 25, expected: '66% (2.4 kW)', showsActivePower: true },
     { code: '8003', family: 'AIO 5kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },

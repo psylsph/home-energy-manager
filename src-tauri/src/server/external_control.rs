@@ -2272,6 +2272,8 @@ mod tests {
     async fn unsupported_inverters_reject_every_external_mutation_before_side_effects() {
         with_isolated_config_dir_async(|| async {
             for device in [
+                // Issue #428: writes to a Gateway don't reach the AIO.
+                DeviceType::Gateway,
                 DeviceType::PvInverter,
                 DeviceType::Ems,
                 DeviceType::Gen4Hybrid,
@@ -2992,7 +2994,7 @@ mod tests {
                 DeviceType::ACCoupled,
                 DeviceType::Gen3Hybrid,
                 DeviceType::ThreePhase,
-                DeviceType::Gateway,
+                DeviceType::AllInOne6kW,
             ] {
                 let state = setup(true).await;
                 set_device_with_pause_baseline(&state, device).await;

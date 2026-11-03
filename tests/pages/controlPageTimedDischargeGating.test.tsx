@@ -212,7 +212,6 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
       ['3001', 'AC-coupled (HR319/320 rejected)'],
       ['3002', 'AC-coupled Mk2 (HR319/320 gated)'],
       ['4001', 'Three-phase'],
-      ['7001', 'Gateway'],
       ['8101', 'Hybrid HV Gen3'],
       ['8301', 'Gen4 hybrid'],
       ['2301', 'PV inverter'],

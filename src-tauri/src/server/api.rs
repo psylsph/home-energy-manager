@@ -10361,11 +10361,12 @@ pub(crate) mod tests {
         .await;
     }
 
-    /// The GivEnergy Gateway (DTC 0x7001) is a single-phase-class control
-    /// device for scheduling purposes — it forwards standard charge/discharge
-    /// slot and SOC writes to its child AIO(s). It must NOT route through the
-    /// three-phase control bank (HR 1080-1124), which a real Gateway dongle
-    /// has no registers for (issue #149: quick actions silently did nothing).
+    /// The GivEnergy Gateway (DTC 0x7001) keeps the single-phase schedule
+    /// layout. It must NOT route through the three-phase control bank
+    /// (HR 1080-1124), which a real Gateway dongle has no registers for
+    /// (issue #149: quick actions silently did nothing). Since issue #428 the
+    /// router refuses these controls on a Gateway, whose copies don't reach
+    /// the AIO, so this pins the handler's routing only.
     /// Mirrors dewet22/givenergy-modbus `slot_map` (Gateway →
     /// SINGLE_PHASE_SLOTS) and GivTCP ("gateway" is not "3ph" for write
     /// routing). Regression test: route force-charge to single-phase registers.

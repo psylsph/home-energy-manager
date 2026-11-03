@@ -212,3 +212,17 @@ export function deviceSupportsTimedDischarge(
   }
   return false;
 }
+
+/** Whether the device is a GivEnergy Gateway (device type code 0x70xx). */
+export function isGatewayDevice(code: string | null | undefined): boolean {
+  return !!code?.startsWith('70');
+}
+
+/**
+ * Whether battery settings written to this device reach the battery.
+ * Stub (issue #428): not yet implemented.
+ */
+export function deviceHasBatteryControls(code: string | null | undefined): boolean {
+  void code;
+  return true;
+}

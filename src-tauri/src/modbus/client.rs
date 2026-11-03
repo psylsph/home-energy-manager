@@ -60,6 +60,11 @@ pub enum ClientError {
 
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
+
+    /// The connected device doesn't pass this register to the battery, so the
+    /// write was not sent (issue #428).
+    #[error("Write to HR {0} refused: this device doesn't pass it to the battery")]
+    WriteRefused(u16),
 }
 
 impl ClientError {
@@ -386,6 +391,11 @@ impl ModbusClient {
     /// Set the Modbus slave address used for operational inverter reads.
     pub fn set_slave(&mut self, slave: u8) {
         self.slave = slave;
+    }
+
+    /// Record the detected model. Stub (issue #428): writes aren't limited yet.
+    pub fn set_write_device(&mut self, device: crate::inverter::model::DeviceType) {
+        let _ = device;
     }
 
     /// Return the current Modbus slave address used for operational reads.
@@ -3415,6 +3425,40 @@ pub(crate) mod tests {
         );
 
         server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_register_refuses_gateway_battery_registers_before_sending() {
+        // Issue #428: a Gateway keeps its own copy of the battery settings.
+        // The refusal comes before the connection check, so nothing is sent.
+        let mut client = ModbusClient::new("127.0.0.1", 1, "");
+        client.set_write_device(crate::inverter::model::DeviceType::Gateway);
+        for reg in [94u16, 96, 110, 313, 318] {
+            let err = client.write_register(reg, 1).await.unwrap_err();
+            assert!(
+                matches!(err, ClientError::WriteRefused(r) if r == reg),
+                "HR {reg}: {err:?}"
+            );
+            assert!(!err.is_hard_failure(), "a refusal isn't a lost connection");
+        }
+        // Allowed Gateway registers reach the (absent) connection.
+        for reg in [35u16, 163, 2071] {
+            let err = client.write_register(reg, 1).await.unwrap_err();
+            assert!(
+                matches!(err, ClientError::NotConnected),
+                "HR {reg}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn write_register_is_unrestricted_before_detection_and_on_an_aio() {
+        let mut client = ModbusClient::new("127.0.0.1", 1, "");
+        let err = client.write_register(96, 1).await.unwrap_err();
+        assert!(matches!(err, ClientError::NotConnected), "{err:?}");
+        client.set_write_device(crate::inverter::model::DeviceType::AllInOne6kW);
+        let err = client.write_register(96, 1).await.unwrap_err();
+        assert!(matches!(err, ClientError::NotConnected), "{err:?}");
     }
 
     #[tokio::test]

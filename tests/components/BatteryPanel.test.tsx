@@ -115,3 +115,22 @@ describe('<BatteryPanel/> Power row sign convention', () => {
     expect(powerRow(container)).toBe('0W');
   });
 });
+
+describe('<BatteryPanel/> on a Gateway', () => {
+  const labels = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('span.text-text-secondary')).map((n) => n.textContent);
+
+  it("leaves out Mode and Reserve, which are the Gateway's own copy, not the AIO's", () => {
+    // Issue #428.
+    const { container } = render(<BatteryPanel snapshot={{ ...snapshot(), device_type_code: '7001' }} />);
+    expect(labels(container)).not.toContain('Mode');
+    expect(labels(container)).not.toContain('Reserve');
+    expect(labels(container)).toContain('Charged Today');
+  });
+
+  it('shows Mode and Reserve on an AIO', () => {
+    const { container } = render(<BatteryPanel snapshot={{ ...snapshot(), device_type_code: '8001' }} />);
+    expect(labels(container)).toContain('Mode');
+    expect(labels(container)).toContain('Reserve');
+  });
+});

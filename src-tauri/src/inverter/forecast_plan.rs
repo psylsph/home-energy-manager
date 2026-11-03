@@ -1571,6 +1571,32 @@ mod tests {
         .await;
     }
 
+    fn gateway() -> InverterSnapshot {
+        InverterSnapshot {
+            device_type: DeviceType::Gateway,
+            ..gen2()
+        }
+    }
+
+    /// Issue #428: a Gateway keeps its own copy of the charge slot and doesn't
+    /// pass writes to the AIO, so a plan applied there would never charge.
+    /// Both automations sit out — no plan, no writes, no "applied" message —
+    /// and pick up again once HEM is connected to the AIO.
+    #[tokio::test]
+    async fn auto_apply_and_refresh_sit_out_on_a_gateway() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let now = before_the_cheap_window();
+            run_plan_auto_apply(&state, &auto_apply_settings(), &gateway(), now).await;
+            run_plan_refresh(&state, &auto_refresh_settings(), &gateway(), now).await;
+            assert_eq!(*state.forecast_plan_apply_date.lock().await, None);
+            assert_eq!(*state.forecast_plan_refresh_date.lock().await, None);
+            assert_eq!(*state.forecast_plan_apply_warned.lock().await, None);
+            assert!(queued(&state).await.is_empty());
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn refresh_waits_outside_the_lead_window() {
         with_isolated_config_dir_async(|| async {

@@ -66,6 +66,33 @@ pub struct AuthenticatedIdentity {
     pub fingerprint: String,
 }
 
+/// Routes that write battery settings directly; refused on a device whose
+/// battery settings don't reach the battery (issue #428). Stub: not yet guarded.
+#[allow(dead_code)]
+const BATTERY_CONTROL_PATHS: &[&str] = &[
+    "/api/control/mode",
+    "/api/control/eco",
+    "/api/control/timed-charge",
+    "/api/control/timed-export",
+    "/api/control/timed-discharge",
+    "/api/control/charge-slot",
+    "/api/control/discharge-slot",
+    "/api/control/reserve",
+    "/api/control/charge-rate",
+    "/api/control/discharge-rate",
+    "/api/control/eps",
+    "/api/control/active-power-rate",
+    "/api/control/pause",
+    "/api/control/unpause",
+    "/api/control/force-charge",
+    "/api/control/force-charge/stop",
+    "/api/control/force-discharge",
+    "/api/control/force-discharge/stop",
+    "/api/control/calibration",
+    "/api/battery/calibration",
+    "/api/export-once",
+];
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     create_router_at(state, None)
 }
@@ -1019,6 +1046,128 @@ mod tests {
             state.served_dir.lock().unwrap().as_deref(),
             Some(std::path::Path::new("/srv/hem/dist"))
         );
+    }
+
+    async fn state_connected_to(device_type: crate::inverter::model::DeviceType) -> Arc<AppState> {
+        let state = Arc::new(AppState::new());
+        *state.latest_snapshot.lock().await = Some(crate::inverter::model::InverterSnapshot {
+            device_type,
+            inverter_serial: "HEM-TEST-001".to_string(),
+            inverter_time: "2026-06-28 17:00:00".to_string(),
+            soc: 50,
+            ..Default::default()
+        });
+        *state.connection_state.lock().await = crate::inverter::poll::ConnectionState::Connected;
+        state
+    }
+
+    async fn post_json(
+        state: &Arc<AppState>,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = create_router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(json!(null)),
+        )
+    }
+
+    /// Issue #428: a Gateway keeps its own copy of the battery settings and
+    /// doesn't pass writes to the AIO, so every battery control is refused
+    /// before a write is queued.
+    #[tokio::test]
+    async fn gateway_battery_controls_are_refused_without_queuing_writes() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_connected_to(crate::inverter::model::DeviceType::Gateway).await;
+            for uri in BATTERY_CONTROL_PATHS {
+                let (status, body) = post_json(&state, uri, json!({})).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+                assert_eq!(body["ok"], false, "{uri}");
+                assert!(
+                    body["error"].as_str().unwrap_or("").contains("Gateway"),
+                    "{uri}: {body}"
+                );
+            }
+            assert!(
+                state.pending_writes.lock().await.is_empty(),
+                "nothing may be queued for a Gateway"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gateway_still_accepts_clock_and_export_limit() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_connected_to(crate::inverter::model::DeviceType::Gateway).await;
+            let (status, body) = post_json(&state, "/api/control/sync-clock", json!({})).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let (status, body) =
+                post_json(&state, "/api/control/export-limit", json!({"watts": 5000})).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            // Reading the calibration state isn't a write.
+            let request = Request::builder()
+                .uri("/api/battery/calibration")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = create_router(state.clone()).oneshot(request).await.unwrap();
+            assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn every_guarded_battery_control_path_is_a_real_route() {
+        // A typo in BATTERY_CONTROL_PATHS would leave the real route unguarded
+        // while the Gateway test still passed.
+        // Probe with GET: a POST-only route answers 405 without running its
+        // handler, an unknown /api/* path 404. (The two with GET handlers,
+        // calibration and export-once, only read.)
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_connected_to(crate::inverter::model::DeviceType::Gen1Hybrid).await;
+            for uri in BATTERY_CONTROL_PATHS {
+                let request = Request::builder()
+                    .uri(*uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                let response = create_router(state.clone()).oneshot(request).await.unwrap();
+                assert_ne!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            }
+            let request = Request::builder()
+                .uri("/api/control/no-such-route")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = create_router(state).oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "the probe must detect a typo"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn aio_battery_controls_are_not_refused() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_connected_to(crate::inverter::model::DeviceType::AllInOne6kW).await;
+            let (status, body) =
+                post_json(&state, "/api/control/reserve", json!({"soc": 10})).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(!state.pending_writes.lock().await.is_empty());
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 import SavingSessionsPanel from '../../src/components/SavingSessionsPanel';
+import { useInverterStore } from '../../src/store/useInverterStore';
 
 function reply(overrides: Partial<SavingSessionsResponse> = {}): SavingSessionsResponse {
   return {
@@ -82,6 +83,34 @@ describe('SavingSessionsPanel', () => {
       expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', { mode: 'alert' }),
     );
     await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  describe('on a Gateway', () => {
+    // Issue #428: an export written to a Gateway never reaches the AIO.
+    afterEach(() => useInverterStore.setState({ snapshot: null }));
+
+    it("doesn't offer Alert and Export", async () => {
+      useInverterStore.setState({ snapshot: { device_type_code: '7001' } as never });
+      apiGet.mockResolvedValue(reply({ mode: 'alert' }));
+      render(<SavingSessionsPanel />);
+      await screen.findByRole('button', { name: 'Alert Only' });
+      expect(screen.getByRole('button', { name: 'Off' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Alert and Export' })).toBeNull();
+    });
+
+    it('keeps Alert and Export visible while it is the saved mode, so it can be switched off', async () => {
+      useInverterStore.setState({ snapshot: { device_type_code: '7001' } as never });
+      apiGet.mockResolvedValue(reply({ mode: 'export' }));
+      render(<SavingSessionsPanel />);
+      expect(await screen.findByRole('button', { name: 'Alert and Export' })).toBeTruthy();
+    });
+
+    it('offers Alert and Export on an AIO', async () => {
+      useInverterStore.setState({ snapshot: { device_type_code: '8001' } as never });
+      apiGet.mockResolvedValue(reply({ mode: 'alert' }));
+      render(<SavingSessionsPanel />);
+      expect(await screen.findByRole('button', { name: 'Alert and Export' })).toBeTruthy();
+    });
   });
 
   it('shows nothing but the switch when off', async () => {

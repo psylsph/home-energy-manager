@@ -4,9 +4,13 @@ import { render, screen, cleanup, act } from '@testing-library/react';
 const timedExport = vi.hoisted(() => ({
   value: null as null | { schedule_enabled: boolean; slots: unknown[] },
   loaded: true,
+  calls: 0,
 }));
 vi.mock('../../src/hooks/useTimedExportSchedule', () => ({
-  useTimedExportSchedule: () => ({ schedule: timedExport.value, loaded: timedExport.loaded }),
+  useTimedExportSchedule: () => {
+    timedExport.calls += 1;
+    return { schedule: timedExport.value, loaded: timedExport.loaded };
+  },
 }));
 
 import HouseStatusCards from '../../src/components/house/HouseStatusCards';
@@ -85,6 +89,31 @@ describe('<HouseStatusCards/>', () => {
     const icon = tid('house-charge-icon');
     expect(icon.getAttribute('data-kind')).toBe('none');
     expect(icon.querySelector('path')).toBeNull();
+  });
+
+  it("says the schedule isn't available on a Gateway rather than none scheduled", () => {
+    // Issue #428: a Gateway's schedule registers are its own copy, not the
+    // AIO's, so neither they nor HEM's Timed Export schedule say what the
+    // battery will do.
+    timedExport.value = { schedule_enabled: true, slots: [slot(16, 0, 19, 0)] };
+    render(<HouseStatusCards snapshot={snap({ device_type_code: '7001' })} />);
+    expect(tid('house-charge-card').getAttribute('data-state')).toBe('unavailable');
+    expect(screen.getByText('Schedule')).toBeDefined();
+    expect(screen.queryByText('Next Charge')).toBeNull();
+    expect(screen.queryByText('Next Export')).toBeNull();
+    expect(tid('house-charge-window').textContent).toBe('Not available on a Gateway');
+    expect(tid('house-charge-icon').getAttribute('data-kind')).toBe('none');
+    // The battery card is unaffected.
+    expect(tid('house-battery-card')).toBeDefined();
+  });
+
+  it("doesn't fetch the Timed Export schedule on a Gateway, since it isn't shown", () => {
+    timedExport.calls = 0;
+    render(<HouseStatusCards snapshot={snap({ device_type_code: '7001' })} />);
+    expect(timedExport.calls).toBe(0);
+    cleanup();
+    render(<HouseStatusCards snapshot={snap({ device_type_code: '8001' })} />);
+    expect(timedExport.calls).toBeGreaterThan(0);
   });
 
   it('says All day when the merged slots cover the whole day', () => {

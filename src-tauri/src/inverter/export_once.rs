@@ -1259,6 +1259,36 @@ mod tests {
         .await;
     }
 
+    /// Issue #428: a Gateway keeps its own copy of the discharge slots and
+    /// doesn't pass writes to the AIO. A booked export (including a Saving
+    /// Session's) waits rather than arming a slot that would never export.
+    #[tokio::test]
+    async fn tick_leaves_events_alone_on_a_gateway() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state().await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .device_type = DeviceType::Gateway;
+            seed_schedule(&state, false, vec![sched(22, 0, 23, 0, 30)]).await;
+            store(vec![event("e1", 1, "2026-10-17 18:00", "2026-10-17 19:00")]);
+
+            set_clock(&state, "2026-10-17 18:05").await;
+            run_tick(&state).await;
+
+            let ev = stored("e1");
+            assert_eq!(ev.state, ExportOnceState::Pending);
+            assert!(!ev.applied);
+            assert_eq!(ev.attempts, 0);
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert_eq!(desired_slot(&state, 0).await.start_hour, 22);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn tick_restores_the_original_slot_when_the_event_ends() {
         with_isolated_config_dir_async(|| async {

@@ -165,6 +165,24 @@ async function main() {
     assert('No faults', Array.isArray(snap.gateway_fault_codes) && snap.gateway_fault_codes.length === 0);
     assert('Max charge slots >= 2', snap.max_charge_slots >= 2, `Got ${snap.max_charge_slots}`);
 
+    // Issue #428: a Gateway keeps its own copy of the battery settings and
+    // doesn't pass writes to the AIO, so battery controls are refused.
+    for (const [path, body] of [
+      ['/api/control/reserve', { soc: 20 }],
+      ['/api/control/charge-slot', { slot: 1, enabled: true, start_hour: 2, start_minute: 10, end_hour: 4, end_minute: 59, target_soc: 100 }],
+      ['/api/control/force-charge', { minutes: 30 }],
+    ]) {
+      const resp = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const reply = await resp.json().catch(() => ({}));
+      assert(`${path} refused on a Gateway`, resp.status === 400 && /Gateway/.test(reply.error ?? ''), `Got ${resp.status} ${JSON.stringify(reply)}`);
+    }
+    const clock = await fetch(`${baseUrl}/api/control/sync-clock`, { method: 'POST' });
+    assert('Sync clock still accepted on a Gateway', clock.status === 200, `Got ${clock.status}`);
+
     // API endpoints respond
     const statusResp = await fetchJson(`${baseUrl}/api/status`);
     assert('Status API responds', statusResp.ok !== false);

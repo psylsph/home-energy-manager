@@ -1573,6 +1573,15 @@ describe('battery node structured fields', () => {
     expect(battery.unit).toBe('34% · Timed Demand (Charging)');
   });
 
+  it("leaves the mode out on a Gateway, whose mode registers are its own copy, not the AIO's", () => {
+    // Issue #428.
+    const vm = buildEnergyFlows(snap({ soc: 74, battery_mode: 'eco', device_type_code: '7001' }));
+    const battery = vm.nodes.find((n) => n.id === 'battery')!;
+    expect(battery.socText).toBe('74%');
+    expect(battery.mode).toBeUndefined();
+    expect(battery.unit).toBe('74%');
+  });
+
   it('leaves the fields off the other nodes', () => {
     const vm = buildEnergyFlows(snap(), { showEvc: true });
     for (const n of vm.nodes.filter((x) => x.id !== 'battery')) {

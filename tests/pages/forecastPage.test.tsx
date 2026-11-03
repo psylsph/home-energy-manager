@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { useInverterStore } from '../../src/store/useInverterStore';
 
@@ -615,6 +615,30 @@ describe('ForecastPage plan card', () => {
     });
     const timedCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/timed-charge');
     expect(timedCall).toBeTruthy();
+  });
+
+  it('offers neither Apply nor automatic apply on a Gateway', async () => {
+    // Issue #428: the Gateway doesn't pass a charge slot on to the AIO, and
+    // the backend refuses it, so the plan is shown but can't be applied.
+    onTestFinished(() => useInverterStore.setState({ snapshot: null } as never));
+    useInverterStore.setState({
+      snapshot: { soc: 50, max_battery_power_w: 5000, device_type_code: '7001' },
+    } as never);
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/3\.2/);
+    });
+    expect(screen.queryByTestId('forecast-plan-apply')).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Apply Charging Plan Automatically' })).toBeNull();
+    expect(screen.queryByText('Apply Charging Plan Automatically')).toBeNull();
+    // Automatic planning sits out on a Gateway, so don't say it's on.
+    expect(screen.queryByTestId('forecast-auto-apply-summary')).toBeNull();
+    expect(screen.queryByText('Automatic Planning')).toBeNull();
   });
 
   it('shows inverter-write progress while applying the charge plan', async () => {
