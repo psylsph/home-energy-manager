@@ -213,11 +213,12 @@ describe('<HouseStatusCards/>', () => {
     expect(level.textContent).toBe('34%');
     expect(level.style.color).toBe(css(socColor(33.5)));
     const segments = screen.getAllByTestId('house-battery-segment');
-    expect(segments).toHaveLength(10);
+    // 5% each, so a cap on a multiple of 5 falls between two bars.
+    expect(segments).toHaveLength(20);
     const lit = segments.filter((s) => s.getAttribute('data-lit') === 'true');
-    expect(lit).toHaveLength(3);
+    expect(lit).toHaveLength(7);
     for (const s of lit) expect(s.style.backgroundColor).toBe(css(socColor(33.5)));
-    expect(segments[9].style.backgroundColor).toBe('var(--color-bg-elevated)');
+    expect(segments[19].style.backgroundColor).toBe('var(--color-bg-elevated)');
   });
 
   it('shows a dash when the capacity is unknown', () => {
@@ -225,4 +226,18 @@ describe('<HouseStatusCards/>', () => {
     expect(tid('house-battery-stored').textContent).toBe('—');
     expect(screen.getAllByTestId('house-battery-segment').filter((s) => s.getAttribute('data-lit') === 'true')).toHaveLength(0);
   });
+
+  // Charge cap (issue #426).
+  it('marks the charge cap on the level bars only while it is on', () => {
+    render(<HouseStatusCards snapshot={snap({ charge_cap_enabled: true, charge_cap_soc: 90 })} />);
+    const cap = tid('house-battery-cap');
+    // In the 2px gap after the 18th bar: 90% of (width + gap), less half a gap.
+    expect(cap.style.left).toBe('calc(90% + 0.8px)');
+    expect(cap.style.backgroundColor).toBe('var(--app-accent, #22D3EE)');
+    expect(cap.getAttribute('title')).toBe('Charge cap 90%');
+    cleanup();
+    render(<HouseStatusCards snapshot={snap({ charge_cap_enabled: false, charge_cap_soc: 90 })} />);
+    expect(screen.queryByTestId('house-battery-cap')).toBeNull();
+  });
 });
+

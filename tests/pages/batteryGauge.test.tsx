@@ -125,4 +125,26 @@ describe('BatteryGauge', () => {
     const { container } = render(<BatteryGauge soc={50} />);
     expect(Number(container.querySelector('text')!.getAttribute('font-size'))).toBe(12);
   });
+
+  // Charge cap (issue #426).
+  it('draws no cap line without a cap', () => {
+    const { container } = render(<BatteryGauge soc={60} />);
+    expect(container.querySelector('[data-testid="battery-gauge-cap"]')).toBeNull();
+  });
+
+  it('draws the cap line at the cap level and names it', () => {
+    const { container } = render(<BatteryGauge soc={60} capSoc={90} />);
+    const line = container.querySelector('[data-testid="battery-gauge-cap"]')!;
+    // Fill spans y 13 (100%) to 73 (0%), so 90% sits at y 19.
+    expect(Number(line.getAttribute('y1'))).toBeCloseTo(19);
+    expect(line.getAttribute('y1')).toBe(line.getAttribute('y2'));
+    expect(screen.getByRole('img', { name: 'Battery 60% charged, charge cap 90%' })).toBeTruthy();
+  });
+
+  it('draws the cap line across the horizontal cell too', () => {
+    const { container } = render(<BatteryGauge soc={60} capSoc={50} orientation="horizontal" />);
+    const line = container.querySelector('[data-testid="battery-gauge-cap"]')!;
+    // Fill spans x 7 to 69, so 50% sits at x 38.
+    expect(Number(line.getAttribute('x1'))).toBeCloseTo(38);
+  });
 });

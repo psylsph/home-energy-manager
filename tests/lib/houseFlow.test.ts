@@ -369,7 +369,7 @@ describe('buildHouseScene — pill and battery gauge', () => {
 
   it('lights SOC bars in the SOC colour', () => {
     const { sc } = scene(snap({ soc: 62 }));
-    expect(sc.battery).toEqual({ barsLit: 6, color: socColor(62), fraction: 0.62 });
+    expect(sc.battery).toEqual({ barsLit: 12, color: socColor(62), fraction: 0.62 });
   });
 });
 
@@ -407,8 +407,10 @@ describe('batteryBarsLit', () => {
     [Number.NaN, 0],
     [1, 1],
     [4, 1],
-    [50, 5],
-    [96, BATTERY_BARS],
+    [50, 10],
+    [95, 19],
+    [96, 19],
+    [98, BATTERY_BARS],
     [100, BATTERY_BARS],
     [140, BATTERY_BARS],
   ])('SOC %s → %s bars', (soc, bars) => {

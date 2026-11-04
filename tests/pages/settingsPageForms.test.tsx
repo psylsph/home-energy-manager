@@ -200,6 +200,54 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
     });
   });
 
+  it('saves the full-charge reminder and its days', async () => {
+    mount({ alerts: { enabled: true } });
+    render(<SettingsPage />);
+    const s = await heading('Notifications');
+    await waitFor(() => expect(within(s).getByRole('button', { name: 'Save Notification Settings' })).toBeEnabled());
+
+    const reminder = within(s).getByRole('switch', { name: 'Battery Not Fully Charged' });
+    expect(reminder.getAttribute('aria-checked')).toBe('true');
+    const days = within(s).getByLabelText('Days Without a Full Charge (7–90)') as HTMLInputElement;
+    expect(days.value).toBe('30');
+    fireEvent.change(days, { target: { value: '14' } });
+    fireEvent.click(within(s).getByRole('button', { name: 'Save Notification Settings' }));
+    await waitFor(() => expect(postsTo('/api/alerts')).toHaveLength(1));
+    expect(lastPost('/api/alerts')).toMatchObject({ full_charge_alert_enabled: true, full_charge_alert_days: 14 });
+
+    // Switched off, the days field goes.
+    fireEvent.click(reminder);
+    expect(within(s).queryByLabelText('Days Without a Full Charge (7–90)')).toBeNull();
+  });
+
+  it('explains a days value it cannot save instead of failing the whole save', async () => {
+    mount();
+    render(<SettingsPage />);
+    const s = await loadedNotifications();
+    const days = within(s).getByLabelText('Days Without a Full Charge (7–90)') as HTMLInputElement;
+    for (const value of ['', '3', '7.5', '91']) {
+      fireEvent.change(days, { target: { value } });
+      fireEvent.click(within(s).getByRole('button', { name: 'Save Notification Settings' }));
+      await screen.findByText('Days without a full charge must be a whole number from 7 to 90.');
+    }
+    expect(postsTo('/api/alerts')).toHaveLength(0);
+  });
+
+  it('keeps a days value it cannot save in view after the reminder is switched off', async () => {
+    mount();
+    render(<SettingsPage />);
+    const s = await loadedNotifications();
+    fireEvent.change(within(s).getByLabelText('Days Without a Full Charge (7–90)'), { target: { value: '5' } });
+    fireEvent.click(within(s).getByRole('switch', { name: 'Battery Not Fully Charged' }));
+    fireEvent.click(within(s).getByRole('button', { name: 'Save Notification Settings' }));
+    await screen.findByText('Days without a full charge must be a whole number from 7 to 90.');
+    expect(postsTo('/api/alerts')).toHaveLength(0);
+    // Still there to fix; once it's valid the field goes with the reminder.
+    const days = within(s).getByLabelText('Days Without a Full Charge (7–90)');
+    fireEvent.change(days, { target: { value: '30' } });
+    expect(within(s).queryByLabelText('Days Without a Full Charge (7–90)')).toBeNull();
+  });
+
   it('confirms switching alerts on and off', async () => {
     mount({ alerts: { enabled: false } });
     render(<SettingsPage />);

@@ -1,0 +1,138 @@
+{
+  "_comment": "What GivTCP does per inverter model, and where HEM or the simulator knowingly differs. GivTCP has far more users testing it on real hardware, so it is the reference for model capability. Checked offline by src-tauri/src/inverter/givtcp_contract.rs, tests/lib/givtcpContract.test.ts, e2e/local-model-contract.spec.ts (every simulator model through the backend) and the simulator's crates/sim-registers/tests/givtcp_contract.rs, which reads an identical copy (tests/scripts/check-givtcp-contract.test.py, in npm test, compares the two when the simulator is checked out next to HEM). npm run check:givtcp (scripts/check-givtcp-contract.py) re-reads GivTCP itself before a release. pause: none, mode (HR 318 only) or mode_and_window (HR 318-320). three_phase: the HR 1000+ schedule and control bank. charge_cap: HEM's charge cap (issue #426) is offered, which GivTCP's pause implies. A deviation is a known difference: its value is what HEM (or the simulator) does instead, with the issue that will remove it, or why it stays.",
+  "givtcp": {
+    "repo": "britkat1980/giv_tcp",
+    "commit": "2858cdcaf1c1d7e296e54737028b4c15dd75237f",
+    "files": ["GivTCP/modbus_patches.py", "requirements.txt"],
+    "pause_registers_fingerprint": "b26d14a3284c7edd6ad06c04df61b2ee73c0991d80a938eee0aa69382559ffe7"
+  },
+  "modbus_fork": {
+    "repo": "britkat1980/givenergy-modbus",
+    "commit": "a556333bb7ac1589d7c266ed9cdf5cdfafba44e8",
+    "files": ["givenergy_modbus/model/manifest.py"]
+  },
+  "constants": {
+    "AC_PAUSE_MIN_ARM_FW": 200,
+    "GEN1_PAUSE_MIN_ARM_FW": 187,
+    "PAUSE_MODELS": ["ALL_IN_ONE", "GATEWAY", "HYBRID_GEN2", "HYBRID_GEN3", "HYBRID_HV_GEN3", "ALL_IN_ONE_HYBRID"],
+    "is_three_phase": ["HYBRID_3PH", "AC_3PH", "AIO_COMMERCIAL"]
+  },
+  "rows": [
+    {
+      "code": "2001", "arm_fw": 186, "hem": "Gen1Hybrid", "sim": "Gen1Hybrid", "givtcp_model": "HYBRID_GEN1",
+      "givtcp": { "pause": "none", "three_phase": false },
+      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on every single-phase hybrid" } }
+    },
+    {
+      "code": "2001", "arm_fw": 252, "hem": "Gen1Hybrid", "sim": "Gen1Hybrid", "givtcp_model": "HYBRID_GEN1",
+      "givtcp": { "pause": "mode", "three_phase": false },
+      "hem_deviations": {
+        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the Gen1 yet" },
+        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" }
+      },
+      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the window on the Gen1 too" } }
+    },
+    {
+      "code": "2001", "arm_fw": 852, "hem": "Gen2Hybrid", "sim": "Gen2Hybrid", "givtcp_model": "HYBRID_GEN2",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false },
+      "hem_deviations": {
+        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the Gen2 yet" },
+        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" }
+      }
+    },
+    {
+      "code": "2001", "arm_fw": 311, "hem": "Gen3Hybrid", "sim": "Gen3Hybrid", "givtcp_model": "HYBRID_GEN3",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false },
+      "hem_deviations": {
+        "pause": { "value": "none", "issue": 433, "why": "HEM only probes the pause from ARM 312" },
+        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" }
+      }
+    },
+    {
+      "code": "2001", "arm_fw": 318, "hem": "Gen3Hybrid", "sim": "Gen3Hybrid", "givtcp_model": "HYBRID_GEN3",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false }
+    },
+    {
+      "code": "2101", "arm_fw": 318, "hem": "PolarHybrid", "sim": null, "givtcp_model": "POLAR",
+      "givtcp": { "pause": "none", "three_phase": false }
+    },
+    {
+      "code": "3001", "arm_fw": 199, "hem": "ACCoupled", "sim": "ACCoupled", "givtcp_model": "AC",
+      "givtcp": { "pause": "none", "three_phase": false },
+      "hem_deviations": { "pause": { "value": "mode", "issue": 433, "why": "HEM has no ARM 200 floor on the AC's pause yet" } }
+    },
+    {
+      "code": "3001", "arm_fw": 200, "hem": "ACCoupled", "sim": "ACCoupled", "givtcp_model": "AC",
+      "givtcp": { "pause": "mode", "three_phase": false }
+    },
+    {
+      "code": "3002", "arm_fw": 200, "hem": "ACCoupledMk2", "sim": "ACCoupled2", "givtcp_model": "AC",
+      "givtcp": { "pause": "mode", "three_phase": false },
+      "hem_deviations": {
+        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the AC Mk2 yet" },
+        "charge_cap": { "value": false, "issue": 433, "why": "calibration and Force Discharge's restore only lift a pause HEM's own table knows, so the cap waits for the Mk2's" }
+      }
+    },
+    {
+      "code": "4001", "arm_fw": 612, "hem": "ThreePhase", "sim": "ThreePhase", "givtcp_model": "HYBRID_3PH",
+      "givtcp": { "pause": "none", "three_phase": true },
+      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on the three-phase hybrid" } }
+    },
+    {
+      "code": "5001", "arm_fw": 612, "hem": "Ems", "sim": "EMS", "givtcp_model": "EMS",
+      "givtcp": { "pause": "none", "three_phase": false },
+      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on the EMS" } }
+    },
+    {
+      "code": "6001", "arm_fw": 612, "hem": "ACThreePhase", "sim": "ACCoupledThreePhase6kW", "givtcp_model": "AC_3PH",
+      "givtcp": { "pause": "none", "three_phase": true },
+      "hem_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "HEM gives the AC three-phase Timed Discharge" } },
+      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator serves Timed Discharge on the AC three-phase" } }
+    },
+    {
+      "code": "7001", "arm_fw": 612, "hem": "Gateway", "sim": "Gateway12kW", "givtcp_model": "GATEWAY",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false },
+      "hem_deviations": {
+        "pause": { "value": "none", "issue": 428, "why": "the Gateway keeps its own copy of the battery settings and doesn't pass writes to the AIO; proven on hardware, so this stays" },
+        "charge_cap": { "value": false, "issue": 428, "why": "the pause would never reach the AIO; this stays" }
+      }
+    },
+    {
+      "code": "8001", "arm_fw": 620, "hem": "AllInOne6kW", "sim": "AllInOne6", "givtcp_model": "ALL_IN_ONE",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false }
+    },
+    {
+      "code": "8002", "arm_fw": 620, "hem": "AllInOne3_6kW", "sim": "AllInOne", "givtcp_model": "ALL_IN_ONE",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false }
+    },
+    {
+      "code": "8003", "arm_fw": 620, "hem": "AllInOne5kW", "sim": "AllInOne5", "givtcp_model": "ALL_IN_ONE",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false }
+    },
+    {
+      "code": "8101", "arm_fw": 612, "hem": "HybridHvGen3", "sim": "Gen3HvHybrid6kW", "givtcp_model": "HYBRID_HV_GEN3",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false },
+      "hem_deviations": {
+        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the HV Gen3 yet" },
+        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" },
+        "three_phase": { "value": true, "issue": 432, "why": "HEM still drives the HV Gen3 through the three-phase registers" }
+      },
+      "sim_deviations": { "three_phase": { "value": true, "issue": 432, "why": "the simulator serves the HV Gen3 three-phase" } }
+    },
+    {
+      "code": "8201", "arm_fw": 612, "hem": "AllInOneHybrid", "sim": "AIOHybrid6kW", "givtcp_model": "ALL_IN_ONE_HYBRID",
+      "givtcp": { "pause": "mode_and_window", "three_phase": false },
+      "hem_deviations": {
+        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the AIO Hybrid yet" },
+        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" },
+        "three_phase": { "value": true, "issue": 432, "why": "HEM still drives the AIO Hybrid through the three-phase registers" }
+      },
+      "sim_deviations": { "three_phase": { "value": true, "issue": 432, "why": "the simulator serves the AIO Hybrid three-phase" } }
+    },
+    {
+      "code": "8304", "arm_fw": 612, "hem": "Gen4Hybrid", "sim": "Gen4Hybrid6kW", "givtcp_model": "HYBRID_GEN4",
+      "givtcp": { "pause": "none", "three_phase": false },
+      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on the Gen4" } }
+    }
+  ]
+}

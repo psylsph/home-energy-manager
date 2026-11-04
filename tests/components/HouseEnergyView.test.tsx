@@ -148,8 +148,28 @@ describe('<HouseEnergyView/>', () => {
   it('fills the battery bars to the SOC', () => {
     render(<HouseEnergyView snapshot={snap({ soc: 62 })} connectionState="connected" gridFault={false} />);
     const bars = all('house-battery-bar');
-    expect(bars).toHaveLength(10);
-    expect(bars.filter((b) => b.getAttribute('data-lit') === 'true')).toHaveLength(6);
+    expect(bars).toHaveLength(20);
+    expect(bars.filter((b) => b.getAttribute('data-lit') === 'true')).toHaveLength(12);
+  });
+
+  // Charge cap (issue #426).
+  it('marks the charge cap on the battery cabinet only while it is on', () => {
+    const { rerender } = render(
+      <HouseEnergyView snapshot={snap({ soc: 62, charge_cap_enabled: true, charge_cap_soc: 95 })} connectionState="connected" gridFault={false} />,
+    );
+    const cap = tid('house-battery-cap')!;
+    expect(cap.getAttribute('stroke')).toBe('var(--app-accent, #22D3EE)');
+    expect(cap.textContent).toBe('Charge cap 95%');
+    // Between the 19th and 20th bars: below the top bar, above the one under it.
+    const bars = all('house-battery-bar');
+    const top = (el: Element) => Math.min(...el.getAttribute('points')!.split(' ').map((p) => Number(p.split(',')[1])));
+    const bottom = (el: Element) => Math.max(...el.getAttribute('points')!.split(' ').map((p) => Number(p.split(',')[1])));
+    const capY = (Number(cap.getAttribute('y1')) + Number(cap.getAttribute('y2'))) / 2;
+    const barMid = (el: Element) => (top(el) + bottom(el)) / 2;
+    expect(capY).toBeLessThan(barMid(bars[18]));
+    expect(capY).toBeGreaterThan(barMid(bars[19]));
+    rerender(<HouseEnergyView snapshot={snap({ soc: 62, charge_cap_enabled: false, charge_cap_soc: 95 })} connectionState="connected" gridFault={false} />);
+    expect(tid('house-battery-cap')).toBeNull();
   });
 
   it('draws no flows for sub-threshold readings', () => {

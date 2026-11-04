@@ -973,4 +973,18 @@ describe('EnergyOrbitDiagram', () => {
       expect(pxPerS).toBeGreaterThan(22);
     });
   });
+
+  // Charge cap (issue #426).
+  it('marks the charge cap on the battery node only while it is on', () => {
+    const on = render(
+      <EnergyOrbitDiagram snapshot={makeSnapshot({ soc: 60, charge_cap_enabled: true, charge_cap_soc: 90 })} />,
+    );
+    expect(on.container.querySelector('[data-testid="battery-soc-ring-cap"]')).not.toBeNull();
+    expect(on.container.querySelector('[data-testid="battery-glyph-cap"] title')?.textContent).toBe('Charge cap 90%');
+    on.unmount();
+    const off = render(<EnergyOrbitDiagram snapshot={makeSnapshot({ soc: 60, charge_cap_soc: 90 })} />);
+    expect(off.container.querySelector('[data-testid="battery-soc-ring-cap"]')).toBeNull();
+    expect(off.container.querySelector('[data-testid="battery-glyph-cap"]')).toBeNull();
+  });
 });
+

@@ -2715,3 +2715,43 @@ async fn forecast_plan_endpoint_includes_export_advice() {
         );
     }
 }
+
+// ====================================================================
+// Charge cap (issue #426)
+// ====================================================================
+
+#[tokio::test]
+async fn charge_cap_round_trips_through_the_router() {
+    let router = fresh_router();
+    let (status, body) = get_json(&router, "/api/charge-cap").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], Value::Bool(false), "off by default");
+    assert_eq!(body["connected"], Value::Bool(false));
+
+    let (status, body) = post_json(
+        &router,
+        "/api/charge-cap",
+        &json!({ "enabled": true, "cap_soc": 90, "resume_soc": 85 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, body) = get_json(&router, "/api/charge-cap").await;
+    assert_eq!(body["enabled"], Value::Bool(true));
+    assert_eq!(body["cap_soc"], json!(90));
+    assert_eq!(body["resume_soc"], json!(85));
+
+    let (status, body) = post_json(
+        &router,
+        "/api/charge-cap",
+        &json!({ "enabled": true, "cap_soc": 90, "resume_soc": 89 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (_, body) = get_json(&router, "/api/charge-cap").await;
+    assert_eq!(
+        body["resume_soc"],
+        json!(85),
+        "a rejected save changes nothing"
+    );
+}
