@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 2 November 2026 (v1.7.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 4 November 2026 (v1.7.1). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 The order weighs three things: whether users are affected today, whether a later item depends on it, and how much it costs. Where it differs from the issue's own label, the reason is given.
 
@@ -12,14 +12,16 @@ The code is done for all of these. They stay open only until a release or a repl
 |---|---|---|---|
 | [378](https://github.com/psylsph/home-energy-manager/issues/378) | Long term backup of History.db | S | Scheduled backups shipped (#379). Restore steps were posted on the issue (30 Oct) and are now in `INSTALL.md`, linked from the issue (31 Oct). The reporter has thanked us and is reworking their own backup script around it (31 Oct), so nothing is left on HEM's side. Ready to close. |
 | [406](https://github.com/psylsph/home-energy-manager/issues/406) | Use Octopus dispatch slots as known load | S | Done in v1.5.0–v1.7.0. The Planner holds the battery through smart charges and counts boosts as battery load; a smart charge is grid load at the off-peak rate. The car's charging comes out of the usage history from the GivEnergy charger or, without one, from a log of the charges Octopus ran, and its planned energy is added once that history is free of it. Reply to the reporter, then close. The reporter's idea of charging the house battery during a dispatch's cheap rate is worth its own ticket. |
+| [428](https://github.com/psylsph/home-energy-manager/issues/428) | Next charge time missing from the Status page when connected to a Gateway | S | Fixed in v1.7.1. The reporter's captures and write test showed the Gateway keeps its own copy of the schedule and battery settings and doesn't pass writes to the AIO, so HEM now refuses those controls on a Gateway, its automations sit out there, and the Status page says the schedule isn't available. Reply to the reporter, then close once they confirm. |
+| [426](https://github.com/psylsph/home-energy-manager/issues/426) | Optional charge cap: stop the battery charging above a set SOC | S | Done in v1.7.1 for the All-in-Ones, the Gen3 on newer firmware and the AC Coupled, with HEM connected to the inverter itself (#428 showed a Gateway never passes the pause on). A reminder after 30 days without a full charge keeps the cells balanced. Reply to the reporter, then close once they confirm. |
 | [419](https://github.com/psylsph/home-energy-manager/issues/419) | Solar Graph puzzle | S | Fixed in v0.97.0. The overnight climb was the inverter's output counter standing in for solar while the panel counters read zero, not a clock problem; solar now comes only from the panel counters, so the drop at sunrise and the inflated Generated total are gone. Days already recorded keep their old values. Explained on the issue (31 Oct); waiting for the reporter to confirm on v0.97.0, then close. |
 
 ## Tier 2: user-facing gaps and polish
 
 | Order | # | Issue | Effort | Why here |
 |---|---|---|---|---|
-| 1 | [426](https://github.com/psylsph/home-energy-manager/issues/426) | Optional charge cap: stop the battery charging above a set SOC | M | A user with AIOs behind a Gateway only fails over to island mode when the battery isn't full (their installer traced it to an AC-coupled Solax), and with GivEnergy gone no firmware fix is coming. The open question is how to stop charging through a Gateway, which has no pause registers; a zero charge rate needs confirming on real hardware first. It also needs a periodic full charge so the cells still balance (#418's calibration cycle could serve). |
-| 2 | [425](https://github.com/psylsph/home-energy-manager/issues/425) | House view: a garage for the EV charge point and a choice of house styles | M, then L | Picked up from gagenp01's ideas on the closed #422. The garage half is the useful one — it gives the EV charger a place in the house story (the post is currently bare), and the charger's offline states decide what gets drawn. A re-skin of the same anchors, so the flow model and tests don't move. Styles are breadth afterward. Supplier logos stay out (third-party branding). |
+| 1 | [425](https://github.com/psylsph/home-energy-manager/issues/425) | House view: a garage for the EV charge point and a choice of house styles | M, then L | Picked up from gagenp01's ideas on the closed #422. The garage half is the useful one — it gives the EV charger a place in the house story (the post is currently bare), and the charger's offline states decide what gets drawn. A re-skin of the same anchors, so the flow model and tests don't move. Styles are breadth afterward. Supplier logos stay out (third-party branding). |
+| 2 | [433](https://github.com/psylsph/home-energy-manager/issues/433) | Battery pause: offer it on the models GivTCP does | M | GivTCP pauses the Gen1 (ARM 187+), Gen2, AC Mk2, HV Gen3 and AIO Hybrid, which HEM doesn't yet, so Timed Discharge and the Charge Cap are missing there. The model contract lists each gap; closing one means real-hardware confidence that the registers behave, then dropping its deviation. |
 
 ## Tier 3: smarter planning around Intelligent Octopus Go
 

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.1] - 2026-11-04
+
+### Added
+
+- **Charge Cap: stop the battery charging above a level you choose (#426).** Turn it on under Battery and Power Controls on the Control page, pick where charging stops and where it starts again, and the surplus goes to export instead. Timed Charge, Force Charge and calibration still charge past it. It works on the All-in-Ones, the Gen3 hybrid on newer firmware and the AC Coupled (not yet the Mk2), and only while HEM is running. The battery shows the cap as a line, and HEM reminds you if it hasn't reached 100% for 30 days, so the cells still get balanced (you can change that in Settings → Notifications).
+
+### Fixed
+
+- **HEM no longer offers battery controls that don't work through a Gateway (#428).** A GivEnergy Gateway keeps its own copy of the charge schedule and battery settings and doesn't pass changes on to the AIO, so schedules, reserve, charge rates, Force Charge and the automations set through it never reached the battery. On a Gateway the Control page now says why and keeps Sync Clock, your automations wait until HEM is connected to the AIO again, and the Status page says the schedule isn't available rather than showing none. To control the battery, connect HEM to the AIO itself.
+
 ## [1.7.0] - 2026-11-02
 
 ### Added
