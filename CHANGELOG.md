@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.2] - 2026-11-04
+
+### Changed
+
+- **Every setting is shown without opening an Advanced section (#435).** Refresh Interval and HTTP Port now sit at the bottom of Settings → App, so you no longer have to unfold anything to find them. The same goes for the listen address and allowed origins under Remote Access, and Chart Grid Lines under Panel Controls.
+
 ## [1.7.1] - 2026-11-04
 
 ### Added

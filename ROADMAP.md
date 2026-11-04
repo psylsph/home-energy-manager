@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 4 November 2026 (v1.7.1). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 4 November 2026 (v1.7.2). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 The order weighs three things: whether users are affected today, whether a later item depends on it, and how much it costs. Where it differs from the issue's own label, the reason is given.
 
