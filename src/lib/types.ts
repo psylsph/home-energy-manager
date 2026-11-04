@@ -1,3 +1,4 @@
+import type { ChargeCapStateName } from './chargeCap';
 import type { PlanStrategy } from './forecast';
 
 export interface InverterSnapshot {
@@ -96,6 +97,12 @@ export interface InverterSnapshot {
   enable_charge: boolean;
   enable_discharge: boolean;
   auto_winter_active: boolean;
+  /** Charge cap (issue #426) on and supported by this inverter. */
+  charge_cap_enabled?: boolean;
+  /** The SOC the charge cap stops charging at. */
+  charge_cap_soc?: number;
+  /** What the charge cap is doing. */
+  charge_cap_state?: ChargeCapStateName;
   charging_mode?: 'standard' | 'cosy' | 'agile' | 'agile_charge' | 'agile_discharge' | 'adaptive';
   adaptive_charge_enabled?: boolean;
   adaptive_charge_state?: 'inactive' | 'outside_window' | 'preferred' | 'recovery' | 'suspended_auto_winter' | 'restoring' | 'error';

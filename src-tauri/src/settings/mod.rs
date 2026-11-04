@@ -871,12 +871,15 @@ pub enum PlanStrategy {
     Cheapest,
 }
 
-/// Read `forecast_plan_strategy` leniently: a value this version doesn't
-/// know (a newer build's strategy, after a downgrade) falls back to the
-/// default instead of failing the whole settings file.
-fn deserialize_plan_strategy<'de, D>(deserializer: D) -> Result<PlanStrategy, D::Error>
+/// Read a field leniently: a value this version can't read falls back to
+/// the default instead of failing the whole settings file. Used for
+/// `forecast_plan_strategy` (a newer build's strategy, after a downgrade)
+/// and `charge_cap_hold` (an unreleased build's record shape, which loads
+/// as none).
+fn deserialize_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
@@ -1521,7 +1524,7 @@ pub struct Settings {
     pub forecast_plan_auto_apply_lead_minutes: u16,
     /// How the Planner sizes the overnight charge (issue #359). Defaults
     /// to [`PlanStrategy::MinSoc`], the original behaviour.
-    #[serde(default, deserialize_with = "deserialize_plan_strategy")]
+    #[serde(default, deserialize_with = "deserialize_or_default")]
     pub forecast_plan_strategy: PlanStrategy,
     /// The charge target a hold plan last armed on the inverter (issue
     /// #359), so the planner can undo that target, and only that one, when
@@ -1740,6 +1743,15 @@ pub struct Settings {
     /// How the last cycle ended, for the Control page.
     #[serde(default)]
     pub battery_calibration_last: Option<crate::inverter::calibration::CalibrationRecord>,
+
+    // -- Charge cap (issue #426) --
+    /// Stop charging at a chosen SOC and resume below a lower one.
+    #[serde(default)]
+    pub charge_cap: crate::inverter::charge_cap::ChargeCapConfig,
+    /// Present while a pause the cap started may still be on the inverter;
+    /// owned by the poll loop, written before the cap's first pause write.
+    #[serde(default, deserialize_with = "deserialize_or_default")]
+    pub charge_cap_hold: Option<crate::inverter::charge_cap::ChargeCapHold>,
 
     // -- Solar array capacities (issue #110) --
     /// Rated peak capacity (kWp) of the PV1 DC string on a hybrid /
@@ -1980,6 +1992,15 @@ pub struct AlertsConfig {
     /// flows (issue #393, the BMS 3007-3022 SOC bug). On by default.
     #[serde(default = "default_true")]
     pub soc_anomaly_alert_enabled: bool,
+    /// Notify when the battery hasn't reached 100% for
+    /// `full_charge_alert_days` (issue #426: the cells balance at full
+    /// charge). Checked once a day; on by default.
+    #[serde(default = "default_true")]
+    pub full_charge_alert_enabled: bool,
+    /// Days without a full charge before [`Self::full_charge_alert_enabled`]
+    /// notifies (7–90).
+    #[serde(default = "default_full_charge_alert_days")]
+    pub full_charge_alert_days: u32,
 
     /// ntfy.sh (or self-hosted) topic for push notifications.
     #[serde(default)]
@@ -2011,6 +2032,15 @@ pub struct AlertsConfig {
 
 fn default_ntfy_server() -> String {
     "https://ntfy.sh".to_string()
+}
+
+/// Days without a full charge before the full-charge reminder (issue #426).
+pub const DEFAULT_FULL_CHARGE_ALERT_DAYS: u32 = 30;
+/// Shortest and longest full-charge reminder interval, in days.
+pub const FULL_CHARGE_ALERT_DAYS_RANGE: std::ops::RangeInclusive<u32> = 7..=90;
+
+fn default_full_charge_alert_days() -> u32 {
+    DEFAULT_FULL_CHARGE_ALERT_DAYS
 }
 
 fn default_alert_cooldown_minutes() -> u32 {
@@ -2059,6 +2089,8 @@ impl Default for AlertsConfig {
             solar_clipping_ceiling_w: 0,
             cell_spread_alert_enabled: true,
             soc_anomaly_alert_enabled: true,
+            full_charge_alert_enabled: true,
+            full_charge_alert_days: default_full_charge_alert_days(),
             ntfy_topic: String::new(),
             ntfy_server: default_ntfy_server(),
             pushover_app_token: String::new(),
@@ -2178,6 +2210,8 @@ impl Default for Settings {
             dispatch_hold_active_persisted: false,
             battery_calibration_run: None,
             battery_calibration_last: None,
+            charge_cap: Default::default(),
+            charge_cap_hold: None,
             // Issue #110: solar array capacities default to unset so a
             // fresh install (and every existing install on upgrade) sees
             // no behaviour change until the user opts in via Settings.
@@ -2686,6 +2720,60 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_charge_cap_hold_loads_as_none_without_losing_settings() {
+        let mut json = serde_json::to_value(Settings::default()).expect("json");
+        json["host"] = serde_json::json!("10.0.0.9");
+        json["charge_cap_hold"] = serde_json::json!({
+            "inverter_serial": "SA1234",
+            "device_type_code": "3001",
+            "prior_slot_start": null,
+            "prior_slot_end": null
+        });
+        let loaded: Settings = serde_json::from_value(json).expect("settings still load");
+        assert_eq!(loaded.charge_cap_hold, None);
+        assert_eq!(loaded.host, "10.0.0.9");
+    }
+
+    #[test]
+    fn charge_cap_defaults_off_and_survives_a_save() {
+        let s = Settings::default();
+        assert!(!s.charge_cap.enabled);
+        assert_eq!(s.charge_cap_hold, None);
+
+        crate::test_util::with_isolated_config_dir(|| {
+            let mut s = Settings::default();
+            s.charge_cap.enabled = true;
+            s.charge_cap.cap_soc = 90;
+            s.charge_cap.resume_soc = 85;
+            s.charge_cap_hold = Some(crate::inverter::charge_cap::ChargeCapHold {
+                inverter_serial: "SA1234".into(),
+                device_type_code: "8001".into(),
+                prior_slot_start: 1600,
+                prior_slot_end: 1900,
+                mode_only: false,
+            });
+            s.save().expect("save");
+            let loaded = Settings::load();
+            assert_eq!(loaded.charge_cap, s.charge_cap);
+            assert_eq!(loaded.charge_cap_hold, s.charge_cap_hold);
+        });
+    }
+
+    #[test]
+    fn settings_without_charge_cap_fields_load_with_it_off() {
+        let mut json = serde_json::to_value(Settings::default()).expect("json");
+        let map = json.as_object_mut().expect("object");
+        map.remove("charge_cap");
+        map.remove("charge_cap_hold");
+        let s: Settings = serde_json::from_value(json).expect("parse");
+        assert_eq!(
+            s.charge_cap,
+            crate::inverter::charge_cap::ChargeCapConfig::default()
+        );
+        assert_eq!(s.charge_cap_hold, None);
+    }
+
+    #[test]
     fn save_removes_temporary_file_after_atomic_replace() {
         crate::test_util::with_isolated_config_dir(|| {
             let settings = Settings {
@@ -2864,6 +2952,8 @@ mod tests {
             dispatch_hold_active_persisted: false,
             battery_calibration_run: None,
             battery_calibration_last: None,
+            charge_cap: Default::default(),
+            charge_cap_hold: None,
             // Issue #110: solar array capacities must round-trip exactly.
             pv1_rated_kw: 6.0,
             pv2_rated_kw: 4.2,
@@ -3623,6 +3713,8 @@ mod tests {
             dispatch_hold_active_persisted: false,
             battery_calibration_run: None,
             battery_calibration_last: None,
+            charge_cap: Default::default(),
+            charge_cap_hold: None,
             pv1_rated_kw: 0.0,
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),

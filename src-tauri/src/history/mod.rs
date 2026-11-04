@@ -1408,6 +1408,19 @@ impl HistoryDb {
         add_readings_column_if_missing(&conn, "pv1_pct", "REAL")?;
         add_readings_column_if_missing(&conn, "pv2_pct", "REAL")?;
 
+        // The newest reading at 100% (issue #426's full-charge reminder)
+        // without scanning every reading when there isn't one. Built after
+        // the column migrations, and only where the table has a SOC column
+        // (very old test databases don't), so it can never stop a database
+        // opening.
+        if table_has_column(&conn, "readings", "soc")? {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_readings_full_charge
+                     ON readings (timestamp) WHERE soc >= 100",
+            )
+            .map_err(|e| format!("Failed to create the full-charge index: {e}"))?;
+        }
+
         // Migration: SOC jump / stuck counts per module-day (issue #393).
         add_column_if_missing(
             &conn,
@@ -2685,6 +2698,38 @@ impl HistoryDb {
         Ok(())
     }
 
+    /// Unix seconds of the newest reading at 100% SOC, if any (issue #426's
+    /// full-charge reminder), through the partial `idx_readings_full_charge`
+    /// index, so it costs nothing when no reading has reached 100%.
+    pub fn last_full_charge_at(&self) -> Result<Option<i64>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.query_row(
+            "SELECT timestamp FROM readings WHERE soc >= 100 ORDER BY timestamp DESC LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read the last full charge: {e}"))
+    }
+
+    /// Unix seconds of the oldest reading, if any.
+    pub fn earliest_reading_at(&self) -> Result<Option<i64>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.query_row(
+            "SELECT timestamp FROM readings ORDER BY timestamp ASC LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read the oldest reading: {e}"))
+    }
+
     /// Store one Planner decision (issue #361). A row with the same
     /// `recorded_at` and `kind` is replaced.
     pub fn insert_plan_snapshot(&self, row: &PlanSnapshotRow) -> Result<(), String> {
@@ -3787,6 +3832,46 @@ mod tests {
         let dir = unique_test_dir("givenergy-history-test");
         let path = dir.join("test_history.db");
         HistoryDb::open(&path).unwrap()
+    }
+
+    #[test]
+    fn last_full_charge_is_the_newest_reading_at_100() {
+        let db = test_db();
+        assert_eq!(db.last_full_charge_at(), Ok(None));
+        assert_eq!(db.earliest_reading_at(), Ok(None));
+        for (timestamp, soc) in [(1_000, 80), (2_000, 100), (3_000, 100), (4_000, 99)] {
+            db.insert_reading(&InverterSnapshot {
+                timestamp,
+                soc,
+                ..Default::default()
+            });
+        }
+        assert_eq!(db.last_full_charge_at(), Ok(Some(3_000)));
+        assert_eq!(db.earliest_reading_at(), Ok(Some(1_000)));
+    }
+
+    /// With the cap on there's usually no reading at 100% at all, and a scan
+    /// of every reading under the history lock would block the poll writer
+    /// on every Control page load (issue #426 review).
+    #[test]
+    fn the_last_full_charge_is_found_through_an_index_not_a_table_scan() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT timestamp FROM readings \
+                 WHERE soc >= 100 ORDER BY timestamp DESC LIMIT 1",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_readings_full_charge")),
+            "{plan:?}"
+        );
     }
 
     fn plan_row(recorded_at: i64, kind: &str, plan: &str) -> PlanSnapshotRow {

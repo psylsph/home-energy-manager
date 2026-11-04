@@ -560,6 +560,11 @@ pub struct AppState {
     /// Guided battery calibration cycle (issue #418); mirrors
     /// `Settings::battery_calibration_run`.
     pub calibration_run: Arc<Mutex<Option<crate::inverter::calibration::CalibrationRun>>>,
+    /// Charge cap (issue #426): config, runtime and the persisted hold record
+    /// under one lock, so an API save and a poll never interleave.
+    pub charge_cap: Arc<Mutex<crate::inverter::charge_cap::ChargeCapShared>>,
+    /// Daily full-charge reminder gate (issue #426).
+    pub full_charge_check: Arc<Mutex<crate::alerts::full_charge::FullChargeCheck>>,
     /// Discharge floor guard configuration (developer mode only).
     pub discharge_floor_config: Arc<Mutex<DischargeFloorConfig>>,
     /// Discharge floor guard runtime state.
@@ -780,6 +785,8 @@ impl AppState {
             temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
             dispatch_hold_state: Arc::new(Mutex::new(DispatchHoldState::default())),
             calibration_run: Arc::new(Mutex::new(None)),
+            charge_cap: Arc::new(Mutex::new(Default::default())),
+            full_charge_check: Arc::new(Mutex::new(Default::default())),
             discharge_floor_config: Arc::new(Mutex::new({
                 let s = crate::settings::Settings::load();
                 DischargeFloorConfig {
@@ -3116,6 +3123,7 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
         .await
         .unwrap_or_default();
     stamp_solar_array_fields(&mut snapshot, &fresh_settings);
+    crate::inverter::charge_cap::stamp_snapshot(&mut snapshot, &*state.charge_cap.lock().await);
 
     {
         let mut latest = state.latest_snapshot.lock().await;
@@ -4580,6 +4588,43 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
+                                // ---- Charge cap (issue #426) ----
+                                // Pauses charging (HR 318 mode 1) at the cap and
+                                // lets go below the resume level, or whenever a
+                                // charge slot, Force Charge or calibration wants
+                                // the battery charging. Never over another pause.
+                                {
+                                    // Read fresh, after this poll's reverts, and one
+                                    // lock at a time.
+                                    let force_charge =
+                                        state.force_charge_revert.lock().await.is_some();
+                                    let force_discharge =
+                                        state.force_discharge_revert.lock().await.is_some();
+                                    let pause_revert =
+                                        state.pause_mode_revert.lock().await.is_some();
+                                    let context = crate::inverter::charge_cap::context_for(
+                                        &snapshot,
+                                        inverter_minute,
+                                        calibrating,
+                                        force_charge,
+                                        force_discharge,
+                                        pause_revert,
+                                    );
+                                    let writes = crate::inverter::charge_cap::advance(
+                                        &state, &snapshot, context,
+                                    )
+                                    .await;
+                                    if !writes.is_empty() {
+                                        write_registers_fail_fast_with_gap(
+                                            &mut client,
+                                            &writes,
+                                            "Charge cap",
+                                            write_gap,
+                                        )
+                                        .await;
+                                    }
+                                }
+
                                 // ---- Timed Export state machine ----
                                 //
                                 // Issue #289: Eco is the normal baseline outside
@@ -5477,6 +5522,26 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                     &config,
                                                     &text,
                                                     "battery spread",
+                                                )
+                                                .await
+                                            },
+                                        )
+                                        .await;
+                                    });
+                                }
+
+                                // ---- Full-charge reminder (issue #426) ----
+                                if crate::alerts::full_charge::check_pending(&state, health_now).await {
+                                    let state = state.clone();
+                                    tokio::spawn(async move {
+                                        crate::alerts::full_charge::run_check(
+                                            &state,
+                                            health_now,
+                                            |config, text| async move {
+                                                crate::alerts::dispatch_alert_text(
+                                                    &config,
+                                                    &text,
+                                                    "full charge",
                                                 )
                                                 .await
                                             },

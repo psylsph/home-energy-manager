@@ -1285,6 +1285,15 @@ pub struct InverterSnapshot {
     /// mode (distinct from `enable_charge_target` which any write can set).
     #[serde(default)]
     pub auto_winter_active: bool,
+    /// Charge cap (issue #426): on, and this inverter can run it.
+    #[serde(default)]
+    pub charge_cap_enabled: bool,
+    /// The SOC the charge cap stops charging at.
+    #[serde(default)]
+    pub charge_cap_soc: u8,
+    /// What the charge cap is doing (`ChargeCapState::api_name`).
+    #[serde(default)]
+    pub charge_cap_state: String,
     /// Unified user-facing charging mode.
     #[serde(default)]
     pub charging_mode: crate::settings::ChargingMode,
@@ -1593,6 +1602,9 @@ impl InverterSnapshot {
             enable_charge_target: false,
             enable_discharge: false,
             auto_winter_active: false,
+            charge_cap_enabled: false,
+            charge_cap_soc: 0,
+            charge_cap_state: String::new(),
             charging_mode: crate::settings::ChargingMode::default(),
             adaptive_charge_enabled: false,
             adaptive_charge_state: String::new(),

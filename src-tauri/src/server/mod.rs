@@ -7,6 +7,7 @@ pub mod api;
 pub mod audit;
 pub mod authenticated_lifecycle;
 pub(crate) mod calibration;
+pub(crate) mod charge_cap;
 pub(crate) mod control_status;
 pub mod export_once;
 pub mod external_commands;
@@ -222,6 +223,11 @@ fn create_router_at(
         .route(
             "/api/battery/calibration/cancel",
             post(calibration::cancel_calibration),
+        )
+        // Optional charge cap (issue #426).
+        .route(
+            "/api/charge-cap",
+            get(charge_cap::get_charge_cap).post(charge_cap::set_charge_cap),
         )
         // Cost totals for the Power page Consumption Report (issue #131).
         // Accepts the same range/offset/explicit-window params as

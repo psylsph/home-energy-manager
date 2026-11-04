@@ -18,6 +18,8 @@ import { useCarbonIntensity } from '../../hooks/useCarbonIntensity';
 import { useNow } from '../../hooks/useNow';
 import { moonLitPath, skyScene, type SkyScene } from '../../lib/moon';
 import { formatClock } from '../../lib/format';
+import { capLineSoc } from '../../lib/chargeCap';
+import CapMarker from '../CapMarker';
 import {
   CARBON_BAND_COLORS,
   carbonLabel,
@@ -40,6 +42,7 @@ import {
   EV_POST,
   HOUSE,
   HOUSE_VIEWBOX,
+  isoPoint,
   panelCells,
   polygonPoints,
   SKY_ARC,
@@ -425,15 +428,16 @@ function Route({ route, reduced }: { route: HouseRoute; reduced: boolean }) {
   );
 }
 
-function BatteryCabinet({ barsLit, color }: { barsLit: number; color: string }) {
+function BatteryCabinet({ barsLit, color, capSoc }: { barsLit: number; color: string; capSoc: number | null }) {
   const x0 = HOUSE.x1;
   const x1 = HOUSE.x1 + BATTERY_BOX.depth;
   const { y0, y1, z0, z1 } = BATTERY_BOX;
   const fill = 'var(--app-house-device, #161B22)';
   const barH = (z1 - z0 - 0.7) / BATTERY_BARS;
+  const barGap = 0.04;
   const bars = Array.from({ length: BATTERY_BARS }).map((_, i) => {
     const bz0 = z0 + 0.35 + i * barH;
-    const bz1 = bz0 + barH - 0.07;
+    const bz1 = bz0 + barH - barGap;
     const lit = i < barsLit;
     return (
       <polygon
@@ -452,8 +456,25 @@ function BatteryCabinet({ barsLit, color }: { barsLit: number; color: string }) 
       <polygon points={polygonPoints([w(x1, y1, z0), w(x1, y0, z0), w(x1, y0, z1), w(x1, y1, z1)])} fill={fill} stroke={color} strokeWidth={1.3} strokeLinejoin="round" />
       <polygon points={polygonPoints([w(x0, y0, z1), w(x1, y0, z1), w(x1, y1, z1), w(x0, y1, z1)])} fill={fill} stroke={color} strokeWidth={1.3} strokeLinejoin="round" />
       {bars}
+      {capSoc != null && (() => {
+        // In the gap between bars at the cap, a little wider than the bars.
+        const cz = z0 + 0.35 + (capSoc / 100) * BATTERY_BARS * barH - barGap / 2;
+        return (
+          <CapMarker
+            testId="house-battery-cap"
+            capSoc={capSoc}
+            {...lineEnds(w(x1 + 0.02, y1 - 0.25, cz), w(x1 + 0.02, y0 + 0.25, cz))}
+          />
+        );
+      })()}
     </g>
   );
+}
+
+function lineEnds(a: WorldPoint, b: WorldPoint) {
+  const p = isoPoint(a);
+  const q = isoPoint(b);
+  return { x1: p.x, y1: p.y, x2: q.x, y2: q.y };
 }
 
 function EvPost() {
@@ -549,7 +570,7 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
             ))}
           </g>
 
-          <BatteryCabinet barsLit={scene.battery.barsLit} color={scene.battery.color} />
+          <BatteryCabinet barsLit={scene.battery.barsLit} color={scene.battery.color} capSoc={capLineSoc(source.snapshot)} />
           {source.showEvc && <EvPost />}
 
           {/* Idle wiring, then one moving cable per part with power on it. */}

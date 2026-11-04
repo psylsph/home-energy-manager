@@ -8,6 +8,7 @@ import { batteryEvent, batteryStoredKwh, doingIt, type BatteryEventKind, type Ti
 import { useTimedExportSchedule } from '../../hooks/useTimedExportSchedule';
 import { inverterMinuteOfDay } from '../../lib/ecoTimedExport';
 import { batteryBarsLit } from '../../lib/houseFlow';
+import { CAP_MARKER_COLOR, capLineSoc, capTitle } from '../../lib/chargeCap';
 import { BATTERY_BARS } from '../../lib/houseGeometry';
 import { formatPercent } from '../../lib/format';
 import { BATTERY_OUTPUT_COLOR, SOC_MID_COLOR, socColor } from '../../lib/energyFlow';
@@ -15,6 +16,8 @@ import { useInverterStore } from '../../store/useInverterStore';
 import { deviceHasBatteryControls } from '../../lib/deviceCapabilities';
 
 const CHARGE_GREEN = BATTERY_OUTPUT_COLOR;
+/** The level bars' `gap-0.5`, which the cap marker sits in. */
+const SEGMENT_GAP_PX = 2;
 const EXPORT_AMBER = SOC_MID_COLOR;
 const CARD = 'bg-bg-surface rounded-lg p-3 flex flex-col gap-1.5 min-w-0';
 const LABEL = 'text-[11px] font-semibold uppercase tracking-wider text-text-secondary';
@@ -78,6 +81,7 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
   const stored = batteryStoredKwh(snapshot.soc, snapshot.battery_capacity_kwh);
   const color = socColor(snapshot.soc);
   const lit = batteryBarsLit(snapshot.soc);
+  const cap = capLineSoc(snapshot);
   return (
     <section className={CARD} data-testid="house-battery-card">
       <span className="flex items-baseline gap-1">
@@ -89,7 +93,7 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
       <span className={LABEL}>
         Battery Level · <span style={{ color }} data-testid="house-battery-level">{formatPercent(snapshot.soc)}</span>
       </span>
-      <span className="flex gap-1" aria-hidden="true">
+      <span className="relative flex gap-0.5" aria-hidden="true">
         {Array.from({ length: BATTERY_BARS }, (_, i) => (
           <span
             key={i}
@@ -99,6 +103,16 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
             style={{ backgroundColor: i < lit ? color : 'var(--color-bg-elevated)' }}
           />
         ))}
+        {cap != null && (
+          <span
+            data-testid="house-battery-cap"
+            title={capTitle(cap)}
+            className="absolute -top-1.5 -bottom-1.5 w-[3px] -translate-x-1/2 rounded-full"
+            // Centred on the gap between bars: n bars with a 2px gap put the
+            // boundary at p% of (width + gap), less half a gap.
+            style={{ left: `calc(${cap}% + ${(cap / 100) * SEGMENT_GAP_PX - SEGMENT_GAP_PX / 2}px)`, backgroundColor: CAP_MARKER_COLOR }}
+          />
+        )}
       </span>
     </section>
   );

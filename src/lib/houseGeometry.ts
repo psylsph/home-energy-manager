@@ -95,8 +95,12 @@ export const HEDGES = [
 const GRID_RUN_Y = 8.8;
 /** Chimney stack (with its cap) on the back roof slope; leader lines must stay clear of it. */
 export const CHIMNEY = { x0: 0.75, x1: 1.85, y0: 2.45, y1: 3.55, z0: 6.8, z1: 9.75 } as const;
-/** Number of SOC bars drawn on the battery cabinet. */
-export const BATTERY_BARS = 10;
+/**
+ * Number of SOC bars on the battery cabinet and the Battery Level card: 5%
+ * each, so a charge cap on a multiple of 5 (the default 95%) falls between
+ * two bars rather than through one.
+ */
+export const BATTERY_BARS = 20;
 
 /** World point on the front roof slope: `u` along the ridge (x), `v` 0 = eave → 1 = ridge. */
 export function frontRoofPoint(x: number, v: number): WorldPoint {

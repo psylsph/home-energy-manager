@@ -292,6 +292,14 @@ async fn initialize_app_state(
         *state.calibration_run.lock().await = Some(run);
     }
 
+    // The charge cap (issue #426) picks up its config and, after a restart
+    // mid-hold, the record that says the pause on the inverter is its own.
+    {
+        let mut cap = state.charge_cap.lock().await;
+        cap.config = app_settings.charge_cap.clone();
+        cap.hold = app_settings.charge_cap_hold.clone();
+    }
+
     // Restore the shared limiter reserve so the exact previous
     // reserve is written back (not a hardcoded default).
     if let Some(reserve) = app_settings.load_limiter_saved_reserve {
@@ -788,7 +796,16 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<Arc<AppState>>() {
-                    tauri::async_runtime::block_on(flush_history_on_shutdown(&state));
+                    // Side by side, as in headless mode: neither needs the other.
+                    tauri::async_runtime::block_on(async {
+                        tokio::join!(
+                            crate::inverter::charge_cap::release_on_shutdown(
+                                &state,
+                                crate::inverter::charge_cap::SHUTDOWN_RELEASE_LIMIT,
+                            ),
+                            flush_history_on_shutdown(&state),
+                        );
+                    });
                 }
             }
         });
@@ -1166,7 +1183,15 @@ pub fn run_headless(args: &[String]) {
             _ = server => {}
             _ = shutdown_signal() => tracing::warn!("Shutting down"),
         }
-        flush_history_on_shutdown(&state).await;
+        // Side by side: neither needs the other, and one after the other
+        // they could outlast a container's stop timeout (Docker's is 10 s).
+        tokio::join!(
+            crate::inverter::charge_cap::release_on_shutdown(
+                &state,
+                crate::inverter::charge_cap::SHUTDOWN_RELEASE_LIMIT,
+            ),
+            flush_history_on_shutdown(&state),
+        );
     });
     // Don't wait on blocking work still running (a backup to a stalled NAS
     // share, a metadata call on a stalled mount): stop now, as SIGTERM did

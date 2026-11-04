@@ -49,7 +49,11 @@ Review findings (`/code-review`, bots, PR comments) are claims to verify, not in
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) and [GivTCP](https://github.com/dewet22/giv_tcp)
 - **Testing**: inline Rust unit tests + mock-TCP integration tests + Playwright E2E (local-only E2E use the [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator))
-- **References**: local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding
+- **References**: local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are source of truth for register layout, slot maps, slave addressing, command encoding — but `git fetch` them first (the GivTCP clone once sat 256 commits behind). Current GivTCP runs the britkat1980/givenergy-modbus fork it pins in `requirements.txt`, not dewet22's.
+
+## Model capability contract
+
+When HEM and GivTCP disagree on what a model supports, GivTCP wins: it has far more real hardware behind it. `tests/fixtures/givtcp-model-contract.json` records GivTCP's pause support and three-phase layout per model, and every place HEM or the simulator knowingly differs (`hem_deviations` / `sim_deviations`, each with an issue and a why). It's checked offline by `inverter/givtcp_contract.rs`, `tests/lib/givtcpContract.test.ts`, the simulator's `crates/sim-registers/tests/givtcp_contract.rs` (an identical copy, compared in `npm test`) and `e2e/local-model-contract.spec.ts` (every simulator model through the backend); an unrecorded difference fails, and so does a recorded one that has gone away. `npm run check:givtcp` re-reads GivTCP itself (network; run it before a release). Changing a model's capability means updating the contract in both repos in the same change.
 
 ## Tauri plugin pairing
 

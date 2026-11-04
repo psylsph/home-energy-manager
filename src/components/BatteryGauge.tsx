@@ -15,6 +15,8 @@
 import { memo } from 'react';
 import { formatPercent } from '../lib/format';
 import { socColor, batteryFillFraction } from '../lib/energyFlow';
+import { capTitle } from '../lib/chargeCap';
+import CapMarker from './CapMarker';
 
 interface Props {
   /** State of charge, 0–100. */
@@ -25,7 +27,10 @@ interface Props {
   showLabel?: boolean;
   /** Battery orientation. Mobile panels use the horizontal variant. */
   orientation?: 'vertical' | 'horizontal';
+  /** Charge cap SOC (issue #426): a line across the cell at this level. */
+  capSoc?: number | null;
 }
+
 
 // ViewBox geometry — a 40×80 cell with a 16×6 terminal nub on top. The fill
 // lives inside an inset body so the outline stroke never overlaps it.
@@ -52,7 +57,9 @@ const NUB_W = 16;
 const NUB_H = 6;
 const NUB_X = (VB_W - NUB_W) / 2;
 
-function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'vertical' }: Props) {
+function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'vertical', capSoc = null }: Props) {
+  const capFrac = capSoc == null ? null : batteryFillFraction(capSoc);
+  const capLabel = capSoc == null ? null : capTitle(capSoc);
   const color = socColor(soc);
   const frac = batteryFillFraction(soc);
   const horizontal = orientation === 'horizontal';
@@ -85,7 +92,7 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
         width={width}
         height={width * 0.5}
         role="img"
-        aria-label={`Battery ${formatPercent(soc)} charged`}
+        aria-label={`Battery ${formatPercent(soc)} charged${capLabel ? `, ${capLabel.toLowerCase()}` : ''}`}
         style={{ display: 'block' }}
       >
         <rect
@@ -121,6 +128,16 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
             style={{ transition: 'width 0.6s ease' }}
           />
         )}
+        {capFrac != null && (
+          <CapMarker
+            testId="battery-gauge-cap"
+            capSoc={capSoc!}
+            x1={hBodyX + FILL_INSET + capFrac * (hBodyW - FILL_INSET * 2)}
+            x2={hBodyX + FILL_INSET + capFrac * (hBodyW - FILL_INSET * 2)}
+            y1={hBodyY + 1}
+            y2={hBodyY + hBodyH - 1}
+          />
+        )}
         {labelVisible && (
           <text
             x={hBodyX + hBodyW / 2}
@@ -145,7 +162,7 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
       width={width}
       height={width * (VB_H / VB_W)}
       role="img"
-      aria-label={`Battery ${formatPercent(soc)} charged`}
+      aria-label={`Battery ${formatPercent(soc)} charged${capLabel ? `, ${capLabel.toLowerCase()}` : ''}`}
       style={{ display: 'block' }}
     >
       {/* Terminal nub */}
@@ -183,6 +200,17 @@ function BatteryGaugeInner({ soc, width = 96, showLabel = true, orientation = 'v
           fill={color}
           // Ease the fill transition when SOC ticks so it doesn't snap.
           style={{ transition: 'y 0.6s ease, height 0.6s ease' }}
+        />
+      )}
+      {/* Charge cap line (issue #426) */}
+      {capFrac != null && (
+        <CapMarker
+          testId="battery-gauge-cap"
+          capSoc={capSoc!}
+          x1={BODY_X + 1}
+          x2={BODY_X + BODY_W - 1}
+          y1={FILL_Y_BOTTOM - capFrac * FILL_H}
+          y2={FILL_Y_BOTTOM - capFrac * FILL_H}
         />
       )}
       {/* Percentage label, centred in the body */}

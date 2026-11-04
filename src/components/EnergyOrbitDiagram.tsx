@@ -15,8 +15,9 @@ import { memo, useId } from 'react';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useInverterStore } from '../store/useInverterStore';
 import type { EnergyFlow, FlowNode, FlowNodeId } from '../types/energyFlow';
-import { FLOW_COLORS, nodeStatus, visualEndpoints } from '../lib/energyFlow';
+import { FLOW_COLORS, batteryFillFraction, nodeStatus, visualEndpoints } from '../lib/energyFlow';
 import { useEnergyFlowViewModel, type EnergyFlowSourceProps } from '../hooks/useEnergyFlowViewModel';
+import CapMarker from './CapMarker';
 
 type Props = EnergyFlowSourceProps;
 
@@ -430,6 +431,24 @@ function BatterySocRing({ node, x, y, r }: { node: FlowNode; x: number; y: numbe
         strokeDasharray={`${filled} ${circumference - filled}`}
         transform={`rotate(-90 ${x} ${y})`}
       />
+      {node.capPercent != null && (() => {
+        // A short tick across the ring at the charge cap (issue #426),
+        // measured clockwise from the top like the fill.
+        const angle = batteryFillFraction(node.capPercent) * 2 * Math.PI;
+        const dx = Math.sin(angle);
+        const dy = -Math.cos(angle);
+        return (
+          <CapMarker
+            testId="battery-soc-ring-cap"
+            capSoc={node.capPercent}
+            x1={x + dx * (ringR - 8)}
+            y1={y + dy * (ringR - 8)}
+            x2={x + dx * (ringR + 8)}
+            y2={y + dy * (ringR + 8)}
+            width={3.5}
+          />
+        );
+      })()}
     </g>
   );
 }
@@ -474,6 +493,16 @@ function BatteryGlyph({ node, x, y }: { node: FlowNode; x: number; y: number }) 
         fill={node.color}
         opacity={0.55}
       />
+      {node.capPercent != null && (
+        <CapMarker
+          testId="battery-glyph-cap"
+          capSoc={node.capPercent}
+          x1={bodyX + 4 + (bodyW - 8) * batteryFillFraction(node.capPercent)}
+          x2={bodyX + 4 + (bodyW - 8) * batteryFillFraction(node.capPercent)}
+          y1={bodyY + 2}
+          y2={bodyY + bodyH - 2}
+        />
+      )}
     </g>
   );
 }

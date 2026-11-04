@@ -45,6 +45,7 @@ import {
 } from './format';
 import { solarOverallPercent } from './solarArrays';
 import { deviceHasBatteryControls } from './deviceCapabilities';
+import { capLineSoc } from './chargeCap';
 import { gridMeterCurrentA, GRID_CT_AUTO } from './meters';
 
 /**
@@ -745,6 +746,7 @@ export function buildEnergyFlows(
       subLabel: batteryMeasurements,
       color: batteryColor,
       ringPercent: s.soc,
+      capPercent: capLineSoc(s) ?? undefined,
       active: isCharging || isDischarging,
       status: isCharging ? 'Charging' : isDischarging ? 'Discharging' : 'Idle',
     },

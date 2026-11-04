@@ -2827,6 +2827,14 @@ fn validate_alert_threshold_pair(
 }
 
 fn validate_alert_thresholds(config: &crate::settings::AlertsConfig) -> Result<(), String> {
+    let days = crate::settings::FULL_CHARGE_ALERT_DAYS_RANGE;
+    if !days.contains(&config.full_charge_alert_days) {
+        return Err(format!(
+            "full_charge_alert_days must be {}-{} days",
+            days.start(),
+            days.end()
+        ));
+    }
     validate_alert_threshold_pair(
         config.batt_temp_min,
         config.batt_temp_max,
@@ -7202,6 +7210,18 @@ pub async fn set_alerts(
         .and_then(|v| v.as_bool())
     {
         candidate.soc_anomaly_alert_enabled = v;
+    }
+    if let Some(v) = body
+        .get("full_charge_alert_enabled")
+        .and_then(|v| v.as_bool())
+    {
+        candidate.full_charge_alert_enabled = v;
+    }
+    if let Some(v) = body.get("full_charge_alert_days") {
+        match v.as_u64().and_then(|days| u32::try_from(days).ok()) {
+            Some(days) => candidate.full_charge_alert_days = days,
+            None => return error_response("full_charge_alert_days must be a whole number of days"),
+        }
     }
     if let Some(v) = body
         .get("solar_clipping_ceiling_w")
@@ -19945,6 +19965,46 @@ pub(crate) mod tests {
 
             let reloaded = crate::settings::Settings::load();
             assert!(reloaded.alerts_config.inverter_trip_enabled);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_alerts_persists_the_full_charge_reminder_and_checks_its_days() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let defaults = state.alert_config.lock().await.clone();
+            assert!(defaults.full_charge_alert_enabled);
+            assert_eq!(defaults.full_charge_alert_days, 30);
+
+            let body = serde_json::json!({
+                "full_charge_alert_enabled": false,
+                "full_charge_alert_days": 14,
+            });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let reloaded = crate::settings::Settings::load().alerts_config;
+            assert!(!reloaded.full_charge_alert_enabled);
+            assert_eq!(reloaded.full_charge_alert_days, 14);
+
+            for days in [
+                serde_json::json!(6),
+                serde_json::json!(91),
+                serde_json::json!(-1),
+                serde_json::json!(10.5),
+                serde_json::json!("30"),
+            ] {
+                let body = serde_json::json!({ "full_charge_alert_days": days });
+                let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{days}");
+            }
+            assert_eq!(
+                crate::settings::Settings::load()
+                    .alerts_config
+                    .full_charge_alert_days,
+                14,
+                "a rejected save changes nothing"
+            );
         })
         .await;
     }

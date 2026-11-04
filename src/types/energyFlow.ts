@@ -53,6 +53,8 @@ export interface FlowNode {
   color: string;
   /** Optional 0–100 ring fill (currently battery state-of-charge). */
   ringPercent?: number;
+  /** Battery only: the charge cap's SOC, drawn as a line, when it's on and below 100%. */
+  capPercent?: number;
   /** Whether this node is currently moving meaningful power. */
   active: boolean;
   /** Optional pre-derived status word, e.g. "Importing" or "Exporting". */

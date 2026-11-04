@@ -34,6 +34,7 @@ import AwaitingConnection from '../components/AwaitingConnection';
 import CosyBlockedNotice from '../components/CosyBlockedNotice';
 import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import ExportOnceCard from '../components/ExportOnceCard';
+import ChargeCapSection from '../components/ChargeCapSection';
 import Toggle from '../components/Toggle';
 import HelpTip from '../components/HelpTip';
 import SlotScheduleWarnings from '../components/SlotScheduleWarnings';
@@ -4163,6 +4164,8 @@ export default function ControlPage() {
       {/* Section 6: Battery and Power Controls */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Battery and Power Controls</h2>
+        {/* Optional charge cap (issue #426) */}
+        <ChargeCapSection />
         {powerControlSaving && <InverterWriteProgress />}
         {powerControlSaveError && (
           <div

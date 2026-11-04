@@ -7,6 +7,7 @@ pub(crate) mod agile;
 pub(crate) mod auto_discovery;
 pub(crate) mod battery_reads;
 pub mod calibration;
+pub mod charge_cap;
 pub(crate) mod cosy;
 pub mod daily_report;
 pub mod decoder;
@@ -14,6 +15,8 @@ pub mod discovery;
 pub mod encoder;
 pub mod export_once;
 pub(crate) mod forecast_plan;
+#[cfg(test)]
+mod givtcp_contract;
 pub mod model;
 pub mod poll;
 pub mod power_limit;

@@ -1,6 +1,14 @@
 import Toggle from '../../Toggle';
 import { SettingsGroup, SettingsRow } from '../SettingsSection';
-import { FIELD_LABEL, TEXT_INPUT, type AlertsConfig, type AlertsFormProps } from './alertsConfig';
+import {
+  FIELD_LABEL,
+  FULL_CHARGE_DAYS_MAX,
+  FULL_CHARGE_DAYS_MIN,
+  fullChargeDaysValid,
+  TEXT_INPUT,
+  type AlertsConfig,
+  type AlertsFormProps,
+} from './alertsConfig';
 
 type BooleanField = {
   [K in keyof AlertsConfig]: AlertsConfig[K] extends boolean ? K : never;
@@ -32,6 +40,12 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string; help?: string
     hint: "Notify when a battery's state of charge jumps in one step or stays put while it charges or discharges (the BMS SOC bug)",
   },
   {
+    key: 'full_charge_alert_enabled',
+    label: 'Battery Not Fully Charged',
+    hint: "Notify when the battery hasn't reached 100% for a while",
+    help: 'Checked once a day. The cells balance and the SOC reading re-anchors at full charge, so a battery held below 100% (by the charge cap, or by short winter days) slowly drifts.',
+  },
+  {
     key: 'connection_lost_enabled',
     label: 'Connection Lost',
     hint: 'Notify when contact with the inverter is dropped and restored',
@@ -47,6 +61,18 @@ export default function AlertTriggers({ config, update }: AlertsFormProps) {
           <SettingsRow label={label} hint={hint} help={help}>
             <Toggle checked={config[key]} ariaLabel={label} onChange={(v) => update({ [key]: v })} />
           </SettingsRow>
+          {key === 'full_charge_alert_enabled'
+            && (config.full_charge_alert_enabled || !fullChargeDaysValid(config.full_charge_alert_days)) && (
+            <label className="flex items-center justify-between gap-3">
+              <span className={FIELD_LABEL}>Days Without a Full Charge (7–90)</span>
+              <input
+                type="number" step="1" min={FULL_CHARGE_DAYS_MIN} max={FULL_CHARGE_DAYS_MAX}
+                value={config.full_charge_alert_days}
+                onChange={(e) => update({ full_charge_alert_days: Number(e.target.value) })}
+                className={`${TEXT_INPUT} w-28 text-left`}
+              />
+            </label>
+          )}
           {key === 'solar_clipping_enabled' && config.solar_clipping_enabled && (
             <label className="flex items-center justify-between gap-3">
               <span className={FIELD_LABEL}>

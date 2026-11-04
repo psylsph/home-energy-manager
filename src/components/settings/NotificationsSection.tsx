@@ -10,6 +10,7 @@ import NtfySettings from './notifications/NtfySettings';
 import PushoverSettings from './notifications/PushoverSettings';
 import TelegramSettings from './notifications/TelegramSettings';
 import {
+  alertsFormError,
   DEFAULT_ALERTS_CONFIG,
   hasChannel,
   ntfyTopic,
@@ -72,8 +73,13 @@ export default function NotificationsSection({
 
   const { generated, effective } = ntfyTopic(config, serial || inverterSerial);
 
-  const handleSave = () =>
-    save.run(async () => {
+  const handleSave = () => {
+    const formError = alertsFormError(config);
+    if (formError) {
+      flash(formError, false);
+      return;
+    }
+    return save.run(async () => {
       // Persist the effective topic (the user's, or the serial default when
       // left blank) so ntfy works without the user typing one.
       const saveConfig = { ...config, ntfy_topic: effective };
@@ -88,6 +94,7 @@ export default function NotificationsSection({
         });
       }
     }, () => 'Failed to save alert settings');
+  };
 
   const handleTest = () =>
     test.run(async () => {
