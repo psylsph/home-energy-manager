@@ -31,7 +31,6 @@ vi.mock('../../src/lib/openExternal', () => ({
 import SettingsPage from '../../src/pages/SettingsPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import { SETTINGS_NAV } from '../../src/lib/settingsNav';
-import { openAdvanced } from './settingsTestUtils';
 
 function silenceConsoleError() {
   return vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -202,7 +201,6 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       // The interval is rendered as a row of buttons labelled with the
       // step in seconds. 33 clamps to the nearest lower step (30), so the
       // 30s button is the active one.
-      await openAdvanced();
       await screen.findByText('Refresh Interval');
       const thirtyBtn = screen.getByText('30s');
       expect(thirtyBtn.className).toContain('bg-accent');
@@ -212,7 +210,6 @@ describe('<SettingsPage/> — page shell & hydration', () => {
     it('warns that each poll also reaches the GivEnergy cloud via the dongle', async () => {
       mountApiMocks();
       render(<SettingsPage />);
-      await openAdvanced();
       await screen.findByText('Refresh Interval');
       expect(
         screen.getByText(/Each poll also reaches the GivEnergy cloud through the WiFi dongle/),
@@ -669,7 +666,6 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       expect(switchOn('Start Hidden in Tray')).toBe('true');
       expect(switchOn('Check for New Releases')).toBe('false');
 
-      await openAdvanced();
       const app = screen.getByRole('heading', { name: 'App', level: 2 }).closest('section')!;
       expect((within(app).getByRole('spinbutton') as HTMLInputElement).value).toBe('8123');
       expect(within(app).getByRole('button', { name: '45s' }).className).toContain('bg-accent');
@@ -688,7 +684,6 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       expect(switchOn('Start Hidden in Tray')).toBe('false');
       expect(switchOn('Check for New Releases')).toBe('true');
 
-      await openAdvanced();
       const app = screen.getByRole('heading', { name: 'App', level: 2 }).closest('section')!;
       expect((within(app).getByRole('spinbutton') as HTMLInputElement).value).toBe('7337');
       expect(within(app).getByRole('button', { name: '20s' }).className).toContain('bg-accent');

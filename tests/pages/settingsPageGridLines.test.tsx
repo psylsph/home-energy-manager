@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
-import { openAdvanced } from './settingsTestUtils';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 // The Chart Grid Lines group in Settings → Panel Controls. The real
 // `useInverterStore` is the subject under test, so it's used as-is and
@@ -39,7 +38,6 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
   describe('render', () => {
     it('renders the sub-section heading inside Panel Controls', async () => {
       render(<Section />);
-      await openAdvanced();
       expect(
         await screen.findByRole('heading', { name: 'Chart Grid Lines', level: 3 }),
       ).toBeDefined();
@@ -47,7 +45,6 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
 
     it('renders both Standard and Subtle buttons with the swatch SVGs', async () => {
       render(<Section />);
-      await openAdvanced();
       const standardBtn = await screen.findByRole('button', { name: /Standard/i });
       const subtleBtn = await screen.findByRole('button', { name: /Subtle/i });
 
@@ -63,14 +60,12 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
 
     it('describes the Forecast chart as using the setting', async () => {
       render(<Section />);
-      await openAdvanced();
       await screen.findByRole('heading', { name: 'Chart Grid Lines', level: 3 });
       expect(screen.getByText(/Power, History, Battery, Solar, and Forecast charts/)).toBeDefined();
     });
 
     it('marks Standard as the default selected preset', async () => {
       render(<Section />);
-      await openAdvanced();
       const standardBtn = await screen.findByRole('button', { name: /Standard/i });
       const subtleBtn = await screen.findByRole('button', { name: /Subtle/i });
       // aria-pressed is the canonical a11y signal for a toggle button.
@@ -84,7 +79,6 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
   describe('interaction', () => {
     it('clicking Subtle switches the store to "subtle" and toggles aria-pressed', async () => {
       render(<Section />);
-      await openAdvanced();
       const subtleBtn = await screen.findByRole('button', { name: /Subtle/i });
 
       fireEvent.click(subtleBtn);
@@ -100,7 +94,6 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
 
     it('clicking Subtle persists the choice to localStorage', async () => {
       render(<Section />);
-      await openAdvanced();
       const subtleBtn = await screen.findByRole('button', { name: /Subtle/i });
       fireEvent.click(subtleBtn);
       await waitFor(() => {
@@ -115,7 +108,6 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
       localStorage.setItem('gridLineWeight', 'subtle');
 
       render(<Section />);
-      await openAdvanced();
       const standardBtn = await screen.findByRole('button', { name: /Standard/i });
       fireEvent.click(standardBtn);
 
@@ -130,7 +122,6 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
       // settings sync. The next render must reflect the change without
       // needing a re-mount.
       const { rerender } = render(<Section />);
-      await openAdvanced();
       // Wait for first paint of the buttons before mutating store state.
       await screen.findByRole('button', { name: /Standard/i });
       useInverterStore.getState().setGridLineWeight('subtle');
@@ -144,23 +135,15 @@ describe('<PanelControlsSection/> — Chart Grid Lines sub-section (issue #111)'
   });
 
   describe('position in Panel Controls', () => {
-    it('sits under Panel Controls → Advanced, folded away until opened', async () => {
-      // Issue #111 asks for the control inside Panel Controls; issue #402
-      // moved it under Advanced, since it's rarely changed.
+    it('sits in the Panel Controls section, always visible', async () => {
+      // Issue #111 put the control inside Panel Controls; issue #402 briefly
+      // folded it under Advanced, and #435 unfolded every section, so it is
+      // an ordinary group again — visible without asking.
       render(<Section />);
-      const advanced = await screen.findByRole('button', { name: 'Advanced' });
-      expect(advanced.getAttribute('aria-expanded')).toBe('false');
-      expect(screen.queryByRole('heading', { name: 'Chart Grid Lines' })).toBeNull();
-
-      fireEvent.click(advanced);
-      expect(advanced.getAttribute('aria-expanded')).toBe('true');
-      const panel = document.getElementById(advanced.getAttribute('aria-controls')!)!;
-      expect(within(panel).getByRole('heading', { name: 'Chart Grid Lines', level: 3 })).toBeDefined();
+      const heading = await screen.findByRole('heading', { name: 'Chart Grid Lines', level: 3 });
       const section = screen.getByRole('heading', { name: 'Panel Controls', level: 2 }).closest('section')!;
-      expect(section.contains(panel)).toBe(true);
-
-      fireEvent.click(advanced);
-      expect(screen.queryByRole('heading', { name: 'Chart Grid Lines' })).toBeNull();
+      expect(section.contains(heading)).toBe(true);
+      expect(screen.queryByRole('button', { name: 'Advanced' })).toBeNull();
     });
   });
 });

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { apiPost } from '../../lib/api';
 import { useInverterStore } from '../../store/useInverterStore';
 import Toggle from '../Toggle';
-import { AdvancedSettings, SettingsGroup, SettingsSection } from './SettingsSection';
+import { SettingsGroup, SettingsSection } from './SettingsSection';
 import { useSettingsSave, type Flash } from './useSettingsSave';
 import HelpTip from '../HelpTip';
 
@@ -80,9 +80,7 @@ export default function PanelControlsSection({
       <PanelGraphsGroup />
       <HistoryAveragesGroup />
       <EnergyFlowGroup />
-      <AdvancedSettings>
-        <GridLinesGroup />
-      </AdvancedSettings>
+      <GridLinesGroup />
     </SettingsSection>
   );
 }

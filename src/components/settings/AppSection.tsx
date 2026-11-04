@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { apiPost } from '../../lib/api';
 import { clampInterval, VALID_INTERVALS } from '../../lib/settingsForm';
 import Toggle from '../Toggle';
-import { AdvancedSettings, SettingsRow, SettingsSection } from './SettingsSection';
+import { SettingsRow, SettingsSection } from './SettingsSection';
 import { useSettingsSave, useSettingToggle, type Flash } from './useSettingsSave';
 import HelpTip from '../HelpTip';
 
@@ -161,55 +161,52 @@ export default function AppSection({
         </>
       )}
 
-      {/* Rarely changed: most installs never touch these. */}
-      <AdvancedSettings>
-          <div className="flex flex-col gap-2">
-            <span className={ROW_LABEL}>Refresh Interval</span>
-            <p className={HINT}>
-              How often the app polls the inverter for fresh data.{' '}
-              <HelpTip label="Refresh Interval">
-                Each poll also reaches the GivEnergy cloud through the WiFi dongle, which stores it as a
-                data point, so a short interval makes your cloud history much larger.
-              </HelpTip>
-            </p>
-            <div className="flex gap-2">
-              {VALID_INTERVALS.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => void handleIntervalChange(s)}
-                  className={`flex-1 py-2 rounded-lg text-sm font-mono transition ${
-                    intervalSecs === s
-                      ? 'bg-accent text-on-accent font-semibold'
-                      : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
-                  }`}
-                >
-                  {s}s
-                </button>
-              ))}
-            </div>
-          </div>
+      <div className="flex flex-col gap-2">
+        <span className={ROW_LABEL}>Refresh Interval</span>
+        <p className={HINT}>
+          How often the app polls the inverter for fresh data.{' '}
+          <HelpTip label="Refresh Interval">
+            Each poll also reaches the GivEnergy cloud through the WiFi dongle, which stores it as a
+            data point, so a short interval makes your cloud history much larger.
+          </HelpTip>
+        </p>
+        <div className="flex gap-2">
+          {VALID_INTERVALS.map((s) => (
+            <button
+              key={s}
+              onClick={() => void handleIntervalChange(s)}
+              className={`flex-1 py-2 rounded-lg text-sm font-mono transition ${
+                intervalSecs === s
+                  ? 'bg-accent text-on-accent font-semibold'
+                  : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
+              }`}
+            >
+              {s}s
+            </button>
+          ))}
+        </div>
+      </div>
 
-          <div className="flex flex-col gap-2">
-            <span className={ROW_LABEL}>HTTP Port</span>
-            <p className={HINT}>Change to run multiple instances on the same machine. Requires restart.</p>
-            <div className="flex items-center gap-3">
-              <input
-                type="number"
-                min={1024}
-                max={65535}
-                value={httpPort}
-                onChange={(e) => setHttpPort(e.target.value === '' ? '' : Number(e.target.value))}
-                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
-              />
-              <button
-                onClick={() => void handleHttpPortSave()}
-                className="bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
-              >
-                Save
-              </button>
-            </div>
-          </div>
-      </AdvancedSettings>
+      <div className="flex flex-col gap-2">
+        <span className={ROW_LABEL}>HTTP Port</span>
+        <p className={HINT}>Change to run multiple instances on the same machine. Requires restart.</p>
+        <div className="flex items-center gap-3">
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            value={httpPort}
+            onChange={(e) => setHttpPort(e.target.value === '' ? '' : Number(e.target.value))}
+            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
+          />
+          <button
+            onClick={() => void handleHttpPortSave()}
+            className="bg-accent text-on-accent font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+          >
+            Save
+          </button>
+        </div>
+      </div>
     </SettingsSection>
   );
 }

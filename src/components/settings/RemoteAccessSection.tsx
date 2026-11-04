@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { apiGet, apiPost, getApiBase, getServerPort } from '../../lib/api';
 import type { PollSettings } from '../../lib/types';
 import Toggle from '../Toggle';
-import { AdvancedSettings, SettingsSection } from './SettingsSection';
+import { SettingsSection } from './SettingsSection';
 import { TEXT_INPUT as INPUT } from './styles';
 import { useSettingsSave, useSettingToggle, type Flash } from './useSettingsSave';
 import HelpTip, { HeadingWithHelp } from '../HelpTip';
@@ -229,36 +229,34 @@ export default function RemoteAccessSection({
             Accepting connections on every network interface.{' '}
             <HelpTip label="the listen address">
               This server currently accepts connections on every network interface. Set a listen
-              address under Advanced (127.0.0.1 keeps it local-only) if you only need machine-local
+              address (127.0.0.1 keeps it local-only) if you only need machine-local
               or VPN/proxy access.
             </HelpTip>
           </p>
         )}
-        <AdvancedSettings>
-          <label className="flex flex-col gap-1">
-            <span className={HINT}>Listen Address</span>
-            <input
-              type="text"
-              value={apiBindAddress}
-              onChange={(e) => setApiBindAddress(e.target.value)}
-              placeholder="127.0.0.1 (local only) — blank = all interfaces"
-              className={INPUT}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className={HINT}>Allowed Browser Origins (CORS, Comma-Separated)</span>
-            <input
-              type="text"
-              value={apiAllowedOrigins}
-              onChange={(e) => setApiAllowedOrigins(e.target.value)}
-              placeholder="https://dashboard.example.com — blank = no browser access"
-              className={INPUT}
-            />
-          </label>
-          <button onClick={() => void handleApiNetworkSave()} disabled={networkSave.busy} className={PRIMARY_BUTTON}>
-            {networkSave.busy ? 'Applying…' : 'Apply Network Settings'}
-          </button>
-        </AdvancedSettings>
+        <label className="flex flex-col gap-1">
+          <span className={HINT}>Listen Address</span>
+          <input
+            type="text"
+            value={apiBindAddress}
+            onChange={(e) => setApiBindAddress(e.target.value)}
+            placeholder="127.0.0.1 (local only) — blank = all interfaces"
+            className={INPUT}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className={HINT}>Allowed Browser Origins (CORS, Comma-Separated)</span>
+          <input
+            type="text"
+            value={apiAllowedOrigins}
+            onChange={(e) => setApiAllowedOrigins(e.target.value)}
+            placeholder="https://dashboard.example.com — blank = no browser access"
+            className={INPUT}
+          />
+        </label>
+        <button onClick={() => void handleApiNetworkSave()} disabled={networkSave.busy} className={PRIMARY_BUTTON}>
+          {networkSave.busy ? 'Applying…' : 'Apply Network Settings'}
+        </button>
         <div className="flex items-center justify-between gap-3">
           <span className="text-text-primary text-sm font-sans">Allow Battery Control Through the Authenticated API</span>
           <Toggle

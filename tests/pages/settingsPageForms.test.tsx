@@ -32,7 +32,6 @@ vi.mock('../../src/lib/openExternal', () => ({
 
 import SettingsPage from '../../src/pages/SettingsPage';
 import { useInverterStore } from '../../src/store/useInverterStore';
-import { openAdvanced } from './settingsTestUtils';
 
 const flat = (rate = 0.15) => ({ slots: [{ start: '00:00', end: '23:59', rate }], version: 2 });
 
@@ -401,40 +400,22 @@ describe('<SettingsPage/> — tariff window editor', () => {
   });
 });
 
-describe('<SettingsPage/> — Advanced settings (issue #402)', () => {
-  it('folds the rarely changed settings away until asked for', async () => {
+describe('<SettingsPage/> — settings layout (issue #402, unfolded by #435)', () => {
+  it('shows the formerly folded settings outright', async () => {
     mount({ settings: { api_key_configured: true } });
     render(<SettingsPage />);
     const app = await heading('App');
     const remote = await heading('Remote / Mobile Network Access');
-    for (const label of ['Refresh Interval', 'HTTP Port', 'Listen Address']) {
-      expect(screen.queryByText(label)).toBeNull();
-    }
-    expect(screen.queryByRole('button', { name: 'Apply Network Settings' })).toBeNull();
-    // The all-interfaces warning stays visible, and says where to look.
-    expect(within(remote).getByText(/Set a listen\s+address under Advanced/)).toBeDefined();
-
-    fireEvent.click(within(app).getByRole('button', { name: 'Advanced' }));
+    // Issue #402 folded the rarely changed fields away; #435 unfolded every
+    // section, so there is no Advanced expander left on the page.
     expect(within(app).getByText('Refresh Interval')).toBeDefined();
     expect(within(app).getByText('HTTP Port')).toBeDefined();
-    // Each section unfolds on its own.
-    expect(screen.queryByText('Listen Address')).toBeNull();
-
-    fireEvent.click(within(remote).getByRole('button', { name: 'Advanced' }));
     expect(within(remote).getByLabelText('Listen Address')).toBeDefined();
-  });
-
-  it('keeps an unsaved edit when Advanced is folded and unfolded', async () => {
-    mount();
-    render(<SettingsPage />);
-    const remote = await heading('Remote / Mobile Network Access');
-    const toggle = within(remote).getByRole('button', { name: 'Advanced' });
-    fireEvent.click(toggle);
-    fireEvent.change(within(remote).getByLabelText('Listen Address'), { target: { value: '127.0.0.1' } });
-
-    fireEvent.click(toggle);
-    fireEvent.click(toggle);
-    expect((within(remote).getByLabelText('Listen Address') as HTMLInputElement).value).toBe('127.0.0.1');
+    expect(within(remote).getByLabelText('Allowed Browser Origins (CORS, Comma-Separated)')).toBeDefined();
+    expect(within(remote).getByRole('button', { name: 'Apply Network Settings' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Advanced' })).toBeNull();
+    // The all-interfaces warning stays visible, and names the listen address.
+    expect(within(remote).getByText(/Set a listen\s+address/)).toBeDefined();
   });
 });
 
@@ -445,7 +426,6 @@ describe('<SettingsPage/> — message toast', () => {
     await heading('App');
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
-    await openAdvanced();
     const save = within((await screen.findByText('HTTP Port')).closest('section')!).getAllByRole('button', { name: 'Save' })[0];
     fireEvent.click(save);
     await screen.findByText(/HTTP port set to 7337/);
@@ -465,7 +445,6 @@ describe('<SettingsPage/> — message toast', () => {
     render(<SettingsPage />);
     await heading('App');
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    await openAdvanced();
     const save = within((await screen.findByText('HTTP Port')).closest('section')!).getAllByRole('button', { name: 'Save' })[0];
 
     fireEvent.click(save);
@@ -503,7 +482,6 @@ describe('<SettingsPage/> — message toast', () => {
     expect(screen.queryByText(KEY_MESSAGE)).not.toBeNull();
 
     // An ordinary message replaces it and clears itself as usual.
-    await openAdvanced();
     const save = within((await screen.findByText('HTTP Port')).closest('section')!).getAllByRole('button', { name: 'Save' })[0];
     fireEvent.click(save);
     await screen.findByText(/HTTP port set to 7337/);
@@ -520,7 +498,6 @@ describe('<SettingsPage/> — message toast', () => {
     await heading('App');
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
-    await openAdvanced();
     const save = within((await screen.findByText('HTTP Port')).closest('section')!).getAllByRole('button', { name: 'Save' })[0];
     fireEvent.click(save);
     await screen.findByText(/HTTP port set to 7337/);
@@ -540,7 +517,6 @@ describe('<SettingsPage/> — message toast', () => {
   it('reports a failed HTTP port save, with a generic fallback', async () => {
     mount();
     render(<SettingsPage />);
-    await openAdvanced();
     const s = (await screen.findByText('HTTP Port')).closest('section')!;
     apiPostMock.mockRejectedValue(new Error('port in use'));
     fireEvent.click(within(s).getAllByRole('button', { name: 'Save' })[0]);
@@ -584,7 +560,6 @@ describe('<SettingsPage/> — connection and EV charger fields', () => {
     mount();
     useInverterStore.setState({ developerMode: true });
     render(<SettingsPage />);
-    await openAdvanced();
     const apply = await screen.findByRole('button', { name: 'Apply Network Settings' });
     fireEvent.change(screen.getByLabelText('Listen Address'), { target: { value: '0.0.0.0' } });
     fireEvent.change(screen.getByLabelText('Allowed Browser Origins (CORS, Comma-Separated)'), {

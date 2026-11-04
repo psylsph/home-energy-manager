@@ -66,17 +66,17 @@ describe('<PanelControlsSection/> — History Chart Averages (issue #345)', () =
     expect(toggle.getAttribute('aria-checked')).toBe('true');
   });
 
-  it('sits between Panel Graphs and Energy Flow Diagram, with Chart Grid Lines folded under Advanced', async () => {
+  it('sits between Panel Graphs and Energy Flow Diagram, with Chart Grid Lines after it (issue #435)', async () => {
     render(<Section />);
     const section = (await screen.findByRole('heading', { name: 'Panel Controls', level: 2 })).closest('section')!;
     const groups = () =>
       within(section).getAllByRole('heading', { level: 3 }).map((h) => h.textContent ?? '');
 
-    expect(groups()).toEqual(['Panel Visibility', 'Panel Graphs', 'History Chart Averages', 'Energy Flow Diagram']);
-
-    fireEvent.click(within(section).getByRole('button', { name: 'Advanced' }));
+    // Issue #402 folded Chart Grid Lines under an Advanced expander;
+    // #435 removed the last folds, so every group shows outright.
     expect(groups()).toEqual([
       'Panel Visibility', 'Panel Graphs', 'History Chart Averages', 'Energy Flow Diagram', 'Chart Grid Lines',
     ]);
+    expect(within(section).queryByRole('button', { name: 'Advanced' })).toBeNull();
   });
 });

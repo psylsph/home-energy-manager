@@ -58,39 +58,38 @@ test.describe('Settings Page - Connection', () => {
   });
 });
 
-/** Unfold the App section's Advanced settings (interval and HTTP port). */
-async function openAppAdvanced(page: import('@playwright/test').Page) {
+/** Open Settings and return the App section, so checks can't match elsewhere. */
+async function openAppSettings(page: import('@playwright/test').Page) {
   await page.goto('/#/settings');
-  const app = page.locator('section', { has: page.getByRole('heading', { name: 'App', exact: true, level: 2 }) });
-  await app.getByRole('button', { name: 'Advanced' }).click({ timeout: 10_000 });
+  return page.locator('section', { has: page.getByRole('heading', { name: 'App', exact: true, level: 2 }) });
 }
 
 test.describe('Settings Page - Refresh Interval', () => {
   test('should show Refresh Interval heading', async ({ page }) => {
-    await openAppAdvanced(page);
-    await expect(page.locator('text=Refresh Interval')).toBeVisible({ timeout: 10_000 });
+    const app = await openAppSettings(page);
+    await expect(app.getByText('Refresh Interval', { exact: true })).toBeVisible({ timeout: 10_000 });
   });
 
   test('should show interval buttons', async ({ page }) => {
-    await openAppAdvanced(page);
-    await expect(page.getByRole('button', { name: '5s', exact: true })).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByRole('button', { name: '10s', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: '15s', exact: true })).toBeVisible();
+    const app = await openAppSettings(page);
+    await expect(app.getByRole('button', { name: '5s', exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(app.getByRole('button', { name: '10s', exact: true })).toBeVisible();
+    await expect(app.getByRole('button', { name: '15s', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '20s', exact: true })).toBeVisible();
   });
 
   test('5s should be active by default', async ({ page }) => {
-    await openAppAdvanced(page);
+    const app = await openAppSettings(page);
     // The 5s button should have the active/highlighted style
-    const btn = page.getByRole('button', { name: '5s', exact: true });
+    const btn = app.getByRole('button', { name: '5s', exact: true });
     await expect(btn).toBeVisible({ timeout: 10_000 });
   });
 });
 
 test.describe('Settings Page - HTTP Port', () => {
   test('should show HTTP Port heading', async ({ page }) => {
-    await openAppAdvanced(page);
-    await expect(page.locator('text=HTTP Port')).toBeVisible({ timeout: 10_000 });
+    const app = await openAppSettings(page);
+    await expect(app.getByText('HTTP Port', { exact: true })).toBeVisible({ timeout: 10_000 });
   });
 });
 
