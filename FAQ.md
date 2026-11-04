@@ -323,6 +323,35 @@ configured under **Settings → Energy Tariffs**.
 
 ---
 
+### Which charging mode should I use with the Planner?
+
+**Standard.** The Planner doesn't read your charging mode at all — it works out
+the charge itself and writes it to charge slot 1 when you press **Apply** or
+switch the automatic planning on, arming Timed Charge as it does.
+
+The one mode that does hold it back is **Adaptive Charge**: that one sets the
+charge rate, so while it is running the Planner's automatic writes wait instead
+of fighting it over the rate.
+
+**Don't point Cosy mode at the Planner.** Cosy mode (Control → Charging Mode →
+Cosy) is a separate, older feature with its own up to three force-charge slots.
+It ignores your tariff windows and knows nothing about the Planner — and it
+writes charge slot 1 too, so with both on each overwrites the other's schedule.
+
+**Where the Planner gets its cheap windows** is **Settings → Energy Tariffs** —
+the same Import windows the History page costs use. They're in half-hour steps
+and must cover the whole day with no gaps or overlaps (the last one ends 23:59),
+up to 10 of them. A tariff like Octopus Cosy needs six: its three cheap windows
+plus the rate for the hours in between. The app never fetches your rates from
+Octopus, so these are yours to keep up to date. The Planner then charges in
+whichever window is cheapest.
+
+Expect one charge: the Planner plans **one** charge cycle per run — the cheapest
+window at or after now, with ties going to the earlier one. Three cheap periods
+a day therefore give one charge, not a top-up in each.
+
+---
+
 ### How do I stop the battery discharging into the car, or another large load?
 
 The **Load Discharge Limiter** on the Control page watches your home load and
