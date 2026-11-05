@@ -1,8 +1,8 @@
 /**
  * E2E tests for the Status / Dashboard page.
  *
- * Tests the energy flow diagram, summary tiles, battery panel, and loading states
- * using the real GivEnergy simulator.
+ * Tests the energy flow diagram, the Today balance bars (#429), and loading
+ * states using the real GivEnergy simulator.
  */
 
 import type { Page } from '@playwright/test';
@@ -80,7 +80,7 @@ test.describe('Status Page - Battery Card', () => {
   });
 });
 
-test.describe('Status Page - Summary Tiles', () => {
+test.describe('Status Page - Today Balance (issue #429)', () => {
   test('should show Today heading', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
@@ -88,38 +88,42 @@ test.describe('Status Page - Summary Tiles', () => {
     await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible({ timeout: 5_000 });
   });
 
-  test('should show Solar Today tile with energy', async ({ page }) => {
+  test('should show both bars', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // Solar today should show kWh
-    const solarTile = page.locator('text=/☀/').locator('..').locator('..');
-    await expect(solarTile).toBeVisible();
+    await expect(page.getByText('Energy In', { exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('Energy Out', { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
-  test('should show Consumption tile', async ({ page }) => {
+  test('should show the Home Use segment', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // Consumption tile (label was renamed to "Home Use")
-    await expect(page.locator('span', { hasText: /^Home Use$/ })).toBeVisible({ timeout: 5_000 });
+    // There is no legend, so the text alternative inside the card is the
+    // stable place to see all six segments whatever the fill widths.
+    await expect(page.getByTestId('today-balance')).toContainText('Home Use', { timeout: 5_000 });
   });
 
-  test('should show Import and Export tiles', async ({ page }) => {
+  test('should show Grid Import and Grid Export in the balance', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.locator('span', { hasText: /^Import$/ })).toBeVisible({ timeout: 5_000 });
-    await expect(page.locator('span', { hasText: /^Export$/ })).toBeVisible({ timeout: 5_000 });
+    const balance = page.getByTestId('today-balance');
+    await expect(balance).toContainText('Grid Import', { timeout: 5_000 });
+    await expect(balance).toContainText('Grid Export', { timeout: 5_000 });
   });
 
-  test('should show kWh values in summary tiles', async ({ page }) => {
+  test('should show kWh values in the balance', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    // At least some kWh values should be visible
-    const kwhValues = page.locator('text=/\\d+\\.\\d+kWh/');
-    await expect(kwhValues.first()).toBeVisible({ timeout: 5_000 });
+    // Values live in the pills, not a legend: at least one segment is wide
+    // enough to hold its value at any viewport.
+    const pillValues = page.getByTestId('today-balance')
+      .locator('[data-testid="balance-fill"]')
+      .locator('text=/\\d+\\.\\d+kWh/');
+    await expect(pillValues.first()).toBeVisible({ timeout: 5_000 });
   });
 });
 
@@ -129,10 +133,11 @@ test.describe('Status Page - Polling State', () => {
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
     // The snapshot is loaded, so the status page should show energy data.
-    // The SummaryTiles grid's "Solar" tile is the most reliable indicator
-    // (scoped to the grid so the nav link of the same name doesn't match).
-    const tiles = page.getByTestId('summary-tiles-grid');
-    await expect(tiles.getByText('Solar', { exact: true })).toBeVisible({ timeout: 5_000 });
+    // Both bar rows are rendered from it; the segment labels may be too
+    // narrow for the pill, so count the rows rather than their text.
+    const balance = page.getByTestId('today-balance');
+    await expect(balance).toBeVisible({ timeout: 5_000 });
+    await expect(balance.getByTestId('balance-bar')).toHaveCount(2);
   });
 });
 
@@ -222,7 +227,7 @@ test.describe('Status Page - House View (issue #422)', () => {
       await expect(page.getByTestId('house-charge-card')).toBeVisible();
       await expect(page.getByTestId('house-battery-card')).toBeVisible();
       // Hidden without ever touching the toggle: the house view's default.
-      await expect(page.getByTestId('summary-tiles-grid')).toHaveCount(0);
+      await expect(page.getByTestId('today-balance')).toHaveCount(0);
       await expect(page.locator('nav.sticky')).toHaveCount(0);
 
       const dims = await page.evaluate(() => {
@@ -333,12 +338,12 @@ test.describe('Status Page - House View (issue #422)', () => {
 
   test('hides the Today statistics from Settings', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByTestId('summary-tiles-grid')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId('today-balance')).toBeVisible({ timeout: 20_000 });
     await page.goto('/#/settings');
     await page.getByRole('switch', { name: 'Show Today Statistics' }).click();
     await page.goto('/#/');
     await expect(page.getByRole('heading', { name: 'Today' })).toHaveCount(0);
-    await expect(page.getByTestId('summary-tiles-grid')).toHaveCount(0);
+    await expect(page.getByTestId('today-balance')).toHaveCount(0);
   });
 
   test('switches between Orbit and House from Settings without a reload', async ({ page }) => {
@@ -355,5 +360,29 @@ test.describe('Status Page - House View (issue #422)', () => {
     await page.getByRole('group', { name: 'Energy Flow Display' }).getByRole('button', { name: 'Orbit' }).click();
     await expect(page.locator('nav.sticky')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Menu' })).toHaveCount(0);
+  });
+});
+
+test.describe('Status Page - Today Balance on a phone (issue #429)', () => {
+  test('fits the bars in their card at 390×763 with the statistics shown', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 763 });
+    // Pin the toggle: invariant 7 keeps the bars within today's tile-card
+    // budget, and the narrowest bar in the app sets the label thresholds.
+    await page.addInitScript(() => {
+      localStorage.setItem('showTodayStats', 'true');
+    });
+    await page.goto('/');
+    const card = page.getByTestId('today-balance');
+    await expect(card).toBeVisible({ timeout: 20_000 });
+
+    // Nothing overflows its box — card and bar rows keep their scroll width
+    // within their client width (fills clip their own text).
+    // +1px tolerates the sub-pixel rounding of the percentage widths.
+    const overflows = await page.evaluate(
+      () => [...document.querySelectorAll(
+        '[data-testid="today-balance"], [data-testid="balance-bar"]',
+      )].filter((el) => el.scrollWidth > el.clientWidth + 1).length,
+    );
+    expect(overflows).toBe(0);
   });
 });

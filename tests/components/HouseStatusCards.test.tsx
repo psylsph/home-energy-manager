@@ -239,5 +239,19 @@ describe('<HouseStatusCards/>', () => {
     render(<HouseStatusCards snapshot={snap({ charge_cap_enabled: false, charge_cap_soc: 90 })} />);
     expect(screen.queryByTestId('house-battery-cap')).toBeNull();
   });
+
+  it('stays compact so the taller Today bars fit the phone screen', () => {
+    // Issue #429 round 2: the two cards shrank to pay for the bars.
+    render(<HouseStatusCards snapshot={snap({ battery_capacity_kwh: 9.5 })} />);
+    const charge = tid('house-charge-card');
+    expect(charge.className).toContain('p-2');
+    expect(charge.className).toContain('gap-1');
+    // The glyph scaled down with the card.
+    expect(tid('house-charge-icon').getAttribute('width')).toBe('26');
+    expect(tid('house-charge-window').className).toContain('text-base');
+    expect(tid('house-battery-stored').className).toContain('text-xl');
+    expect(screen.getByTestId('house-battery-card').className).toContain('p-2');
+    expect(screen.getAllByTestId('house-battery-segment')[0].className).toContain('h-2');
+  });
 });
 

@@ -17,6 +17,7 @@ vi.mock('../../src/hooks/useCarbonIntensity', () => ({
 import HouseEnergyView from '../../src/components/house/HouseEnergyView';
 import { buildEnergyFlows, FLOW_COLORS } from '../../src/lib/energyFlow';
 import { HOUSE, HOUSE_VIEWBOX, SKY_BAND, iso, skyPoint } from '../../src/lib/houseGeometry';
+import { READING_SLOTS } from '../../src/lib/houseFlow';
 import { moonLitPath, moonPass } from '../../src/lib/moon';
 import { sunTimes } from '../../src/lib/sun';
 import { formatClock } from '../../src/lib/format';
@@ -300,11 +301,15 @@ describe('<HouseEnergyView/>', () => {
       const rect = pill.querySelector('rect')!;
       const right = Number(rect.getAttribute('x')) + Number(rect.getAttribute('width'));
       const bottom = Number(rect.getAttribute('y')) + Number(rect.getAttribute('height'));
-      // The eave runs from the front-left corner up towards the ridge.
+      // The roof slope runs up-right from the eave point, so while the pill's
+      // bottom is beside the slope the roof line is the nearest ink; lower
+      // than the eave point it's the wall's vertical edge, at the same x.
       const eave = iso(HOUSE.x0, HOUSE.y1, HOUSE.wall);
       const ridge = iso(HOUSE.x0, (HOUSE.y0 + HOUSE.y1) / 2, HOUSE.ridge);
-      const roofX = eave.x + ((eave.y - bottom) / (eave.y - ridge.y)) * (ridge.x - eave.x);
-      expect(right).toBeLessThan(roofX - 3);
+      const limitX = bottom < eave.y
+        ? eave.x + ((eave.y - bottom) / (eave.y - ridge.y)) * (ridge.x - eave.x)
+        : eave.x;
+      expect(right).toBeLessThan(limitX - 3);
     });
 
     it('greys an unknown band', () => {
@@ -546,7 +551,7 @@ describe('<HouseEnergyView/>', () => {
       fireEvent.click(tid('house-reading-solar')!);
       expect(box().y).toBeGreaterThan(70);
       fireEvent.click(tid('house-reading-battery')!);
-      expect(box().y).toBeLessThan(446 - 22);
+      expect(box().y).toBeLessThan(READING_SLOTS.battery.valueY - 22);
       expect(box().x + box().w).toBeLessThanOrEqual(390);
     });
 

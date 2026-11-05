@@ -524,8 +524,8 @@ test.describe('Settings Page - Energy Flow Diagram Noise Threshold', () => {
     // Now go to the status page — grid at 500W is above 100W threshold, so still shows
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-    // Use first() to disambiguate between SVG text and summary tile span
-    await expect(page.locator('text=Import').first()).toBeVisible({ timeout: 5_000 });
+    // Visible only: a hidden ⓘ tooltip on the page also mentions "import".
+    await expect(page.locator('text=Import >> visible=true').first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('should hide grid flow when threshold exceeds grid power', async ({ page }) => {
@@ -544,7 +544,7 @@ test.describe('Settings Page - Energy Flow Diagram Noise Threshold', () => {
     // Go to status page — everything should still show
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-    // Use first() to disambiguate between SVG text and summary tile span
-    await expect(page.locator('text=Import').first()).toBeVisible({ timeout: 5_000 });
+    // Visible only: a hidden ⓘ tooltip on the page also mentions "import".
+    await expect(page.locator('text=Import >> visible=true').first()).toBeVisible({ timeout: 5_000 });
   });
 });

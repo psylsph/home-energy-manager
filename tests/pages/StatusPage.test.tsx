@@ -18,8 +18,8 @@ vi.mock('../../src/components/house/HouseEnergyView', () => ({
 vi.mock('../../src/components/BatteryPanel', () => ({
   default: () => <div data-testid="battery-panel">BatteryPanel</div>,
 }));
-vi.mock('../../src/components/SummaryTiles', () => ({
-  default: () => <div data-testid="summary-tiles">SummaryTiles</div>,
+vi.mock('../../src/components/EnergyBalanceBars', () => ({
+  default: () => <div data-testid="today-balance">EnergyBalanceBars</div>,
 }));
 vi.mock('../../src/components/house/HouseStatusCards', () => ({
   default: () => <div data-testid="house-status-cards">HouseStatusCards</div>,
@@ -175,7 +175,7 @@ describe('StatusPage', () => {
     });
     const { container } = render(<StatusPage />);
     expect(container.querySelector('[data-testid="energy-orbit-diagram"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="today-balance"]')).not.toBeNull();
   });
 
   describe('energy flow display (issue #422)', () => {
@@ -190,14 +190,15 @@ describe('StatusPage', () => {
       expect(container.querySelector('[data-testid="house-energy-view"]')).toBeNull();
     });
 
-    it('shows the house when chosen, with its cards and the summary tiles beside it', () => {
-      // Tiles are an explicit re-enable here: the house starts without them.
+    it('shows the house when chosen, with its cards and the Today bars beside it', () => {
+      // Today statistics are an explicit re-enable here: the house starts
+      // without them.
       useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'house', showTodayStats: true });
       const { container } = render(<StatusPage />);
       expect(container.querySelector('[data-testid="house-energy-view"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="energy-orbit-diagram"]')).toBeNull();
       expect(container.querySelector('[data-testid="house-status-cards"]')).not.toBeNull();
-      expect(container.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="today-balance"]')).not.toBeNull();
     });
 
     it('keeps the house cards off the orbit', () => {
@@ -209,7 +210,7 @@ describe('StatusPage', () => {
     it.each(['orbit', 'house'] as const)('hides the Today statistics when switched off (%s)', (display) => {
       useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: display, showTodayStats: false });
       const { container } = render(<StatusPage />);
-      expect(container.querySelector('[data-testid="summary-tiles"]')).toBeNull();
+      expect(container.querySelector('[data-testid="today-balance"]')).toBeNull();
       const grid = container.querySelector('[data-testid="status-landscape-grid"]')!;
       // The orbit alone takes the full width; the house keeps a column for its cards.
       expect(grid.className.includes('lg:grid-cols-2')).toBe(display === 'house');
@@ -252,8 +253,8 @@ describe('StatusPage', () => {
   });
 
   it('places the diagram beside the panels in a landscape grid', () => {
-    // The status page arranges the energy-flow diagram next to the summary
-    // tiles (rather than stacked) so the whole page fits in
+    // The status page arranges the energy-flow diagram next to the Today
+    // balance bars (rather than stacked) so the whole page fits in
     // ~800px tall on wide viewports. The layout is driven by responsive
     // Tailwind classes on this grid container; here we assert the
     // structure (diagram section + panels column are siblings inside the
@@ -268,8 +269,8 @@ describe('StatusPage', () => {
     expect(grid).not.toBeNull();
     // The diagram lives in a <section> that is a direct child of the grid.
     expect(grid!.querySelector(':scope > section')).not.toBeNull();
-    // The summary tiles render inside the grid, beside the diagram.
-    expect(grid!.querySelector('[data-testid="summary-tiles"]')).not.toBeNull();
+    // The Today balance bars render inside the grid, beside the diagram.
+    expect(grid!.querySelector('[data-testid="today-balance"]')).not.toBeNull();
   });
 
   it('shows connection status bar when not connected even with snapshot', () => {

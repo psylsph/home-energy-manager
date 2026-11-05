@@ -11,7 +11,7 @@ import {
   splitPowerValue,
   type HouseScene,
 } from '../../src/lib/houseFlow';
-import { BATTERY_BARS, CHIMNEY, EV_LEG, HOUSE_ANCHORS, HOUSE_VIEWBOX, LEGS, iso, isoPoint, pathD } from '../../src/lib/houseGeometry';
+import { BATTERY_BARS, CHIMNEY, EV_LEG, HOUSE_ANCHORS, HOUSE_VIEWBOX, LEGS, PLOT, iso, isoPoint, pathD, type ScreenPoint } from '../../src/lib/houseGeometry';
 import type { InverterSnapshot } from '../../src/lib/types';
 import type { BuildEnergyFlowsOptions } from '../../src/lib/energyFlow';
 
@@ -276,6 +276,33 @@ describe('buildHouseScene — readings', () => {
     // Text starts 6 px in from the slot's x.
     expect(READING_SLOTS.solar.x + READING_HIT_WIDTH).toBeLessThan(READING_SLOTS.home.x + 6);
     expect(READING_SLOTS.grid.x + READING_HIT_WIDTH).toBeLessThan(READING_SLOTS.battery.x + 6);
+  });
+
+  it('keeps the bottom-row readings clear of the plot edges above them', () => {
+    // The deepest house ink isn't global — the plot's front-right corner
+    // dips to ~382 in the strip *between* the two readings. What matters is
+    // the ink directly above each reading's tap area: the plot's front edge
+    // (Grid) and right-hand edge (Battery). Issue #429 round 2 tightened
+    // this gap; the status pill line (valueY + 46) keeps the viewBox's
+    // bottom margin.
+    const y = (a: ScreenPoint, b: ScreenPoint, x: number) =>
+      a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x);
+    const front = [iso(PLOT.x0, PLOT.y1), iso(PLOT.x1, PLOT.y1)] as const;
+    const right = [iso(PLOT.x1, PLOT.y1), iso(PLOT.x1, PLOT.y0)] as const;
+    const deepestIn = (x: number) => {
+      const span: Array<[number, number]> = [];
+      for (const [a, b] of [front, right]) {
+        if (x + READING_HIT_WIDTH < Math.min(a.x, b.x) || x > Math.max(a.x, b.x)) continue;
+        span.push([y(a, b, Math.max(x, a.x)), y(a, b, Math.min(x + READING_HIT_WIDTH, b.x))]);
+      }
+      return Math.max(...span.flat());
+    };
+    for (const id of ['grid', 'battery'] as const) {
+      const { x, valueY, edgeY } = READING_SLOTS[id];
+      expect(valueY - 22).toBeGreaterThan(deepestIn(x));
+      expect(edgeY).toBeGreaterThan(deepestIn(x));
+      expect(valueY + 46).toBeLessThanOrEqual(HOUSE_VIEWBOX.height);
+    }
   });
 
   it("keeps the Solar leader off the chimney: one vertical line down to the panels", () => {

@@ -19,8 +19,8 @@ vi.mock('../../src/components/EnergyOrbitDiagram', () => ({
     return <div data-testid="energy-orbit-diagram" />;
   },
 }));
-vi.mock('../../src/components/SummaryTiles', () => ({
-  default: () => <div data-testid="summary-tiles" />,
+vi.mock('../../src/components/EnergyBalanceBars', () => ({
+  default: () => <div data-testid="today-balance" />,
 }));
 vi.mock('../../src/components/ColdBatteryWarning', () => ({
   default: () => <div data-testid="cold-battery-warning" />,
