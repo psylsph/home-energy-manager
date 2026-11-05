@@ -62,8 +62,8 @@ export default function TariffsSection({
     <SettingsSection
       id={id}
       title="Energy Tariffs"
-      description="Your tariff windows and rates, for the History page costs."
-      help="Configure your electricity tariff time windows and rates. Add multiple windows for time-of-use tariffs like Octopus Flux, Cosy, or Eco7. Used for cost calculations on the History page."
+      description="Your tariff windows and rates, for the Planner and History costs."
+      help="Configure your electricity tariff time windows and rates. Add multiple windows for time-of-use tariffs like Octopus Flux, Cosy, or Eco7. The Planner charges in the cheapest import window, and the History page uses the rates for costs."
     >
       <TariffSlotEditor label="Import" config={importCfg} onChange={setImportCfg} />
       <TariffSlotEditor label="Export" config={exportCfg} onChange={setExportCfg} />
