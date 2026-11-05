@@ -48,4 +48,10 @@ describe('<TariffsSection/> — tariff Rate field is 3dp', () => {
     });
     expect(importRate.getAttribute('step')).toBe('0.001');
   });
+
+  it('says the tariff windows feed the Planner, not only History costs (third code review #8)', () => {
+    const { container } = render(<Section />);
+    expect(container.textContent).not.toMatch(/for the History page costs/);
+    expect(container.textContent).toContain('Planner');
+  });
 });
