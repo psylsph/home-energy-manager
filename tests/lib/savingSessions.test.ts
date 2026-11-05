@@ -41,7 +41,7 @@ describe('readSessionsResponse', () => {
   const good = {
     ok: true, mode: 'alert', configured: true, alerts_ready: true,
     checked_at: null, error: null, enrolled: true, sessions: [],
-    export_slot: 1, export_floor_soc: 20, max_discharge_slots: 2,
+    export_slot: 1, export_floor_soc: 20, effective_floor_soc: 20, max_discharge_slots: 2,
   };
   it('accepts a well-formed response', () => {
     expect(readSessionsResponse(good)).not.toBeNull();

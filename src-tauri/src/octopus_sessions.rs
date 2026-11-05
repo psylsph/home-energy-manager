@@ -548,7 +548,7 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         return;
     }
     let (parsed, joined_by_hem) = auto_join(state, &settings, parsed, &token, now).await;
-    let floor_applies = max_discharge_slots(state).await > 2;
+    let stop_soc = export_stop_soc(state, &settings).await;
     let outcomes = if settings.octopus_sessions_mode == SessionsMode::Export {
         cancel_withdrawn_exports(state, &settings, &parsed.sessions).await;
         let previous_errors = state.octopus_sessions.lock().await.booking_errors.clone();
@@ -589,7 +589,7 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         &parsed.sessions,
         now,
         &outcomes,
-        floor_applies,
+        stop_soc,
         &joined_by_hem,
     )
     .await;
@@ -879,7 +879,7 @@ fn export_note(
     settings: &Settings,
     session_id: i64,
     outcomes: &HashMap<i64, Result<(), String>>,
-    floor_applies: bool,
+    stop_soc: Option<u8>,
 ) -> Option<String> {
     if settings.octopus_sessions_mode != SessionsMode::Export {
         return None;
@@ -887,20 +887,18 @@ fn export_note(
     if settings.octopus_sessions_skipped.contains(&session_id) {
         return Some("Skipped, so HEM will not export.".to_string());
     }
-    // Only models with extended slots hold a per-slot floor; elsewhere the
-    // export runs to the battery's own reserve, so do not promise a level.
-    let will_export = || {
-        if floor_applies {
-            format!(
-                "HEM will export during it: slot {}, down to {}%.",
-                settings.octopus_sessions_export_slot, settings.octopus_sessions_export_floor_soc
-            )
-        } else {
-            format!(
-                "HEM will export during it: slot {}.",
-                settings.octopus_sessions_export_slot
-            )
-        }
+    // Name where the export really stops: the per-slot floor on models that
+    // hold one, otherwise the inverter's own reserve (issue #446). Nothing is
+    // promised before a usable read.
+    let will_export = || match stop_soc {
+        Some(soc) => format!(
+            "HEM will export during it: slot {}, down to {soc}%.",
+            settings.octopus_sessions_export_slot
+        ),
+        None => format!(
+            "HEM will export during it: slot {}.",
+            settings.octopus_sessions_export_slot
+        ),
     };
     match outcomes.get(&session_id) {
         Some(Ok(())) => Some(will_export()),
@@ -918,7 +916,7 @@ async fn send_due_alerts(
     sessions: &[Session],
     now: DateTime<Utc>,
     outcomes: &HashMap<i64, Result<(), String>>,
-    floor_applies: bool,
+    stop_soc: Option<u8>,
     joined_by_hem: &HashSet<i64>,
 ) {
     let due = due_alerts(
@@ -932,7 +930,7 @@ async fn send_due_alerts(
         if joined_by_hem.contains(&session.id) {
             text.push_str("\nHEM joined this session for you.");
         }
-        if let Some(note) = export_note(settings, session.id, outcomes, floor_applies) {
+        if let Some(note) = export_note(settings, session.id, outcomes, stop_soc) {
             text.push('\n');
             text.push_str(&note);
         }
@@ -1009,6 +1007,28 @@ async fn max_discharge_slots(state: &Arc<AppState>) -> u8 {
         .max_discharge_slots()
 }
 
+/// The battery level an export for a session stops at on this inverter: the
+/// per-slot floor the user chose where the model has those registers, and the
+/// inverter's own Minimum SOC reserve where it has none (issue #446 — the
+/// export there has no per-slot floor, so it runs to the reserve). `None` when
+/// the model has no per-slot floor and no snapshot has been read yet, so a
+/// message says nothing rather than guessing a level.
+async fn export_stop_soc(state: &Arc<AppState>, settings: &Settings) -> Option<u8> {
+    let snapshot = state.latest_snapshot.lock().await;
+    let device_type = snapshot
+        .as_ref()
+        .map_or(crate::inverter::model::DeviceType::Gen2Hybrid, |snapshot| {
+            snapshot.device_type
+        });
+    let reserve = snapshot.as_ref().map(|snapshot| snapshot.battery_reserve);
+    drop(snapshot);
+    export_once::export_stop_soc(
+        device_type,
+        reserve,
+        settings.octopus_sessions_export_floor_soc,
+    )
+}
+
 /// How the export for one session stands, for the Octopus page.
 fn export_status(settings: &Settings, current: &SessionsState, session: &Session) -> Option<Value> {
     if settings.octopus_sessions_mode != SessionsMode::Export {
@@ -1043,6 +1063,7 @@ fn export_status(settings: &Settings, current: &SessionsState, session: &Session
 /// GET /api/octopus/sessions
 pub async fn get_sessions(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = Settings::load_async().await;
+    let effective_floor_soc = export_stop_soc(&state, &settings).await;
     let current = state.octopus_sessions.lock().await.clone();
     let alerts_ready = {
         let config = state.alert_config.lock().await;
@@ -1089,6 +1110,7 @@ pub async fn get_sessions(State(state): State<Arc<AppState>>) -> (StatusCode, Js
             "alerts_ready": alerts_ready,
             "export_slot": settings.octopus_sessions_export_slot,
             "export_floor_soc": settings.octopus_sessions_export_floor_soc,
+            "effective_floor_soc": effective_floor_soc,
             "max_discharge_slots": max_discharge_slots(&state).await,
             "checked_at": current.checked_at,
             "error": current.error,

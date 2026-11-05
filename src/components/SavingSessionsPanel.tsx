@@ -5,6 +5,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 import HelpTip, { HeadingWithHelp } from './HelpTip';
 import { exportStatusLabel, formatReward, formatSessionWindow, readSessionsResponse } from '../lib/savingSessions';
+import { exportStopsAtLabel } from '../lib/exportOnce';
 import type { SavingSessionsMode, SavingSessionsResponse } from '../lib/types';
 
 /** What /api/octopus/sessions/mode answers: the mode as saved. */
@@ -107,6 +108,9 @@ export default function SavingSessionsPanel() {
   // inverter (the one slot is used), no floor on models that cannot hold one.
   const showSlotPicker = maxSlots > 1 || data.export_slot > maxSlots;
   const showFloor = maxSlots > 2;
+  // Inverters with no per-slot floor run the export to their own Minimum SOC
+  // (issue #446): say where it stops instead of showing nothing at all.
+  const stopsAt = exportStopsAtLabel(maxSlots, data.effective_floor_soc);
   // Neither this nor the join tick sends a mode: the one on the page may be
   // up to a minute old, and re-sending it could undo a change made elsewhere
   // and stop a running export.
@@ -270,6 +274,16 @@ export default function SavingSessionsPanel() {
               inverter at the time.
             </HelpTip>
           </p>
+          {stopsAt && (
+            <p className="flex items-center gap-1.5 text-sm text-text-secondary">
+              {stopsAt}
+              <HelpTip label="Where the export stops">
+                This inverter has no per-slot floor setting, so the export runs until the battery
+                reaches your Minimum SOC. Lower or raise Minimum SOC on the Control page to change
+                where it stops.
+              </HelpTip>
+            </p>
+          )}
           {(showSlotPicker || showFloor) && (
           <div className="flex flex-wrap items-center gap-4">
             {showSlotPicker && (

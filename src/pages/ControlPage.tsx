@@ -4154,6 +4154,7 @@ export default function ControlPage() {
           <ExportOnceCard
             maxDischargeSlots={maxDischargeSlots}
             dischargeSlots={dischargeSlots}
+            batteryReserve={snapshot?.battery_reserve ?? null}
           />
         </section>
       )}

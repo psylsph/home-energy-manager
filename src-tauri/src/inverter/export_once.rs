@@ -339,6 +339,27 @@ async fn desired_slot_at(state: &Arc<AppState>, index: usize) -> ScheduleSlot {
     base.get(index).cloned().unwrap_or_else(disabled_slot)
 }
 
+/// The device the last poll identified, or a two-slot hybrid when nothing has
+/// been read yet (the same fallback the sessions module uses).
+async fn snapshot_device_type(state: &Arc<AppState>) -> DeviceType {
+    state
+        .latest_snapshot
+        .lock()
+        .await
+        .as_ref()
+        .map_or(DeviceType::Gen2Hybrid, |snapshot| snapshot.device_type)
+}
+
+/// The battery's Minimum SOC reserve from the last poll, if one has been read.
+async fn snapshot_reserve(state: &Arc<AppState>) -> Option<u8> {
+    state
+        .latest_snapshot
+        .lock()
+        .await
+        .as_ref()
+        .map(|snapshot| snapshot.battery_reserve)
+}
+
 /// The inverter's local clock, falling back to the host's.
 pub async fn inverter_now(state: &Arc<AppState>) -> NaiveDateTime {
     let reported = state
@@ -462,6 +483,41 @@ async fn finish(id: &str, state: ExportOnceState, note: Option<String>) {
 
 /// Exports booked for Octopus Saving Sessions carry this `source` prefix.
 const SESSION_SOURCE_PREFIX: &str = "saving_session:";
+
+/// The battery level an export stops at on this device.
+///
+/// Models with the per-slot target SOC registers hold the level the user
+/// chose for the slot. Everything else has no per-slot floor to write, so the
+/// export runs to the inverter's own Minimum SOC reserve — which is what the
+/// user needs told, and (from #446 stage 2) what a booking will hold.
+/// `None` when neither can be trusted, so a message says nothing rather than
+/// promising a level nobody set.
+pub fn export_stop_soc(
+    device_type: DeviceType,
+    battery_reserve: Option<u8>,
+    floor_soc: u8,
+) -> Option<u8> {
+    if device_type.uses_extended_schedule_slots() {
+        return Some(floor_soc);
+    }
+    battery_reserve.filter(|reserve| (4..=100).contains(reserve))
+}
+
+/// How much a started session export is told about where it stops.
+fn export_started_detail(event: &ExportOnceEvent, stop_soc: Option<u8>) -> String {
+    let until = event.end.get(11..16).unwrap_or("the end of the session");
+    match stop_soc {
+        Some(soc) => format!(
+            "Slot {} is exporting until {until}, down to {soc}%. It goes back to its previous \
+             setting afterwards.",
+            event.slot
+        ),
+        None => format!(
+            "Slot {} is exporting until {until}. It goes back to its previous setting afterwards.",
+            event.slot
+        ),
+    }
+}
 
 /// Tell the user how a Saving Session export is going. Exports the user
 /// booked by hand are theirs to watch and send nothing. The send is detached
@@ -621,15 +677,18 @@ async fn apply_event(state: &Arc<AppState>, id: &str) -> bool {
             e.note = None;
         })
         .await;
+        let stop_soc = export_stop_soc(
+            snapshot_device_type(state).await,
+            snapshot_reserve(state).await,
+            Settings::load_async()
+                .await
+                .octopus_sessions_export_floor_soc,
+        );
         notify_session_export(
             state,
             &event,
             "Saving Session export started",
-            format!(
-                "Slot {} is exporting until {}. It goes back to its previous setting afterwards.",
-                event.slot,
-                event.end.get(11..16).unwrap_or("the end of the session")
-            ),
+            export_started_detail(&event, stop_soc),
         );
     } else {
         let reason = response_error(&body.0);
@@ -2088,13 +2147,19 @@ mod tests {
             Some(4),
             "no per-slot register: the reserve is the floor"
         );
-        assert_eq!(export_stop_soc(DeviceType::Gen2Hybrid, Some(12), 35), Some(12));
+        assert_eq!(
+            export_stop_soc(DeviceType::Gen2Hybrid, Some(12), 35),
+            Some(12)
+        );
         assert_eq!(
             export_stop_soc(DeviceType::Gen3Hybrid, Some(4), 35),
             Some(35),
             "per-slot floor: the configured level, not the reserve"
         );
-        assert_eq!(export_stop_soc(DeviceType::ThreePhase, Some(4), 20), Some(20));
+        assert_eq!(
+            export_stop_soc(DeviceType::ThreePhase, Some(4), 20),
+            Some(20)
+        );
     }
 
     #[test]
