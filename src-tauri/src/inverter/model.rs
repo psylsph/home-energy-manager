@@ -1315,9 +1315,9 @@ pub struct InverterSnapshot {
     /// True when Cosy tariff mode is enabled in settings (may be between slots).
     #[serde(default)]
     pub cosy_enabled: bool,
-    /// Why Cosy is not running this poll: `"pause"`, `"force"` or `"safety"`
-    /// when a pause, a manual Force action or a safety limiter holds the
-    /// inverter; empty when nothing is stopping it.
+    /// Why Cosy is not running this poll: the code of the owner holding the
+    /// inverter (`"pause"`, `"dispatch_hold"`, `"force"`, `"calibration"`,
+    /// `"safety"`); empty when nothing is stopping it.
     #[serde(default)]
     pub cosy_blocked_by: String,
     /// True when Cosy is blocked while one of its slots is running or about
@@ -1327,7 +1327,8 @@ pub struct InverterSnapshot {
     pub cosy_slot_at_risk: bool,
     /// Why Agile did not act on a charge or discharge it wanted this poll: the
     /// code of the owner that outranks it (`"timed_export"`, `"manual_mode"`,
-    /// `"pause"`, `"force"`, `"safety"`); empty when nothing held it back.
+    /// `"pause"`, `"dispatch_hold"`, `"force"`, `"calibration"`, `"safety"`);
+    /// empty when nothing held it back.
     #[serde(default)]
     pub agile_blocked_by: String,
     /// True when the Agile Octopus state machine is actively force-charging or

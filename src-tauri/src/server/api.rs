@@ -1131,12 +1131,7 @@ pub(crate) fn snapshot_matches_writes(
         }
     };
 
-    let touches_pause_registers = writes.iter().any(|write| {
-        matches!(
-            write.address,
-            HR_BATTERY_PAUSE_MODE | HR_BATTERY_PAUSE_SLOT_1_START | HR_BATTERY_PAUSE_SLOT_1_END
-        )
-    });
+    let touches_pause_registers = touches_pause_registers(writes);
     if touches_pause_registers
         && snapshot.battery_pause_registers_observed_at != Some(snapshot.timestamp)
     {
@@ -2991,6 +2986,25 @@ pub async fn set_mode(
         Some(m) => m,
         None => return error_response("Missing 'mode' field"),
     };
+    // The selector's pause modes queue as ExplicitPause, below the dispatch
+    // hold and calibration: refuse them as the Pause button is refused, or
+    // they land late after the read-back has given up (fifth code review #4).
+    if matches!(mode_str, "eco_paused" | "export_paused") {
+        if crate::server::calibration::calibration_running(&state).await {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    json!({"ok": false, "error": crate::server::calibration::CALIBRATION_RUNNING}),
+                ),
+            );
+        }
+        if let Some((_, message)) = dispatch_hold_baseline_refusal(&state).await {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"ok": false, "error": message})),
+            );
+        }
+    }
     // An omitted `soc_reserve` must preserve the snapshot's configured
     // reserve rather than silently resetting it to the 4% default — the same
     // omit-default clobber class as the 0.74.10 charge-slot `target_soc` fix.
@@ -4169,6 +4183,15 @@ pub async fn set_timed_discharge(
             "Timed Discharge is not supported on {} inverters",
             device_type.display_name()
         ));
+    }
+
+    // Like Pause: queued behind the hold or its restore, it would land late
+    // while the Control page's read-back had already given up.
+    if let Some((_, message)) = dispatch_hold_baseline_refusal(&state).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "error": message})),
+        );
     }
 
     let enabled = body["enabled"].as_bool().unwrap_or(true);
@@ -5402,6 +5425,35 @@ pub async fn set_export_limit(
     }
 }
 
+/// The refusal for Force Discharge or a manual pause during a smart charge
+/// (issue #431). Force Charge is still allowed.
+pub(crate) const DISPATCH_HOLD_RESTORING: &str = "The Intelligent Octopus Go hold is still putting the battery settings back after a smart charge; try again in a few minutes";
+pub(crate) const DISPATCH_HOLD_ACTIVE: &str = "The Intelligent Octopus Go hold is pausing the battery while your car smart-charges; turn the hold off on the Octopus page first";
+
+/// Why a discharge command (Force Discharge, Pause, Timed Discharge, the
+/// external pause) can't run now: `(code, message)`. While the hold holds it
+/// would fight the hold. Until the hold's restore reads back, the inverter
+/// still carries the hold's pause: a baseline captured then would put it
+/// back with no owner left to clear it, and anything else would queue behind
+/// the restore and land late.
+pub(crate) async fn dispatch_hold_baseline_refusal(
+    state: &AppState,
+) -> Option<(&'static str, &'static str)> {
+    use crate::inverter::poll::DispatchHoldState;
+    let hold = state.dispatch_hold_state.lock().await.clone();
+    match hold {
+        DispatchHoldState::Holding => Some(("dispatch_hold_active", DISPATCH_HOLD_ACTIVE)),
+        DispatchHoldState::Releasing => Some(("dispatch_hold_restoring", DISPATCH_HOLD_RESTORING)),
+        // An AIO capture not yet restored (after Resume or a restart, until
+        // the next poll moves to Releasing) still means HR 318-320 carry the
+        // hold's pause (fifth code review #1).
+        DispatchHoldState::Idle if state.dispatch_hold_native.lock().await.is_some() => {
+            Some(("dispatch_hold_restoring", DISPATCH_HOLD_RESTORING))
+        }
+        DispatchHoldState::Idle => None,
+    }
+}
+
 /// POST /api/control/pause — pause battery discharge using Eco Paused.
 ///
 /// Eco Paused is the standard Eco/self-consumption mode with discharge
@@ -5413,6 +5465,12 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, J
         return (
             StatusCode::CONFLICT,
             Json(json!({"ok": false, "error": crate::server::calibration::CALIBRATION_RUNNING})),
+        );
+    }
+    if let Some((_, message)) = dispatch_hold_baseline_refusal(&state).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "error": message})),
         );
     }
     // Refuse to pause while clearly offline. Writes queued while Disconnected
@@ -5529,12 +5587,17 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         disabled_load_limiter,
         disabled_temperature_limiter,
         disabled_dispatch_hold,
+        native_hold,
     ) = {
         let mut load_config = state.load_limiter_config.lock().await;
         let mut load_state = state.load_limiter_state.lock().await;
         let mut temperature_config = state.temperature_limiter_config.lock().await;
         let mut temperature_state = state.temperature_limiter_state.lock().await;
         let mut dispatch_state = state.dispatch_hold_state.lock().await;
+        // An AIO's dispatch hold pauses with HR 318, not the reserve (issue
+        // #431). Read under the locks the poll loop saves it under, so a
+        // hold that starts while Resume waits for them is seen.
+        let native_hold = state.dispatch_hold_native.lock().await.is_some();
         let mut saved = state.load_limiter_saved.lock().await;
         let disabled_load_limiter = load_state.is_actively_pausing();
         let disabled_temperature_limiter = temperature_state.is_actively_pausing();
@@ -5554,6 +5617,7 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
             disabled_load_limiter,
             disabled_temperature_limiter,
             disabled_dispatch_hold,
+            native_hold,
         )
     };
     // The opt-in goes off only when the hold would otherwise start again.
@@ -5587,6 +5651,22 @@ pub async fn unpause_battery(State(state): State<Arc<AppState>>) -> (StatusCode,
         // reads it at once, and would otherwise fetch a list and hold again.
         state.octopus_dispatches.lock().await.reset();
         state.octopus_dispatches_wake.notify_one();
+    }
+
+    // Only the AIO's native hold was pausing: HEM never raised the reserve,
+    // so writing one back would replace the user's own, whatever the hold's
+    // state (sixth code review #6). The next poll puts HR 318-320 back (and
+    // gives up after 15 minutes if the inverter won't take it).
+    if native_hold && !disabled_load_limiter && !disabled_temperature_limiter {
+        tracing::info!(
+            turn_off_dispatch_hold,
+            "UnpauseBattery: releasing the AIO dispatch hold"
+        );
+        return ok_response(if turn_off_dispatch_hold {
+            "Dispatch hold turned off; the battery can discharge again within one poll"
+        } else {
+            "Dispatch hold released; the battery can discharge again within one poll"
+        });
     }
 
     let mut writes = Vec::new();
@@ -6115,6 +6195,12 @@ pub(crate) async fn force_discharge_at_unlocked(
         return (
             StatusCode::CONFLICT,
             Json(json!({"ok": false, "error": crate::server::calibration::CALIBRATION_RUNNING})),
+        );
+    }
+    if let Some((_, message)) = dispatch_hold_baseline_refusal(&state).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "error": message})),
         );
     }
     if state.force_charge_revert.lock().await.is_some() {
@@ -14934,6 +15020,264 @@ pub(crate) mod tests {
         .await;
     }
 
+    // ---- Manual commands during a dispatch hold (issue #431) ----
+
+    #[tokio::test]
+    async fn force_discharge_and_pause_are_refused_while_the_dispatch_hold_holds() {
+        // #431: they used to queue silently behind the hold and run when it
+        // ended. Force Discharge would empty the battery into the car, and a
+        // pause is what the hold is doing already.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+
+            let (code, Json(body)) = force_discharge(State(state.clone()), None).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"], DISPATCH_HOLD_ACTIVE);
+            let (code, Json(body)) = pause_battery(State(state.clone())).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"], DISPATCH_HOLD_ACTIVE);
+
+            assert!(state.force_discharge_revert.lock().await.is_none());
+            assert!(state.load_limiter_saved.lock().await.is_none());
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert!(DISPATCH_HOLD_ACTIVE.contains("Octopus page"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_discharge_is_refused_while_the_dispatch_hold_holds() {
+        // Second code review #4: its HR 318-320 writes queued behind the hold
+        // and the endpoint still said "enabled", so the Control page's
+        // read-back timed out and the write landed after the dispatch.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            for body in [
+                json!({"enabled": true, "start": "16:00", "end": "19:00"}),
+                json!({"enabled": false}),
+            ] {
+                let (code, Json(res)) =
+                    set_timed_discharge(State(state.clone()), Json(body.clone())).await;
+                assert_eq!(code, StatusCode::CONFLICT, "{body} {res}");
+                assert_eq!(res["error"], DISPATCH_HOLD_ACTIVE);
+            }
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_is_accepted_while_the_dispatch_hold_holds() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            let (code, Json(body)) = force_charge(State(state.clone()), None).await;
+            assert_eq!(code, StatusCode::OK, "{body}");
+            assert!(state.force_charge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_discharge_waits_for_the_dispatch_hold_restore() {
+        // Code review #2: while the restore is unconfirmed the inverter still
+        // holds the hold's pause. Force Discharge would capture that as its
+        // baseline and, on Stop, put the all-day AIO pause back with no owner
+        // left to clear it. Calibration already refuses here for the same reason.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Releasing;
+            let (code, Json(body)) = force_discharge(State(state.clone()), None).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"], DISPATCH_HOLD_RESTORING);
+            // The restore is given up after 15 minutes, so a few is fair.
+            assert!(DISPATCH_HOLD_RESTORING.contains("few minutes"));
+            assert!(state.force_discharge_revert.lock().await.is_none());
+            assert!(state.pending_writes.lock().await.is_empty());
+
+            // Once the restore is confirmed it goes through.
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Idle;
+            let (_, Json(body)) = force_discharge(State(state.clone()), None).await;
+            assert_ne!(body["error"], DISPATCH_HOLD_RESTORING, "{body}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_and_timed_discharge_wait_for_the_dispatch_hold_restore() {
+        // Third code review #2: while the restore backs off, a Pause or a
+        // Timed Discharge queued behind the DispatchHold owner and landed
+        // minutes later, after the Control page's read-back had given up.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Releasing;
+
+            let (code, Json(body)) = pause_battery(State(state.clone())).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"], DISPATCH_HOLD_RESTORING);
+            for request in [
+                json!({"enabled": true, "start": "16:00", "end": "19:00"}),
+                json!({"enabled": false}),
+            ] {
+                let (code, Json(res)) =
+                    set_timed_discharge(State(state.clone()), Json(request.clone())).await;
+                assert_eq!(code, StatusCode::CONFLICT, "{request} {res}");
+                assert_eq!(res["error"], DISPATCH_HOLD_RESTORING);
+            }
+            assert!(state.load_limiter_saved.lock().await.is_none());
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    fn aio_capture() -> crate::inverter::poll::DispatchHoldNative {
+        crate::inverter::poll::DispatchHoldNative {
+            inverter_serial: "HEM-TEST-001".into(),
+            device_type_code: String::new(),
+            prior_mode: 2,
+            prior_slot_start: 1600,
+            prior_slot_end: 1900,
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_wait_while_an_aio_capture_is_still_to_be_restored() {
+        // Fifth code review #1: after Resume, or a restart, the state is Idle
+        // until the next poll moves to Releasing, but HR 318-320 still hold
+        // the hold's all-day pause. A baseline captured then would put it back.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Idle;
+            *state.dispatch_hold_native.lock().await = Some(aio_capture());
+
+            assert_eq!(
+                dispatch_hold_baseline_refusal(&state).await,
+                Some(("dispatch_hold_restoring", DISPATCH_HOLD_RESTORING))
+            );
+            let (code, Json(body)) = pause_battery(State(state.clone())).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            let (code, Json(body)) = force_discharge(State(state.clone()), None).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            let (code, Json(body)) = set_timed_discharge(
+                State(state.clone()),
+                Json(json!({"enabled": true, "start": "16:00", "end": "19:00"})),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_mode_selectors_pauses_are_refused_like_the_pause_button() {
+        // Fifth code review #4: Eco Paused from the mode selector is the same
+        // PauseBattery as the Pause button, but queued behind the hold (or a
+        // calibration cycle) and landed late instead of being refused.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            for (hold, error) in [
+                (DispatchHoldState::Holding, DISPATCH_HOLD_ACTIVE),
+                (DispatchHoldState::Releasing, DISPATCH_HOLD_RESTORING),
+            ] {
+                *state.dispatch_hold_state.lock().await = hold.clone();
+                for mode in ["eco_paused", "export_paused"] {
+                    let (code, Json(body)) =
+                        set_mode(State(state.clone()), Json(json!({"mode": mode}))).await;
+                    assert_eq!(code, StatusCode::CONFLICT, "{hold:?} {mode} {body}");
+                    assert_eq!(body["error"], error, "{hold:?} {mode}");
+                }
+            }
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Idle;
+
+            let snapshot = InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                inverter_serial: "HEM-TEST-001".into(),
+                battery_mode: crate::inverter::model::BatteryMode::Eco,
+                inverter_time: "2026-08-30 22:00:00".into(),
+                ..Default::default()
+            };
+            let plan = crate::inverter::calibration::build_plan(&snapshot).expect("plan");
+            *state.calibration_run.lock().await = Some(crate::inverter::calibration::new_run(
+                &snapshot, plan, 120, 0,
+            ));
+            for mode in ["eco_paused", "export_paused"] {
+                let (code, Json(body)) =
+                    set_mode(State(state.clone()), Json(json!({"mode": mode}))).await;
+                assert_eq!(code, StatusCode::CONFLICT, "{mode} {body}");
+                assert_eq!(
+                    body["error"],
+                    crate::server::calibration::CALIBRATION_RUNNING
+                );
+            }
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resume_never_writes_the_reserve_while_an_aio_capture_is_pending() {
+        // Sixth code review #6: Idle with a capture and no serial yet (just
+        // after a restart) fell through to the reserve path and wrote 4%.
+        for (hold, connected) in [
+            (crate::inverter::poll::DispatchHoldState::Idle, true),
+            (crate::inverter::poll::DispatchHoldState::Idle, false),
+            (crate::inverter::poll::DispatchHoldState::Releasing, false),
+        ] {
+            with_isolated_config_dir_async(|| async {
+                let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+                if connected {
+                    if let Some(snap) = state.latest_snapshot.lock().await.as_mut() {
+                        snap.inverter_serial.clear();
+                    }
+                } else {
+                    *state.latest_snapshot.lock().await = None;
+                }
+                *state.dispatch_hold_state.lock().await = hold.clone();
+                *state.dispatch_hold_native.lock().await = Some(aio_capture());
+                let (code, Json(body)) = unpause_battery(State(state.clone())).await;
+                assert_eq!(code, StatusCode::OK, "{hold:?} {connected} {body}");
+                assert!(
+                    state.pending_writes.lock().await.is_empty(),
+                    "{hold:?} {connected}: nothing written"
+                );
+                assert_eq!(
+                    *state.dispatch_hold_native.lock().await,
+                    Some(aio_capture())
+                );
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_while_an_aio_hold_holds_keeps_the_capture_for_its_restore() {
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::DispatchHoldState;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            *state.dispatch_hold_native.lock().await = Some(aio_capture());
+            let (code, Json(body)) = unpause_battery(State(state.clone())).await;
+            assert_eq!(code, StatusCode::OK, "{body}");
+            // The next poll restores it the normal, confirmed way.
+            assert_eq!(
+                *state.dispatch_hold_native.lock().await,
+                Some(aio_capture())
+            );
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn unpause_battery_turns_off_an_active_dispatch_hold() {
         with_isolated_config_dir_async(|| async {
@@ -14987,6 +15331,108 @@ pub(crate) mod tests {
             // ... and the reply says why the hold stopped.
             let message = body["message"].as_str().unwrap_or_default().to_lowercase();
             assert!(message.contains("dispatch hold"), "{message}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_turns_off_an_aio_hold_without_touching_the_reserve() {
+        // Issue #431: an AIO's hold pauses with HR 318 and never saved the
+        // reserve, so writing the 4% fallback would replace the user's own.
+        // Turning the hold off is enough: the next poll puts HR 318 back.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::{DispatchHoldNative, DispatchHoldState};
+            use crate::modbus::registers::HR_BATTERY_SOC_RESERVE;
+
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            *state.dispatch_hold_native.lock().await = Some(DispatchHoldNative {
+                inverter_serial: "HEM-TEST-001".into(),
+                device_type_code: String::new(),
+                prior_mode: 0,
+                prior_slot_start: 0,
+                prior_slot_end: 0,
+            });
+            {
+                let mut dispatches = state.octopus_dispatches.lock().await;
+                dispatches.checked_at = Some(chrono::Utc::now());
+                dispatches.dispatches = vec![crate::octopus_dispatches::Dispatch {
+                    start: chrono::Utc::now() - chrono::Duration::minutes(10),
+                    end: chrono::Utc::now() + chrono::Duration::minutes(50),
+                    kind: Some("SMART".to_string()),
+                    energy_added_kwh: None,
+                }];
+            }
+            let mut settings = crate::settings::Settings::load();
+            settings.octopus_dispatch_hold = true;
+            settings.save().expect("seed settings");
+
+            let (status, Json(body)) = unpause_battery(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(!crate::settings::Settings::load().octopus_dispatch_hold);
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes.iter().all(|w| w.address != HR_BATTERY_SOC_RESERVE),
+                "{writes:?}"
+            );
+            assert!(
+                state.dispatch_hold_native.lock().await.is_some(),
+                "kept, so the poll loop restores HR 318"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unpause_sees_an_aio_hold_that_starts_while_it_waits_for_the_locks() {
+        // Code review #5: the poll loop saves the AIO capture under the pause
+        // locks. Resume read it before taking them, so a hold starting in
+        // between was missed and the 4% fallback overwrote the user's reserve.
+        with_isolated_config_dir_async(|| async {
+            use crate::inverter::poll::{DispatchHoldNative, DispatchHoldState};
+            use crate::modbus::registers::HR_BATTERY_SOC_RESERVE;
+
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            // Stand in for the poll loop mid-evaluation: it holds the first
+            // pause lock while it starts the hold.
+            let poll_guard = state.load_limiter_config.lock().await;
+            // Drive Resume by hand up to the pause locks (third code review
+            // #9: sleeps made this depend on the scheduler). With no smart
+            // charge running, everything before them is an uncontended lock,
+            // so one poll runs it until it blocks on the lock held above.
+            let mut resume = Box::pin(unpause_battery(State(state.clone())));
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(
+                std::future::Future::poll(resume.as_mut(), &mut cx).is_pending(),
+                "Resume waits for the pause locks"
+            );
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            *state.dispatch_hold_native.lock().await = Some(DispatchHoldNative {
+                inverter_serial: "HEM-TEST-001".into(),
+                device_type_code: String::new(),
+                prior_mode: 0,
+                prior_slot_start: 0,
+                prior_slot_end: 0,
+            });
+            drop(poll_guard);
+            let handler = tokio::spawn(resume);
+
+            // The reserve path waits for read-back, so don't await the
+            // handler: wait until it has finished or queued its writes.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !handler.is_finished()
+                && state.pending_writes.lock().await.is_empty()
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            handler.abort();
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes.iter().all(|w| w.address != HR_BATTERY_SOC_RESERVE),
+                "the user's reserve was overwritten: {writes:?}"
+            );
+            assert!(state.dispatch_hold_native.lock().await.is_some());
         })
         .await;
     }

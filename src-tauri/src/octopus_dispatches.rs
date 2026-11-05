@@ -550,8 +550,16 @@ pub async fn get_dispatches(State(state): State<Arc<AppState>>) -> (StatusCode, 
     let settings = Settings::load_async().await;
     let current = state.octopus_dispatches.lock().await.clone();
     // Only while holding: a restore still being retried is not a charge.
-    let holding = *state.dispatch_hold_state.lock().await
-        == crate::inverter::poll::DispatchHoldState::Holding;
+    let hold_state = state.dispatch_hold_state.lock().await.clone();
+    let holding = hold_state == crate::inverter::poll::DispatchHoldState::Holding;
+    // The inverter isn't taking the pause (issue #431), or an AIO hold has
+    // had no usable reading to save and so never started.
+    let hold_failing = {
+        let retry = state.dispatch_hold_retry.lock().await;
+        (holding && retry.failing())
+            || (hold_state == crate::inverter::poll::DispatchHoldState::Idle
+                && retry.cannot_start())
+    };
     let now = Utc::now();
     let dispatches: Vec<Value> = current
         .dispatches
@@ -577,6 +585,7 @@ pub async fn get_dispatches(State(state): State<Arc<AppState>>) -> (StatusCode, 
             "error": current.error,
             "devices": current.devices.len(),
             "holding": holding,
+            "hold_failing": hold_failing,
             "stale_after_minutes": STALE_AFTER_MINUTES,
             "dispatches": dispatches,
         })),
@@ -1638,6 +1647,52 @@ mod tests {
                 let (_, Json(body)) = get_dispatches(State(state.clone())).await;
                 assert_eq!(body["holding"], expected, "{hold:?}");
             }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_page_says_when_the_hold_cannot_pause_the_battery() {
+        // #431: the AIO wouldn't take the pause, and nothing told the user.
+        use crate::inverter::poll::{DispatchHoldRetry, DispatchHoldState};
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+            assert_eq!(body["hold_failing"], false);
+
+            *state.dispatch_hold_retry.lock().await = DispatchHoldRetry {
+                failing: true,
+                ..Default::default()
+            };
+            for (hold, expected) in [
+                (DispatchHoldState::Holding, true),
+                (DispatchHoldState::Releasing, false),
+                (DispatchHoldState::Idle, false),
+            ] {
+                *state.dispatch_hold_state.lock().await = hold.clone();
+                let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+                assert_eq!(body["hold_failing"], expected, "{hold:?}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_page_says_when_an_aio_hold_cannot_start_for_want_of_a_reading() {
+        // Third code review #4: the hold couldn't save HR 318-320, so it never
+        // started; it stays Idle but must not look like nothing is happening.
+        use crate::inverter::poll::{DispatchHoldRetry, DispatchHoldState};
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Idle;
+            *state.dispatch_hold_retry.lock().await = DispatchHoldRetry {
+                failing: true,
+                unread_since: Some(1_800_000_000),
+                ..Default::default()
+            };
+            let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+            assert_eq!(body["hold_failing"], true);
+            assert_eq!(body["holding"], false);
         })
         .await;
     }

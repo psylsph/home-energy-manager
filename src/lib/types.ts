@@ -114,11 +114,11 @@ export interface InverterSnapshot {
   dispatch_hold_active?: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
-  /** Why Cosy is not running: 'pause', 'force', 'calibration' or 'safety'; empty or absent when nothing blocks it. */
+  /** Why Cosy is not running: 'pause', 'force', 'calibration', 'dispatch_hold' or 'safety'; empty or absent when nothing blocks it. */
   cosy_blocked_by?: string;
   /** True while a Cosy slot is running or about to start and Cosy is blocked. */
   cosy_slot_at_risk?: boolean;
-  /** Why Agile did not act: 'timed_export', 'manual_mode', 'pause', 'force', 'calibration' or 'safety'; empty or absent when nothing blocks it. */
+  /** Why Agile did not act: 'timed_export', 'manual_mode', 'pause', 'force', 'calibration', 'dispatch_hold' or 'safety'; empty or absent when nothing blocks it. */
   agile_blocked_by?: string;
   agile_active: boolean;
   agile_state: 'idle' | 'charging' | 'discharging';
@@ -571,6 +571,8 @@ export interface SmartChargingResponse {
   devices: number;
   /** The battery is being held for a charge right now. */
   holding: boolean;
+  /** The inverter isn't taking the hold's pause; HEM retries every 5 minutes (#431). */
+  hold_failing: boolean;
   /** How old the dispatch list may be before HEM stops trusting it. */
   stale_after_minutes: number;
   dispatches: SmartChargeDispatch[];

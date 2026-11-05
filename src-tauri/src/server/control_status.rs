@@ -587,6 +587,10 @@ fn build_status(
             "pause" => "Cosy on hold: a battery pause is active",
             "force" => "Cosy on hold: a manual Force action is running",
             "safety" => "Cosy on hold: a safety limit is holding the battery",
+            "dispatch_hold" => {
+                "Cosy on hold: the Intelligent Octopus Go hold is pausing the battery"
+            }
+            "calibration" => "Cosy on hold: a battery calibration cycle is running",
             _ => "Cosy on hold",
         },
     );
@@ -599,6 +603,10 @@ fn build_status(
             "pause" => "Agile on hold: a battery pause is active",
             "force" => "Agile on hold: a manual Force action is running",
             "safety" => "Agile on hold: a safety limit is holding the battery",
+            "dispatch_hold" => {
+                "Agile on hold: the Intelligent Octopus Go hold is pausing the battery"
+            }
+            "calibration" => "Agile on hold: a battery calibration cycle is running",
             _ => "Agile on hold",
         },
     );
@@ -1340,6 +1348,15 @@ mod tests {
                 "safety",
                 "Cosy on hold: a safety limit is holding the battery",
             ),
+            // Code review #8: these two fell back to a bare "Cosy on hold".
+            (
+                "dispatch_hold",
+                "Cosy on hold: the Intelligent Octopus Go hold is pausing the battery",
+            ),
+            (
+                "calibration",
+                "Cosy on hold: a battery calibration cycle is running",
+            ),
         ] {
             let s = InverterSnapshot {
                 cosy_enabled: true,
@@ -1402,6 +1419,15 @@ mod tests {
             (
                 "safety",
                 "Agile on hold: a safety limit is holding the battery",
+            ),
+            // Code review #8: these two fell back to a bare "Agile on hold".
+            (
+                "dispatch_hold",
+                "Agile on hold: the Intelligent Octopus Go hold is pausing the battery",
+            ),
+            (
+                "calibration",
+                "Agile on hold: a battery calibration cycle is running",
             ),
         ] {
             let s = InverterSnapshot {

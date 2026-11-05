@@ -269,6 +269,9 @@ async fn initialize_app_state(
     // A dispatch hold active at shutdown restores Eco unless a fresh dispatch
     // list shows the charge is still running. The list does not exist yet, so
     // keep the hold until the first dispatch check has finished.
+    // An AIO's native pause is put back from the HR 318-320 saved before it
+    // was written (issue #431).
+    *state.dispatch_hold_native.lock().await = app_settings.dispatch_hold_native.clone();
     if app_settings.dispatch_hold_active_persisted {
         *state.dispatch_hold_state.lock().await =
             crate::inverter::poll::DispatchHoldState::Releasing;
@@ -1470,6 +1473,35 @@ mod tests {
             assert!(
                 state.history.lock().await.is_some(),
                 "history db should be opened"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_mid_aio_hold_keeps_the_hr318_it_has_to_put_back() {
+        // Issue #431: the AIO's native pause is restored from the record
+        // saved before the first pause write.
+        with_isolated_config_dir_async(|| async {
+            let record = crate::inverter::poll::DispatchHoldNative {
+                inverter_serial: "AIO-1".into(),
+                device_type_code: "8001".into(),
+                prior_mode: 1,
+                prior_slot_start: 0,
+                prior_slot_end: 2359,
+            };
+            let mut s = Settings::load();
+            s.dispatch_hold_active_persisted = true;
+            s.dispatch_hold_native = Some(record.clone());
+            s.save().expect("settings save");
+
+            let state = initialize_app_state(Settings::load(), Arc::new(LogRing::new(64)))
+                .await
+                .expect("state");
+            assert_eq!(*state.dispatch_hold_native.lock().await, Some(record));
+            assert_eq!(
+                *state.dispatch_hold_state.lock().await,
+                crate::inverter::poll::DispatchHoldState::Releasing
             );
         })
         .await;

@@ -25,9 +25,10 @@ use crate::inverter::power_limit::PowerLimitScale;
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
     encode_hhmm, HR_3PH_BATTERY_SOC_RESERVE, HR_3PH_FORCE_DISCHARGE_ENABLE,
-    HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END,
-    HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
-    HR_ENABLE_DISCHARGE,
+    HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_END,
+    HR_BATTERY_PAUSE_SLOT_1_START, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE,
+    HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE,
+    HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
 };
 
 /// The owner of the inverter's shared discharge-control registers.
@@ -52,6 +53,13 @@ pub enum DischargeControlOwner {
     ManualMode,
     /// Explicit Pause Discharge / HR318 pause.
     ExplicitPause,
+    /// The Intelligent Octopus Go dispatch hold (issue #394) on its own. It
+    /// outranks every automation and pause but yields to Manual Force, so a
+    /// Force Charge during a smart charge runs at once (issue #431): charging
+    /// still stops the battery emptying into the car. Force Discharge and
+    /// manual pauses are refused at the API while the hold holds. When a
+    /// thermal or load limiter pauses too, the whole pause is `Safety`.
+    DispatchHold,
     /// Manual Force Charge / Force Discharge. This deliberate user override
     /// may temporarily clear an HR318 discharge pause after capturing it for
     /// restoration.
@@ -85,6 +93,7 @@ impl DischargeControlOwner {
             Self::TimedExport => "timed_export",
             Self::ManualMode => "manual_mode",
             Self::ExplicitPause => "pause",
+            Self::DispatchHold => "dispatch_hold",
             Self::ManualForce => "force",
             Self::Calibration => "calibration",
             Self::Safety => "safety",
@@ -1689,15 +1698,179 @@ impl DispatchHoldState {
     }
 }
 
-/// Evaluate the dispatch hold. `in_dispatch` is true only while a smart
-/// dispatch is running and the dispatch list is fresh; anything unknown means
-/// normal behaviour. `other_active` is another limiter that owns the shared
-/// Eco Paused state; `reassert_pause` is set when a discharge command earlier
-/// in this poll may have overridden the pause.
+/// Unconfirmed pause attempts sent back to back before the hold backs off.
+const DISPATCH_HOLD_FAST_ATTEMPTS: u32 = 2;
+/// How long the hold waits between pause attempts once it has backed off.
+pub(crate) const DISPATCH_HOLD_RETRY_SECS: i64 = 5 * 60;
+/// How long the restore after a smart charge is retried before HEM alerts and
+/// stops, leaving the battery as it is. Retrying for good would keep the hold
+/// owning the battery, and refusing the user's own commands, indefinitely.
+pub(crate) const DISPATCH_HOLD_RESTORE_GIVE_UP_SECS: i64 = 15 * 60;
+
+/// Whether the inverter is taking the dispatch hold's pause (issue #431).
+///
+/// An AIO behind a Gateway timed out on every reserve = 100 write; re-sending
+/// the whole pause every poll stretched each poll to about 30 s for the whole
+/// dispatch. After two attempts that read-back hasn't confirmed, the hold
+/// reports itself as failing and tries again every five minutes. Reset at the
+/// start of each dispatch and whenever the hold stops holding.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DispatchHoldRetry {
+    /// Pause attempts sent since read-back last showed the pause.
+    pub(crate) unconfirmed: u32,
+    /// Snapshot time (Unix seconds) of the last pause attempt.
+    pub(crate) last_sent: Option<i64>,
+    /// The pause hasn't read back after repeated attempts.
+    pub(crate) failing: bool,
+    /// The failure has been notified during this dispatch.
+    pub(crate) notified: bool,
+    /// Consecutive readings from an inverter other than the one an AIO
+    /// native pause was captured on.
+    pub(crate) foreign_readings: u32,
+    /// When an AIO hold last started going without a usable HR 318-320
+    /// read: none to capture before it starts, or none to confirm its pause
+    /// once it holds. Failing once that lasts [`DISPATCH_HOLD_RETRY_SECS`].
+    pub(crate) unread_since: Option<i64>,
+    /// When the restore after a smart charge started (either path); it is
+    /// given up [`DISPATCH_HOLD_RESTORE_GIVE_UP_SECS`] later.
+    pub(crate) restore_started: Option<i64>,
+    /// What to put back by hand, set when the restore was given up and taken
+    /// once by the poll loop to alert.
+    pub(crate) gave_up: Option<String>,
+}
+
+impl DispatchHoldRetry {
+    /// The inverter isn't taking the pause.
+    pub fn failing(&self) -> bool {
+        self.failing
+    }
+
+    /// Time the restore after a smart charge: starts it on the first call and
+    /// says whether it has now gone on for
+    /// [`DISPATCH_HOLD_RESTORE_GIVE_UP_SECS`]. A clock that stepped back
+    /// starts the wait again.
+    fn restore_timed_out(&mut self, now: i64) -> bool {
+        let started = match self.restore_started {
+            Some(started) if started <= now => started,
+            _ => {
+                self.restore_started = Some(now);
+                now
+            }
+        };
+        now - started >= DISPATCH_HOLD_RESTORE_GIVE_UP_SECS
+    }
+
+    /// The restore was given up this poll: what the user should put back.
+    pub(crate) fn take_gave_up(&mut self) -> Option<String> {
+        self.gave_up.take()
+    }
+
+    /// An AIO hold has gone five minutes without a usable reading. Read
+    /// with the hold Idle, it never had one to save and hasn't paused.
+    pub fn cannot_start(&self) -> bool {
+        self.failing && self.unread_since.is_some()
+    }
+
+    /// True once per dispatch, the first time the pause is failing.
+    pub(crate) fn take_notification(&mut self) -> bool {
+        let due = self.failing && !self.notified;
+        if due {
+            self.notified = true;
+        }
+        due
+    }
+
+    /// Start a fresh set of attempts within the same dispatch, keeping the
+    /// foreign-inverter count and whether this dispatch has been alerted, so
+    /// one smart charge never alerts twice (fifth code review #5).
+    fn reset_attempts(&mut self) {
+        *self = Self {
+            foreign_readings: self.foreign_readings,
+            notified: self.notified,
+            ..Self::default()
+        };
+    }
+
+    /// The dispatch is over: the next one starts with no attempts and may
+    /// alert again.
+    fn end_dispatch(&mut self) {
+        *self = Self {
+            foreign_readings: self.foreign_readings,
+            ..Self::default()
+        };
+    }
+
+    /// An AIO hold has no usable HR 318-320 read this poll, so it can neither
+    /// capture nor confirm anything. After five minutes of that it reports
+    /// itself failing, as an unconfirmed pause would, rather than going
+    /// silent all dispatch. A clock that stepped back starts the wait again.
+    pub(crate) fn pause_unread(&mut self, now: i64) {
+        let since = match self.unread_since {
+            Some(since) if since <= now => since,
+            _ => {
+                self.unread_since = Some(now);
+                now
+            }
+        };
+        if now - since >= DISPATCH_HOLD_RETRY_SECS && !self.failing {
+            self.failing = true;
+            tracing::warn!(
+                "Dispatch hold: nothing usable to pause with for 5 minutes (no fresh reading, or it couldn't be saved); the battery may not be paused"
+            );
+        }
+    }
+
+    fn record_attempt(&mut self, at: i64) {
+        self.unconfirmed = self.unconfirmed.saturating_add(1);
+        self.last_sent = Some(at);
+    }
+
+    /// Whether a pause attempt is due now. A clock that stepped back retries
+    /// at once rather than waiting out the step.
+    fn attempt_due(&self, now: i64) -> bool {
+        if self.unconfirmed < DISPATCH_HOLD_FAST_ATTEMPTS {
+            return true;
+        }
+        match self.last_sent {
+            Some(sent) => now < sent || now - sent >= DISPATCH_HOLD_RETRY_SECS,
+            None => true,
+        }
+    }
+}
+
+/// [`check_dispatch_hold_with_retry`] without back-off: every poll that
+/// doesn't read back the pause re-sends it.
+#[cfg(test)]
 pub(crate) fn check_dispatch_hold(
     snap: &InverterSnapshot,
     in_dispatch: bool,
     state: &mut DispatchHoldState,
+    saved: &mut Option<LoadLimiterSaved>,
+    other_active: bool,
+    reassert_pause: bool,
+) -> Option<Vec<RegisterWrite>> {
+    check_dispatch_hold_with_retry(
+        snap,
+        in_dispatch,
+        state,
+        &mut DispatchHoldRetry::default(),
+        saved,
+        other_active,
+        reassert_pause,
+    )
+}
+
+/// Evaluate the dispatch hold. `in_dispatch` is true only while a smart
+/// dispatch is running and the dispatch list is fresh; anything unknown means
+/// normal behaviour. `other_active` is another limiter that owns the shared
+/// Eco Paused state; `reassert_pause` is set when a discharge command earlier
+/// in this poll may have overridden the pause. `retry` spaces out a pause the
+/// inverter keeps refusing; the restore is never spaced out.
+pub(crate) fn check_dispatch_hold_with_retry(
+    snap: &InverterSnapshot,
+    in_dispatch: bool,
+    state: &mut DispatchHoldState,
+    retry: &mut DispatchHoldRetry,
     saved: &mut Option<LoadLimiterSaved>,
     other_active: bool,
     reassert_pause: bool,
@@ -1717,6 +1890,11 @@ pub(crate) fn check_dispatch_hold(
             );
             return None;
         }
+        if *state != DispatchHoldState::Holding {
+            // A new dispatch, or one resumed while the restore was retried:
+            // the pause gets a fresh set of attempts and notification.
+            *retry = DispatchHoldRetry::default();
+        }
         *state = DispatchHoldState::Holding;
         if starting {
             // Capture the reserve only for the first owner of the pause; a
@@ -1731,25 +1909,65 @@ pub(crate) fn check_dispatch_hold(
             // same poll, and these writes follow its restore. They change
             // nothing if the battery is already paused.
             tracing::info!("Dispatch hold: smart charging started, pausing battery discharge");
+            retry.record_attempt(snap.timestamp);
             return Some(discharge_pause_writes(snap.device_type, 100));
         }
-        if reassert_pause || snap.battery_mode != BatteryMode::EcoPaused {
+        if snap.battery_mode == BatteryMode::EcoPaused {
+            retry.unconfirmed = 0;
+            retry.failing = false;
+            if reassert_pause {
+                return Some(discharge_pause_writes(snap.device_type, 100));
+            }
+            return None;
+        }
+        if retry.unconfirmed >= DISPATCH_HOLD_FAST_ATTEMPTS && !retry.failing {
+            retry.failing = true;
+            tracing::warn!(
+                mode = ?snap.battery_mode,
+                "Dispatch hold: the inverter isn't taking the pause; retrying every 5 minutes"
+            );
+        }
+        // An in-poll discharge command runs unopposed until the next attempt,
+        // so it is always answered, back-off or not.
+        if reassert_pause || retry.attempt_due(snap.timestamp) {
+            retry.record_attempt(snap.timestamp);
             return Some(discharge_pause_writes(snap.device_type, 100));
         }
         return None;
     }
 
+    // The restore's clock runs across polls; everything else starts afresh.
+    let restore_started = (*state == DispatchHoldState::Releasing)
+        .then_some(retry.restore_started)
+        .flatten();
+    *retry = DispatchHoldRetry::default();
+    retry.restore_started = restore_started;
     match state {
         DispatchHoldState::Idle => None,
         DispatchHoldState::Holding | DispatchHoldState::Releasing => {
             if other_active {
                 // The remaining owner restores Eco and needs the baseline.
                 *state = DispatchHoldState::Idle;
+                retry.restore_started = None;
                 return None;
             }
             if *state == DispatchHoldState::Releasing && snap.battery_mode == BatteryMode::Eco {
                 *saved = None;
                 *state = DispatchHoldState::Idle;
+                retry.restore_started = None;
+                return None;
+            }
+            if retry.restore_timed_out(snap.timestamp) {
+                // Like the AIO restore: alert with what to put back, and let go.
+                let reserve = saved.take().map(|value| value.reserve).unwrap_or(4);
+                tracing::warn!(
+                    "Dispatch hold: the inverter didn't take the restore in 15 minutes; giving up"
+                );
+                *state = DispatchHoldState::Idle;
+                retry.restore_started = None;
+                retry.gave_up = Some(format!(
+                    "Eco mode with a minimum charge (reserve) of {reserve}%"
+                ));
                 return None;
             }
             if *state == DispatchHoldState::Holding {
@@ -1764,6 +1982,318 @@ pub(crate) fn check_dispatch_hold(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Native dispatch pause on the single-phase All-in-Ones (issue #431)
+// ---------------------------------------------------------------------------
+
+/// HR 318 value that pauses discharge only: the hold's pause whatever was
+/// there before, so charging (Force Charge, a charge slot) still works during
+/// a dispatch. A charge-cap pause it replaces comes back with the restore.
+const PAUSE_DISCHARGE: u16 = 2;
+/// HR 318 value that pauses charge and discharge.
+const PAUSE_BOTH: u16 = 3;
+/// The all-day pause window the hold writes to HR 319/320.
+const NATIVE_WINDOW: (u16, u16) = (0, 2359);
+/// Consecutive readings from another inverter before a capture is dropped,
+/// so one misread serial can't orphan the pause.
+const NATIVE_FOREIGN_READINGS: u32 = 3;
+
+/// Whether the dispatch hold pauses this model with HR 318 instead of a 100%
+/// reserve. An AIO in #431 timed out on every reserve = 100 write while it
+/// took a low reserve at once, so the single-phase All-in-Ones use their own
+/// pause (mode 2 with an all-day window), as GivTCP's pause does.
+pub(crate) fn uses_native_dispatch_pause(device: DeviceType) -> bool {
+    matches!(
+        device,
+        DeviceType::AllInOne6kW | DeviceType::AllInOne3_6kW | DeviceType::AllInOne5kW
+    )
+}
+
+/// The HR 318-320 the dispatch hold found on an AIO before pausing it, and
+/// the inverter it found them on. Persisted before the first pause write and
+/// kept until a fresh read shows them back, so a restart can always finish
+/// the restore.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DispatchHoldNative {
+    pub inverter_serial: String,
+    pub device_type_code: String,
+    /// HR 318 before the hold's write: 0, 1 for the charge cap's pause, or
+    /// 2/3 with a window that didn't cover the whole day.
+    pub prior_mode: u16,
+    /// HR 319 before the hold's write.
+    pub prior_slot_start: u16,
+    /// HR 320 before the hold's write.
+    pub prior_slot_end: u16,
+}
+
+impl DispatchHoldNative {
+    fn holding(&self) -> (u16, u16, u16) {
+        (PAUSE_DISCHARGE, NATIVE_WINDOW.0, NATIVE_WINDOW.1)
+    }
+
+    fn prior(&self) -> (u16, u16, u16) {
+        (self.prior_mode, self.prior_slot_start, self.prior_slot_end)
+    }
+
+    /// The window before the mode, so the pause never applies to the old
+    /// window.
+    fn pause_writes(&self) -> Vec<RegisterWrite> {
+        vec![
+            RegisterWrite {
+                address: HR_BATTERY_PAUSE_SLOT_1_START,
+                value: NATIVE_WINDOW.0,
+            },
+            RegisterWrite {
+                address: HR_BATTERY_PAUSE_SLOT_1_END,
+                value: NATIVE_WINDOW.1,
+            },
+            RegisterWrite {
+                address: HR_BATTERY_PAUSE_MODE,
+                value: PAUSE_DISCHARGE,
+            },
+        ]
+    }
+
+    /// The mode first, so the all-day pause ends before the window changes.
+    fn restore_writes(&self) -> Vec<RegisterWrite> {
+        vec![
+            RegisterWrite {
+                address: HR_BATTERY_PAUSE_MODE,
+                value: self.prior_mode,
+            },
+            RegisterWrite {
+                address: HR_BATTERY_PAUSE_SLOT_1_START,
+                value: self.prior_slot_start,
+            },
+            RegisterWrite {
+                address: HR_BATTERY_PAUSE_SLOT_1_END,
+                value: self.prior_slot_end,
+            },
+        ]
+    }
+
+    /// The serial identifies the inverter, as for the Force baselines; a
+    /// same-serial code change is still this AIO and must keep its restore.
+    fn matches(&self, snap: &InverterSnapshot) -> bool {
+        self.inverter_serial == snap.inverter_serial
+    }
+}
+
+/// HR 318-320 in words, for what to put back by hand.
+fn describe_pause_registers((mode, start, end): (u16, u16, u16)) -> String {
+    let time = |hhmm: u16| format!("{:02}:{:02}", hhmm / 100, hhmm % 100);
+    match mode {
+        0 => "off".to_string(),
+        1 => format!("pause charging from {} to {}", time(start), time(end)),
+        2 => format!("pause discharging from {} to {}", time(start), time(end)),
+        3 => format!(
+            "pause charging and discharging from {} to {}",
+            time(start),
+            time(end)
+        ),
+        other => format!("mode {other} from {} to {}", time(start), time(end)),
+    }
+}
+
+/// HR 318-320 from this poll's own read, or `None` when stale or unread.
+fn fresh_pause_registers(snap: &InverterSnapshot) -> Option<(u16, u16, u16)> {
+    if snap.battery_pause_registers_observed_at != Some(snap.timestamp) {
+        return None;
+    }
+    Some((
+        snap.battery_pause_mode_raw?,
+        snap.battery_pause_slot_start_raw?,
+        snap.battery_pause_slot_end_raw?,
+    ))
+}
+
+/// Whether HR 318-320 hold values the inverter could have been set to, so
+/// they are safe to save and write back: a mode of 0-3 and two real times.
+pub(crate) fn valid_pause_registers((mode, start, end): (u16, u16, u16)) -> bool {
+    let valid_hhmm = |value| crate::modbus::registers::decode_hhmm(value).is_some();
+    mode <= PAUSE_BOTH && valid_hhmm(start) && valid_hhmm(end)
+}
+
+/// The dispatch hold on an All-in-One, with HR 318 instead of the shared
+/// reserve pause. Same start rule, back-off and restore-until-confirmed as
+/// [`check_dispatch_hold_with_retry`]; the restore puts back exactly the HR
+/// 318-320 captured in `record`. Only a fresh read confirms anything; a
+/// stale one sends no pause and counts no attempt.
+pub(crate) fn check_native_dispatch_hold(
+    snap: &InverterSnapshot,
+    in_dispatch: bool,
+    state: &mut DispatchHoldState,
+    retry: &mut DispatchHoldRetry,
+    record: &mut Option<DispatchHoldNative>,
+    other_active: bool,
+    reassert_pause: bool,
+) -> Option<Vec<RegisterWrite>> {
+    if let Some(capture) = record.as_ref() {
+        if capture.matches(snap) {
+            retry.foreign_readings = 0;
+        } else {
+            if snap.inverter_serial.is_empty() {
+                return None;
+            }
+            retry.foreign_readings = retry.foreign_readings.saturating_add(1);
+            if retry.foreign_readings < NATIVE_FOREIGN_READINGS {
+                return None;
+            }
+            tracing::warn!(
+                captured_on = %capture.inverter_serial,
+                "Dispatch hold: connected to a different inverter; dropping the pause it saved"
+            );
+            *record = None;
+            *retry = DispatchHoldRetry::default();
+            *state = DispatchHoldState::Idle;
+            return None;
+        }
+    }
+    let fresh = fresh_pause_registers(snap);
+
+    if in_dispatch {
+        let Some(capture) = record.as_ref() else {
+            // Starting. Same rule as the reserve pause: plain Eco, or joining
+            // a pause another HEM owner holds.
+            if !other_active && snap.battery_mode != BatteryMode::Eco {
+                tracing::debug!(
+                    mode = ?snap.battery_mode,
+                    "Dispatch hold: smart charging running, but the battery is not in plain Eco; leaving it alone"
+                );
+                retry.reset_attempts();
+                return None;
+            }
+            // A stale read, or a corrupt one the restore would write back
+            // (third code review #1, #4), or one from an inverter it can't
+            // name, whose capture would later look foreign and be dropped
+            // with the pause still on (fifth code review #2): send nothing,
+            // and say so if it lasts.
+            let Some((mode, start, end)) = fresh
+                .filter(|r| valid_pause_registers(*r))
+                .filter(|_| !snap.inverter_serial.is_empty())
+            else {
+                retry.pause_unread(snap.timestamp);
+                return None;
+            };
+            if matches!(mode, PAUSE_DISCHARGE | PAUSE_BOTH) && (start, end) == NATIVE_WINDOW {
+                // A remote pause already stops discharge all day. A part-day
+                // window (Timed Discharge) or an empty one doesn't, so those
+                // are captured and paused over like any other.
+                tracing::debug!(
+                    mode,
+                    "Dispatch hold: the battery pause is already set all day; leaving it alone"
+                );
+                retry.reset_attempts();
+                return None;
+            }
+            let capture = DispatchHoldNative {
+                inverter_serial: snap.inverter_serial.clone(),
+                device_type_code: snap.device_type_code.clone(),
+                prior_mode: mode,
+                prior_slot_start: start,
+                prior_slot_end: end,
+            };
+            let writes = capture.pause_writes();
+            *record = Some(capture);
+            retry.reset_attempts();
+            *state = DispatchHoldState::Holding;
+            retry.record_attempt(snap.timestamp);
+            tracing::info!(
+                "Dispatch hold: smart charging started, pausing battery discharge (HR 318)"
+            );
+            return Some(writes);
+        };
+        if *state != DispatchHoldState::Holding {
+            // Back to holding after a restore or a restart: a new smart
+            // charge, so its failures may alert again.
+            retry.end_dispatch();
+            *state = DispatchHoldState::Holding;
+        }
+        // A stale read can't confirm or refuse anything: wait for a fresh
+        // one, but not silently (fourth code review #1). Once that has lasted
+        // five minutes, the pause is re-sent on the back-off in case the first
+        // write was lost too.
+        let Some(registers) = fresh else {
+            retry.pause_unread(snap.timestamp);
+            if retry.failing && retry.attempt_due(snap.timestamp) {
+                retry.record_attempt(snap.timestamp);
+                return Some(capture.pause_writes());
+            }
+            return None;
+        };
+        retry.unread_since = None;
+        if registers == capture.holding() {
+            retry.unconfirmed = 0;
+            retry.failing = false;
+            return reassert_pause.then(|| capture.pause_writes());
+        }
+        if retry.unconfirmed >= DISPATCH_HOLD_FAST_ATTEMPTS && !retry.failing {
+            retry.failing = true;
+            tracing::warn!(
+                ?registers,
+                "Dispatch hold: the inverter isn't taking the pause; retrying every 5 minutes"
+            );
+        }
+        if reassert_pause || retry.attempt_due(snap.timestamp) {
+            retry.record_attempt(snap.timestamp);
+            return Some(capture.pause_writes());
+        }
+        return None;
+    }
+
+    let Some(capture) = record.as_ref() else {
+        retry.end_dispatch();
+        *state = DispatchHoldState::Idle;
+        return None;
+    };
+    if fresh == Some(capture.prior()) {
+        *record = None;
+        retry.end_dispatch();
+        *state = DispatchHoldState::Idle;
+        return None;
+    }
+    if *state != DispatchHoldState::Releasing {
+        // The dispatch just ended: restore at once, whatever the read.
+        if *state == DispatchHoldState::Holding {
+            tracing::info!(
+                "Dispatch hold: smart charging ended, restoring the battery pause settings"
+            );
+        }
+        *state = DispatchHoldState::Releasing;
+        retry.end_dispatch();
+        retry.record_attempt(snap.timestamp);
+        retry.restore_timed_out(snap.timestamp);
+        return Some(capture.restore_writes());
+    }
+    // Retried, with the pause's back-off (an AIO that times out on these
+    // writes would otherwise stall every poll), until a fresh read confirms
+    // it, or for 15 minutes: then HEM alerts with what to put back and lets
+    // go, so a restore that won't land can't own the battery or refuse the
+    // user's commands for good.
+    if retry.restore_timed_out(snap.timestamp) {
+        let detail = describe_pause_registers(capture.prior());
+        tracing::warn!(
+            registers = ?fresh,
+            "Dispatch hold: the inverter didn't take the restore in 15 minutes; giving up"
+        );
+        *record = None;
+        *state = DispatchHoldState::Idle;
+        retry.gave_up = Some(detail);
+        return None;
+    }
+    fresh?;
+    if retry.attempt_due(snap.timestamp) {
+        retry.record_attempt(snap.timestamp);
+        return Some(capture.restore_writes());
+    }
+    None
+}
+
+/// Label of the dispatch hold's writes from [`evaluate_pause_limiters`]. The
+/// poll loop tells the hold's writes from the limiters' by it, to pick their
+/// arbiter owner, so it must be this constant on both sides.
+pub(crate) const DISPATCH_HOLD_LABEL: &str = "Dispatch hold";
+
 /// The discharge pause owners, which share one Eco Paused state and one
 /// saved pre-pause reserve.
 pub(crate) struct PauseLimiters<'a> {
@@ -1772,6 +2302,10 @@ pub(crate) struct PauseLimiters<'a> {
     pub load_config: &'a LoadLimiterConfig,
     pub load_state: &'a mut LoadLimiterState,
     pub dispatch_state: &'a mut DispatchHoldState,
+    pub dispatch_retry: &'a mut DispatchHoldRetry,
+    /// The AIO native pause's capture (issue #431); `None` on the reserve
+    /// pause.
+    pub dispatch_native: &'a mut Option<DispatchHoldNative>,
     pub saved: &'a mut Option<LoadLimiterSaved>,
 }
 
@@ -1796,10 +2330,19 @@ pub(crate) fn evaluate_pause_limiters(
         load_config,
         load_state,
         dispatch_state,
+        dispatch_retry,
+        dispatch_native,
         saved,
     } = limiters;
     let load_was_active = load_state.is_actively_pausing();
-    let dispatch_was_active = dispatch_state.is_actively_pausing();
+    // An AIO's native pause (HR 318) is separate from the shared reserve
+    // pause: it is never another owner of it, and never touches `saved`.
+    // A hold with no capture uses the reserve pause, so one started by an
+    // older HEM finishes the way it began.
+    let native = dispatch_native.is_some()
+        || (*dispatch_state == DispatchHoldState::Idle
+            && uses_native_dispatch_pause(snap.device_type));
+    let dispatch_was_active = dispatch_state.is_actively_pausing() && !native;
 
     let temperature = check_temperature_limiter_after_automation(
         snap,
@@ -1810,14 +2353,28 @@ pub(crate) fn evaluate_pause_limiters(
         reassert_pause,
     );
     let temperature_active = temperature_state.is_actively_pausing();
-    let dispatch = check_dispatch_hold(
-        snap,
-        in_dispatch,
-        dispatch_state,
-        saved,
-        temperature_active || load_was_active,
-        reassert_pause,
-    );
+    let dispatch = if native {
+        check_native_dispatch_hold(
+            snap,
+            in_dispatch,
+            dispatch_state,
+            dispatch_retry,
+            dispatch_native,
+            temperature_active || load_was_active,
+            reassert_pause,
+        )
+    } else {
+        check_dispatch_hold_with_retry(
+            snap,
+            in_dispatch,
+            dispatch_state,
+            dispatch_retry,
+            saved,
+            temperature_active || load_was_active,
+            reassert_pause,
+        )
+    };
+    let dispatch_shares_reserve = dispatch_state.is_actively_pausing() && dispatch_native.is_none();
     let load = check_load_limiter_at(
         snap,
         load_config,
@@ -1825,12 +2382,12 @@ pub(crate) fn evaluate_pause_limiters(
         poll_interval_secs,
         saved,
         now_minutes,
-        temperature_active || dispatch_state.is_actively_pausing(),
+        temperature_active || dispatch_shares_reserve,
     );
 
     [
         ("Temperature limiter", temperature),
-        ("Dispatch hold", dispatch),
+        (DISPATCH_HOLD_LABEL, dispatch),
         ("Load limiter", load),
     ]
     .into_iter()
@@ -8937,6 +9494,35 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn force_charge_outranks_the_dispatch_hold_and_automations_do_not() {
+        // Issue #431: charging during a smart charge still stops the battery
+        // emptying into the car, so Force Charge wins; every automation,
+        // mode change and pause still waits for the hold.
+        let mut arbiter = DischargeControlArbiter::default();
+        assert!(arbiter.request(DischargeControlOwner::DispatchHold));
+        for lower in [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+        ] {
+            assert!(!arbiter.can_request(lower), "{lower:?}");
+        }
+        assert!(arbiter.can_request(DischargeControlOwner::ManualForce));
+        assert!(arbiter.can_request(DischargeControlOwner::Calibration));
+        assert!(arbiter.can_request(DischargeControlOwner::Safety));
+        assert_eq!(DischargeControlOwner::DispatchHold.code(), "dispatch_hold");
+        assert!(crate::inverter::cosy::is_hard_override(
+            DischargeControlOwner::DispatchHold
+        ));
+        assert!(
+            crate::inverter::cosy::deferral_reason(DischargeControlOwner::DispatchHold)
+                .contains("Intelligent Octopus Go")
+        );
+    }
+
     // ---- Dispatch hold (issue #394) ----
 
     fn has_write(writes: &[RegisterWrite], address: u16, value: u16) -> bool {
@@ -9019,6 +9605,202 @@ mod tests {
         assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 100));
     }
 
+    // ---- A pause the inverter won't take (issue #431) ----
+
+    fn dispatch_snap_at(mode: BatteryMode, reserve: u8, timestamp: i64) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp,
+            ..dispatch_snap(mode, reserve)
+        }
+    }
+
+    /// One poll of the hold mid-dispatch with retry bookkeeping.
+    fn hold_poll(
+        snap: &InverterSnapshot,
+        in_dispatch: bool,
+        state: &mut DispatchHoldState,
+        retry: &mut DispatchHoldRetry,
+        saved: &mut Option<LoadLimiterSaved>,
+        reassert_pause: bool,
+    ) -> Option<Vec<RegisterWrite>> {
+        check_dispatch_hold_with_retry(
+            snap,
+            in_dispatch,
+            state,
+            retry,
+            saved,
+            false,
+            reassert_pause,
+        )
+    }
+
+    /// Starts a hold at t=1000 and lets the AIO refuse the pause twice
+    /// (t=1000, t=1030), so the hold is backing off from t=1060.
+    fn refused_hold() -> (
+        DispatchHoldState,
+        DispatchHoldRetry,
+        Option<LoadLimiterSaved>,
+    ) {
+        let mut state = DispatchHoldState::Idle;
+        let mut retry = DispatchHoldRetry::default();
+        let mut saved = None;
+        for t in [1000, 1030] {
+            assert!(hold_poll(
+                &dispatch_snap_at(BatteryMode::Eco, 4, t),
+                true,
+                &mut state,
+                &mut retry,
+                &mut saved,
+                false,
+            )
+            .is_some());
+        }
+        assert!(!retry.failing(), "two attempts are not yet a failure");
+        (state, retry, saved)
+    }
+
+    #[test]
+    fn dispatch_hold_backs_off_when_the_pause_never_reads_back() {
+        // #431: an AIO behind a Gateway times out on reserve = 100. Re-sending
+        // the whole pause every poll stretched polls to ~30 s for the whole
+        // dispatch; after two unconfirmed attempts the hold waits 5 minutes.
+        let (mut state, mut retry, mut saved) = refused_hold();
+        let eco = |t| dispatch_snap_at(BatteryMode::Eco, 4, t);
+
+        assert!(hold_poll(&eco(1060), true, &mut state, &mut retry, &mut saved, false).is_none());
+        assert!(
+            retry.failing(),
+            "the pause hasn't read back after two attempts"
+        );
+        assert!(hold_poll(&eco(1329), true, &mut state, &mut retry, &mut saved, false).is_none());
+
+        let writes = hold_poll(&eco(1330), true, &mut state, &mut retry, &mut saved, false)
+            .expect("retries 5 minutes after the last attempt");
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 100));
+        assert!(
+            retry.failing(),
+            "still failing until read-back shows the pause"
+        );
+        assert!(hold_poll(&eco(1360), true, &mut state, &mut retry, &mut saved, false).is_none());
+        assert!(hold_poll(&eco(1630), true, &mut state, &mut retry, &mut saved, false).is_some());
+        assert_eq!(state, DispatchHoldState::Holding);
+        assert_eq!(saved, Some(LoadLimiterSaved { reserve: 4 }));
+    }
+
+    #[test]
+    fn dispatch_hold_clears_the_failure_once_the_pause_reads_back() {
+        let (mut state, mut retry, mut saved) = refused_hold();
+        let eco = |t| dispatch_snap_at(BatteryMode::Eco, 4, t);
+        assert!(hold_poll(&eco(1060), true, &mut state, &mut retry, &mut saved, false).is_none());
+        assert!(retry.failing());
+
+        // The 19:25 attempt in #431's log landed in the end.
+        assert!(hold_poll(
+            &dispatch_snap_at(BatteryMode::EcoPaused, 100, 1090),
+            true,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false,
+        )
+        .is_none());
+        assert!(!retry.failing());
+
+        // Overridden again later: back to reasserting straight away.
+        assert!(hold_poll(&eco(1120), true, &mut state, &mut retry, &mut saved, false).is_some());
+        assert!(hold_poll(&eco(1150), true, &mut state, &mut retry, &mut saved, false).is_some());
+        assert!(hold_poll(&eco(1180), true, &mut state, &mut retry, &mut saved, false).is_none());
+        assert!(retry.failing());
+    }
+
+    #[test]
+    fn dispatch_hold_retries_at_once_when_the_clock_steps_back() {
+        // A backwards clock must not stall the retry for however far it went.
+        let (mut state, mut retry, mut saved) = refused_hold();
+        assert!(hold_poll(
+            &dispatch_snap_at(BatteryMode::Eco, 4, 400),
+            true,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn dispatch_hold_reasserts_after_an_in_poll_override_even_while_backing_off() {
+        // A discharge command earlier in this poll would otherwise run
+        // unopposed until the next retry.
+        let (mut state, mut retry, mut saved) = refused_hold();
+        assert!(hold_poll(
+            &dispatch_snap_at(BatteryMode::Eco, 4, 1060),
+            true,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            true,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn dispatch_hold_restores_at_once_when_the_dispatch_ends_during_back_off() {
+        let (mut state, mut retry, mut saved) = refused_hold();
+        let eco = |t| dispatch_snap_at(BatteryMode::Eco, 4, t);
+        assert!(hold_poll(&eco(1060), true, &mut state, &mut retry, &mut saved, false).is_none());
+
+        // The 19:25 write landed after all, then the dispatch ended.
+        let writes = hold_poll(
+            &dispatch_snap_at(BatteryMode::EcoPaused, 100, 1090),
+            false,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false,
+        )
+        .expect("the restore is never held back by the pause's back-off");
+        assert!(has_write(&writes, HR_BATTERY_SOC_RESERVE, 4));
+        assert_eq!(state, DispatchHoldState::Releasing);
+        assert!(!retry.failing());
+    }
+
+    #[test]
+    fn dispatch_hold_failure_is_notified_once_per_dispatch() {
+        let (mut state, mut retry, mut saved) = refused_hold();
+        let eco = |t| dispatch_snap_at(BatteryMode::Eco, 4, t);
+        assert!(!retry.take_notification(), "not failing yet");
+        hold_poll(&eco(1060), true, &mut state, &mut retry, &mut saved, false);
+        assert!(retry.take_notification());
+        assert!(!retry.take_notification(), "only once");
+
+        // Read back once, then refused again in the same dispatch: no repeat.
+        hold_poll(
+            &dispatch_snap_at(BatteryMode::EcoPaused, 100, 1090),
+            true,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false,
+        );
+        for t in [1120, 1150, 1180] {
+            hold_poll(&eco(t), true, &mut state, &mut retry, &mut saved, false);
+        }
+        assert!(retry.failing());
+        assert!(!retry.take_notification(), "one notification per dispatch");
+
+        // The dispatch ends and the restore reads back; the next one starts
+        // and fails too: that one is notified.
+        hold_poll(&eco(1210), false, &mut state, &mut retry, &mut saved, false);
+        hold_poll(&eco(1240), false, &mut state, &mut retry, &mut saved, false);
+        assert_eq!(state, DispatchHoldState::Idle);
+        for t in [5000, 5030, 5060] {
+            hold_poll(&eco(t), true, &mut state, &mut retry, &mut saved, false);
+        }
+        assert!(retry.failing());
+        assert!(retry.take_notification());
+    }
+
     #[test]
     fn dispatch_hold_restores_the_reserve_and_retries_until_eco_is_read_back() {
         let mut state = DispatchHoldState::Holding;
@@ -9049,6 +9831,75 @@ mod tests {
         .is_none());
         assert_eq!(state, DispatchHoldState::Idle);
         assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn dispatch_hold_gives_up_the_reserve_restore_after_15_minutes() {
+        let mut state = DispatchHoldState::Holding;
+        let mut retry = DispatchHoldRetry::default();
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        let paused = |t| dispatch_snap_at(BatteryMode::EcoPaused, 100, t);
+        let poll = |t,
+                    state: &mut DispatchHoldState,
+                    retry: &mut DispatchHoldRetry,
+                    saved: &mut Option<LoadLimiterSaved>| {
+            hold_poll(&paused(t), false, state, retry, saved, false)
+        };
+        assert!(poll(1000, &mut state, &mut retry, &mut saved).is_some());
+        assert!(
+            poll(1030, &mut state, &mut retry, &mut saved).is_some(),
+            "retried"
+        );
+        assert!(poll(1899, &mut state, &mut retry, &mut saved).is_some());
+        assert_eq!(state, DispatchHoldState::Releasing);
+        assert_eq!(retry.take_gave_up(), None);
+
+        assert!(poll(1900, &mut state, &mut retry, &mut saved).is_none());
+        assert_eq!(state, DispatchHoldState::Idle);
+        assert!(!state.is_actively_pausing());
+        assert_eq!(saved, None, "the baseline is let go too");
+        let detail = retry.take_gave_up().expect("the user is told");
+        assert!(detail.contains("23%"), "{detail}");
+        assert_eq!(retry.take_gave_up(), None);
+        assert!(poll(1930, &mut state, &mut retry, &mut saved).is_none());
+    }
+
+    #[test]
+    fn dispatch_hold_that_reads_eco_in_time_never_gives_up() {
+        let mut state = DispatchHoldState::Holding;
+        let mut retry = DispatchHoldRetry::default();
+        let mut saved = Some(LoadLimiterSaved { reserve: 23 });
+        let at = |mode, t| dispatch_snap_at(mode, 23, t);
+        hold_poll(
+            &at(BatteryMode::EcoPaused, 1000),
+            false,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false,
+        );
+        assert!(hold_poll(
+            &at(BatteryMode::Eco, 1899),
+            false,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false
+        )
+        .is_none());
+        assert_eq!(state, DispatchHoldState::Idle);
+        assert_eq!(retry.take_gave_up(), None);
+        // A later idle poll starts nothing.
+        assert!(hold_poll(
+            &at(BatteryMode::Eco, 2500),
+            false,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false
+        )
+        .is_none());
+        assert_eq!(retry.take_gave_up(), None);
     }
 
     #[test]
@@ -9170,6 +10021,664 @@ mod tests {
         assert!(has_write(&writes, HR_3PH_FORCE_DISCHARGE_ENABLE, 0));
     }
 
+    // ---- Native pause on the All-in-Ones (issue #431, phase 3) ----
+
+    const AIO_TS: i64 = 1_800_000_000;
+
+    /// An AIO 6 kW in plain Eco with HR 318-320 read fresh in this poll.
+    fn aio_snap(mode: u16, start: u16, end: u16, timestamp: i64) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp,
+            battery_mode: BatteryMode::Eco,
+            battery_reserve: 4,
+            device_type: DeviceType::AllInOne6kW,
+            device_type_code: "8001".into(),
+            inverter_serial: "AIO-1".into(),
+            battery_pause_mode_raw: Some(mode),
+            battery_pause_slot_start_raw: Some(start),
+            battery_pause_slot_end_raw: Some(end),
+            battery_pause_registers_observed_at: Some(timestamp),
+            ..Default::default()
+        }
+    }
+
+    fn stale(mut snap: InverterSnapshot) -> InverterSnapshot {
+        snap.battery_pause_registers_observed_at = Some(snap.timestamp - 30);
+        snap
+    }
+
+    struct Native {
+        state: DispatchHoldState,
+        retry: DispatchHoldRetry,
+        record: Option<DispatchHoldNative>,
+    }
+
+    impl Native {
+        fn new() -> Self {
+            Self {
+                state: DispatchHoldState::Idle,
+                retry: DispatchHoldRetry::default(),
+                record: None,
+            }
+        }
+
+        fn poll(
+            &mut self,
+            snap: &InverterSnapshot,
+            in_dispatch: bool,
+        ) -> Option<Vec<RegisterWrite>> {
+            check_native_dispatch_hold(
+                snap,
+                in_dispatch,
+                &mut self.state,
+                &mut self.retry,
+                &mut self.record,
+                false,
+                false,
+            )
+        }
+    }
+
+    fn values(writes: &[RegisterWrite]) -> Vec<(u16, u16)> {
+        writes.iter().map(|w| (w.address, w.value)).collect()
+    }
+
+    #[test]
+    fn only_the_single_phase_all_in_ones_pause_natively() {
+        for device in [
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+        ] {
+            assert!(uses_native_dispatch_pause(device), "{device:?}");
+        }
+        for device in [
+            DeviceType::Gen3Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::ACCoupled,
+            DeviceType::ACThreePhase,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gateway,
+        ] {
+            assert!(!uses_native_dispatch_pause(device), "{device:?}");
+        }
+    }
+
+    #[test]
+    fn an_aio_hold_pauses_with_hr318_and_puts_back_exactly_what_was_there() {
+        // #431: the AIO timed out on reserve = 100, so it pauses natively.
+        let mut hold = Native::new();
+        let writes = hold
+            .poll(&aio_snap(0, 1600, 1900, AIO_TS), true)
+            .expect("a dispatch starting pauses discharge");
+        assert_eq!(
+            values(&writes),
+            vec![(319, 0), (320, 2359), (318, 2)],
+            "the all-day window before the mode"
+        );
+        assert_eq!(hold.state, DispatchHoldState::Holding);
+        assert_eq!(
+            hold.record,
+            Some(DispatchHoldNative {
+                inverter_serial: "AIO-1".into(),
+                device_type_code: "8001".into(),
+                prior_mode: 0,
+                prior_slot_start: 1600,
+                prior_slot_end: 1900,
+            })
+        );
+
+        // Read back: nothing more to do.
+        assert!(hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 30), true)
+            .is_none());
+        assert!(!hold.retry.failing());
+
+        // The dispatch ends: the mode, then the window it found.
+        let writes = hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 60), false)
+            .expect("restores");
+        assert_eq!(values(&writes), vec![(318, 0), (319, 1600), (320, 1900)]);
+        assert_eq!(hold.state, DispatchHoldState::Releasing);
+        // Not read back yet: repeated.
+        assert!(hold
+            .poll(&aio_snap(2, 1600, 1900, AIO_TS + 90), false)
+            .is_some());
+        // Read back: done, record dropped.
+        assert!(hold
+            .poll(&aio_snap(0, 1600, 1900, AIO_TS + 120), false)
+            .is_none());
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        assert_eq!(hold.record, None);
+    }
+
+    #[test]
+    fn an_aio_hold_never_touches_the_reserve_or_mode_registers() {
+        let mut hold = Native::new();
+        let writes = hold.poll(&aio_snap(0, 0, 0, AIO_TS), true).unwrap();
+        for address in [
+            HR_BATTERY_POWER_MODE,
+            HR_ENABLE_DISCHARGE,
+            HR_BATTERY_SOC_RESERVE,
+        ] {
+            assert!(writes.iter().all(|w| w.address != address), "{address}");
+        }
+    }
+
+    #[test]
+    fn an_aio_hold_pauses_discharge_only_over_the_charge_caps_pause() {
+        // Second code review #1: mode 3 also stopped charging for the whole
+        // dispatch, so a Force Charge the hold lets through (#431) charged
+        // nothing, and the cap stayed Blocked behind it. The hold pauses
+        // discharge only; the cap's mode 1 comes back with the restore.
+        let mut hold = Native::new();
+        let writes = hold.poll(&aio_snap(1, 0, 2359, AIO_TS), true).unwrap();
+        assert_eq!(values(&writes), vec![(319, 0), (320, 2359), (318, 2)]);
+        assert!(hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 30), true)
+            .is_none());
+        let writes = hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 60), false)
+            .unwrap();
+        assert_eq!(values(&writes), vec![(318, 1), (319, 0), (320, 2359)]);
+    }
+
+    #[test]
+    fn an_aio_hold_leaves_an_all_day_discharge_pause_alone() {
+        // A remote pause that already stops discharge all day: nothing to add.
+        for mode in [2, 3] {
+            let mut hold = Native::new();
+            assert!(hold.poll(&aio_snap(mode, 0, 2359, AIO_TS), true).is_none());
+            assert_eq!(hold.state, DispatchHoldState::Idle, "{mode}");
+            assert_eq!(hold.record, None, "{mode}");
+        }
+    }
+
+    #[test]
+    fn an_aio_hold_pauses_over_a_part_day_or_empty_pause_window() {
+        // Code review #3: mode 2 or 3 only pauses inside its window. A Timed
+        // Discharge (pause 19:00-16:00, discharging 16:00-19:00) or a
+        // leftover zero-length window leaves the battery free to empty into
+        // the car, so the hold takes over and restores exactly afterwards.
+        for (mode, start, end, target) in [(2, 1900, 1600, 2), (2, 0, 0, 2), (3, 1900, 1600, 2)] {
+            let mut hold = Native::new();
+            let writes = hold
+                .poll(&aio_snap(mode, start, end, AIO_TS), true)
+                .unwrap_or_else(|| panic!("pauses over ({mode}, {start}, {end})"));
+            assert_eq!(values(&writes), vec![(319, 0), (320, 2359), (318, target)]);
+            assert_eq!(hold.state, DispatchHoldState::Holding);
+            let restore = hold
+                .poll(&aio_snap(target, 0, 2359, AIO_TS + 30), false)
+                .expect("restores");
+            assert_eq!(
+                values(&restore),
+                vec![(318, mode), (319, start), (320, end)]
+            );
+        }
+    }
+
+    #[test]
+    fn an_aio_hold_waits_for_a_fresh_read_before_it_starts() {
+        let mut hold = Native::new();
+        assert!(hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS)), true).is_none());
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        assert_eq!(hold.record, None);
+        // Not plain Eco (a Timed Export the user armed): left alone.
+        let mut snap = aio_snap(0, 0, 0, AIO_TS + 30);
+        snap.battery_mode = BatteryMode::TimedExport;
+        assert!(hold.poll(&snap, true).is_none());
+        assert_eq!(hold.record, None);
+    }
+
+    #[test]
+    fn an_aio_hold_never_captures_a_corrupt_pause_baseline() {
+        // Third code review #1: a corrupted read on the poll a dispatch
+        // started was saved as the restore and written back afterwards.
+        for (mode, start, end) in [
+            (4, 0, 0),
+            (65535, 0, 0),
+            (0, 2400, 0),
+            (0, 0, 2360),
+            (2, 1290, 1800),
+            (0, 65535, 65535),
+        ] {
+            let mut hold = Native::new();
+            assert!(
+                hold.poll(&aio_snap(mode, start, end, AIO_TS), true)
+                    .is_none(),
+                "{mode} {start} {end}"
+            );
+            assert_eq!(hold.record, None, "{mode} {start} {end}");
+            assert_eq!(hold.state, DispatchHoldState::Idle);
+            // The next good read starts it as normal.
+            assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS + 30), true).is_some());
+            assert_eq!(hold.record.as_ref().map(|c| c.prior()), Some((0, 0, 0)));
+        }
+    }
+
+    #[test]
+    fn an_aio_hold_that_never_gets_a_usable_read_reports_failing() {
+        // Third code review #4: with HR 300-359 failing, every read was
+        // carried forward and the hold did nothing all dispatch, silently.
+        let mut hold = Native::new();
+        for t in [0, 30, 150, 299] {
+            assert!(hold
+                .poll(&stale(aio_snap(0, 0, 0, AIO_TS + t)), true)
+                .is_none());
+            assert!(!hold.retry.failing(), "only {t} s without a read");
+        }
+        assert!(hold
+            .poll(&aio_snap(65535, 0, 0, AIO_TS + 300), true)
+            .is_none());
+        assert!(hold.retry.failing(), "5 minutes without a usable read");
+        assert!(hold.retry.take_notification());
+        assert!(!hold.retry.take_notification(), "notified once");
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        assert_eq!(hold.record, None);
+
+        // A usable read starts the hold and clears the failure.
+        assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS + 330), true).is_some());
+        assert!(!hold.retry.failing());
+    }
+
+    #[test]
+    fn an_aio_hold_that_never_reads_its_pause_back_reports_failing() {
+        // Fourth code review #1: the first pause went out, then HR 300-359
+        // never read fresh again; the page said Holding all dispatch.
+        let mut hold = Native::new();
+        assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS), true).is_some());
+        for t in [30, 150, 329] {
+            assert!(hold
+                .poll(&stale(aio_snap(0, 0, 0, AIO_TS + t)), true)
+                .is_none());
+            assert!(!hold.retry.failing(), "only {t} s without a fresh read");
+        }
+        let resend = hold
+            .poll(&stale(aio_snap(0, 0, 0, AIO_TS + 330)), true)
+            .expect("5 minutes unread: the pause is sent again");
+        assert_eq!(values(&resend), vec![(319, 0), (320, 2359), (318, 2)]);
+        assert!(hold.retry.failing());
+        assert!(hold.retry.take_notification());
+        assert_eq!(hold.state, DispatchHoldState::Holding);
+        // Then on the back-off, not every poll.
+        assert!(hold
+            .poll(&stale(aio_snap(0, 0, 0, AIO_TS + 360)), true)
+            .is_none());
+
+        // A fresh read showing the pause clears it, and a later stale spell
+        // starts its own 5 minutes.
+        assert!(hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 390), true)
+            .is_none());
+        assert!(!hold.retry.failing());
+        assert!(hold
+            .poll(&stale(aio_snap(2, 0, 2359, AIO_TS + 420)), true)
+            .is_none());
+        assert!(!hold.retry.failing());
+    }
+
+    #[test]
+    fn an_aio_hold_never_captures_from_an_inverter_it_cannot_identify() {
+        // Fifth code review #2: a capture saved under an empty serial was
+        // later dropped as another inverter's, leaving the all-day pause on.
+        let mut hold = Native::new();
+        let mut unnamed = aio_snap(0, 0, 0, AIO_TS);
+        unnamed.inverter_serial.clear();
+        assert!(hold.poll(&unnamed, true).is_none());
+        assert_eq!(hold.record, None);
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        // It counts as no usable read, so it can't go on silently.
+        unnamed.timestamp = AIO_TS + 300;
+        unnamed.battery_pause_registers_observed_at = Some(AIO_TS + 300);
+        hold.poll(&unnamed, true);
+        assert!(hold.retry.cannot_start());
+        // Identified again: it starts.
+        assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS + 330), true).is_some());
+        assert_eq!(
+            hold.record.as_ref().map(|c| c.inverter_serial.as_str()),
+            Some("AIO-1")
+        );
+    }
+
+    #[test]
+    fn an_aio_hold_alerts_once_per_dispatch_whatever_fails_first() {
+        // Fifth code review #5: a capture after an unread spell cleared the
+        // notification, so one dispatch could alert twice.
+        let mut hold = Native::new();
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 300)), true);
+        assert!(hold.retry.take_notification(), "first failure alerts");
+        // A usable read: the hold starts, but the pause never reads back.
+        assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS + 330), true).is_some());
+        assert!(!hold.retry.failing());
+        hold.poll(&aio_snap(0, 0, 0, AIO_TS + 360), true);
+        hold.poll(&aio_snap(0, 0, 0, AIO_TS + 390), true);
+        assert!(hold.retry.failing(), "failing again");
+        assert!(
+            !hold.retry.take_notification(),
+            "same dispatch: no second alert"
+        );
+
+        // The dispatch ends and the restore reads back; the next dispatch
+        // alerts again.
+        assert!(hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 420), false)
+            .is_some());
+        assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS + 450), false).is_none());
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 3600)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 3900)), true);
+        assert!(hold.retry.take_notification(), "a new dispatch alerts");
+    }
+
+    #[test]
+    fn an_aio_hold_ending_before_it_ever_started_lets_the_next_dispatch_alert() {
+        let mut hold = Native::new();
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 300)), true);
+        assert!(hold.retry.take_notification());
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 330)), false);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 3600)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 3900)), true);
+        assert!(hold.retry.take_notification());
+    }
+
+    #[test]
+    fn an_aio_hold_clears_its_failure_when_it_finds_an_all_day_pause() {
+        // Fourth code review #4: the stand-aside branch kept a failure from
+        // reads that were unusable, though the battery is in fact paused.
+        let mut hold = Native::new();
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 300)), true);
+        assert!(hold.retry.cannot_start());
+        assert!(hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 330), true)
+            .is_none());
+        assert!(!hold.retry.failing());
+        assert!(!hold.retry.cannot_start());
+    }
+
+    #[test]
+    fn an_aio_hold_waiting_for_a_read_clears_when_the_dispatch_ends() {
+        let mut hold = Native::new();
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 300)), true);
+        assert!(hold.retry.failing());
+        assert!(hold
+            .poll(&stale(aio_snap(0, 0, 0, AIO_TS + 330)), false)
+            .is_none());
+        assert!(!hold.retry.failing());
+        // The next dispatch starts its own 5 minutes.
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 3600)), true);
+        assert!(!hold.retry.failing());
+    }
+
+    #[test]
+    fn an_aio_hold_waiting_for_a_read_restarts_its_wait_when_the_clock_steps_back() {
+        let mut hold = Native::new();
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS - 3600)), true);
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS - 3600 + 299)), true);
+        assert!(!hold.retry.failing());
+        hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS - 3600 + 300)), true);
+        assert!(hold.retry.failing());
+    }
+
+    #[test]
+    fn an_aio_hold_does_not_count_a_stale_read_as_a_refused_pause() {
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 0, 0, AIO_TS), true).unwrap();
+        for t in 1..10 {
+            assert!(hold
+                .poll(&stale(aio_snap(0, 0, 0, AIO_TS + 30 * t)), true)
+                .is_none());
+        }
+        assert!(!hold.retry.failing());
+    }
+
+    #[test]
+    fn an_aio_hold_backs_off_a_pause_that_never_reads_back() {
+        let mut hold = Native::new();
+        let idle = |t| aio_snap(0, 0, 0, AIO_TS + t);
+        assert!(hold.poll(&idle(0), true).is_some());
+        assert!(hold.poll(&idle(30), true).is_some());
+        assert!(hold.poll(&idle(60), true).is_none());
+        assert!(hold.retry.failing());
+        assert!(hold.poll(&idle(329), true).is_none());
+        assert!(hold.poll(&idle(330), true).is_some());
+    }
+
+    #[test]
+    fn an_aio_restore_is_sent_at_once_then_waits_for_a_fresh_read() {
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        let writes = hold
+            .poll(&stale(aio_snap(2, 0, 2359, AIO_TS + 30)), false)
+            .expect("the first restore goes out even on a stale read");
+        assert_eq!(values(&writes), vec![(318, 0), (319, 1600), (320, 1900)]);
+        for t in 2..6 {
+            assert!(
+                hold.poll(&stale(aio_snap(2, 0, 2359, AIO_TS + 30 * t)), false)
+                    .is_none(),
+                "a stale read can't refuse the restore"
+            );
+        }
+        assert_eq!(hold.state, DispatchHoldState::Releasing);
+        assert!(hold.record.is_some(), "kept until confirmed");
+        assert!(hold
+            .poll(&aio_snap(0, 1600, 1900, AIO_TS + 300), false)
+            .is_none());
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        assert_eq!(hold.record, None);
+    }
+
+    #[test]
+    fn an_aio_restore_that_never_reads_back_is_retried_every_5_minutes() {
+        // Code review #1: an AIO that times out on HR 318 writes (#431) must
+        // not have three writes resent every poll for the rest of time.
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        let refused = |t| aio_snap(2, 0, 2359, AIO_TS + t);
+        assert!(hold.poll(&refused(30), false).is_some());
+        assert!(hold.poll(&refused(60), false).is_some());
+        assert!(hold.poll(&refused(90), false).is_none());
+        assert!(hold.poll(&refused(359), false).is_none());
+        assert!(hold.poll(&refused(360), false).is_some(), "still retried");
+        assert_eq!(hold.state, DispatchHoldState::Releasing);
+        assert!(hold.record.is_some(), "never given up");
+        // A new dispatch takes the pause straight back.
+        assert!(hold.poll(&refused(370), true).is_none(), "already paused");
+        assert_eq!(hold.state, DispatchHoldState::Holding);
+        // And when that one ends the restore goes out at once again.
+        assert!(hold.poll(&refused(400), false).is_some());
+    }
+
+    #[test]
+    fn an_aio_restore_is_given_up_after_15_minutes_and_says_what_to_put_back() {
+        // The user's call: retry for a fixed time, then alert and stop, rather
+        // than owning the battery (and refusing commands) indefinitely.
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(2, 1600, 1900, AIO_TS), true).unwrap();
+        let refused = |t| aio_snap(2, 0, 2359, AIO_TS + t);
+        assert!(hold.poll(&refused(30), false).is_some(), "restore at once");
+        assert!(hold.poll(&refused(60), false).is_some());
+        for t in [90, 400, 700, 929] {
+            hold.poll(&refused(t), false);
+            assert_eq!(hold.state, DispatchHoldState::Releasing, "{t} s");
+            assert!(hold.record.is_some(), "{t} s");
+            assert_eq!(hold.retry.take_gave_up(), None, "{t} s");
+        }
+        assert!(
+            hold.poll(&refused(930), false).is_none(),
+            "nothing more is sent"
+        );
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        assert_eq!(hold.record, None, "the capture is let go");
+        assert!(!hold.state.is_actively_pausing());
+        let detail = hold.retry.take_gave_up().expect("the user is told");
+        assert!(detail.contains("pause discharging"), "{detail}");
+        assert!(
+            detail.contains("16:00") && detail.contains("19:00"),
+            "{detail}"
+        );
+        assert_eq!(hold.retry.take_gave_up(), None, "once");
+        // Nothing more happens until the next dispatch.
+        assert!(hold.poll(&refused(960), false).is_none());
+        assert_eq!(hold.retry.take_gave_up(), None);
+    }
+
+    #[test]
+    fn an_aio_restore_is_given_up_even_when_it_is_never_read_back() {
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        assert!(hold
+            .poll(&stale(aio_snap(2, 0, 2359, AIO_TS + 30)), false)
+            .is_some());
+        hold.poll(&stale(aio_snap(2, 0, 2359, AIO_TS + 929)), false);
+        assert_eq!(hold.state, DispatchHoldState::Releasing);
+        assert!(hold
+            .poll(&stale(aio_snap(2, 0, 2359, AIO_TS + 930)), false)
+            .is_none());
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        assert!(hold.retry.take_gave_up().unwrap().contains("off"));
+    }
+
+    #[test]
+    fn an_aio_restore_that_reads_back_in_time_is_never_given_up() {
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        hold.poll(&aio_snap(2, 0, 2359, AIO_TS + 30), false);
+        assert!(hold
+            .poll(&aio_snap(0, 1600, 1900, AIO_TS + 929), false)
+            .is_none());
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+        assert_eq!(hold.record, None);
+        assert_eq!(hold.retry.take_gave_up(), None);
+        assert!(hold
+            .poll(&aio_snap(0, 1600, 1900, AIO_TS + 1000), false)
+            .is_none());
+        assert_eq!(hold.retry.take_gave_up(), None);
+    }
+
+    #[test]
+    fn a_second_smart_charge_restarts_the_15_minutes() {
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        let refused = |t| aio_snap(2, 0, 2359, AIO_TS + t);
+        hold.poll(&refused(30), false);
+        // A new smart charge takes the pause straight back...
+        hold.poll(&refused(400), true);
+        assert_eq!(hold.state, DispatchHoldState::Holding);
+        // ...and its own restore gets its own 15 minutes.
+        assert!(hold.poll(&refused(1000), false).is_some());
+        hold.poll(&refused(1000 + 899), false);
+        assert_eq!(hold.state, DispatchHoldState::Releasing);
+        hold.poll(&refused(1000 + 900), false);
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+    }
+
+    #[test]
+    fn an_aio_restore_restarts_its_15_minutes_when_the_clock_steps_back() {
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        let refused = |t| aio_snap(2, 0, 2359, AIO_TS + t);
+        hold.poll(&refused(30), false);
+        hold.poll(&refused(30 - 3600), false);
+        hold.poll(&refused(30 - 3600 + 899), false);
+        assert_eq!(hold.state, DispatchHoldState::Releasing);
+        hold.poll(&refused(30 - 3600 + 900), false);
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+    }
+
+    #[test]
+    fn a_restore_after_a_restart_gets_15_minutes_from_the_first_poll() {
+        // lib.rs restores Releasing with the saved capture and a clean retry.
+        let mut hold = Native::new();
+        hold.state = DispatchHoldState::Releasing;
+        hold.record = Some(DispatchHoldNative {
+            inverter_serial: "AIO-1".into(),
+            device_type_code: "8001".into(),
+            prior_mode: 0,
+            prior_slot_start: 0,
+            prior_slot_end: 0,
+        });
+        let refused = |t| aio_snap(2, 0, 2359, AIO_TS + t);
+        for t in [0, 400, 899] {
+            hold.poll(&refused(t), false);
+            assert_eq!(hold.state, DispatchHoldState::Releasing, "{t} s");
+        }
+        hold.poll(&refused(900), false);
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+    }
+
+    #[test]
+    fn an_aio_hold_never_writes_another_inverters_capture() {
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        let other = |t| InverterSnapshot {
+            inverter_serial: "AIO-2".into(),
+            ..aio_snap(2, 0, 2359, AIO_TS + t)
+        };
+        // One misread serial mustn't orphan the pause.
+        assert!(hold.poll(&other(30), false).is_none());
+        assert!(hold.record.is_some());
+        assert!(hold
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 60), false)
+            .is_some());
+        // Three in a row: it really is another inverter.
+        for t in [90, 120, 150] {
+            assert!(hold.poll(&other(t), false).is_none());
+        }
+        assert_eq!(hold.record, None);
+        assert_eq!(hold.state, DispatchHoldState::Idle);
+    }
+
+    #[test]
+    fn an_aio_capture_survives_a_model_code_change_on_the_same_inverter() {
+        // Code review #6: the serial identifies the inverter. A same-serial
+        // code change (a model refinement, a pinned misread after a
+        // reconnect) used to count as another inverter and drop the capture,
+        // leaving this AIO paused all day with nothing to restore it.
+        let mut hold = Native::new();
+        hold.poll(&aio_snap(0, 1600, 1900, AIO_TS), true).unwrap();
+        let recoded = |t| InverterSnapshot {
+            device_type_code: "8002".into(),
+            ..aio_snap(2, 0, 2359, AIO_TS + t)
+        };
+        for t in [30, 60, 90, 120] {
+            hold.poll(&recoded(t), false);
+        }
+        assert!(hold.record.is_some(), "kept for the same serial");
+        assert_eq!(hold.state, DispatchHoldState::Releasing);
+        assert!(hold
+            .poll(
+                &InverterSnapshot {
+                    device_type_code: "8002".into(),
+                    ..aio_snap(0, 1600, 1900, AIO_TS + 150)
+                },
+                false
+            )
+            .is_none());
+        assert_eq!(hold.record, None, "restored and confirmed");
+    }
+
+    #[test]
+    fn a_restart_mid_hold_resumes_the_aio_pause_from_the_record() {
+        // lib.rs restores Releasing; the dispatch is still running.
+        let mut hold = Native::new();
+        hold.state = DispatchHoldState::Releasing;
+        hold.record = Some(DispatchHoldNative {
+            inverter_serial: "AIO-1".into(),
+            device_type_code: "8001".into(),
+            prior_mode: 0,
+            prior_slot_start: 1600,
+            prior_slot_end: 1900,
+        });
+        assert!(hold.poll(&aio_snap(2, 0, 2359, AIO_TS), true).is_none());
+        assert_eq!(hold.state, DispatchHoldState::Holding);
+        assert_eq!(hold.record.as_ref().unwrap().prior_slot_start, 1600);
+    }
+
     // ---- All pause owners together ----
 
     struct Owners {
@@ -9178,6 +10687,8 @@ mod tests {
         load_config: LoadLimiterConfig,
         load_state: LoadLimiterState,
         dispatch_state: DispatchHoldState,
+        dispatch_retry: DispatchHoldRetry,
+        dispatch_native: Option<DispatchHoldNative>,
         saved: Option<LoadLimiterSaved>,
     }
 
@@ -9194,6 +10705,8 @@ mod tests {
                 },
                 load_state: LoadLimiterState::Idle,
                 dispatch_state: DispatchHoldState::Idle,
+                dispatch_retry: DispatchHoldRetry::default(),
+                dispatch_native: None,
                 saved: None,
             }
         }
@@ -9211,6 +10724,8 @@ mod tests {
                     load_config: &self.load_config,
                     load_state: &mut self.load_state,
                     dispatch_state: &mut self.dispatch_state,
+                    dispatch_retry: &mut self.dispatch_retry,
+                    dispatch_native: &mut self.dispatch_native,
                     saved: &mut self.saved,
                 },
                 in_dispatch,
@@ -9226,6 +10741,55 @@ mod tests {
             home_power,
             ..dispatch_snap(mode, reserve)
         }
+    }
+
+    #[test]
+    fn an_aio_hold_does_not_share_the_reserve_pause_with_the_limiters() {
+        // The load limiter pausing during an AIO dispatch must restore its
+        // own reserve when it lets go; the hold's HR 318 pause is separate.
+        let mut owners = Owners::new();
+        let snap = |reserve, home_power, t| InverterSnapshot {
+            home_power,
+            battery_mode: if reserve == 100 {
+                BatteryMode::EcoPaused
+            } else {
+                BatteryMode::Eco
+            },
+            battery_reserve: reserve,
+            ..aio_snap(0, 0, 0, AIO_TS + t)
+        };
+        let writes = owners.poll(&snap(23, 500, 0), true);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "Dispatch hold");
+        assert!(owners.dispatch_native.is_some());
+        assert_eq!(owners.saved, None, "the reserve is not the hold's");
+
+        owners.load_state = LoadLimiterState::Paused;
+        owners.saved = Some(LoadLimiterSaved { reserve: 23 });
+        owners.load_state = LoadLimiterState::LowLoadPending { consecutive: 0 };
+        let mut snap_paused = snap(100, 500, 30);
+        snap_paused.battery_pause_mode_raw = Some(2);
+        snap_paused.battery_pause_slot_end_raw = Some(2359);
+        let writes = owners.poll(&snap_paused, true);
+        let load = writes
+            .iter()
+            .find(|(label, _)| *label == "Load limiter")
+            .expect("the load limiter restores its reserve mid-dispatch");
+        assert!(has_write(&load.1, HR_BATTERY_SOC_RESERVE, 23));
+    }
+
+    #[test]
+    fn the_pause_owners_back_off_a_dispatch_pause_that_never_reads_back() {
+        let mut owners = Owners::new();
+        let eco = |timestamp| InverterSnapshot {
+            timestamp,
+            ..load_snap(BatteryMode::Eco, 4, 500)
+        };
+        assert_eq!(owners.poll(&eco(1000), true).len(), 1);
+        assert_eq!(owners.poll(&eco(1030), true).len(), 1);
+        assert!(owners.poll(&eco(1060), true).is_empty());
+        assert!(owners.dispatch_retry.failing());
+        assert_eq!(owners.poll(&eco(1330), true).len(), 1);
     }
 
     #[test]

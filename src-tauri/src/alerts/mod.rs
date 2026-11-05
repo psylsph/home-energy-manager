@@ -1149,6 +1149,53 @@ pub(crate) async fn dispatch_alert_text(
 // Forecast plan auto-apply notifications
 // ---------------------------------------------------------------------------
 
+/// Notification text for a dispatch hold the inverter won't take (issue
+/// #431). Sent once per smart charge.
+pub fn build_dispatch_hold_failing_message() -> String {
+    "⚠️ Couldn't pause the battery for your car's smart charge, so it may be charging the \
+     car. HEM keeps trying until the charge ends."
+        .to_string()
+}
+
+/// Notification text for a restore after a smart charge the inverter didn't
+/// take in 15 minutes, which HEM has given up. `detail` is what to put back.
+pub fn build_dispatch_hold_gave_up_message(detail: &str) -> String {
+    format!(
+        "⚠️ Couldn't put the battery settings back after your car's smart charge, and HEM has \
+         stopped trying, so the battery may still be paused. Set it back to: {detail}."
+    )
+}
+
+/// How often an undelivered dispatch-hold alert is resent, and for how long.
+pub(crate) const HOLD_ALERT_RESEND_SECS: u64 = 5 * 60;
+pub(crate) const HOLD_ALERT_RESEND_ATTEMPTS: u32 = 12;
+
+/// Deliver the one dispatch-hold alert for a smart charge (issue #431). A
+/// failed delivery is resent every 5 minutes for up to an hour, like the SOC
+/// alerts' outbox, and stops once the hold is no longer failing so a late
+/// message never reports a problem that has gone.
+pub(crate) async fn deliver_hold_failing_alert<S, SF, F, FF>(mut send: S, mut still_failing: F)
+where
+    S: FnMut() -> SF,
+    SF: std::future::Future<Output = AlertDelivery>,
+    F: FnMut() -> FF,
+    FF: std::future::Future<Output = bool>,
+{
+    if send().await != AlertDelivery::Failed {
+        return;
+    }
+    for _ in 0..HOLD_ALERT_RESEND_ATTEMPTS {
+        tokio::time::sleep(Duration::from_secs(HOLD_ALERT_RESEND_SECS)).await;
+        if !still_failing().await {
+            return;
+        }
+        if send().await != AlertDelivery::Failed {
+            return;
+        }
+    }
+    tracing::warn!("Dispatch hold: couldn't deliver the pause-failure alert after an hour");
+}
+
 /// Notification text for the auto-applied charging plan: charge slot 1
 /// was (re)written with the plan's window at the user's lead time before
 /// the cheap tariff window.
@@ -2285,6 +2332,65 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
 
 #[cfg(test)]
 mod tests {
+
+    mod hold_alert_resend {
+        use super::super::{deliver_hold_failing_alert, AlertDelivery, HOLD_ALERT_RESEND_ATTEMPTS};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        // Second code review #8: the alert was marked sent before delivery and
+        // a failure was thrown away, so a brief outage lost the one warning
+        // that the battery may be emptying into the car.
+        async fn run(results: Vec<AlertDelivery>, failing_for: u32) -> u32 {
+            let sends = Arc::new(AtomicU32::new(0));
+            let checks = Arc::new(AtomicU32::new(0));
+            let results = Arc::new(results);
+            deliver_hold_failing_alert(
+                || {
+                    let n = sends.fetch_add(1, Ordering::SeqCst) as usize;
+                    let r = results.get(n).copied().unwrap_or(AlertDelivery::Failed);
+                    async move { r }
+                },
+                || {
+                    let n = checks.fetch_add(1, Ordering::SeqCst);
+                    async move { n < failing_for }
+                },
+            )
+            .await;
+            sends.load(Ordering::SeqCst)
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_failed_alert_is_resent_until_delivered() {
+            let sent = run(
+                vec![
+                    AlertDelivery::Failed,
+                    AlertDelivery::Failed,
+                    AlertDelivery::Delivered,
+                ],
+                u32::MAX,
+            )
+            .await;
+            assert_eq!(sent, 3);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_delivered_or_skipped_alert_is_sent_once() {
+            assert_eq!(run(vec![AlertDelivery::Delivered], u32::MAX).await, 1);
+            assert_eq!(run(vec![AlertDelivery::Skipped], u32::MAX).await, 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_resend_stops_once_the_hold_is_no_longer_failing() {
+            // Failing at the first resend check, not at the second.
+            assert_eq!(run(vec![], 1).await, 2);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_resend_gives_up_after_an_hour() {
+            assert_eq!(run(vec![], u32::MAX).await, HOLD_ALERT_RESEND_ATTEMPTS + 1);
+        }
+    }
 
     use super::*;
     use crate::inverter::model::InverterSnapshot;
@@ -4646,6 +4752,27 @@ mod tests {
             "a failed attempt must not start the cooldown or stay pending"
         );
         assert!(guard.extract_cleared(&[]).is_empty(), "and is not active");
+    }
+
+    #[test]
+    fn the_dispatch_hold_failure_message_says_what_happens_next() {
+        let text = build_dispatch_hold_failing_message();
+        assert!(text.contains("Couldn't pause the battery"), "{text}");
+        // Fourth code review #8: with no usable reading nothing is being
+        // re-sent, so it mustn't say "retrying".
+        assert!(text.contains("HEM keeps trying"), "{text}");
+        assert!(!text.contains("retrying"), "{text}");
+    }
+
+    #[test]
+    fn the_gave_up_restore_message_says_what_to_put_back() {
+        let text = build_dispatch_hold_gave_up_message("pause discharging from 16:00 to 19:00");
+        assert!(text.contains("stopped trying"), "{text}");
+        assert!(text.contains("may still be paused"), "{text}");
+        assert!(
+            text.contains("Set it back to: pause discharging from 16:00 to 19:00."),
+            "{text}"
+        );
     }
 
     #[test]

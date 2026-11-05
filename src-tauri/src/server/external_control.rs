@@ -231,11 +231,7 @@ async fn require_operation_capability_inner(
 }
 
 async fn snapshot_pause_baseline_unavailable(state: &Arc<AppState>, mode_only: bool) -> bool {
-    fn valid_hhmm(value: u16) -> bool {
-        let hour = value / 100;
-        let minute = value % 100;
-        hour < 24 && minute < 60
-    }
+    let valid_hhmm = |value| crate::modbus::registers::decode_hhmm(value).is_some();
 
     let snapshot = state.latest_snapshot.lock().await;
     let Some(snapshot) = snapshot.as_ref() else {
@@ -654,6 +650,9 @@ async fn run_pause_start(
             "calibration_running",
             crate::server::calibration::CALIBRATION_RUNNING,
         );
+    }
+    if let Some((code, message)) = api::dispatch_hold_baseline_refusal(&state).await {
+        return capability_error(StatusCode::CONFLICT, code, message);
     }
     if let Err(response) = require_operation_capability(&state, mode.operation()).await {
         return *response;
@@ -2382,6 +2381,76 @@ mod tests {
             }
             assert!(state.pending_writes.lock().await.is_empty());
             assert!(state.pause_mode_revert.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_mode_is_refused_while_the_dispatch_hold_holds() {
+        // Issue #431: queued behind the hold, it would run once the smart
+        // charge ended with a window that no longer made sense.
+        with_isolated_config_dir_async(|| async {
+            for mode in ["charge", "discharge", "both"] {
+                // A fresh state each time: starts are rate-limited.
+                let state = setup_native_pause().await;
+                *state.dispatch_hold_state.lock().await =
+                    crate::inverter::poll::DispatchHoldState::Holding;
+                let (status, body) = request(
+                    state.clone(),
+                    "pause-mode",
+                    Some("integration-key"),
+                    json!({"mode": mode, "minutes": 30}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{mode}: {body}");
+                assert_eq!(body["code"], "dispatch_hold_active", "{mode}: {body}");
+                assert!(state.pending_writes.lock().await.is_empty());
+                assert!(state.pause_mode_revert.lock().await.is_none());
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_mode_waits_for_the_dispatch_hold_restore() {
+        // Code review #2: until the restore reads back, HR 318-320 still hold
+        // the hold's all-day pause, and this baseline would put it back when
+        // the external pause ends.
+        with_isolated_config_dir_async(|| async {
+            let state = setup_native_pause().await;
+            *state.dispatch_hold_state.lock().await =
+                crate::inverter::poll::DispatchHoldState::Releasing;
+            let (status, body) = request(
+                state.clone(),
+                "pause-mode",
+                Some("integration-key"),
+                json!({"mode": "discharge", "minutes": 30}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["code"], "dispatch_hold_restoring", "{body}");
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert!(state.pause_mode_revert.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn external_force_discharge_is_refused_while_the_dispatch_hold_holds() {
+        with_isolated_config_dir_async(|| async {
+            let state = setup_native_pause().await;
+            *state.dispatch_hold_state.lock().await =
+                crate::inverter::poll::DispatchHoldState::Holding;
+            let (status, body) = request(
+                state.clone(),
+                "force-discharge",
+                Some("integration-key"),
+                json!({"minutes": 30}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert!(state.force_discharge_revert.lock().await.is_none());
+            assert!(state.pending_writes.lock().await.is_empty());
         })
         .await;
     }

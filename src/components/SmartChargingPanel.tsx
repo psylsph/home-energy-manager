@@ -107,9 +107,17 @@ export default function SmartChargingPanel() {
         </p>
       )}
 
-      {watching && data.holding && (
+      {watching && data.holding && !data.hold_failing && (
         <p role="status" className="mt-3 rounded-lg border border-green-500/30 bg-green-950/20 px-3 py-2 text-xs text-green-300">
           Holding the battery now: your car is smart-charging.
+        </p>
+      )}
+
+      {/* Failing without holding: an All-in-One hold that never had a usable
+          reading to save, so it never paused (third code review #4). */}
+      {watching && data.hold_failing && (
+        <p role="status" className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-text-primary">
+          Couldn&apos;t pause the battery, so it may be charging the car. HEM keeps trying.
         </p>
       )}
 

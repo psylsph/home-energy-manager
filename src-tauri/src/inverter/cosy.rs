@@ -530,6 +530,9 @@ pub(crate) fn deferral_reason(owner: DischargeControlOwner) -> &'static str {
             "the inverter is in Timed Demand (Eco with discharge enabled), which is treated as a manually chosen mode whether it was selected in HEM or set elsewhere"
         }
         DischargeControlOwner::ExplicitPause => "a Pause Discharge / battery-pause is in effect",
+        DischargeControlOwner::DispatchHold => {
+            "the Intelligent Octopus Go hold is pausing the battery while the car smart-charges"
+        }
         DischargeControlOwner::ManualForce => "a manual Force Charge / Force Discharge is running",
         DischargeControlOwner::Calibration => "a battery calibration cycle is running",
         DischargeControlOwner::Safety => {

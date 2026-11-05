@@ -1734,6 +1734,10 @@ pub struct Settings {
     /// Persisted active flag so a restart mid-dispatch restores Eco.
     #[serde(default)]
     pub dispatch_hold_active_persisted: bool,
+    /// The HR 318-320 an AIO dispatch hold has to put back (issue #431),
+    /// saved before its first pause write.
+    #[serde(default)]
+    pub dispatch_hold_native: Option<crate::inverter::state_machines::DispatchHoldNative>,
 
     // -- Guided battery calibration (issue #418) --
     /// The running calibration cycle, owned by the poll loop and persisted
@@ -2208,6 +2212,7 @@ impl Default for Settings {
             octopus_sessions_join_attempted: Vec::new(),
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
+            dispatch_hold_native: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),
@@ -2950,6 +2955,7 @@ mod tests {
             octopus_sessions_join_attempted: Vec::new(),
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
+            dispatch_hold_native: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),
@@ -3711,6 +3717,7 @@ mod tests {
             octopus_sessions_join_attempted: Vec::new(),
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
+            dispatch_hold_native: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),

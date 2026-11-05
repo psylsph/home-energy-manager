@@ -819,6 +819,16 @@ pub const EMS_PLANT_HOLDING_BLOCK: RegisterBlock = RegisterBlock {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Whether a batch writes any of the pause registers HR 318-320.
+pub fn touches_pause_registers(writes: &[crate::inverter::encoder::RegisterWrite]) -> bool {
+    writes.iter().any(|write| {
+        matches!(
+            write.address,
+            HR_BATTERY_PAUSE_MODE | HR_BATTERY_PAUSE_SLOT_1_START | HR_BATTERY_PAUSE_SLOT_1_END
+        )
+    })
+}
+
 /// Decode a packed HHMM time value into (hour, minute).
 /// Returns None if the value represents an empty/disabled slot.
 ///

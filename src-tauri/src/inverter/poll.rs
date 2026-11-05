@@ -75,12 +75,13 @@ use crate::inverter::state_machines::{
     build_timed_export_disable_writes, check_adaptive_charge, check_auto_winter_with_outcome,
     check_discharge_floor, evaluate_pause_limiters, should_repair_timed_export,
     write_registers_to_inverter, AgileSlotAction, AutoWinterWriteOutcome, DischargeControlArbiter,
-    DischargeControlOwner, PauseLimiters,
+    DischargeControlOwner, PauseLimiters, DISPATCH_HOLD_LABEL,
 };
 pub use crate::inverter::state_machines::{
     AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, DischargeFloorConfig,
-    DischargeFloorState, DispatchHoldState, LoadLimiterConfig, LoadLimiterSaved, LoadLimiterState,
-    PriceSlot, TemperatureLimiterConfig, TemperatureLimiterState,
+    DischargeFloorState, DispatchHoldNative, DispatchHoldRetry, DispatchHoldState,
+    LoadLimiterConfig, LoadLimiterSaved, LoadLimiterState, PriceSlot, TemperatureLimiterConfig,
+    TemperatureLimiterState,
 };
 use crate::modbus::client::GatewayPollScope;
 use crate::modbus::client::ModbusClient;
@@ -557,6 +558,11 @@ pub struct AppState {
     pub temperature_limiter_state: Arc<Mutex<TemperatureLimiterState>>,
     /// Intelligent Octopus Go dispatch hold runtime state (issue #394).
     pub dispatch_hold_state: Arc<Mutex<DispatchHoldState>>,
+    /// Whether the inverter is taking the dispatch hold's pause (issue #431).
+    pub dispatch_hold_retry: Arc<Mutex<DispatchHoldRetry>>,
+    /// HR 318-320 an AIO dispatch hold has to put back (issue #431);
+    /// mirrors `Settings::dispatch_hold_native`.
+    pub dispatch_hold_native: Arc<Mutex<Option<DispatchHoldNative>>>,
     /// Guided battery calibration cycle (issue #418); mirrors
     /// `Settings::battery_calibration_run`.
     pub calibration_run: Arc<Mutex<Option<crate::inverter::calibration::CalibrationRun>>>,
@@ -784,6 +790,8 @@ impl AppState {
             temperature_limiter_config: Arc::new(Mutex::new(TemperatureLimiterConfig::default())),
             temperature_limiter_state: Arc::new(Mutex::new(TemperatureLimiterState::default())),
             dispatch_hold_state: Arc::new(Mutex::new(DispatchHoldState::default())),
+            dispatch_hold_retry: Arc::new(Mutex::new(DispatchHoldRetry::default())),
+            dispatch_hold_native: Arc::new(Mutex::new(None)),
             calibration_run: Arc::new(Mutex::new(None)),
             charge_cap: Arc::new(Mutex::new(Default::default())),
             full_charge_check: Arc::new(Mutex::new(Default::default())),
@@ -1389,7 +1397,7 @@ async fn run_force_charge_auto_revert(
 async fn run_force_discharge_auto_revert(
     state: &Arc<AppState>,
     client: &mut ModbusClient,
-    snapshot: &InverterSnapshot,
+    snapshot: &mut InverterSnapshot,
     arbiter: &mut DischargeControlArbiter,
     write_gap: Duration,
 ) -> Option<bool> {
@@ -1469,6 +1477,9 @@ async fn run_force_discharge_auto_revert(
                 }
                 tokio::time::sleep(write_gap).await;
             }
+            // Fourth code review #3: later readers this poll (the dispatch
+            // hold's capture) must not act on HR 318-320 from before this.
+            pause_registers_written_by(snapshot, &writes);
             Some(true)
         }
     }
@@ -2616,7 +2627,7 @@ async fn current_discharge_control_owner(state: &Arc<AppState>) -> Option<Discha
 
     let mut arbiter = DischargeControlArbiter::default();
     if load_paused || temperature_paused || dispatch_paused {
-        arbiter.request(DischargeControlOwner::Safety);
+        arbiter.request(pause_limiters_owner(load_paused || temperature_paused));
     }
     if state.calibration_run.lock().await.is_some() {
         arbiter.request(DischargeControlOwner::Calibration);
@@ -2700,6 +2711,74 @@ fn timed_export_machine_may_write(
             && arbiter.selected_owner() == Some(DischargeControlOwner::ManualMode))
 }
 
+/// The owner of the shared Eco Paused state this poll. The dispatch hold on
+/// its own yields to Manual Force (issue #431); once a thermal or load
+/// limiter takes part, the whole pause is `Safety`, so a limiter restoring
+/// Eco and the hold re-pausing in the same poll always go together.
+fn pause_limiters_owner(limiter_involved: bool) -> DischargeControlOwner {
+    if limiter_involved {
+        DischargeControlOwner::Safety
+    } else {
+        DischargeControlOwner::DispatchHold
+    }
+}
+
+/// Run a dry-run evaluation (the arbiter preview of the pause owners) without
+/// its log lines: the real evaluation later in the poll logs the same events,
+/// and the Logs page showed every hold start and failure twice (seventh code
+/// review #7).
+fn quietly<T>(dry_run: impl FnOnce() -> T) -> T {
+    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), dry_run)
+}
+
+/// The AIO hold's new capture couldn't be saved, so its pause mustn't go out
+/// (a restart couldn't restore it): put the hold back as it was and drop its
+/// writes. It counts as a poll without a usable capture, so a save that keeps
+/// failing reports the hold failing after five minutes instead of the hold
+/// doing nothing silently (sixth code review #1).
+fn dispatch_capture_not_saved(
+    state: &mut DispatchHoldState,
+    retry: &mut DispatchHoldRetry,
+    native: &mut Option<crate::inverter::state_machines::DispatchHoldNative>,
+    before: (
+        DispatchHoldState,
+        DispatchHoldRetry,
+        Option<crate::inverter::state_machines::DispatchHoldNative>,
+    ),
+    writes: &mut Vec<(&'static str, Vec<RegisterWrite>)>,
+    now: i64,
+) {
+    (*state, *retry, *native) = before;
+    retry.pause_unread(now);
+    writes.retain(|(label, _)| *label != DISPATCH_HOLD_LABEL);
+}
+
+/// Claim the arbiter for this poll's pause-owner writes and return the ones
+/// to send. Writes a higher owner keeps from going out were never sent, so
+/// the dispatch hold's retry bookkeeping goes back to `retry_before`: they
+/// must not count as attempts the inverter refused.
+fn arbitrate_pause_limiter_writes(
+    arbiter: &mut DischargeControlArbiter,
+    writes: Vec<(&'static str, Vec<RegisterWrite>)>,
+    limiter_involved: bool,
+    retry: &mut DispatchHoldRetry,
+    retry_before: &DispatchHoldRetry,
+) -> Vec<(&'static str, Vec<RegisterWrite>)> {
+    if writes.is_empty() {
+        return writes;
+    }
+    let limiter_involved = limiter_involved
+        || writes
+            .iter()
+            .any(|(label, _)| *label != DISPATCH_HOLD_LABEL);
+    if arbiter.request(pause_limiters_owner(limiter_involved)) {
+        writes
+    } else {
+        *retry = retry_before.clone();
+        Vec::new()
+    }
+}
+
 /// Take only batches that belong to the winning discharge owner for this poll.
 /// Lower-priority owned batches stay queued and are retried after the winner
 /// releases the inverter. Unowned batches are independent register work and
@@ -2768,6 +2847,21 @@ async fn drain_write_batches(
         tracing::warn!("Command ledger dispatch mark failed: {e}");
     }
     drain_write_batches_with_gap(client, pending, inter_write_gap).await
+}
+
+/// HEM has just written HR 318-320, so this poll's read of them is out of
+/// date. Marking it stale makes every later reader this poll (the dispatch
+/// hold's capture, pause and Force baselines, the command ledger) wait for
+/// the next read instead of acting on values from before the write.
+fn pause_registers_written(snapshot: &mut InverterSnapshot) {
+    snapshot.battery_pause_registers_observed_at = None;
+}
+
+/// [`pause_registers_written`] when any of `writes` is to HR 318-320.
+fn pause_registers_written_by(snapshot: &mut InverterSnapshot, writes: &[RegisterWrite]) {
+    if crate::modbus::registers::touches_pause_registers(writes) {
+        pause_registers_written(snapshot);
+    }
 }
 
 /// Execute a direct poll-loop transition with strict ordering. The first
@@ -4458,28 +4552,43 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     let mut preview_temperature_state = temperature_state;
                                     let mut preview_load_state = load_state;
                                     let mut preview_dispatch_state = dispatch_state;
+                                    let mut preview_dispatch_retry =
+                                        state.dispatch_hold_retry.lock().await.clone();
+                                    let mut preview_dispatch_native =
+                                        state.dispatch_hold_native.lock().await.clone();
                                     let mut preview_saved =
                                         state.load_limiter_saved.lock().await.clone();
-                                    let preview_writes = evaluate_pause_limiters(
-                                        &snapshot,
-                                        PauseLimiters {
-                                            temperature_config: &temperature_config,
-                                            temperature_state: &mut preview_temperature_state,
-                                            load_config: &load_config,
-                                            load_state: &mut preview_load_state,
-                                            dispatch_state: &mut preview_dispatch_state,
-                                            saved: &mut preview_saved,
-                                        },
-                                        in_dispatch,
-                                        poll_settings.poll_interval,
-                                        inverter_minute,
-                                        false,
-                                    );
-                                    reaches_battery
-                                        && (already_pausing || !preview_writes.is_empty())
+                                    let preview_writes = quietly(|| {
+                                        evaluate_pause_limiters(
+                                            &snapshot,
+                                            PauseLimiters {
+                                                temperature_config: &temperature_config,
+                                                temperature_state: &mut preview_temperature_state,
+                                                load_config: &load_config,
+                                                load_state: &mut preview_load_state,
+                                                dispatch_state: &mut preview_dispatch_state,
+                                                dispatch_retry: &mut preview_dispatch_retry,
+                                                dispatch_native: &mut preview_dispatch_native,
+                                                saved: &mut preview_saved,
+                                            },
+                                            in_dispatch,
+                                            poll_settings.poll_interval,
+                                            inverter_minute,
+                                            false,
+                                        )
+                                    });
+                                    let limiter_involved = preview_load_state
+                                        .is_actively_pausing()
+                                        || preview_temperature_state.is_actively_pausing()
+                                        || preview_writes
+                                            .iter()
+                                            .any(|(label, _)| *label != DISPATCH_HOLD_LABEL);
+                                    (reaches_battery
+                                        && (already_pausing || !preview_writes.is_empty()))
+                                    .then(|| pause_limiters_owner(limiter_involved))
                                 };
-                                if safety_demand {
-                                    discharge_arbiter.request(DischargeControlOwner::Safety);
+                                if let Some(owner) = safety_demand {
+                                    discharge_arbiter.request(owner);
                                 }
 
                                 if crate::inverter::state_machines::hr318_blocks_discharge(
@@ -4552,7 +4661,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     if let Some(may_override) = run_force_discharge_auto_revert(
                                         &state,
                                         &mut client,
-                                        &snapshot,
+                                        &mut snapshot,
                                         &mut discharge_arbiter,
                                         write_gap,
                                     )
@@ -4585,6 +4694,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             write_gap,
                                         )
                                         .await;
+                                        pause_registers_written_by(&mut snapshot, &writes);
                                     }
                                 }
 
@@ -4602,6 +4712,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         state.force_discharge_revert.lock().await.is_some();
                                     let pause_revert =
                                         state.pause_mode_revert.lock().await.is_some();
+                                    let dispatch_native =
+                                        state.dispatch_hold_native.lock().await.is_some();
                                     let context = crate::inverter::charge_cap::context_for(
                                         &snapshot,
                                         inverter_minute,
@@ -4609,6 +4721,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         force_charge,
                                         force_discharge,
                                         pause_revert,
+                                        dispatch_native,
                                     );
                                     let writes = crate::inverter::charge_cap::advance(
                                         &state, &snapshot, context,
@@ -4622,6 +4735,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             write_gap,
                                         )
                                         .await;
+                                        // Code review #9: the dispatch hold runs
+                                        // later this poll and must not capture
+                                        // HR 318 from before this write.
+                                        pause_registers_written_by(&mut snapshot, &writes);
                                     }
                                 }
 
@@ -5288,8 +5405,15 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         state.temperature_limiter_state.lock().await;
                                     let mut dispatch_state =
                                         state.dispatch_hold_state.lock().await;
+                                    let mut dispatch_retry =
+                                        state.dispatch_hold_retry.lock().await;
+                                    let mut dispatch_native =
+                                        state.dispatch_hold_native.lock().await;
                                     let mut shared_saved = state.load_limiter_saved.lock().await;
 
+                                    let dispatch_retry_before = dispatch_retry.clone();
+                                    let dispatch_state_before = dispatch_state.clone();
+                                    let dispatch_native_before = dispatch_native.clone();
                                     let limiter_writes = evaluate_pause_limiters(
                                         &snapshot,
                                         PauseLimiters {
@@ -5298,6 +5422,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             load_config: &load_config,
                                             load_state: &mut load_state,
                                             dispatch_state: &mut dispatch_state,
+                                            dispatch_retry: &mut dispatch_retry,
+                                            dispatch_native: &mut dispatch_native,
                                             saved: &mut shared_saved,
                                         },
                                         in_dispatch,
@@ -5306,6 +5432,43 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         discharge_control_may_override_pause,
                                     );
 
+                                    // Taken now, before any rollback below can undo it.
+                                    let hold_gave_up = dispatch_retry.take_gave_up();
+
+                                    // A new AIO capture must be on disk before its pause
+                                    // is written, so a restart can always put HR 318-320
+                                    // back (issue #431). If it can't be saved, nothing
+                                    // changes and the hold tries again next poll.
+                                    let mut limiter_writes = limiter_writes;
+                                    if dispatch_native.is_some()
+                                        && *dispatch_native != dispatch_native_before
+                                    {
+                                        let capture = dispatch_native.clone();
+                                        let saved_capture =
+                                            settings_update_blocking(move |s| {
+                                                s.dispatch_hold_native = capture;
+                                                s.dispatch_hold_active_persisted = true;
+                                            })
+                                            .await;
+                                        if let Err(e) = saved_capture {
+                                            tracing::warn!(
+                                                "Dispatch hold: couldn't save the battery pause settings, not pausing: {e}"
+                                            );
+                                            dispatch_capture_not_saved(
+                                                &mut dispatch_state,
+                                                &mut dispatch_retry,
+                                                &mut dispatch_native,
+                                                (
+                                                    dispatch_state_before,
+                                                    dispatch_retry_before.clone(),
+                                                    dispatch_native_before,
+                                                ),
+                                                &mut limiter_writes,
+                                                snapshot.timestamp,
+                                            );
+                                        }
+                                    }
+
                                     snapshot.load_limiter_active =
                                         load_state.is_actively_pausing();
                                     snapshot.temperature_limiter_active =
@@ -5313,13 +5476,65 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     snapshot.dispatch_hold_active =
                                         dispatch_state.is_actively_pausing();
                                     let persist_saved = shared_saved.clone();
+                                    let persist_native = dispatch_native.clone();
+                                    let limiter_involved = load_state.is_actively_pausing()
+                                        || temperature_state.is_actively_pausing();
+                                    let limiter_writes = arbitrate_pause_limiter_writes(
+                                        &mut discharge_arbiter,
+                                        limiter_writes,
+                                        limiter_involved,
+                                        &mut dispatch_retry,
+                                        &dispatch_retry_before,
+                                    );
+                                    let notify_hold_failing = dispatch_retry.take_notification();
 
-                                    drop(load_config);
-                                    drop(load_state);
-                                    drop(temperature_config);
-                                    drop(temperature_state);
-                                    drop(dispatch_state);
-                                    drop(shared_saved);
+                                    if let Some(detail) = hold_gave_up {
+                                        // The restore after a smart charge wasn't
+                                        // taken in 15 minutes and HEM has let go:
+                                        // say what to put back (resent if it
+                                        // can't be delivered, for an hour).
+                                        let state = state.clone();
+                                        tokio::spawn(async move {
+                                            let text = crate::alerts::build_dispatch_hold_gave_up_message(
+                                                &detail,
+                                            );
+                                            crate::alerts::deliver_hold_failing_alert(
+                                                || {
+                                                    crate::alerts::send_text_notification(
+                                                        &state,
+                                                        &text,
+                                                        "dispatch-hold-gave-up",
+                                                    )
+                                                },
+                                                || async { true },
+                                            )
+                                            .await;
+                                        });
+                                    }
+
+                                    if notify_hold_failing {
+                                        // Delivery can take seconds; never hold up the poll.
+                                        let state = state.clone();
+                                        // A failed delivery is resent while the hold
+                                        // is still failing (second code review #8).
+                                        tokio::spawn(async move {
+                                            let text =
+                                                crate::alerts::build_dispatch_hold_failing_message();
+                                            crate::alerts::deliver_hold_failing_alert(
+                                                || {
+                                                    crate::alerts::send_text_notification(
+                                                        &state,
+                                                        &text,
+                                                        "dispatch-hold-failing",
+                                                    )
+                                                },
+                                                || async {
+                                                    state.dispatch_hold_retry.lock().await.failing()
+                                                },
+                                            )
+                                            .await;
+                                        });
+                                    }
 
                                     let persisted_reserve =
                                         persist_saved.as_ref().map(|value| value.reserve);
@@ -5334,8 +5549,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             || s.temperature_limiter_active_persisted
                                                 != temperature_limiter_active
                                             || s.dispatch_hold_active_persisted
-                                                != dispatch_hold_active;
+                                                != dispatch_hold_active
+                                            || s.dispatch_hold_native != persist_native;
                                         if changed {
+                                            s.dispatch_hold_native = persist_native;
                                             s.load_limiter_saved_reserve = persisted_reserve;
                                             s.load_limiter_active_persisted = load_limiter_active;
                                             s.temperature_limiter_active_persisted =
@@ -5350,11 +5567,21 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             "Failed to persist discharge limiter state: {e}"
                                         );
                                     }
+                                    // Saved before the locks go (sixth code review #3):
+                                    // a Resume that forgets the AIO capture in
+                                    // between would otherwise have this copy saved
+                                    // back over its own, and a restart would then
+                                    // write the stale HR 318-320 over the user's.
+                                    drop(load_config);
+                                    drop(load_state);
+                                    drop(temperature_config);
+                                    drop(temperature_state);
+                                    drop(dispatch_state);
+                                    drop(dispatch_retry);
+                                    drop(dispatch_native);
+                                    drop(shared_saved);
 
-                                    let limiter_owns_discharge = limiter_writes.is_empty()
-                                        || discharge_arbiter
-                                            .request(DischargeControlOwner::Safety);
-                                    if limiter_owns_discharge {
+                                    {
                                         for (label, writes) in limiter_writes {
                                             for write in &writes {
                                                 match client
@@ -5373,6 +5600,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 }
                                                 tokio::time::sleep(write_gap).await;
                                             }
+                                            // The AIO hold's own HR 318-320 writes
+                                            // too (sixth code review #4).
+                                            pause_registers_written_by(&mut snapshot, &writes);
                                         }
                                     }
                                 }
@@ -6416,6 +6646,45 @@ pub(crate) fn apply_ct_solar_authority(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_dispatch_hold_never_captures_hr318_from_before_the_charge_caps_write() {
+        // Code review #9: the charge cap writes HR 318 mid-poll. A hold
+        // starting later in the same poll read mode 0 from before that write,
+        // saved it as the prior, and paused with mode 2, losing the cap's
+        // charge pause for the whole dispatch.
+        use crate::inverter::model::BatteryMode;
+        use crate::inverter::state_machines::{
+            check_native_dispatch_hold, DispatchHoldRetry, DispatchHoldState,
+        };
+        let mut snapshot = InverterSnapshot {
+            timestamp: 1_800_000_000,
+            battery_mode: BatteryMode::Eco,
+            device_type: DeviceType::AllInOne6kW,
+            inverter_serial: "AIO-1".into(),
+            battery_pause_mode_raw: Some(0),
+            battery_pause_slot_start_raw: Some(0),
+            battery_pause_slot_end_raw: Some(0),
+            battery_pause_registers_observed_at: Some(1_800_000_000),
+            ..Default::default()
+        };
+        pause_registers_written(&mut snapshot);
+        let mut state = DispatchHoldState::Idle;
+        let mut retry = DispatchHoldRetry::default();
+        let mut record = None;
+        let writes = check_native_dispatch_hold(
+            &snapshot,
+            true,
+            &mut state,
+            &mut retry,
+            &mut record,
+            false,
+            false,
+        );
+        assert!(writes.is_none(), "waits for a read after the cap's write");
+        assert_eq!(record, None);
+        assert_eq!(state, DispatchHoldState::Idle);
+    }
     use super::*;
 
     const FIXED_NOW_MS: i64 = 1_700_000_000_000;
@@ -8442,7 +8711,7 @@ mod tests {
             let may_override = run_force_discharge_auto_revert(
                 &state,
                 &mut client,
-                &gen2_snapshot("SN1"),
+                &mut gen2_snapshot("SN1"),
                 &mut arbiter,
                 GAP,
             )
@@ -8459,16 +8728,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_discharge_auto_revert_that_restores_hr318_marks_this_polls_read_stale() {
+        // Fourth code review #3: the revert writes HR 318-320 back, and the
+        // dispatch hold later in the same poll could capture the values from
+        // before that write.
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let mut revert = discharge_baseline("SN1", LONG_EXPIRED);
+            revert.device_type = DeviceType::AllInOne6kW;
+            revert.firmware_version = "620".into();
+            revert.pause_registers_supported = true;
+            revert.battery_pause_mode_raw = Some(1);
+            revert.battery_pause_slot_start_raw = Some(0);
+            revert.battery_pause_slot_end_raw = Some(2359);
+            *state.force_discharge_revert.lock().await = Some(revert);
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+
+            let mut snapshot = InverterSnapshot {
+                timestamp: 1_800_000_000,
+                device_type: DeviceType::AllInOne6kW,
+                inverter_serial: "SN1".into(),
+                firmware_version: "620".into(),
+                battery_pause_mode_raw: Some(0),
+                battery_pause_slot_start_raw: Some(0),
+                battery_pause_slot_end_raw: Some(0),
+                battery_pause_registers_observed_at: Some(1_800_000_000),
+                ..Default::default()
+            };
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_discharge_auto_revert(&state, &mut client, &mut snapshot, &mut arbiter, GAP)
+                .await;
+            server.abort();
+
+            assert!(
+                recorded
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(address, _)| *address == 318),
+                "the fixture restores HR 318"
+            );
+            assert_eq!(snapshot.battery_pause_registers_observed_at, None);
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_capture_that_cannot_be_saved_reports_the_hold_failing_if_it_lasts() {
+        // Sixth code review #1: every poll rolled the hold back, retry and
+        // all, so with settings.json unwritable it never paused or said so.
+        use crate::inverter::state_machines::{
+            check_native_dispatch_hold, DispatchHoldRetry, DispatchHoldState,
+        };
+        let snap = |t: i64| InverterSnapshot {
+            timestamp: t,
+            battery_mode: BatteryMode::Eco,
+            device_type: DeviceType::AllInOne6kW,
+            inverter_serial: "AIO-1".into(),
+            battery_pause_mode_raw: Some(0),
+            battery_pause_slot_start_raw: Some(0),
+            battery_pause_slot_end_raw: Some(0),
+            battery_pause_registers_observed_at: Some(t),
+            ..Default::default()
+        };
+        let mut state = DispatchHoldState::Idle;
+        let mut retry = DispatchHoldRetry::default();
+        let mut native = None;
+        for t in [0, 30, 150, 299, 300] {
+            let at = 1_800_000_000 + t;
+            let before = (state.clone(), retry.clone(), native.clone());
+            let writes = check_native_dispatch_hold(
+                &snap(at),
+                true,
+                &mut state,
+                &mut retry,
+                &mut native,
+                false,
+                false,
+            )
+            .expect("the hold would pause");
+            let mut labelled = vec![(DISPATCH_HOLD_LABEL, writes)];
+            dispatch_capture_not_saved(
+                &mut state,
+                &mut retry,
+                &mut native,
+                before,
+                &mut labelled,
+                at,
+            );
+            assert!(labelled.is_empty(), "nothing goes out unsaved");
+            assert_eq!(native, None);
+            assert_eq!(state, DispatchHoldState::Idle);
+            assert_eq!(retry.cannot_start(), t >= 300, "{t} s");
+        }
+        assert!(retry.take_notification());
+    }
+
+    #[test]
+    fn the_arbiter_preview_logs_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct CountEvents(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountEvents {
+            fn on_event(
+                &self,
+                _event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let events = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountEvents(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("the real evaluation");
+            let value = quietly(|| {
+                tracing::warn!("the preview");
+                7
+            });
+            assert_eq!(value, 7);
+            tracing::info!("logging is back afterwards");
+        });
+        assert_eq!(events.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn only_a_write_to_hr318_to_320_marks_the_pause_read_stale() {
+        let fresh = || InverterSnapshot {
+            timestamp: 5,
+            battery_pause_registers_observed_at: Some(5),
+            ..Default::default()
+        };
+        let write = |address| RegisterWrite { address, value: 0 };
+        for address in [318, 319, 320] {
+            let mut snap = fresh();
+            pause_registers_written_by(&mut snap, &[write(110), write(address)]);
+            assert_eq!(snap.battery_pause_registers_observed_at, None, "{address}");
+        }
+        for address in [110, 317, 321] {
+            let mut snap = fresh();
+            pause_registers_written_by(&mut snap, &[write(address)]);
+            assert_eq!(
+                snap.battery_pause_registers_observed_at,
+                Some(5),
+                "{address}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn discharge_auto_revert_leaves_the_pause_flag_alone_when_not_due() {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
             let (mut client, recorded, server) = spawn_write_recorder().await;
-            let snap = gen2_snapshot("SN1");
+            let mut snap = gen2_snapshot("SN1");
 
             // No baseline.
             let mut arbiter = DischargeControlArbiter::default();
             assert_eq!(
-                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                run_force_discharge_auto_revert(&state, &mut client, &mut snap, &mut arbiter, GAP)
                     .await,
                 None
             );
@@ -8477,7 +8896,7 @@ mod tests {
                 Some(discharge_baseline("SN1", NEVER_EXPIRES));
             let mut arbiter = DischargeControlArbiter::default();
             assert_eq!(
-                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                run_force_discharge_auto_revert(&state, &mut client, &mut snap, &mut arbiter, GAP)
                     .await,
                 None
             );
@@ -8487,7 +8906,7 @@ mod tests {
             let mut arbiter = DischargeControlArbiter::default();
             arbiter.request(DischargeControlOwner::Safety);
             assert_eq!(
-                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                run_force_discharge_auto_revert(&state, &mut client, &mut snap, &mut arbiter, GAP)
                     .await,
                 None
             );
@@ -8504,17 +8923,23 @@ mod tests {
             *state.force_discharge_revert.lock().await =
                 Some(discharge_baseline("SN1", LONG_EXPIRED));
             let (mut client, recorded, server) = spawn_write_recorder().await;
-            let snap = gen2_snapshot("SN1");
+            let mut snap = gen2_snapshot("SN1");
 
             let mut arbiter = DischargeControlArbiter::default();
-            run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP).await;
+            run_force_discharge_auto_revert(&state, &mut client, &mut snap, &mut arbiter, GAP)
+                .await;
             let first = recorded.lock().unwrap().len();
             assert!(first > 0);
 
             let mut next_cycle = DischargeControlArbiter::default();
-            let again =
-                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut next_cycle, GAP)
-                    .await;
+            let again = run_force_discharge_auto_revert(
+                &state,
+                &mut client,
+                &mut snap,
+                &mut next_cycle,
+                GAP,
+            )
+            .await;
             server.abort();
             assert_eq!(again, None);
             assert_eq!(recorded.lock().unwrap().len(), first);
@@ -8533,7 +8958,7 @@ mod tests {
             let may_override = run_force_discharge_auto_revert(
                 &state,
                 &mut client,
-                &gen2_snapshot("SN-NEW"),
+                &mut gen2_snapshot("SN-NEW"),
                 &mut arbiter,
                 GAP,
             )
@@ -8559,7 +8984,7 @@ mod tests {
             let may_override = run_force_discharge_auto_revert(
                 &state,
                 &mut client,
-                &gen2_snapshot(""),
+                &mut gen2_snapshot(""),
                 &mut arbiter,
                 GAP,
             )
@@ -10432,6 +10857,158 @@ mod tests {
         );
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].writes[0].address, 1);
+    }
+
+    // ---- Manual commands during a dispatch hold (issue #431) ----
+
+    #[test]
+    fn force_charge_queued_during_a_dispatch_hold_runs_at_once() {
+        // #431: three Force Charge presses during a dispatch all waited for
+        // the hold to end, then ran back to back with their old windows.
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        let mut queue = vec![PendingWriteBatch {
+            command_id: None,
+            writes: vec![RegisterWrite {
+                address: 96,
+                value: 1,
+            }],
+            completion: None,
+            policy: Default::default(),
+            owner: Some(DischargeControlOwner::ManualForce),
+        }];
+        let (taken, winner) =
+            take_pending_writes_for_owner(&mut queue, 8, Some(DischargeControlOwner::DispatchHold));
+        assert_eq!(winner, Some(DischargeControlOwner::ManualForce));
+        assert_eq!(taken.len(), 1);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn the_dispatch_hold_still_defers_automations_and_mode_changes() {
+        use super::{take_pending_writes_for_owner, PendingWriteBatch};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::DischargeControlOwner;
+
+        for owner in [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+        ] {
+            let mut queue = vec![PendingWriteBatch {
+                command_id: None,
+                writes: vec![RegisterWrite {
+                    address: 27,
+                    value: 0,
+                }],
+                completion: None,
+                policy: Default::default(),
+                owner: Some(owner),
+            }];
+            let (taken, winner) = take_pending_writes_for_owner(
+                &mut queue,
+                8,
+                Some(DischargeControlOwner::DispatchHold),
+            );
+            assert_eq!(
+                winner,
+                Some(DischargeControlOwner::DispatchHold),
+                "{owner:?}"
+            );
+            assert!(taken.is_empty(), "{owner:?}");
+            assert_eq!(queue.len(), 1, "{owner:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_hold_alone_owns_as_the_dispatch_hold_not_as_safety() {
+        use crate::inverter::state_machines::DischargeControlOwner;
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            assert_eq!(
+                super::current_discharge_control_owner(&state).await,
+                Some(DischargeControlOwner::DispatchHold)
+            );
+
+            // A limiter pausing as well keeps the whole pause at Safety.
+            *state.load_limiter_state.lock().await = LoadLimiterState::Paused;
+            assert_eq!(
+                super::current_discharge_control_owner(&state).await,
+                Some(DischargeControlOwner::Safety)
+            );
+        })
+        .await;
+    }
+
+    #[test]
+    fn pause_owner_is_safety_whenever_a_limiter_takes_part() {
+        use super::pause_limiters_owner;
+        use crate::inverter::state_machines::DischargeControlOwner;
+        assert_eq!(
+            pause_limiters_owner(false),
+            DischargeControlOwner::DispatchHold
+        );
+        assert_eq!(pause_limiters_owner(true), DischargeControlOwner::Safety);
+    }
+
+    #[test]
+    fn dispatch_pause_writes_dropped_for_force_charge_are_not_counted_as_attempts() {
+        // While Force Charge outranks the hold, the hold's pause is never
+        // sent, so it must not end up reported as refused by the inverter.
+        use super::{arbitrate_pause_limiter_writes, DispatchHoldRetry};
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::state_machines::{DischargeControlArbiter, DischargeControlOwner};
+
+        let writes = vec![(
+            "Dispatch hold",
+            vec![RegisterWrite {
+                address: 110,
+                value: 100,
+            }],
+        )];
+        let before = DispatchHoldRetry::default();
+        let mut retry = DispatchHoldRetry {
+            unconfirmed: 3,
+            last_sent: Some(1_000),
+            failing: true,
+            notified: false,
+            foreign_readings: 0,
+            unread_since: None,
+            restore_started: None,
+            gave_up: None,
+        };
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::ManualForce);
+        let sent = arbitrate_pause_limiter_writes(
+            &mut arbiter,
+            writes.clone(),
+            false,
+            &mut retry,
+            &before,
+        );
+        assert!(sent.is_empty());
+        assert_eq!(retry, before, "the dropped attempt is undone");
+
+        // With nothing outranking it, the writes go and the attempt stands.
+        let mut arbiter = DischargeControlArbiter::default();
+        let attempted = DispatchHoldRetry {
+            unconfirmed: 1,
+            last_sent: Some(1_000),
+            ..Default::default()
+        };
+        let mut retry = attempted.clone();
+        let sent = arbitrate_pause_limiter_writes(&mut arbiter, writes, false, &mut retry, &before);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(retry, attempted);
+        assert_eq!(
+            arbiter.selected_owner(),
+            Some(DischargeControlOwner::DispatchHold)
+        );
     }
 
     #[test]

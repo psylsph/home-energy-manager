@@ -536,7 +536,10 @@ owner stay queued until that owner wins a later cycle.
 
 From highest to lowest priority:
 
-1. **Safety**: the load or temperature limiter is holding discharge.
+1. **Safety**: the load or temperature limiter is holding discharge. When
+   the Intelligent Octopus Go dispatch hold pauses at the same time, the
+   whole shared pause is Safety, so a limiter restoring Eco and the hold
+   re-pausing in the same poll always go out together.
 2. **Calibration**: a guided battery calibration cycle is running (issue
    #418). It waits, writing nothing, while a Safety owner holds. While it
    runs, the Intelligent Octopus Go dispatch hold, auto-winter, Adaptive
@@ -545,20 +548,30 @@ From highest to lowest priority:
 3. **Manual Force**: a Force Charge or Force Discharge is running. It may
    lift an HR318 pause for its window, but only after capturing HR318-320,
    and it restores them when it ends.
-4. **Explicit pause**: HR318 is blocking discharge right now, the inverter
+4. **Dispatch hold**: the Intelligent Octopus Go hold alone is pausing the
+   battery for a smart charge, or retrying the restore after one (issue
+   #431). Force Charge outranks it, since charging still keeps the battery
+   from emptying into the car, and it never touches the registers the pause
+   uses. Force Discharge, battery pauses and Timed Discharge are refused
+   while the hold is holding and until its restore has read back, since
+   they would otherwise queue behind it or capture its pause as their own
+   baseline. The restore is retried for 15 minutes at most; if the inverter
+   still hasn't taken it, HEM alerts with what to put back and lets go, so
+   the hold stops owning the battery and the refusals end.
+5. **Explicit pause**: HR318 is blocking discharge right now, the inverter
    reports Eco Paused or Export Paused, or a native battery pause has been
    requested through the API.
-5. **Manual mode**: the inverter is in Timed Demand (HR27=1 with discharge
+6. **Manual mode**: the inverter is in Timed Demand (HR27=1 with discharge
    enabled) and neither Cosy nor Agile set it, so it is treated as a mode
    the user chose, whether in HEM or elsewhere.
-6. **Timed Export**: an enabled HEM-managed export schedule is inside its
+7. **Timed Export**: an enabled HEM-managed export schedule is inside its
    window or still in transition. There is one exception: when the managed
    schedule is enabled, Timed Export may override a register-derived Manual
    mode claim. That Timed Demand shape is exactly what re-arming firmware
    leaves behind (see [Firmware that re-arms HR59](#firmware-that-re-arms-hr59)),
    and the reconciler has to be able to repair it.
-7. **Timed Charge**: the Cosy / scheduled charge automation.
-8. **Agile**: the price-driven Agile automation.
+8. **Timed Charge**: the Cosy / scheduled charge automation.
+9. **Agile**: the price-driven Agile automation.
 
 An automation that is outranked goes on hold rather than failing. The
 Control page shows why (`deferral_reason` in `inverter/cosy.rs`,

@@ -5,6 +5,7 @@ const REASONS: Record<string, string> = {
   force: 'a manual Force Charge or Force Discharge is running',
   calibration: 'a battery calibration cycle is running',
   safety: 'a safety limit (high load or temperature) is holding the battery',
+  dispatch_hold: 'the Intelligent Octopus Go hold is pausing the battery while your car smart-charges',
 };
 
 /**
