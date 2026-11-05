@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2026-11-05
+
+### Added
+
+- **Today's statistics are now two balance bars.** Energy In (solar, grid import and battery out) and Energy Out (home use, grid export and battery in) share one scale, so any gap between them stays visible, and each segment shows its own name and value. A line underneath says how much of the day's solar stayed in the house and how much of the energy in came off the grid, and the ⓘ explains how Home Use is worked out. On the AC-coupled models and the All-in-Ones, which have no solar input of their own, it says the separate solar system isn't measured. The house view's cards are more compact so the Status page still fits without scrolling.
+
+### Fixed
+
+- **The Intelligent Octopus Go battery hold now works on an All-in-One behind a Gateway (#431).** It used to keep failing to pause the battery. It now pauses discharge only, so Force Charge and charge slots still charge during a smart charge, and it puts your own pause settings back afterwards. If the inverter won't take them back within 15 minutes, HEM sends an alert saying what to set them to and stops trying, instead of holding the battery for good. If the hold can't pause the battery at all, the Octopus page and an alert say so.
+- **Pause, Force Discharge and Timed Discharge no longer queue silently during a smart charge.** They are refused with a reason while the hold is pausing the battery or putting its settings back, rather than being applied late, after the charge had ended. Cosy and Agile now say the hold is why they stood aside.
+- **Charge Cap no longer leaves charging paused if the inverter's model code changes.** It now recognises its inverter by serial number, and it waits until the serial is known before it starts.
+- **Energy Tariffs says the Planner uses its windows too.** The hint said they were only for the History page's costs.
+
 ## [1.7.2] - 2026-11-04
 
 ### Changed
