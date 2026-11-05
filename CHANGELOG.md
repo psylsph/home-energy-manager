@@ -2,11 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.8.1] - 2026-11-05
 
 ### Changed
 
 - **The house view's sky shows the sun, and only the sun.** After sunset the arc now moves on to the next day's sunrise and sunset instead of plotting the moon's rise and set, so its two times always mean daylight. The moon's pass read as an implausibly long day, and after dark at a Scottish latitude as a sunrise in the small hours.
+- **The Today card explains missing solar only where it applies.** On AC-coupled inverters and the All-in-Ones the note that the separate solar system isn't measured now sits behind the ⓘ instead of taking a line of its own, and other models no longer see it.
 
 ## [1.8.0] - 2026-11-05
 
