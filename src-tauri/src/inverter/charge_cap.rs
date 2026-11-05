@@ -198,7 +198,8 @@ pub struct ChargeCapContext {
     /// calibration cycle is active.
     pub wants_charge: bool,
     /// Another owner has saved HR 318 and may put the cap's pause back later
-    /// (a remote pause, Force Discharge's restore, or calibration).
+    /// (a remote pause, Force Discharge's restore, calibration, or the
+    /// dispatch hold's native pause on an AIO).
     pub other_pause_owner: bool,
 }
 
@@ -335,6 +336,7 @@ pub fn context_for(
     force_charge: bool,
     force_discharge_revert: bool,
     pause_mode_revert: bool,
+    dispatch_native_pause: bool,
 ) -> ChargeCapContext {
     let charge_slot_running = snapshot.enable_charge
         && crate::inverter::state_machines::export_window_contains(
@@ -343,7 +345,10 @@ pub fn context_for(
         );
     ChargeCapContext {
         wants_charge: calibrating || force_charge || charge_slot_running,
-        other_pause_owner: calibrating || force_discharge_revert || pause_mode_revert,
+        other_pause_owner: calibrating
+            || force_discharge_revert
+            || pause_mode_revert
+            || dispatch_native_pause,
     }
 }
 
@@ -557,6 +562,14 @@ pub fn evaluate(
         runtime.readings_at_cap = 0;
         return Vec::new();
     }
+    // A record needs an inverter to belong to: saved under an empty serial
+    // it would later look foreign and be dropped with the cap's pause still
+    // on (seventh code review #8).
+    if snapshot.inverter_serial.is_empty() {
+        runtime.state = ChargeCapState::Pending;
+        runtime.readings_at_cap = 0;
+        return Vec::new();
+    }
     runtime.readings_at_cap = runtime.readings_at_cap.saturating_add(1);
     if runtime.readings_at_cap < ENGAGE_READINGS {
         runtime.state = ChargeCapState::Pending;
@@ -692,10 +705,11 @@ fn hold_writes(mode_only: bool) -> Vec<RegisterWrite> {
     ]
 }
 
-/// Whether a hold record was captured on the snapshot's inverter.
+/// Whether a hold record was captured on the snapshot's inverter. The serial
+/// identifies it, as for the Force baselines and the dispatch hold's capture:
+/// a same-serial code change is still this inverter and must keep its release.
 pub fn hold_matches_inverter(hold: &ChargeCapHold, snapshot: &InverterSnapshot) -> bool {
     hold.inverter_serial == snapshot.inverter_serial
-        && hold.device_type_code == snapshot.device_type_code
 }
 
 /// HR 318 from this poll's own read, or `None` when it's stale or unread.
@@ -1759,6 +1773,70 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_never_engages_on_an_inverter_it_cannot_name() {
+        // Seventh code review #8: a record saved under an empty serial was
+        // later dropped as another inverter's, with the cap's pause still on.
+        let mut runtime = ChargeCapRuntime::default();
+        let mut hold = None;
+        for step in 0..(ENGAGE_READINGS as i64 + 2) {
+            let mut snap = later(aio(96, 0, 1600, 1900), step * 10);
+            snap.inverter_serial.clear();
+            let writes = run(
+                &snap,
+                &enabled(),
+                Default::default(),
+                &mut runtime,
+                &mut hold,
+            );
+            assert!(writes.is_empty(), "step {step}");
+        }
+        assert!(hold.is_none());
+        assert_eq!(runtime.state, ChargeCapState::Pending);
+        // Named again: it engages as normal.
+        let named = |secs| later(aio(96, 0, 1600, 1900), secs);
+        run(
+            &named(100),
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        let writes = run(
+            &named(110),
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert!(!writes.is_empty());
+        assert_eq!(
+            hold.as_ref().map(|h| h.inverter_serial.as_str()),
+            Some("SA1234")
+        );
+    }
+
+    #[test]
+    fn a_record_survives_a_model_code_change_on_the_same_inverter() {
+        // Second code review: the serial identifies the inverter, as for the
+        // dispatch hold's capture and the Force baselines. A same-serial code
+        // change used to drop the record and leave charging paused for good.
+        let mut runtime = ChargeCapRuntime::default();
+        let mut hold = Some(aio_hold(1600, 1900));
+        for step in 0..(FOREIGN_READINGS as i64 + 2) {
+            let mut snap = later(aio(80, 1, CAP_WINDOW_START, CAP_WINDOW_END), step * 10);
+            snap.device_type_code = "8002".into();
+            run(
+                &snap,
+                &enabled(),
+                Default::default(),
+                &mut runtime,
+                &mut hold,
+            );
+        }
+        assert!(hold.is_some(), "kept for the same serial");
+    }
+
+    #[test]
     fn a_release_is_confirmed_when_the_old_window_was_already_all_day() {
         let (mut runtime, mut hold) = engaged((CAP_WINDOW_START, CAP_WINDOW_END));
         run(
@@ -2031,7 +2109,7 @@ mod tests {
         let mut snap = aio(96, 0, 0, 0);
         snap.charge_slots[0] = slot((23, 30), (5, 30));
         snap.enable_charge = true;
-        let at = |minute| context_for(&snap, minute, false, false, false, false);
+        let at = |minute| context_for(&snap, minute, false, false, false, false, false);
         assert!(at(0).wants_charge, "overnight slot after midnight");
         assert!(at(23 * 60 + 45).wants_charge);
         assert!(!at(12 * 60).wants_charge, "outside the slot");
@@ -2039,7 +2117,7 @@ mod tests {
 
         snap.enable_charge = false;
         assert!(
-            !context_for(&snap, 0, false, false, false, false).wants_charge,
+            !context_for(&snap, 0, false, false, false, false, false).wants_charge,
             "a slot with charging disabled doesn't charge"
         );
     }
@@ -2047,13 +2125,16 @@ mod tests {
     #[test]
     fn force_charge_and_calibration_want_charge_and_pause_owners_are_seen() {
         let snap = aio(96, 0, 0, 0);
-        assert!(context_for(&snap, 0, false, true, false, false).wants_charge);
-        let calibrating = context_for(&snap, 0, true, false, false, false);
+        assert!(context_for(&snap, 0, false, true, false, false, false).wants_charge);
+        let calibrating = context_for(&snap, 0, true, false, false, false, false);
         assert!(calibrating.wants_charge && calibrating.other_pause_owner);
-        assert!(context_for(&snap, 0, false, false, true, false).other_pause_owner);
-        assert!(context_for(&snap, 0, false, false, false, true).other_pause_owner);
+        assert!(context_for(&snap, 0, false, false, true, false, false).other_pause_owner);
+        assert!(context_for(&snap, 0, false, false, false, true, false).other_pause_owner);
+        // The dispatch hold's native pause on an AIO (issue #431).
+        let held = context_for(&snap, 0, false, false, false, false, true);
+        assert!(held.other_pause_owner && !held.wants_charge);
         assert_eq!(
-            context_for(&snap, 0, false, false, false, false),
+            context_for(&snap, 0, false, false, false, false, false),
             ChargeCapContext::default()
         );
     }
