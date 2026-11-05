@@ -50,11 +50,14 @@ export const READING_SLOTS: Record<'solar' | 'home' | 'grid' | 'battery' | 'ev',
   // (issue #401); far enough left that the widest status pill
   // ("Disconnected") stays clear of the roof's eave.
   ev: { x: 4, valueY: 142, edgeY: 194 },
-  // Bottom readings sit close under their anchors so the leaders stay short
-  // and don't cross the gable wall: Grid straight below the gate.
-  grid: { x: anchorX('grid'), valueY: 446, edgeY: 424 },
+  // Bottom readings sit as close under their anchors as the plot edges above
+  // them allow (per reading: the plot's deepest ink — the front-right corner,
+  // y ≈ 382 — falls in the strip between the two readings), and the status
+  // pill's bottom line (valueY + 46) keeps the viewBox's bottom margin.
+  // Issue #429 rounds 2 and 3 tightened this gap.
+  grid: { x: anchorX('grid'), valueY: 402, edgeY: 380 },
   // Straight below the cabinet's front foot: a single vertical leader.
-  battery: { x: anchorX('battery'), valueY: 446, edgeY: 424 },
+  battery: { x: anchorX('battery'), valueY: 402, edgeY: 380 },
 };
 
 /**

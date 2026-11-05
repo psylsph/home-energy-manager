@@ -826,7 +826,7 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
         - snap.today_charge_kwh)
         .max(0.0);
     snap.today_consumption_kwh = consumption_kwh;
-    // home_energy_today_kwh mirrors the formula so the SummaryTiles and
+    // home_energy_today_kwh mirrors the formula so the EnergyBalanceBars and
     // HistoryPage consumption displays read the same register-derived
     // value (no integration, no prev state, no stuck-at-0 risk).
     snap.home_energy_today_kwh = consumption_kwh;
@@ -1761,7 +1761,7 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_discharge_kwh = uint32(get_reg(data, 28), get_reg(data, 29)) as f32 * 0.1;
     snap.today_consumption_kwh = uint32(get_reg(data, 36), get_reg(data, 37)) as f32 * 0.1;
     // Three-phase has a native e_load_today register; mirror it so the
-    // SummaryTiles / HistoryPage consumption display reads the same value
+    // EnergyBalanceBars / HistoryPage consumption display reads the same value
     // regardless of inverter type.
     snap.home_energy_today_kwh = snap.today_consumption_kwh;
     snap.today_ac_charge_kwh = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
@@ -2346,7 +2346,7 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_discharge_kwh = get_reg(data, 52) as f32 * 0.1; // e_aio_discharge_today
     snap.today_consumption_kwh = get_reg(data, 55) as f32 * 0.1; // e_load_today
                                                                  // Gateway has a native e_load_today register; mirror it so the
-                                                                 // SummaryTiles / HistoryPage consumption display reads the same value
+                                                                 // EnergyBalanceBars / HistoryPage consumption display reads the same value
                                                                  // regardless of inverter type.
     snap.home_energy_today_kwh = snap.today_consumption_kwh;
 

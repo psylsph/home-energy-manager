@@ -31,14 +31,16 @@ export interface ScreenPoint {
 }
 
 /** SVG viewBox. Sized so header + view + its two cards fit an iPhone 12 Pro without scrolling (Today statistics hidden). */
-export const HOUSE_VIEWBOX = { width: 390, height: 520 } as const;
+export const HOUSE_VIEWBOX = { width: 390, height: 450 } as const;
 
 /** Pixels per world unit. */
 export const ISO_SCALE = 16;
 /** Screen origin of world (0, 0, 0). */
 // Six px left of centre: the plot keeps a margin each side, and the Battery
-// reading, straight below the cabinet, still fits on the right.
-export const ISO_ORIGIN: ScreenPoint = { x: 189, y: 222 };
+// reading, straight below the cabinet, still fits on the right. Raised high
+// in the box (issue #429 round 2): the bottom readings and the pill sit
+// close under the plot.
+export const ISO_ORIGIN: ScreenPoint = { x: 189, y: 214 };
 const COS30 = Math.cos(Math.PI / 6);
 
 /** Project a world point to SVG coordinates. */
@@ -243,8 +245,10 @@ export function polylineLength(points: ScreenPoint[]): number {
 /**
  * Height of the sky band: the house, readings and weather move down by this
  * much when it's shown, into the room left under the house on a phone.
+ * (Tightened 48 → 44 in the issue #429 round-2 squeeze, then the box
+ * 466 → 450 in round 3 to take the slack under the bottom readings.)
  */
-export const SKY_BAND = 48;
+export const SKY_BAND = 44;
 
 /**
  * The sky arc, in the band: a wide, shallow path from sunrise on the left to

@@ -19,7 +19,8 @@ const CHARGE_GREEN = BATTERY_OUTPUT_COLOR;
 /** The level bars' `gap-0.5`, which the cap marker sits in. */
 const SEGMENT_GAP_PX = 2;
 const EXPORT_AMBER = SOC_MID_COLOR;
-const CARD = 'bg-bg-surface rounded-lg p-3 flex flex-col gap-1.5 min-w-0';
+/** Compact: the bars leave room for the Today statistics on the same screen (issue #429 round 2). */
+const CARD = 'bg-bg-surface rounded-lg p-2 flex flex-col gap-1 min-w-0';
 const LABEL = 'text-[11px] font-semibold uppercase tracking-wider text-text-secondary';
 
 /** Battery outline with a plus (charge), a minus (export / discharge), or plain grey when nothing is scheduled. */
@@ -28,7 +29,7 @@ function BatteryGlyph({ kind, pulsing }: { kind: BatteryEventKind | 'none'; puls
   const mark = kind === 'charge' ? 'M13 5v8M9 9h8' : kind === 'none' ? null : 'M9 9h8';
   return (
     <svg
-      width="30" height="18" viewBox="0 0 30 18" aria-hidden="true"
+      width="26" height="16" viewBox="0 0 30 18" aria-hidden="true"
       data-testid="house-charge-icon" data-kind={kind} data-pulsing={pulsing}
       className={pulsing ? 'motion-safe:animate-pulse' : undefined}
     >
@@ -66,7 +67,7 @@ function ScheduleCard({ snapshot, timedExport, nowMinute }: {
       <BatteryGlyph kind={kind} pulsing={doing} />
       <span className={LABEL}>{label}</span>
       {event ? (
-        <span className="font-mono text-lg font-semibold text-text-primary whitespace-nowrap" data-testid="house-charge-window">
+        <span className="font-mono text-base font-semibold text-text-primary whitespace-nowrap" data-testid="house-charge-window">
           {/* Merged slots can cover the whole day (00:00–00:00). */}
           {event.start === event.end ? 'All day' : `${event.start}–${event.end}`}
         </span>
@@ -85,7 +86,7 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
   return (
     <section className={CARD} data-testid="house-battery-card">
       <span className="flex items-baseline gap-1">
-        <span className="font-mono text-2xl font-semibold text-text-primary" data-testid="house-battery-stored">
+        <span className="font-mono text-xl font-semibold text-text-primary" data-testid="house-battery-stored">
           {stored === null ? '—' : stored.toFixed(1)}
         </span>
         <span className="font-mono text-xs text-text-secondary">kWh</span>
@@ -99,7 +100,7 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
             key={i}
             data-testid="house-battery-segment"
             data-lit={i < lit}
-            className="h-2.5 flex-1 rounded-sm"
+            className="h-2 flex-1 rounded-sm"
             style={{ backgroundColor: i < lit ? color : 'var(--color-bg-elevated)' }}
           />
         ))}
@@ -136,7 +137,8 @@ function ScheduleCardUnavailable() {
 function ScheduleCardLoading() {
   return (
     <section className={CARD} data-testid="house-charge-card" data-kind="none" data-state="loading">
-      <span className="h-[18px]" aria-hidden="true" />
+      {/* Matches the shrunken glyph, so the loading card is the same height. */}
+      <span className="h-[16px]" aria-hidden="true" />
       <span className={LABEL}>Schedule</span>
       <span className="text-sm text-text-secondary" data-testid="house-charge-window">…</span>
     </section>

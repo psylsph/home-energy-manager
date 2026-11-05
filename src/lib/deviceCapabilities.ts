@@ -15,6 +15,16 @@ export function isAcCoupledDevice(code: string | null | undefined): boolean {
 }
 
 /**
+ * Whether the inverter has no PV input of its own, so any solar is a
+ * separate system it doesn't measure: the AC-coupled family (0x30xx) and the
+ * residential All-in-Ones (0x80xx), as in GivTCP's `PV_STRING_VI_UNSUPPORTED`.
+ * The AIO Hybrid (0x82xx) has PV strings and isn't one.
+ */
+export function hasNoPvInput(code: string | null | undefined): boolean {
+  return isAcCoupledDevice(code) || (!!code && code.startsWith('80'));
+}
+
+/**
  * Whether the device uses the three-phase-bank charge/discharge power limit
  * registers (HR 1108/1110, already 1-100%): 0x40/60/81/82 families.
  *

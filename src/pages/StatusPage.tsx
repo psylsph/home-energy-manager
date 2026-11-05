@@ -3,7 +3,7 @@ import { useReconnect } from '../hooks/useReconnect';
 import { useNow } from '../hooks/useNow';
 import EnergyOrbitDiagram from '../components/EnergyOrbitDiagram';
 import HouseEnergyView from '../components/house/HouseEnergyView';
-import SummaryTiles from '../components/SummaryTiles';
+import EnergyBalanceBars from '../components/EnergyBalanceBars';
 import HouseStatusCards from '../components/house/HouseStatusCards';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import AwaitingConnection from '../components/AwaitingConnection';
@@ -146,12 +146,12 @@ export default function StatusPage() {
       <ColdBatteryWarning />
 
       {/* Landscape layout on lg+ (≥1024px): energy diagram on the left
-          with the house cards and summary tiles on the right, so the whole
-          status page fits in roughly 800px tall instead of forcing a scroll.
-          Below lg everything stacks under the diagram. The full battery card
-          lives on the Battery page (issue #422); the diagram already shows
-          battery power, SOC and mode. The Today tiles can be hidden in
-          Settings → Panel Controls. */}
+          with the house cards and Today balance bars on the right, so the
+          whole status page fits in roughly 800px tall instead of forcing a
+          scroll. Below lg everything stacks under the diagram. The full
+          battery card lives on the Battery page (issue #422); the diagram
+          already shows battery power, SOC and mode. The Today statistics
+          (issue #429) can be hidden in Settings → Panel Controls. */}
       <div
         className={`grid grid-cols-1 ${house || showTodayStats ? 'lg:grid-cols-2' : ''} gap-3 lg:gap-4 items-start`}
         data-testid="status-landscape-grid"
@@ -175,7 +175,7 @@ export default function StatusPage() {
           <div className="flex flex-col gap-3 lg:gap-4 min-w-0">
             {/* House view: the charge slot and battery level cards. */}
             {house && <HouseStatusCards snapshot={snapshot} />}
-            {showTodayStats && <SummaryTiles snapshot={snapshot} />}
+            {showTodayStats && <EnergyBalanceBars snapshot={snapshot} />}
           </div>
         )}
       </div>
