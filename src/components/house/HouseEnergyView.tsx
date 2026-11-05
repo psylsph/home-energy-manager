@@ -16,7 +16,7 @@ import { useEnergyFlowViewModel, type EnergyFlowSourceProps } from '../../hooks/
 import { useLiveWeather } from '../../hooks/useLiveWeather';
 import { useCarbonIntensity } from '../../hooks/useCarbonIntensity';
 import { useNow } from '../../hooks/useNow';
-import { moonLitPath, skyScene, type SkyScene } from '../../lib/moon';
+import { skyScene, type SkyScene } from '../../lib/sun';
 import { formatClock } from '../../lib/format';
 import { capLineSoc } from '../../lib/chargeCap';
 import CapMarker from '../CapMarker';
@@ -249,8 +249,6 @@ function Carbon({ carbon, y }: { carbon: CurrentCarbon; y: number }) {
 const SKY_ARC_D = skyArcD();
 
 const SUN_COLOR = '#FBBF24';
-/** The moon's outline and its time dots: visible on both themes' cards. */
-const MOON_EDGE = '#94A3B8';
 
 function SunGlyph({ x, y }: { x: number; y: number }) {
   return (
@@ -265,44 +263,23 @@ function SunGlyph({ x, y }: { x: number; y: number }) {
   );
 }
 
-/** The moon in its phase; mirrored south of the equator, where it's lit the other way. */
-function MoonGlyph({ x, y, phase, south }: { x: number; y: number; phase: number; south: boolean }) {
-  return (
-    <g data-testid="house-moon" transform={`translate(${x} ${y})${south ? ' scale(-1 1)' : ''}`}>
-      {/* Unlit disc, then the lit part over it, in theme colours: on the light
-          theme's white card the dark side carries the shape. */}
-      <circle r={6} fill="var(--app-house-moon-shadow)" stroke={MOON_EDGE} strokeWidth={0.75} />
-      <path data-testid="house-moon-lit" d={moonLitPath(phase, 6)} fill="var(--app-house-moon-lit)" />
-    </g>
-  );
-}
-
 /**
- * The sky band under the status pill: an arc from rise to set with the
- * times beside its ends — the sun's by day, the moon's real ones by night,
- * marked by a dot in that body's colour at each end. The sun moves along it
- * by day, the moon along its pass at night.
+ * The sky band under the status pill: the day's arc from sunrise to sunset with
+ * the times beside its ends, and the sun moving along it while it's up.
  */
 function Sky({ sky }: { sky: SkyScene }) {
   const { start, end } = SKY_ARC;
-  const { body } = sky.labels;
-  const rise = formatClock(sky.labels.rise);
-  const set = formatClock(sky.labels.set);
-  const dot = body === 'sun' ? SUN_COLOR : MOON_EDGE;
-  // The moon's ends may be sunset or sunrise (its path through the night),
-  // so it's described as a span, not as moonrise and moonset.
-  const label = body === 'sun' ? `Sunrise ${rise}, sunset ${set}` : `Moon tonight from ${rise} to ${set}`;
+  const rise = formatClock(sky.rise);
+  const set = formatClock(sky.set);
   const sun = sky.sun == null ? null : skyPoint(sky.sun);
-  const moon = sky.moon && { ...skyPoint(sky.moon.fraction), ...sky.moon };
   return (
-    <g data-testid="house-sky" data-labels={body} aria-label={label}>
+    <g data-testid="house-sky" aria-label={`Sunrise ${rise}, sunset ${set}`}>
       <path d={SKY_ARC_D} fill="none" stroke={TEXT_SECONDARY} strokeOpacity={0.35} strokeWidth={1} strokeDasharray="2 4" strokeLinecap="round" />
-      <circle cx={start.x} cy={start.y} r={2.5} fill={dot} data-testid="house-rise-dot" />
-      <circle cx={end.x} cy={end.y} r={2.5} fill={dot} />
+      <circle cx={start.x} cy={start.y} r={2.5} fill={SUN_COLOR} data-testid="house-rise-dot" />
+      <circle cx={end.x} cy={end.y} r={2.5} fill={SUN_COLOR} />
       {/* Clear of the sun's glow (radius 11) when it sits at either end. */}
       <text x={start.x - 14} y={start.y + 4} textAnchor="end" fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-rise-time">{rise}</text>
       <text x={end.x + 14} y={end.y + 4} fill={TEXT_SECONDARY} fontSize={10} fontFamily={MONO} data-testid="house-set-time">{set}</text>
-      {moon && <MoonGlyph x={moon.x} y={moon.y} phase={moon.phase} south={moon.south} />}
       {sun && <SunGlyph x={sun.x} y={sun.y} />}
     </g>
   );
@@ -500,7 +477,6 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
   const carbonY = weather ? 104 : 68;
   // Moves the sun along its arc; a minute is a fraction of a pixel.
   const now = useNow(60_000);
-  // Searching for the moon's rise and set takes a few hundred steps: once a minute, not every poll.
   const lat = location?.latitude;
   const lon = location?.longitude;
   const sky = useMemo(() => (lat != null && lon != null ? skyScene(now, lat, lon) : null), [now, lat, lon]);

@@ -18,7 +18,6 @@ import HouseEnergyView from '../../src/components/house/HouseEnergyView';
 import { buildEnergyFlows, FLOW_COLORS } from '../../src/lib/energyFlow';
 import { HOUSE, HOUSE_VIEWBOX, SKY_BAND, iso, skyPoint } from '../../src/lib/houseGeometry';
 import { READING_SLOTS } from '../../src/lib/houseFlow';
-import { moonLitPath, moonPass } from '../../src/lib/moon';
 import { sunTimes } from '../../src/lib/sun';
 import { formatClock } from '../../src/lib/format';
 import { useInverterStore } from '../../src/store/useInverterStore';
@@ -369,7 +368,6 @@ describe('<HouseEnergyView/>', () => {
     it('puts the sun near the top of its arc at midday, with the day\'s times at the ends', () => {
       withSky('2026-11-01T11:45:00Z');
       const sky = tid('house-sky')!;
-      expect(sky.getAttribute('data-labels')).toBe('sun');
       const [x, y] = at(tid('house-sun')!);
       const top = skyPoint(0.5);
       expect(Math.abs(x - top.x)).toBeLessThan(5);
@@ -384,49 +382,15 @@ describe('<HouseEnergyView/>', () => {
       expect(sky.getAttribute('aria-label')).toMatch(/^Sunrise \d\d:\d\d, sunset \d\d:\d\d$/);
     });
 
-    it("switches the times to tonight's moonrise and moonset after sunset", () => {
+    it("shows tomorrow's sunrise and sunset, and no body on the arc, after dark", () => {
       withSky('2026-11-01T18:00:00Z');
       const sky = tid('house-sky')!;
-      expect(sky.getAttribute('data-labels')).toBe('moon');
-      expect(sky.getAttribute('aria-label')).toMatch(/^Moon tonight from \d\d:\d\d to \d\d:\d\d$/);
-      const pass = moonPass(Date.parse('2026-11-01T18:00:00Z'), ALTON.latitude, ALTON.longitude)!;
-      expect(tid('house-rise-time')!.textContent).toBe(formatClock(pass.rise));
-      // Sets at 14:07 tomorrow afternoon: the arc ends at sunrise instead.
-      expect(pass.set).toBeGreaterThan(Date.parse('2026-11-02T12:00:00Z'));
-      expect(tid('house-set-time')!.textContent).toBe(formatClock(sunTimes(Date.parse('2026-11-02T06:00:00Z'), ALTON.latitude, ALTON.longitude)!.sunrise));
-      // Not risen yet (about 22:25 UTC) and the sun has set: nothing on the arc.
+      expect(sky.getAttribute('aria-label')).toMatch(/^Sunrise \d\d:\d\d, sunset \d\d:\d\d$/);
+      const tomorrow = sunTimes(Date.parse('2026-11-01T18:00:00Z'), ALTON.latitude, ALTON.longitude, 1)!;
+      expect(tid('house-rise-time')!.textContent).toBe(formatClock(tomorrow.sunrise));
+      expect(tid('house-set-time')!.textContent).toBe(formatClock(tomorrow.sunset));
+      // Nothing is on the arc once the sun is down.
       expect(tid('house-sun')).toBeNull();
-      expect(tid('house-moon')).toBeNull();
-    });
-
-    it('moves the moon along its pass, in its phase, once it has risen', () => {
-      withSky('2026-11-02T03:00:00Z');
-      const pass = moonPass(Date.parse('2026-11-02T03:00:00Z'), ALTON.latitude, ALTON.longitude)!;
-      const moon = tid('house-moon')!;
-      const [x, y] = at(moon);
-      const sunrise = sunTimes(Date.parse('2026-11-02T03:00:00Z'), ALTON.latitude, ALTON.longitude)!.sunrise;
-      const p = skyPoint((Date.parse('2026-11-02T03:00:00Z') - pass.rise) / (sunrise - pass.rise));
-      expect(Math.abs(x - p.x)).toBeLessThan(0.5);
-      expect(Math.abs(y - p.y)).toBeLessThan(0.5);
-      expect(tid('house-moon-lit')!.getAttribute('d')).toBe(moonLitPath(pass.phase, 6));
-      // Just past last quarter: lit on the left (waning), so not mirrored here.
-      expect(moon.getAttribute('transform')).not.toContain('scale');
-    });
-
-    it('draws only the sun by day, even with the moon up', () => {
-      expect(moonPass(Date.parse('2026-11-02T11:00:00Z'), ALTON.latitude, ALTON.longitude)!.up).toBe(true);
-      withSky('2026-11-02T11:00:00Z');
-      expect(tid('house-sky')!.getAttribute('data-labels')).toBe('sun');
-      expect(tid('house-sun')).not.toBeNull();
-      expect(tid('house-moon')).toBeNull();
-    });
-
-    it('mirrors the moon south of the equator', () => {
-      // Sydney, 05:00 local (before dawn): the waning moon is up.
-      const SYDNEY = { latitude: -33.87, longitude: 151.21 };
-      expect(moonPass(Date.parse('2026-11-02T18:00:00Z'), SYDNEY.latitude, SYDNEY.longitude)!.up).toBe(true);
-      withSky('2026-11-02T18:00:00Z', SYDNEY);
-      expect(tid('house-moon')!.getAttribute('transform')).toContain('scale(-1 1)');
     });
 
     it('keeps the sun clear of the status pill at the top of its arc', () => {

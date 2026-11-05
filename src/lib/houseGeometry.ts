@@ -239,7 +239,7 @@ export function polylineLength(points: ScreenPoint[]): number {
 }
 
 // ---------------------------------------------------------------------------
-// Sky: a band under the status pill with the sun's (or moon's) daily path
+// Sky: a band under the status pill with the sun's daily path
 // ---------------------------------------------------------------------------
 
 /**

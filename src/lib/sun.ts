@@ -1,7 +1,6 @@
 /**
- * Sunrise and sunset for the house view's sky (the moon is in `moon.ts`,
- * which shares the solar maths here). Worked out locally from the weather location's
- * coordinates with the standard sunrise equation
+ * Sunrise and sunset for the house view's sky. Worked out locally from the
+ * weather location's coordinates with the standard sunrise equation
  * (<https://en.wikipedia.org/wiki/Sunrise_equation>), good to a minute or two
  * at UK latitudes, so it needs no web request. Pure, so it's unit-tested.
  */
@@ -44,4 +43,36 @@ export function sunTimes(now: number, latitude: number, longitude: number, dayOf
   if (!(Math.abs(cosHour) <= 1)) return null;
   const halfDay = Math.acos(cosHour) / rad / 360;
   return { sunrise: fromJulian(transit - halfDay), sunset: fromJulian(transit + halfDay) };
+}
+
+/** What the house view's sky band shows at a moment. */
+export interface SkyScene {
+  /** The day's sunrise and sunset (ms): the times beside the arc's ends. */
+  rise: number;
+  set: number;
+  /** The sun's place along the arc (0 sunrise, 1 sunset), while it's up. */
+  sun: number | null;
+}
+
+/**
+ * The sky band at `now`: the day's arc with sunrise and sunset at its ends, and
+ * where the sun is on it while it's up. Once the sun has set the ends show the
+ * coming day's times (the sun isn't on the arc until then). `null` where the
+ * sun doesn't rise or set, which is where the band is left off entirely.
+ */
+export function skyScene(now: number, latitude: number, longitude: number): SkyScene | null {
+  const day = sunTimes(now, latitude, longitude);
+  if (!day) return null;
+  if (now >= day.sunset) {
+    // Tomorrow's times if there are any; a polar edge keeps tonight's.
+    const next = sunTimes(now, latitude, longitude, 1);
+    if (next && next.sunrise > now) return { rise: next.sunrise, set: next.sunset, sun: null };
+    return { rise: day.sunrise, set: day.sunset, sun: null };
+  }
+  const up = now >= day.sunrise;
+  return {
+    rise: day.sunrise,
+    set: day.sunset,
+    sun: up ? (now - day.sunrise) / (day.sunset - day.sunrise) : null,
+  };
 }

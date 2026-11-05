@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **The house view's sky shows the sun, and only the sun.** After sunset the arc now moves on to the next day's sunrise and sunset instead of plotting the moon's rise and set, so its two times always mean daylight. The moon's pass read as an implausibly long day, and after dark at a Scottish latitude as a sunrise in the small hours.
+
 ## [1.8.0] - 2026-11-05
 
 ### Added
