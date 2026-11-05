@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultBooking,
-  exportStopsAtLabel,
   formatEventWindow,
   formatSlotRange,
   splitEvents,
@@ -139,23 +138,5 @@ describe('splitEvents', () => {
     const { upcoming, recent } = splitEvents(events);
     expect(upcoming.map((e) => e.id)).toEqual(['run', 'late']);
     expect(recent.map((e) => e.id)).toEqual(['d6', 'd5', 'd4', 'd3', 'd2']);
-  });
-});
-
-describe('exportStopsAtLabel', () => {
-  it('names the inverter\'s own Minimum SOC where there is no per-slot floor', () => {
-    // Issue #446: the reporter's AC 3.0 has one discharge slot and no per-slot
-    // target SOC register, so a booked export runs to HR 110.
-    expect(exportStopsAtLabel(1, 4)).toBe('Stops at 4% · Minimum SOC');
-    expect(exportStopsAtLabel(2, 7)).toBe('Stops at 7% · Minimum SOC');
-  });
-
-  it('still says where it stops when the level has not been read yet', () => {
-    expect(exportStopsAtLabel(1, null)).toBe('Stops at Minimum SOC');
-  });
-
-  it('says nothing where the floor slider is shown, so it is not said twice', () => {
-    expect(exportStopsAtLabel(3, 20)).toBeNull();
-    expect(exportStopsAtLabel(10, 35)).toBeNull();
   });
 });

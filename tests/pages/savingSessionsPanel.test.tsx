@@ -323,44 +323,43 @@ describe('SavingSessionsPanel', () => {
       );
     });
 
-    it('offers no slot choice and no Save when the inverter has a single slot', async () => {
-      // Nothing is configurable: the one slot is used. A Save button that can
-      // never enable, and a picker with one option, would only confuse.
+    it('offers the floor but no slot choice when the inverter has a single slot', async () => {
+      // Issue #446: the one slot is used, but the stop level is still the
+      // user's to choose — on this inverter HEM holds it in Minimum SOC.
       apiGet.mockResolvedValue(
-        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 4 }),
+        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 20 }),
       );
       render(<SavingSessionsPanel />);
       expect(await screen.findByText(/will export from your battery/)).toBeTruthy();
       expect(screen.getByText(/single export slot/)).toBeTruthy();
       expect(screen.queryByLabelText('Slot to Use')).toBeNull();
-      expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Save Export Settings' })).toBeNull();
+      expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Save Export Settings' })).toBeTruthy();
     });
 
-    it('says where the export will stop where the inverter has no per-slot floor', async () => {
-      // Issue #446: on an AC 3.0 the export runs to the battery's own Minimum
-      // SOC and the panel showed nothing at all.
+    it('saves a floor change on a single-slot inverter', async () => {
       apiGet.mockResolvedValue(
-        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 4 }),
+        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 20 }),
       );
+      apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
-      expect(await screen.findByText('Stops at 4% · Minimum SOC')).toBeTruthy();
+      fireEvent.change(await screen.findByLabelText('Stop Exporting at'), { target: { value: '35' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
+      await waitFor(() =>
+        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
+          export_slot: 1,
+          export_floor_soc: 35,
+        }),
+      );
     });
 
-    it('says nothing extra where the floor slider already shows the level', async () => {
-      apiGet.mockResolvedValue(exporting({ max_discharge_slots: 3, effective_floor_soc: 20 }));
-      render(<SavingSessionsPanel />);
-      expect(await screen.findByLabelText('Stop Exporting at')).toBeTruthy();
-      expect(screen.queryByText(/Stops at/)).toBeNull();
-    });
-
-    it('offers the slot picker, but not the floor, on a two-slot inverter, and Save follows the change', async () => {
+    it('offers the slot picker and the floor on a two-slot inverter, and Save follows the change', async () => {
       apiGet.mockResolvedValue(exporting({ max_discharge_slots: 2, export_slot: 1 }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
       const select = (await screen.findByLabelText('Slot to Use')) as HTMLSelectElement;
       expect(Array.from(select.options).map((o) => o.value)).toEqual(['1', '2']);
-      expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
+      expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
       const save = screen.getByRole('button', { name: 'Save Export Settings' });
       expect(save).toBeDisabled();
 

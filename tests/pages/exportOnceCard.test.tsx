@@ -38,10 +38,8 @@ function serve(events: ExportOnceEvent[]) {
   });
 }
 
-function renderCard(max = 2, batteryReserve: number | null = null) {
-  return render(
-    <ExportOnceCard maxDischargeSlots={max} dischargeSlots={slots} batteryReserve={batteryReserve} />,
-  );
+function renderCard(max = 2) {
+  return render(<ExportOnceCard maxDischargeSlots={max} dischargeSlots={slots} />);
 }
 
 describe('ExportOnceCard', () => {
@@ -145,30 +143,28 @@ describe('ExportOnceCard', () => {
     expect(screen.queryByRole('button', { name: /Cancel export/ })).toBeNull();
   });
 
-  it('hides the slot picker with a single slot and the floor on models without per-slot SOC', async () => {
+  it('hides the slot picker with a single slot but still offers the floor', async () => {
+    // Issue #446: a model with no per-slot floor register holds the level in
+    // Minimum SOC instead, so the floor is worth setting there too.
     serve([]);
-    renderCard(1, 4);
+    renderCard(1);
     await screen.findByLabelText('Start');
     expect(screen.queryByLabelText('Slot to Use')).toBeNull();
-    expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
-  });
-
-  it('says where the export will stop when the inverter has no per-slot floor', async () => {
-    // Issue #446: nothing told the reporter that his export ran to his 4%
-    // Minimum SOC.
-    serve([]);
-    renderCard(1, 4);
-    await screen.findByLabelText('Start');
-    expect(screen.getByText('Stops at 4% · Minimum SOC')).toBeTruthy();
-  });
-
-  it('offers the discharge floor on models with per-slot SOC', async () => {
-    serve([]);
-    renderCard(10, 4);
-    await screen.findByLabelText('Start');
     expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
-    // The slider already says where it stops.
-    expect(screen.queryByText(/Stops at/)).toBeNull();
+  });
+
+  it('books the floor the user chose', async () => {
+    serve([]);
+    apiPost.mockResolvedValue({ ok: true });
+    renderCard(1);
+    fireEvent.change(await screen.findByLabelText('Stop Exporting at'), { target: { value: '35' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Book Export' }));
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/export-once',
+        expect.objectContaining({ target_soc: 35 }),
+      ),
+    );
   });
 
   it('warns when the list cannot be loaded and does not offer a form', async () => {
