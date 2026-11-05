@@ -2078,4 +2078,45 @@ mod tests {
         })
         .await;
     }
+
+    #[test]
+    fn the_stop_level_is_the_per_slot_floor_only_where_the_model_holds_one() {
+        // Issue #446: the reporter's AC 3.0 has no per-slot floor register, so
+        // its export runs to its own Minimum SOC reserve.
+        assert_eq!(
+            export_stop_soc(DeviceType::ACCoupled, Some(4), 35),
+            Some(4),
+            "no per-slot register: the reserve is the floor"
+        );
+        assert_eq!(export_stop_soc(DeviceType::Gen2Hybrid, Some(12), 35), Some(12));
+        assert_eq!(
+            export_stop_soc(DeviceType::Gen3Hybrid, Some(4), 35),
+            Some(35),
+            "per-slot floor: the configured level, not the reserve"
+        );
+        assert_eq!(export_stop_soc(DeviceType::ThreePhase, Some(4), 20), Some(20));
+    }
+
+    #[test]
+    fn an_unknown_or_out_of_range_reserve_promises_no_level() {
+        assert_eq!(export_stop_soc(DeviceType::ACCoupled, None, 20), None);
+        assert_eq!(export_stop_soc(DeviceType::ACCoupled, Some(0), 20), None);
+        assert_eq!(export_stop_soc(DeviceType::ACCoupled, Some(101), 20), None);
+    }
+
+    #[test]
+    fn the_started_message_names_where_the_export_stops() {
+        let mut e = event("e1", 1, "2026-10-17 18:00", "2026-10-17 19:00");
+        e.source = format!("{SESSION_SOURCE_PREFIX}9");
+        assert_eq!(
+            export_started_detail(&e, Some(4)),
+            "Slot 1 is exporting until 18:00, down to 4%. \
+             It goes back to its previous setting afterwards."
+        );
+        assert_eq!(
+            export_started_detail(&e, None),
+            "Slot 1 is exporting until 18:00. \
+             It goes back to its previous setting afterwards."
+        );
+    }
 }

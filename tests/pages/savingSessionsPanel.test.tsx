@@ -26,6 +26,7 @@ function reply(overrides: Partial<SavingSessionsResponse> = {}): SavingSessionsR
     sessions: [],
     export_slot: 1,
     export_floor_soc: 20,
+    effective_floor_soc: 20,
     max_discharge_slots: 3,
     ...overrides,
   };
@@ -325,13 +326,32 @@ describe('SavingSessionsPanel', () => {
     it('offers no slot choice and no Save when the inverter has a single slot', async () => {
       // Nothing is configurable: the one slot is used. A Save button that can
       // never enable, and a picker with one option, would only confuse.
-      apiGet.mockResolvedValue(exporting({ max_discharge_slots: 1, export_slot: 1 }));
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 4 }),
+      );
       render(<SavingSessionsPanel />);
       expect(await screen.findByText(/will export from your battery/)).toBeTruthy();
       expect(screen.getByText(/single export slot/)).toBeTruthy();
       expect(screen.queryByLabelText('Slot to Use')).toBeNull();
       expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Save Export Settings' })).toBeNull();
+    });
+
+    it('says where the export will stop where the inverter has no per-slot floor', async () => {
+      // Issue #446: on an AC 3.0 the export runs to the battery's own Minimum
+      // SOC and the panel showed nothing at all.
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 4 }),
+      );
+      render(<SavingSessionsPanel />);
+      expect(await screen.findByText('Stops at 4% · Minimum SOC')).toBeTruthy();
+    });
+
+    it('says nothing extra where the floor slider already shows the level', async () => {
+      apiGet.mockResolvedValue(exporting({ max_discharge_slots: 3, effective_floor_soc: 20 }));
+      render(<SavingSessionsPanel />);
+      expect(await screen.findByLabelText('Stop Exporting at')).toBeTruthy();
+      expect(screen.queryByText(/Stops at/)).toBeNull();
     });
 
     it('offers the slot picker, but not the floor, on a two-slot inverter, and Save follows the change', async () => {

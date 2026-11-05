@@ -2523,12 +2523,22 @@ mod tests {
         .await;
     }
 
+    /// Set the reserve the latest snapshot reports, as the poll loop would.
+    async fn set_reserve(state: &Arc<AppState>, reserve: u8) {
+        if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+            snapshot.battery_reserve = reserve;
+        }
+    }
+
     #[tokio::test]
-    async fn the_announcement_only_promises_a_floor_where_the_inverter_honours_one() {
+    async fn the_announcement_names_the_reserve_where_the_inverter_has_no_per_slot_floor() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(one_session_response()).await;
-            // A Gen2 hybrid has no per-slot floor register.
+            // A Gen2 hybrid has no per-slot floor register, so its export runs
+            // to its own Minimum SOC (issue #446) — say that, not the ignored
+            // setting.
             let state = configure_export(&mock, DeviceType::Gen2Hybrid).await;
+            set_reserve(&state, 4).await;
             Settings::update(|s| s.octopus_sessions_export_floor_soc = 35).unwrap();
             check_once(&state, utc(EXPORT_NOW)).await;
             let alert = &mock.alerts()[0].body;
@@ -2536,10 +2546,60 @@ mod tests {
                 alert.contains("HEM will export") && alert.contains("slot 1"),
                 "{alert}"
             );
-            assert!(
-                !alert.contains("down to") && !alert.contains("35%"),
-                "{alert}"
-            );
+            assert!(alert.contains("down to 4%"), "{alert}");
+            assert!(!alert.contains("35%"), "{alert}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_announcement_names_the_configured_floor_where_the_inverter_holds_one() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            set_reserve(&state, 4).await;
+            Settings::update(|s| s.octopus_sessions_export_floor_soc = 35).unwrap();
+            check_once(&state, utc(EXPORT_NOW)).await;
+            let alert = &mock.alerts()[0].body;
+            assert!(alert.contains("down to 35%"), "{alert}");
+            assert!(!alert.contains("down to 4%"), "{alert}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_announcement_promises_no_level_before_a_usable_read() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure(&mock, SessionsMode::Export).await;
+            *state.latest_snapshot.lock().await = None;
+            check_once(&state, utc(EXPORT_NOW)).await;
+            let alert = &mock.alerts()[0].body;
+            assert!(alert.contains("slot 1"), "{alert}");
+            assert!(!alert.contains("down to"), "{alert}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_sessions_payload_reports_the_level_the_export_stops_at() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            Settings::update(|s| s.octopus_sessions_export_floor_soc = 25).unwrap();
+            let (_, Json(body)) = get_sessions(State(state)).await;
+            assert_eq!(body["effective_floor_soc"], 25);
+
+            // No per-slot floor on a Gen2, so its own reserve is the answer.
+            let state = configure_export(&mock, DeviceType::Gen2Hybrid).await;
+            set_reserve(&state, 7).await;
+            let (_, Json(body)) = get_sessions(State(state.clone())).await;
+            assert_eq!(body["effective_floor_soc"], 7);
+
+            // Nothing read yet: unknown beats a guess.
+            *state.latest_snapshot.lock().await = None;
+            let (_, Json(body)) = get_sessions(State(state)).await;
+            assert!(body["effective_floor_soc"].is_null(), "{body}");
         })
         .await;
     }
