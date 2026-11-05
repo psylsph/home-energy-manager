@@ -309,10 +309,14 @@ from the grid. A minimum at or below your inverter's battery reserve means the
 planner only charges when the battery would otherwise run empty and draw from
 the grid before the next cheap period.
 
-**Automatic planning** saves you pressing Apply every evening. Switch it on and
-the app re-sizes the charge from your live battery level shortly before each
-cheap window (30 minutes by default, adjustable up to two hours), writes the charge slot itself, and sends you a notification
-saying what it did — or why no charge was needed.
+**Automatic planning** saves you pressing Apply every evening. The plan covers one
+charge, for the next cheapest import window, and it is re-sized once a day, not
+once per window. Turn on **Auto-refresh charge plan** and the app re-sizes the
+charge from your live battery level 30 minutes before that window and rewrites
+charge slot 1. Turn on **Apply charging plan automatically** instead and you choose
+how far ahead it applies (up to two hours), and you get a notification saying what
+it did, or why no charge was needed. With neither on, the plan changes only when
+you press Apply.
 
 **Export opportunities** appear when your export tariff pays more at certain
 times. The Planner shows how much you could sell from the battery, when, and
@@ -346,9 +350,14 @@ plus the rate for the hours in between. The app never fetches your rates from
 Octopus, so these are yours to keep up to date. The Planner then charges in
 whichever window is cheapest.
 
-Expect one charge: the Planner plans **one** charge cycle per run — the cheapest
-window at or after now, with ties going to the earlier one. Three cheap periods
-a day therefore give one charge, not a top-up in each.
+Expect one charge: the Planner plans **one** charge cycle per run, for the
+cheapest window that's still ahead. It ranks windows by rate first. If two
+windows have the same rate, it picks the one later today over the one tomorrow,
+even when the tomorrow window is longer. If the same-rate windows both fall today
+or both fall tomorrow, the longer one wins. So a 22:00–00:00 window can win over a
+04:00–07:00 window at the same rate if it's still ahead today. Three cheap periods
+a day therefore give one charge, not a top-up in each. If you want the Planner to
+use a particular window, make its rate the lowest in your tariff.
 
 ---
 
