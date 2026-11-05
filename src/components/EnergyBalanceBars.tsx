@@ -104,19 +104,6 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
           <BalanceBar title="Energy Out" segments={balance.outSegments} total={balance.outTotal} />
         </>
       )}
-      {balance.acCoupledSolarUnmeasured && (
-        <p
-          data-testid="balance-ac-note"
-          className="flex items-center gap-1 text-[11px] leading-snug text-text-secondary"
-        >
-          Solar from the separate PV system isn't measured.
-          <HelpTip label="unmeasured solar">
-            The inverter's Solar counter only covers its own PV. The separate
-            system's output isn't counted anywhere, so Home Use reads low, or
-            zero on days that PV exports.
-          </HelpTip>
-        </p>
-      )}
       {/* The ⓘ rides the end of the summary line. There isn't always a summary
           (just after midnight, or an AC-coupled night when all of In is
           unmeasured) — the tip stays available on its own then. */}
@@ -131,6 +118,12 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
           runs a few percent above Out from conversion and battery losses.
           Export can't be split into solar and battery, so on days the battery
           discharges the solar share is a minimum.
+          {balance.acCoupledSolarUnmeasured && (
+            <>
+              {' '}Your separate solar system isn't measured, so Home Use reads
+              low, or zero on days that PV exports.
+            </>
+          )}
         </HelpTip>
       </p>
       {/* Text alternative for the figure: every value, plus both totals. */}

@@ -16,8 +16,8 @@ import type { InverterSnapshot } from './types';
  * above Out. On AC-coupled inverters and the residential All-in-Ones
  * `today_solar_kwh` covers only the inverter's own PV — which is none — so
  * the separate system's output reaches no counter and Home Use reads low;
- * that case is flagged so the component can say so
- * (`acCoupledSolarUnmeasured`).
+ * that case is flagged (`acCoupledSolarUnmeasured`) so the summary leaves the
+ * solar share out, and the ⓘ explains why Home Use reads low.
  */
 
 /** Identifies a segment so the component can pick its theme colour. */

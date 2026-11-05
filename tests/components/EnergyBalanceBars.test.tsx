@@ -264,16 +264,22 @@ describe('<EnergyBalanceBars/>', () => {
     expect(fill.getAttribute('style')).not.toContain('transition');
   });
 
-  it('says the separate PV is unmeasured on AC-coupled systems', () => {
+  it('explains unmeasured PV in the ⓘ, not as a visible note, on AC-coupled systems', () => {
+    // Issue #429 follow-up: the visible note is gone; the explanation sits
+    // behind the ⓘ so the card stays to the numbers it can stand behind.
     const { container } = renderBalance(snapshot({ device_type_code: '3001' }));
     const card = container.querySelector('[data-testid="today-balance"]')!;
-    const note = card.querySelector('[data-testid="balance-ac-note"]')!;
-    expect(note.textContent).toContain("Solar from the separate PV system isn't measured.");
-    // Its output reaches no counter, so Home Use reads low — Out is not
-    // larger than In because of it (code review #4).
-    expect(note.textContent).toContain('Home Use reads low');
-    expect(note.textContent).not.toContain('larger than Energy In');
-    // The solar share would flatter an unmeasured PV: it stays out of the
+    const tip = screen.getByRole('button', { name: "More about Today's Energy Balance" });
+    expect(document.getElementById(tip.getAttribute('aria-describedby')!)!.textContent).toContain("separate solar system isn't measured");
+    for (const code of ['3002', '8001']) {
+      cleanup();
+      renderBalance(snapshot({ device_type_code: code }));
+      const t = screen.getByRole('button', { name: "More about Today's Energy Balance" });
+      expect(document.getElementById(t.getAttribute('aria-describedby')!)!.textContent).toContain("isn't measured");
+    }
+    expect(card.querySelector('[data-testid="balance-ac-note"]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'More about unmeasured solar' })).toBeNull();
+    // The solar share would still flatter an unmeasured PV: it stays out of the
     // summary line, the grid share still applies.
     expect(card.textContent).toContain(' of energy in came from the grid');
     expect(card.textContent).not.toContain('% of solar used or stored at home');
@@ -318,5 +324,11 @@ describe('<EnergyBalanceBars/>', () => {
     expect(unique.has('var(--app-fill-battery)')).toBe(true);
     expect(unique.has('var(--app-fill-home)')).toBe(true);
     expect(unique.has('var(--app-fill-export)')).toBe(true);
+  });
+
+  it.each(['2201', '7001', '8201'])('keeps unmeasured solar out of the tip on %s, which measures its own', (code) => {
+    renderBalance(snapshot({ device_type_code: code }));
+    const t = screen.getByRole('button', { name: "More about Today's Energy Balance" });
+    expect(document.getElementById(t.getAttribute('aria-describedby')!)!.textContent).not.toContain("isn't measured");
   });
 });
