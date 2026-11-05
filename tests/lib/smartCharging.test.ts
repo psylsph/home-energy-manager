@@ -10,6 +10,7 @@ const valid = {
   error: null,
   devices: 1,
   holding: false,
+  hold_failing: false,
   stale_after_minutes: 15,
   dispatches: [],
 };

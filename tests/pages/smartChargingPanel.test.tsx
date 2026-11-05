@@ -21,6 +21,7 @@ function reply(overrides: Partial<SmartChargingResponse> = {}): SmartChargingRes
     error: null,
     devices: 1,
     holding: false,
+    hold_failing: false,
     stale_after_minutes: 15,
     dispatches: [],
     ...overrides,
@@ -132,6 +133,27 @@ describe('SmartChargingPanel', () => {
     apiGet.mockResolvedValue(reply({ holding: true, dispatches: [smart] }));
     render(<SmartChargingPanel />);
     expect(await screen.findByText(/Holding the battery now/)).toBeTruthy();
+  });
+
+  it("says when the inverter won't take the pause instead of claiming it's held", async () => {
+    // Issue #431: the hold kept trying while the battery emptied into the car.
+    apiGet.mockResolvedValue(reply({ holding: true, hold_failing: true, dispatches: [smart] }));
+    render(<SmartChargingPanel />);
+    expect(
+      await screen.findByText(/Couldn't pause the battery, so it may be charging the car/),
+    ).toBeTruthy();
+    // Fourth code review #8: true whether a write or a read is failing.
+    expect(screen.getByText(/HEM keeps trying/)).toBeTruthy();
+    expect(screen.queryByText(/Retrying every 5 minutes/)).toBeNull();
+    expect(screen.queryByText(/Holding the battery now/)).toBeNull();
+  });
+
+  it("says the battery isn't paused when an All-in-One hold never got to start (third code review #4)", async () => {
+    // No usable reading to save, so the hold never paused: not holding, but failing.
+    apiGet.mockResolvedValue(reply({ holding: false, hold_failing: true, dispatches: [smart] }));
+    render(<SmartChargingPanel />);
+    expect(await screen.findByText(/Couldn't pause the battery/)).toBeTruthy();
+    expect(screen.queryByText(/Holding the battery now/)).toBeNull();
   });
 
   it('asks for credentials when the account is not set up', async () => {

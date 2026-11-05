@@ -28,6 +28,12 @@ describe('agileBlockedMessage', () => {
     expect(agileBlockedMessage('pause', undefined)).toBeNull();
   });
 
+  it('names the Intelligent Octopus Go hold rather than a safety limit (#431)', () => {
+    const message = agileBlockedMessage('dispatch_hold', true) ?? '';
+    expect(message).toMatch(/Intelligent Octopus Go/);
+    expect(message).not.toMatch(/safety limit/i);
+  });
+
   it('still warns for a code from a newer backend', () => {
     expect(agileBlockedMessage('something_new', true)).toMatch(/on hold/i);
   });
