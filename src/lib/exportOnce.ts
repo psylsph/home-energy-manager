@@ -19,17 +19,6 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-/**
- * Where an export will stop on an inverter that has no per-slot floor: its own
- * Minimum SOC. Null where the floor slider is shown (more than two slots), so
- * the same fact is never said twice, and the level is left out until it has
- * been read (issue #446).
- */
-export function exportStopsAtLabel(maxSlots: number, floorSoc: number | null | undefined): string | null {
-  if (maxSlots > 2) return null;
-  return typeof floorSoc === 'number' ? `Stops at ${floorSoc}% · Minimum SOC` : 'Stops at Minimum SOC';
-}
-
 /** Days since the epoch for a `YYYY-MM-DD` date, or null if it is not one. */
 function dayNumber(date: string): number | null {
   const m = DATE_RE.exec(date);

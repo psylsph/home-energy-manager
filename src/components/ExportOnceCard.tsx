@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { apiGet, apiPost } from '../lib/api';
 import {
   defaultBooking,
-  exportStopsAtLabel,
   formatEventWindow,
   formatSlotRange,
   splitEvents,
@@ -20,11 +19,6 @@ interface ExportOnceCardProps {
   maxDischargeSlots: number;
   /** The slots as the Control page shows them, for "currently ..." hints. */
   dischargeSlots: ScheduleSlot[];
-  /**
-   * The inverter's Minimum SOC, which is where an export stops on models with
-   * no per-slot floor (issue #446). Null until it has been read.
-   */
-  batteryReserve?: number | null;
 }
 
 /**
@@ -32,11 +26,7 @@ interface ExportOnceCardProps {
  * picks shortly before it starts, put back to the slot's previous setting
  * when it ends. The backend does the work; this only books and lists.
  */
-export default function ExportOnceCard({
-  maxDischargeSlots,
-  dischargeSlots,
-  batteryReserve = null,
-}: ExportOnceCardProps) {
+export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: ExportOnceCardProps) {
   const [events, setEvents] = useState<ExportOnceEvent[]>([]);
   const [nowLocal, setNowLocal] = useState<string | null>(null);
   const [form, setForm] = useState<ExportOnceBooking | null>(null);
@@ -75,8 +65,7 @@ export default function ExportOnceCard({
   }, [reloadTick]);
 
   const { upcoming, recent } = splitEvents(events);
-  const showFloor = maxDischargeSlots > 2;
-  const stopsAt = exportStopsAtLabel(maxDischargeSlots, batteryReserve);
+
 
   async function book() {
     if (!form || !nowLocal) return;
@@ -222,34 +211,28 @@ export default function ExportOnceCard({
               />
             </label>
           </div>
-          {stopsAt && (
-            <p className="flex items-center gap-1.5 text-sm text-text-secondary">
-              {stopsAt}
-              <HelpTip label="Where the export stops">
-                This inverter has no per-slot floor setting, so the export runs until the battery
-                reaches your Minimum SOC. Change Minimum SOC on this page to suit.
-              </HelpTip>
-            </p>
-          )}
-          {showFloor && (
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-text-secondary text-sm">Stop Exporting at</span>
-                <span className="font-mono text-text-primary text-sm">{form.target_soc}%</span>
-              </div>
-              <input
-                type="range"
-                min={4}
-                max={99}
-                step={1}
-                value={form.target_soc}
-                aria-label="Stop Exporting at"
-                onChange={(e) => update({ target_soc: Number(e.target.value) })}
-                disabled={saving}
-                className="w-full"
-              />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-text-secondary text-sm">Stop Exporting at</span>
+              <span className="font-mono text-text-primary text-sm">{form.target_soc}%</span>
             </div>
-          )}
+            <input
+              type="range"
+              min={4}
+              max={99}
+              step={1}
+              value={form.target_soc}
+              aria-label="Stop Exporting at"
+              onChange={(e) => update({ target_soc: Number(e.target.value) })}
+              disabled={saving}
+              className="w-full"
+            />
+          </div>
+          <HelpTip label="Stop Exporting at">
+            The export stops when the battery reaches this level. Inverters with a per-slot floor
+            hold it there; the rest have their Minimum SOC raised to it for the window. Both go
+            back afterwards.
+          </HelpTip>
           {error && (
             <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
               {error}

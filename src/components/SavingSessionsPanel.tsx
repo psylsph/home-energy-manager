@@ -5,7 +5,6 @@ import { useInverterStore } from '../store/useInverterStore';
 import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 import HelpTip, { HeadingWithHelp } from './HelpTip';
 import { exportStatusLabel, formatReward, formatSessionWindow, readSessionsResponse } from '../lib/savingSessions';
-import { exportStopsAtLabel } from '../lib/exportOnce';
 import type { SavingSessionsMode, SavingSessionsResponse } from '../lib/types';
 
 /** What /api/octopus/sessions/mode answers: the mode as saved. */
@@ -107,10 +106,6 @@ export default function SavingSessionsPanel() {
   // Only offer what can actually be chosen: nothing for a single-slot
   // inverter (the one slot is used), no floor on models that cannot hold one.
   const showSlotPicker = maxSlots > 1 || data.export_slot > maxSlots;
-  const showFloor = maxSlots > 2;
-  // Inverters with no per-slot floor run the export to their own Minimum SOC
-  // (issue #446): say where it stops instead of showing nothing at all.
-  const stopsAt = exportStopsAtLabel(maxSlots, data.effective_floor_soc);
   // Neither this nor the join tick sends a mode: the one on the page may be
   // up to a minute old, and re-sending it could undo a change made elsewhere
   // and stop a running export.
@@ -274,17 +269,6 @@ export default function SavingSessionsPanel() {
               inverter at the time.
             </HelpTip>
           </p>
-          {stopsAt && (
-            <p className="flex items-center gap-1.5 text-sm text-text-secondary">
-              {stopsAt}
-              <HelpTip label="Where the export stops">
-                This inverter has no per-slot floor setting, so the export runs until the battery
-                reaches your Minimum SOC. Lower or raise Minimum SOC on the Control page to change
-                where it stops.
-              </HelpTip>
-            </p>
-          )}
-          {(showSlotPicker || showFloor) && (
           <div className="flex flex-wrap items-center gap-4">
             {showSlotPicker && (
             <label className="flex items-center gap-2 text-sm text-text-secondary">
@@ -301,23 +285,26 @@ export default function SavingSessionsPanel() {
               </select>
             </label>
             )}
-            {showFloor && (
-              <label className="flex flex-1 items-center gap-2 text-sm text-text-secondary">
-                Stop Exporting at
-                <input
-                  type="range"
-                  min={4}
-                  max={99}
-                  step={1}
-                  value={floor}
-                  aria-label="Stop Exporting at"
-                  onChange={(e) => setFloorDraft(Number(e.target.value))}
-                  disabled={saving}
-                  className="min-w-24 flex-1"
-                />
-                <span className="font-mono text-text-primary">{floor}%</span>
-              </label>
-            )}
+            <label className="flex flex-1 items-center gap-2 text-sm text-text-secondary">
+              Stop Exporting at
+              <input
+                type="range"
+                min={4}
+                max={99}
+                step={1}
+                value={floor}
+                aria-label="Stop Exporting at"
+                onChange={(e) => setFloorDraft(Number(e.target.value))}
+                disabled={saving}
+                className="min-w-24 flex-1"
+              />
+              <span className="font-mono text-text-primary">{floor}%</span>
+            </label>
+            <HelpTip label="Stop Exporting at">
+              The export stops when the battery reaches this level. Inverters with a per-slot floor
+              hold it there; the rest have their Minimum SOC raised to it for the session. Both go
+              back afterwards.
+            </HelpTip>
             <button
               type="button"
               disabled={saving || !exportChanged}
@@ -327,7 +314,6 @@ export default function SavingSessionsPanel() {
               Save Export Settings
             </button>
           </div>
-          )}
         </div>
       )}
 
