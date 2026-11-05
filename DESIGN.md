@@ -590,6 +590,18 @@ picks:
 - Saving Sessions exports are Export Once bookings with a non-manual source.
   Only those bookings can be cancelled by HEM itself, when a session is
   skipped or withdrawn.
+- Where the inverter has no per-slot target SOC register (AC-coupled and Gen1/
+  Gen2 models, issue #446), the booking holds its floor in the inverter's own
+  Minimum SOC instead: the value it found is saved in the booking before the
+  write, Minimum SOC is raised to the floor for the window and put back after.
+  It only ever raises, and only while nothing else owns the reserve — the pause
+  limiters, the dispatch hold, calibration, a native pause or another booking.
+  A value someone else changed mid-window wins: a restore writes only while the
+  reserve still reads back at the floor. A restore that cannot land is retried
+  about once a minute for 15 minutes, then HEM gives up on it and says which
+  value to put back by hand. The developer-mode discharge floor guard stands
+  still while a booking holds the floor, and no longer writes its saved reserve
+  over another owner's pause.
 
 ## Testing
 
