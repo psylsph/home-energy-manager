@@ -1458,6 +1458,45 @@ async fn seed_timed_demand_snapshot(state: &Arc<AppState>) {
     *state.latest_snapshot.lock().await = Some(snapshot);
 }
 
+/// Seed a snapshot for `device` with the given Minimum SOC reserve.
+async fn seed_reserve_snapshot(
+    state: &Arc<AppState>,
+    device: givenergy_local::inverter::model::DeviceType,
+    code: &str,
+    reserve: u8,
+) {
+    use givenergy_local::inverter::model::InverterSnapshot;
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        device_type: device,
+        device_type_code: code.into(),
+        inverter_serial: "CE289".into(),
+        battery_reserve: reserve,
+        ..Default::default()
+    });
+}
+
+/// Issue #446: the sessions payload says where an export will stop, so the page
+/// can tell the user instead of leaving it to whatever Minimum SOC happens to
+/// be. On an AC-coupled 3.0 the booking holds the chosen floor in the reserve,
+/// and never lowers one that already stops higher.
+#[tokio::test]
+async fn sessions_payload_reports_the_level_an_export_stops_at() {
+    use givenergy_local::inverter::model::DeviceType;
+    let (router, state) = fresh_router_with_state().await;
+    seed_reserve_snapshot(&state, DeviceType::ACCoupled, "3001", 4).await;
+
+    let (status, body) = get_json(&router, "/api/octopus/sessions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["max_discharge_slots"], 1);
+    assert_eq!(body["export_floor_soc"], 20);
+    assert_eq!(body["effective_floor_soc"], 20, "{body}");
+
+    // The user's own Minimum SOC is higher: that is where the export stops.
+    seed_reserve_snapshot(&state, DeviceType::ACCoupled, "3001", 45).await;
+    let (_, body) = get_json(&router, "/api/octopus/sessions").await;
+    assert_eq!(body["effective_floor_soc"], 45, "{body}");
+}
+
 /// Seed a "physically exporting under an active HR318 pause" snapshot:
 /// HR27=0 / HR59=1 plus a Timed Discharge pause window covering the pinned
 /// inverter minute. This is the live-session scenario where the

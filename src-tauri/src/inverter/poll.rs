@@ -3034,9 +3034,21 @@ pub(crate) fn persist_solar_meter_baselines(
     })
 }
 
+/// Whether something other than the booking `exclude` owns the inverter's
+/// Minimum SOC right now: a discharge pause, calibration, a native pause, or a
+/// booked export's floor (issue #446).
+///
+/// The two writers of the reserve ask this before touching it — a booking
+/// excludes itself, the discharge floor guard excludes nothing — so neither can
+/// capture, raise or restore over the other's value.
+pub(crate) async fn reserve_owned_by_other(state: &Arc<AppState>, exclude: Option<&str>) -> bool {
+    reserve_paused_by_owner(state).await
+        || crate::inverter::export_once::holds_reserve_floor_excluding(state, exclude).await
+}
+
 /// Whether a discharge pause, calibration or a native pause owns Minimum SOC
 /// right now. A booking's own floor is a separate owner (see
-/// `export_once::holds_reserve_floor`), so it is not part of this answer.
+/// `reserve_owned_by_other`), so it is not part of this answer.
 pub(crate) async fn reserve_paused_by_owner(state: &Arc<AppState>) -> bool {
     let load_paused = state.load_limiter_state.lock().await.is_actively_pausing();
     let temperature_paused = state
@@ -3060,11 +3072,16 @@ pub(crate) async fn evaluate_discharge_floor(
     snapshot: &InverterSnapshot,
     inverter_minute: u16,
 ) -> Option<Vec<RegisterWrite>> {
+    // Off is the normal case (a developer-mode experiment), and it must stay
+    // cheap: working out who owns Minimum SOC reads the settings file and five
+    // shared states, which is not something to pay for on every poll.
+    if !state.discharge_floor_config.lock().await.enabled {
+        return None;
+    }
     // A booking holding its own floor owns Minimum SOC for its window, and a
-    // pause owns it until it releases: the guard must not write over either
-    // (issue #446).
-    let pause_owns_reserve = reserve_paused_by_owner(state).await
-        || crate::inverter::export_once::holds_reserve_floor(state).await;
+    // pause owns it until it releases: the guard writes over neither (issue
+    // #446). It excludes no booking, since any of them outranks it.
+    let pause_owns_reserve = reserve_owned_by_other(state, None).await;
     let df_config = state.discharge_floor_config.lock().await;
     let mut df_state = state.discharge_floor_state.lock().await;
     let writes = check_discharge_floor(

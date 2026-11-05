@@ -337,6 +337,26 @@ describe('SavingSessionsPanel', () => {
       expect(screen.getByRole('button', { name: 'Save Export Settings' })).toBeTruthy();
     });
 
+    it('says where Minimum SOC stops the export above the chosen floor', async () => {
+      // A booking never lowers Minimum SOC, so a higher one is where it stops.
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_floor_soc: 20, effective_floor_soc: 45 }),
+      );
+      render(<SavingSessionsPanel />);
+      expect(
+        await screen.findByText('Your Minimum SOC is 45%, so the export stops there.'),
+      ).toBeTruthy();
+    });
+
+    it('says nothing extra when the chosen floor is where it stops', async () => {
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_floor_soc: 20, effective_floor_soc: 20 }),
+      );
+      render(<SavingSessionsPanel />);
+      await screen.findByLabelText('Stop Exporting at');
+      expect(screen.queryByTestId('session-floor-minimum-soc')).toBeNull();
+    });
+
     it('saves a floor change on a single-slot inverter', async () => {
       apiGet.mockResolvedValue(
         exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 20 }),

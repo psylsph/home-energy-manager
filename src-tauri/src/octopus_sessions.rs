@@ -879,7 +879,7 @@ fn export_note(
     settings: &Settings,
     session_id: i64,
     outcomes: &HashMap<i64, Result<(), String>>,
-    stop_soc: Option<u8>,
+    stop_soc: u8,
 ) -> Option<String> {
     if settings.octopus_sessions_mode != SessionsMode::Export {
         return None;
@@ -888,17 +888,13 @@ fn export_note(
         return Some("Skipped, so HEM will not export.".to_string());
     }
     // Name where the export really stops: the per-slot floor on models that
-    // hold one, otherwise the inverter's own reserve (issue #446). Nothing is
-    // promised before a usable read.
-    let will_export = || match stop_soc {
-        Some(soc) => format!(
-            "HEM will export during it: slot {}, down to {soc}%.",
+    // hold one, otherwise the same level held in Minimum SOC for the window
+    // (issue #446).
+    let will_export = || {
+        format!(
+            "HEM will export during it: slot {}, down to {stop_soc}%.",
             settings.octopus_sessions_export_slot
-        ),
-        None => format!(
-            "HEM will export during it: slot {}.",
-            settings.octopus_sessions_export_slot
-        ),
+        )
     };
     match outcomes.get(&session_id) {
         Some(Ok(())) => Some(will_export()),
@@ -916,7 +912,7 @@ async fn send_due_alerts(
     sessions: &[Session],
     now: DateTime<Utc>,
     outcomes: &HashMap<i64, Result<(), String>>,
-    stop_soc: Option<u8>,
+    stop_soc: u8,
     joined_by_hem: &HashSet<i64>,
 ) {
     let due = due_alerts(
@@ -1008,12 +1004,10 @@ async fn max_discharge_slots(state: &Arc<AppState>) -> u8 {
 }
 
 /// The battery level an export for a session stops at on this inverter: the
-/// per-slot floor the user chose where the model has those registers, and the
-/// inverter's own Minimum SOC reserve where it has none (issue #446 — the
-/// export there has no per-slot floor, so it runs to the reserve). `None` when
-/// the model has no per-slot floor and no snapshot has been read yet, so a
-/// message says nothing rather than guessing a level.
-async fn export_stop_soc(state: &Arc<AppState>, settings: &Settings) -> Option<u8> {
+/// per-slot floor the user chose where the model has those registers, and on
+/// the rest the same level held in the inverter's own Minimum SOC for the
+/// window (issue #446). Never below a reserve that already stops higher.
+async fn export_stop_soc(state: &Arc<AppState>, settings: &Settings) -> u8 {
     let snapshot = state.latest_snapshot.lock().await;
     let device_type = snapshot
         .as_ref()
@@ -2553,12 +2547,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_announcement_names_the_reserve_where_the_inverter_has_no_per_slot_floor() {
+    async fn the_announcement_names_the_floor_the_booking_will_hold() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(one_session_response()).await;
-            // A Gen2 hybrid has no per-slot floor register, so its export runs
-            // to its own Minimum SOC (issue #446) — say that, not the ignored
-            // setting.
+            // A Gen2 hybrid has no per-slot floor register, so the booking holds
+            // the chosen level in the inverter's own Minimum SOC (issue #446).
             let state = configure_export(&mock, DeviceType::Gen2Hybrid).await;
             set_reserve(&state, 4).await;
             Settings::update(|s| s.octopus_sessions_export_floor_soc = 35).unwrap();
@@ -2568,37 +2561,21 @@ mod tests {
                 alert.contains("HEM will export") && alert.contains("slot 1"),
                 "{alert}"
             );
-            assert!(alert.contains("down to 4%"), "{alert}");
-            assert!(!alert.contains("35%"), "{alert}");
+            assert!(alert.contains("down to 35%"), "{alert}");
         })
         .await;
     }
 
     #[tokio::test]
-    async fn the_announcement_names_the_configured_floor_where_the_inverter_holds_one() {
+    async fn the_announcement_never_promises_below_a_reserve_that_stops_higher() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(one_session_response()).await;
             let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
-            set_reserve(&state, 4).await;
-            Settings::update(|s| s.octopus_sessions_export_floor_soc = 35).unwrap();
+            set_reserve(&state, 45).await;
+            Settings::update(|s| s.octopus_sessions_export_floor_soc = 20).unwrap();
             check_once(&state, utc(EXPORT_NOW)).await;
             let alert = &mock.alerts()[0].body;
-            assert!(alert.contains("down to 35%"), "{alert}");
-            assert!(!alert.contains("down to 4%"), "{alert}");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn the_announcement_promises_no_level_before_a_usable_read() {
-        with_isolated_config_dir_async(|| async {
-            let mock = MockOctopus::spawn(one_session_response()).await;
-            let state = configure(&mock, SessionsMode::Export).await;
-            *state.latest_snapshot.lock().await = None;
-            check_once(&state, utc(EXPORT_NOW)).await;
-            let alert = &mock.alerts()[0].body;
-            assert!(alert.contains("slot 1"), "{alert}");
-            assert!(!alert.contains("down to"), "{alert}");
+            assert!(alert.contains("down to 20%"), "{alert}");
         })
         .await;
     }
@@ -2612,16 +2589,17 @@ mod tests {
             let (_, Json(body)) = get_sessions(State(state)).await;
             assert_eq!(body["effective_floor_soc"], 25);
 
-            // No per-slot floor on a Gen2, so its own reserve is the answer.
+            // No per-slot floor on a Gen2: the floor is held in Minimum SOC, so
+            // it is still the answer — unless the battery already stops higher.
             let state = configure_export(&mock, DeviceType::Gen2Hybrid).await;
             set_reserve(&state, 7).await;
             let (_, Json(body)) = get_sessions(State(state.clone())).await;
-            assert_eq!(body["effective_floor_soc"], 7);
+            assert_eq!(body["effective_floor_soc"], 25);
 
-            // Nothing read yet: unknown beats a guess.
-            *state.latest_snapshot.lock().await = None;
+            Settings::update(|s| s.octopus_sessions_export_floor_soc = 4).unwrap();
+            set_reserve(&state, 30).await;
             let (_, Json(body)) = get_sessions(State(state)).await;
-            assert!(body["effective_floor_soc"].is_null(), "{body}");
+            assert_eq!(body["effective_floor_soc"], 30, "the reserve stops higher");
         })
         .await;
     }

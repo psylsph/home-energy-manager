@@ -305,6 +305,13 @@ export default function SavingSessionsPanel() {
               hold it there; the rest have their Minimum SOC raised to it for the session. Both go
               back afterwards.
             </HelpTip>
+            {data.effective_floor_soc > floor && (
+              // A booking never lowers Minimum SOC, so a higher one is where
+              // the export really stops.
+              <p className="text-xs text-text-secondary" data-testid="session-floor-minimum-soc">
+                Your Minimum SOC is {data.effective_floor_soc}%, so the export stops there.
+              </p>
+            )}
             <button
               type="button"
               disabled={saving || !exportChanged}

@@ -11,6 +11,11 @@
 //! This module holds the pure parts — the model, validation and the planner
 //! that decides what to do at a given instant. The async executor that runs
 //! the plan against the inverter is added alongside.
+//!
+//! On a model with no per-slot floor register, a booking also holds its floor in
+//! the inverter's Minimum SOC for the window and puts the user's value back
+//! afterwards (issue #446). Only one booking holds it at a time: a second one
+//! whose window overlaps treats the first as the owner and runs to that level.
 
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike as _};
 use serde::{Deserialize, Serialize};
@@ -391,30 +396,18 @@ fn holds_floor_now(event: &ExportOnceEvent, now: NaiveDateTime) -> bool {
         && event.end_at().is_some_and(|end| end > now)
 }
 
-/// Whether anything other than the booking `id` owns Minimum SOC right now: a
-/// discharge pause, calibration, a native pause, or another booking's floor.
-/// Capturing or restoring the reserve then would record their value as the
-/// user's (issue #446).
-async fn reserve_owned_elsewhere(state: &Arc<AppState>, id: &str) -> bool {
-    if crate::inverter::poll::reserve_paused_by_owner(state).await {
-        return true;
-    }
+/// Whether a booked export other than `exclude` is holding the inverter's
+/// Minimum SOC for its window right now.
+///
+/// The discharge floor guard passes `None` — any booking outranks it — while a
+/// booking passes its own id, since holding the floor is what it is trying to
+/// do.
+pub async fn holds_reserve_floor_excluding(state: &Arc<AppState>, exclude: Option<&str>) -> bool {
     let now = inverter_now(state).await;
     list_events()
         .await
         .iter()
-        .any(|other| other.id != id && holds_floor_now(other, now))
-}
-
-/// Whether a booked export is holding the inverter's Minimum SOC for its window
-/// right now — the answer the developer-mode discharge floor guard has to
-/// respect, so the two never write the reserve over each other.
-pub async fn holds_reserve_floor(state: &Arc<AppState>) -> bool {
-    let now = inverter_now(state).await;
-    list_events()
-        .await
-        .iter()
-        .any(|event| holds_floor_now(event, now))
+        .any(|event| exclude.is_none_or(|id| event.id != id) && holds_floor_now(event, now))
 }
 
 /// Raise Minimum SOC to the booking's floor for its window, on a model with no
@@ -425,16 +418,14 @@ async fn hold_reserve_floor(state: &Arc<AppState>, id: &str) -> Option<String> {
     if !reserve_floor_applies(snapshot_device_type(state).await) {
         return None;
     }
-    let Some(event) = load_event(id).await else {
-        return None;
-    };
+    let event = load_event(id).await?;
     if event.state != ExportOnceState::Active || !event.applied || event.floor_refused {
         return None;
     }
     let action = hold_floor(
         event.target_soc,
         snapshot_reserve(state).await.map(u16::from),
-        reserve_owned_elsewhere(state, id).await,
+        crate::inverter::poll::reserve_owned_by_other(state, Some(id)).await,
     );
     match action {
         ReserveFloorAction::Idle
@@ -493,7 +484,7 @@ async fn restore_reserve_floor(
         written,
         saved,
         snapshot_reserve(state).await.map(u16::from),
-        reserve_owned_elsewhere(state, &event.id).await,
+        crate::inverter::poll::reserve_owned_by_other(state, Some(&event.id)).await,
     ) {
         ReserveFloorAction::Idle | ReserveFloorAction::Hold { .. } => Ok(()),
         ReserveFloorAction::Leave(reason) => {
@@ -648,9 +639,6 @@ const SESSION_SOURCE_PREFIX: &str = "saving_session:";
 /// quarter of an hour — the same budget the dispatch hold gives its own restore.
 pub const MAX_RESERVE_RESTORE_ATTEMPTS: u8 = 15;
 
-/// The reserve was somebody else's to give back when the window opened.
-const RESERVE_BUSY_NOTE: &str =
-    "Minimum SOC was held by another control, so the export ran to that level";
 /// The reserve was changed by hand while the export ran.
 const RESERVE_EDITED_NOTE: &str =
     "Minimum SOC was changed during the export, so it was left as you set it";
@@ -723,43 +711,29 @@ pub fn restore_floor(
 
 /// The battery level an export stops at on this device.
 ///
-/// Models with the per-slot target SOC registers hold the level the user
-/// chose for the slot. Everything else has no per-slot floor to write, so a
-/// booking raises the inverter's own Minimum SOC to the same level for its
-/// window (issue #446) — and never lowers a reserve that already stops higher.
-/// `None` only when the device cannot take either, so a message says nothing
-/// rather than promising a level nobody set.
-pub fn export_stop_soc(
-    device_type: DeviceType,
-    battery_reserve: Option<u8>,
-    floor_soc: u8,
-) -> Option<u8> {
+/// Models with the per-slot target SOC registers hold the level the user chose
+/// for the slot. Everywhere else the booking raises the inverter's own Minimum
+/// SOC to that level for its window (issue #446), and never lowers a reserve
+/// that already stops higher — so the answer is always a level the booking will
+/// hold, whether or not a reserve has been read yet.
+pub fn export_stop_soc(device_type: DeviceType, battery_reserve: Option<u8>, floor_soc: u8) -> u8 {
     if device_type.uses_extended_schedule_slots() {
-        return Some(floor_soc);
+        return floor_soc;
     }
-    // The booking raises Minimum SOC to `floor_soc` for its window, so that is
-    // where the export stops — unless the battery already stops higher up,
-    // because the booking never lowers a reserve.
     match battery_reserve.filter(|reserve| (4..=100).contains(reserve)) {
-        Some(reserve) => Some(floor_soc.max(reserve)),
-        None => Some(floor_soc),
+        Some(reserve) => floor_soc.max(reserve),
+        None => floor_soc,
     }
 }
 
 /// How much a started session export is told about where it stops.
-fn export_started_detail(event: &ExportOnceEvent, stop_soc: Option<u8>) -> String {
+fn export_started_detail(event: &ExportOnceEvent, stop_soc: u8) -> String {
     let until = event.end.get(11..16).unwrap_or("the end of the session");
-    match stop_soc {
-        Some(soc) => format!(
-            "Slot {} is exporting until {until}, down to {soc}%. It goes back to its previous \
-             setting afterwards.",
-            event.slot
-        ),
-        None => format!(
-            "Slot {} is exporting until {until}. It goes back to its previous setting afterwards.",
-            event.slot
-        ),
-    }
+    format!(
+        "Slot {} is exporting until {until}, down to {stop_soc}%. It goes back to its previous \
+         setting afterwards.",
+        event.slot
+    )
 }
 
 /// Tell the user how a Saving Session export is going. Exports the user
@@ -890,6 +864,9 @@ async fn apply_event(state: &Arc<AppState>, id: &str) -> bool {
             let original = ExportOnceOriginal {
                 slot: restored.unwrap_or(current),
                 schedule_enabled: state.timed_export_config.lock().await.schedule_enabled,
+                // Captured when the floor is raised, which happens after the
+                // slot is written: a crash between the two owes nothing back.
+                reserve: None,
             };
             // Persisted before the slot is touched: a crash mid-apply must
             // still know what to put back.
@@ -1007,12 +984,17 @@ async fn revert_locked(state: &Arc<AppState>, id: &str, cancelling: bool) -> Res
             // Still live for the reserve: finishing now would drop it.
             return Err(defer);
         }
-        finish(
-            id,
-            ExportOnceState::Done,
-            Some("The slot was edited during the export, so it was left as you set it".to_string()),
-        )
-        .await;
+        // Keep a note the reserve step already left (a value it could not put
+        // back), rather than replacing the one thing the user still has to act
+        // on with a message about the slot.
+        let note = load_event(id)
+            .await
+            .and_then(|event| event.note)
+            .is_none()
+            .then(|| {
+                "The slot was edited during the export, so it was left as you set it".to_string()
+            });
+        finish(id, ExportOnceState::Done, note).await;
         return Ok(());
     }
     let schedule_enabled_before = state.timed_export_config.lock().await.schedule_enabled;
@@ -1194,20 +1176,54 @@ async fn confirm_reserve_floors(state: &Arc<AppState>) {
         return;
     }
     let now = inverter_now(state).await;
-    let owed = list_events().await.into_iter().filter(|event| {
-        event.state == ExportOnceState::Active
-            && event.applied
-            && !event.floor_refused
-            && event
-                .original
-                .as_ref()
-                .is_some_and(|original| original.reserve.is_none())
-            && event.start_at().is_some_and(|start| start <= now)
-            && event.end_at().is_some_and(|end| end > now)
-    });
-    for event in owed.collect::<Vec<_>>() {
-        if let Some(note) = hold_reserve_floor(state, &event.id).await {
-            update_event(&event.id, move |e| e.note = Some(note)).await;
+    let live: Vec<ExportOnceEvent> = list_events()
+        .await
+        .into_iter()
+        .filter(|event| {
+            event.state == ExportOnceState::Active
+                && event.applied
+                && !event.floor_refused
+                && event.start_at().is_some_and(|start| start <= now)
+                && event.end_at().is_some_and(|end| end > now)
+        })
+        .collect();
+    for event in live {
+        let holding = event
+            .original
+            .as_ref()
+            .is_some_and(|original| original.reserve.is_some());
+        if !holding {
+            if let Some(note) = hold_reserve_floor(state, &event.id).await {
+                update_event(&event.id, move |e| e.note = Some(note)).await;
+            }
+            continue;
+        }
+        // Already holding: put the floor back if something outside HEM lowered
+        // it mid-window, the same way the developer-mode guard re-asserts its
+        // own. `original.reserve` stays the user's value.
+        if snapshot_reserve(state).await.map(u16::from) >= Some(u16::from(event.target_soc)) {
+            continue;
+        }
+        if crate::inverter::poll::reserve_owned_by_other(state, Some(&event.id)).await {
+            continue;
+        }
+        match write_battery_reserve(
+            state,
+            u16::from(event.target_soc),
+            DischargeControlOwner::TimedExport,
+        )
+        .await
+        {
+            Ok(()) => tracing::info!(
+                "Export Once: Minimum SOC lowered during {}'s window, raised back to {}%",
+                event.id,
+                event.target_soc
+            ),
+            Err(error) => tracing::warn!(
+                "Export Once: re-asserting Minimum SOC {}% failed for {}: {error}",
+                event.target_soc,
+                event.id
+            ),
         }
     }
 }
@@ -1826,6 +1842,36 @@ mod tests {
             assert!(
                 note.contains("changed during the export"),
                 "the page says why it was left: {note}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_floor_something_else_lowered_is_raised_back_mid_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = reserve_state(DeviceType::ACCoupled, 4).await;
+            seed_schedule(&state, false, vec![]).await;
+            store(vec![event("e1", 1, "2026-10-17 18:00", "2026-10-17 19:00")]);
+
+            set_clock(&state, "2026-10-17 17:55").await;
+            run_tick(&state).await;
+            read_back_reserve(&state, 20).await;
+
+            // Something outside HEM drops Minimum SOC mid-window.
+            read_back_reserve(&state, 4).await;
+            set_clock(&state, "2026-10-17 18:30").await;
+            run_tick(&state).await;
+
+            assert!(
+                reserve_written(&state, 20).await,
+                "the floor is raised back: {:?}",
+                queued_writes(&state).await
+            );
+            assert_eq!(
+                stored("e1").original.expect("original").reserve,
+                Some(4),
+                "and the user's value is still what goes back"
             );
         })
         .await;
@@ -2760,34 +2806,34 @@ mod tests {
     }
 
     #[test]
-    fn the_stop_level_is_the_per_slot_floor_only_where_the_model_holds_one() {
+    fn the_stop_level_is_the_floor_the_booking_holds() {
         // Issue #446: the reporter's AC 3.0 has no per-slot floor register, so
-        // its export runs to its own Minimum SOC reserve.
+        // its booking raises Minimum SOC to the chosen floor for the window.
         assert_eq!(
             export_stop_soc(DeviceType::ACCoupled, Some(4), 35),
-            Some(4),
-            "no per-slot register: the reserve is the floor"
+            35,
+            "no per-slot register: the booking holds it in the reserve"
         );
-        assert_eq!(
-            export_stop_soc(DeviceType::Gen2Hybrid, Some(12), 35),
-            Some(12)
-        );
+        assert_eq!(export_stop_soc(DeviceType::Gen2Hybrid, Some(12), 35), 35);
         assert_eq!(
             export_stop_soc(DeviceType::Gen3Hybrid, Some(4), 35),
-            Some(35),
-            "per-slot floor: the configured level, not the reserve"
+            35,
+            "per-slot floor: the configured level"
         );
-        assert_eq!(
-            export_stop_soc(DeviceType::ThreePhase, Some(4), 20),
-            Some(20)
-        );
+        assert_eq!(export_stop_soc(DeviceType::ThreePhase, Some(4), 20), 20);
     }
 
     #[test]
-    fn an_unknown_or_out_of_range_reserve_promises_no_level() {
-        assert_eq!(export_stop_soc(DeviceType::ACCoupled, None, 20), None);
-        assert_eq!(export_stop_soc(DeviceType::ACCoupled, Some(0), 20), None);
-        assert_eq!(export_stop_soc(DeviceType::ACCoupled, Some(101), 20), None);
+    fn a_reserve_that_already_stops_higher_wins() {
+        // A booking never lowers a reserve: with 45% set, a 20% floor exports
+        // to 45%.
+        assert_eq!(export_stop_soc(DeviceType::ACCoupled, Some(45), 20), 45);
+        assert_eq!(export_stop_soc(DeviceType::Gen2Hybrid, Some(45), 20), 45);
+        // An unread or impossible reserve falls back to the floor the booking
+        // will write, rather than promising a level nobody set.
+        assert_eq!(export_stop_soc(DeviceType::ACCoupled, None, 20), 20);
+        assert_eq!(export_stop_soc(DeviceType::ACCoupled, Some(0), 20), 20);
+        assert_eq!(export_stop_soc(DeviceType::ACCoupled, Some(101), 20), 20);
     }
 
     #[test]
@@ -2795,13 +2841,8 @@ mod tests {
         let mut e = event("e1", 1, "2026-10-17 18:00", "2026-10-17 19:00");
         e.source = format!("{SESSION_SOURCE_PREFIX}9");
         assert_eq!(
-            export_started_detail(&e, Some(4)),
-            "Slot 1 is exporting until 18:00, down to 4%. \
-             It goes back to its previous setting afterwards."
-        );
-        assert_eq!(
-            export_started_detail(&e, None),
-            "Slot 1 is exporting until 18:00. \
+            export_started_detail(&e, 20),
+            "Slot 1 is exporting until 19:00, down to 20%. \
              It goes back to its previous setting afterwards."
         );
     }
