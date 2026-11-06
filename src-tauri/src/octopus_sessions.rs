@@ -17,7 +17,10 @@
 //! the same API. Every join is attempted at most once (the id is persisted
 //! before the request is sent), is gated on the account already being enrolled
 //! in the campaign, and is confirmed by re-reading the joined list before
-//! anything - an alert or an export - relies on it.
+//! anything - an alert or an export - relies on it. Octopus refusing a join
+//! because the account is already in the event is the one refusal that is not
+//! a failure: the joined list lags, so that join is left waiting for a later
+//! check to show it rather than alerted as a failure (#450).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -331,6 +334,9 @@ pub struct SessionsState {
     /// Sessions HEM tried to join and could not, and why. Kept while the
     /// session is still on offer, since a failed join is never retried.
     pub join_errors: HashMap<i64, String>,
+    /// Joins Octopus refused because the account is already in the session,
+    /// waiting for the joined list to catch up. Not failures yet (#450).
+    pub join_pending: HashMap<i64, PendingJoin>,
 }
 
 /// Where the token exchange and the sessions query go. A configured
@@ -427,34 +433,137 @@ fn join_mutation(account: &str, code: &str) -> String {
     )
 }
 
+/// The Kraken code Octopus uses when it will not join an event the account is
+/// already in. The message is the generic "account ineligible" one; only the
+/// code and reason say what actually happened (#450).
+const ALREADY_JOINED_CODE: &str = "KT-GB-5117";
+/// How long a join Octopus called "already signed up" waits for the account to
+/// show it before the page and the alert call it unconfirmed.
+const JOIN_GRACE_MINUTES: i64 = 30;
+
+/// Why Octopus refused a join request, in Octopus's own words.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct JoinRefusal {
+    /// `errors[].extensions.errorCode`, e.g. `KT-GB-5117`.
+    pub code: Option<String>,
+    /// `errors[].message`, the line Octopus puts in front of users.
+    pub message: String,
+    /// `errors[].extensions.errorDescription`, the longer explanation.
+    pub description: Option<String>,
+    /// `errors[].extensions.reason`, which separates "already in this event"
+    /// from a genuine refusal.
+    pub reason: Option<String>,
+    /// The `errors` objects exactly as Octopus sent them, for the log.
+    pub raw: Vec<Value>,
+}
+
+impl JoinRefusal {
+    /// Octopus refuses a second join of an event the account is already in,
+    /// even when `joinedEvents` does not list it yet. That is the opposite of
+    /// a failure, so it must not be reported as one.
+    fn already_joined(&self) -> bool {
+        // Octopus can put the useful half in either extension.
+        let reason = self.reason.as_deref().or(self.description.as_deref());
+        self.code.as_deref() == Some(ALREADY_JOINED_CODE)
+            && reason.is_some_and(|reason| {
+                let reason = reason.to_lowercase();
+                reason.contains("already signed up")
+                    || reason.contains("already joined")
+                    || reason.contains("cannot join again")
+            })
+    }
+
+    /// The code, Octopus's message and the reason it actually gave. The
+    /// description only stands in for the reason, since it usually repeats the
+    /// message.
+    fn detail(&self) -> String {
+        let mut text = match &self.code {
+            Some(code) => format!("{code}: {}", self.message),
+            None => self.message.clone(),
+        };
+        if let Some(extra) = self.reason.as_deref().or(self.description.as_deref()) {
+            let extra = extra.trim();
+            if !extra.is_empty() && !text.contains(extra) {
+                text.push_str(" — ");
+                text.push_str(extra);
+            }
+        }
+        text
+    }
+
+    /// The extensions and message as sent, for a support report.
+    fn raw_json(&self) -> String {
+        Value::Array(self.raw.clone()).to_string()
+    }
+
+    /// A request that never reached Octopus, so there is nothing but the
+    /// transport's own words.
+    fn transport(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+            description: None,
+            reason: None,
+            raw: Vec::new(),
+        }
+    }
+}
+
+/// A join that did not land: the offer, what to tell the user, and whether it
+/// is merely unconfirmed (so the message must not claim a refusal).
+type JoinFailure = (Joinable, String, bool);
+
+/// A join Octopus refused because the account is already in the session. The
+/// joined list can lag that, so it is re-read on later checks rather than
+/// reported as a failure straight away (#450).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PendingJoin {
+    /// When the refusal arrived.
+    pub since: DateTime<Utc>,
+    /// What Octopus said, for the page and for the later report.
+    pub refusal: JoinRefusal,
+}
+
 /// Whether Octopus refused a join request. The reply type has no error field,
 /// so a refusal arrives as top-level GraphQL `errors`. Success here only means
 /// "no refusal": the caller still confirms against the joined list.
-fn join_outcome(response: &Value) -> Result<(), String> {
-    let problems: Vec<String> = response
+fn join_outcome(response: &Value) -> Result<(), JoinRefusal> {
+    let errors: Vec<&Value> = response
         .get("errors")
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item["message"].as_str().map(str::to_string))
-                .collect()
-        })
+        .map(|items| items.iter().filter(|item| item.is_object()).collect())
         .unwrap_or_default();
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Octopus would not join it: {}",
-            problems.join("; ")
-        ))
+    if errors.is_empty() {
+        return Ok(());
     }
+    let message = errors
+        .iter()
+        .filter_map(|error| error["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let extension = |key: &str| {
+        errors
+            .iter()
+            .find_map(|error| error.get("extensions")?.get(key)?.as_str())
+            .map(str::to_string)
+    };
+    Err(JoinRefusal {
+        code: extension("errorCode"),
+        description: extension("errorDescription"),
+        reason: extension("reason"),
+        message: if message.is_empty() {
+            "Octopus gave no reason".to_string()
+        } else {
+            message
+        },
+        raw: errors.into_iter().cloned().collect(),
+    })
 }
 
 /// What one round of join requests achieved.
 struct JoinPass {
-    /// Per requested session, whether Octopus refused it.
-    requests: Vec<Result<(), String>>,
+    /// Per requested session, whether Octopus refused it, and why.
+    requests: Vec<Result<(), JoinRefusal>>,
     /// The joined list read again afterwards, which is what decides success.
     after: Result<Parsed, String>,
 }
@@ -478,15 +587,18 @@ fn join_blocking(
 ) -> JoinPass {
     let (_, query_url) = endpoints(settings);
     let account = settings.octopus_account_number.trim();
-    let requests: Vec<Result<(), String>> = targets
+    let requests: Vec<Result<(), JoinRefusal>> = targets
         .iter()
         .map(|target| {
-            post_graphql(
+            let sent = post_graphql(
                 &query_url,
                 Some(token),
                 &json!({ "query": join_mutation(account, &target.code) }),
-            )
-            .and_then(|response| join_outcome(&response))
+            );
+            match sent {
+                Ok(response) => join_outcome(&response),
+                Err(error) => Err(JoinRefusal::transport(error)),
+            }
         })
         .collect();
     let mut after = query_sessions(settings, token, now);
@@ -565,11 +677,16 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         current
             .join_errors
             .retain(|id, _| parsed.joinable.iter().any(|offer| offer.id == *id));
+        current
+            .join_pending
+            .retain(|id, _| parsed.joinable.iter().any(|offer| offer.id == *id));
         // An attempt is remembered across restarts but its reason is not.
         // A session still on offer after an attempt did not get joined, and
         // must not silently drop off the page.
         for offer in &parsed.joinable {
-            if settings.octopus_sessions_join_attempted.contains(&offer.id) {
+            if settings.octopus_sessions_join_attempted.contains(&offer.id)
+                && !current.join_pending.contains_key(&offer.id)
+            {
                 current.join_errors.entry(offer.id).or_insert_with(|| {
                     "HEM tried to join this earlier and it is still not joined. HEM will not \
                      try again; check the Octopus app"
@@ -630,6 +747,9 @@ async fn auto_join(
         .cloned()
         .collect();
     if targets.is_empty() {
+        // A join Octopus refused as "already signed up" is only waiting; this
+        // check's fresh read may now show it, or run out its grace.
+        settle_pending_at(state, &parsed, now, true).await;
         return (parsed, joined_by_hem);
     }
 
@@ -677,6 +797,9 @@ async fn auto_join(
         return (parsed, joined_by_hem);
     };
 
+    // Joins an earlier check could not confirm because Octopus said the
+    // account was already in them, plus anything added below.
+    let mut pending = std::mem::take(&mut state.octopus_sessions.lock().await.join_pending);
     let confirmed: HashSet<i64> = pass
         .after
         .as_ref()
@@ -691,13 +814,39 @@ async fn auto_join(
             if request.is_ok() {
                 joined_by_hem.insert(offer.id);
             }
+            pending.remove(&offer.id);
             continue;
+        }
+        // "Already signed up" is Octopus saying the join happened, and that
+        // `joinedEvents` has not caught up. Reporting that as a failed join
+        // told the user HEM could not join a session they were in (#450).
+        if let Err(refusal) = request {
+            if refusal.already_joined() {
+                tracing::info!(
+                    "Saving Sessions: Octopus says session {} is already joined ({}); \
+                     waiting for the account to show it. Reply: {}",
+                    offer.id,
+                    refusal.detail(),
+                    refusal.raw_json(),
+                );
+                pending.insert(
+                    offer.id,
+                    PendingJoin {
+                        since: now,
+                        refusal: refusal.clone(),
+                    },
+                );
+                continue;
+            }
         }
         // `unconfirmed`: Octopus took the request but the account does not show
         // the session (yet). That is not the same as a refusal, and the message
         // must not claim a failure that the next check may disprove.
         let (reason, unconfirmed) = match (request, &pass.after) {
-            (Err(error), _) => (error.clone(), false),
+            (Err(refusal), _) => (
+                format!("Octopus would not join it: {}", refusal.detail()),
+                false,
+            ),
             (Ok(()), Ok(_)) => (
                 "Octopus accepted the request but the session is not showing on the account \
                  yet. HEM will not send it again; if it appears you will get the usual \
@@ -716,32 +865,103 @@ async fn auto_join(
         );
         failures.push((offer.clone(), reason, unconfirmed));
     }
-    {
-        let mut current = state.octopus_sessions.lock().await;
-        for (offer, reason, _) in &failures {
-            current.join_errors.insert(offer.id, reason.clone());
-        }
-    }
-    if !failures.is_empty() {
-        // One message however many sessions failed: a login or account
-        // problem fails them all, and five notifications at once is noise.
-        let headline = if failures.iter().all(|(_, _, unconfirmed)| *unconfirmed) {
-            "⚡ HEM — Octopus Saving Session join not confirmed"
-        } else {
-            "⚡ HEM — could not join an Octopus Saving Session"
-        };
-        let mut text = headline.to_string();
-        for (offer, reason, _) in &failures {
-            text.push_str(&format!(
-                "\n{}: {reason}",
-                session_window_text(offer.start, offer.end)
-            ));
-        }
-        crate::alerts::send_text_notification(state, &text, "saving-session").await;
-    }
+
+    // Whatever is left is waiting for the account to show it. A re-read that
+    // failed decides nothing, so those wait for the next check too.
+    let (settled, mut later) = match &pass.after {
+        Ok(after) => settle_pending(pending, after, now, true),
+        Err(_) => settle_pending(pending, &parsed, now, false),
+    };
+    failures.append(&mut later);
+    state.octopus_sessions.lock().await.join_pending = settled;
+    report_failures(state, &failures).await;
     // Carry on with what Octopus reports now; if it could not be read again,
     // with what it reported before, and the next check picks up any join.
     (pass.after.unwrap_or(parsed), joined_by_hem)
+}
+
+/// Move the joins Octopus refused as "already signed up" on by one check:
+/// forget those the account now shows (or no longer offers), keep the rest,
+/// and turn the ones whose grace has run out into unconfirmed failures. Pure,
+/// so the clock and the lists are whatever the caller passes in.
+fn settle_pending(
+    pending: HashMap<i64, PendingJoin>,
+    parsed: &Parsed,
+    now: DateTime<Utc>,
+    decide: bool,
+) -> (HashMap<i64, PendingJoin>, Vec<JoinFailure>) {
+    let mut kept = HashMap::new();
+    let mut failures = Vec::new();
+    for (id, join) in pending {
+        let Some(offer) = parsed.joinable.iter().find(|offer| offer.id == id) else {
+            // Joined, started or withdrawn: nothing left to confirm. Worth a
+            // line when it was never confirmed, since nobody was told.
+            if !parsed.sessions.iter().any(|session| session.id == id) {
+                tracing::info!(
+                    "Saving Sessions: session {id} left the offer list before the account \
+                     showed it; nothing to confirm"
+                );
+            }
+            continue;
+        };
+        if !decide || now - join.since < Duration::minutes(JOIN_GRACE_MINUTES) {
+            kept.insert(id, join);
+            continue;
+        }
+        // The page adds its own "HEM will not try this one again" line, so
+        // this only has to say what Octopus said and what is still missing.
+        // Otherwise the advice reads twice.
+        let reason = format!(
+            "Octopus refused the join saying the account is already signed up ({}), but the \
+             session is still not showing",
+            join.refusal.detail()
+        );
+        tracing::warn!("Saving Sessions: could not confirm the join of session {id}: {reason}");
+        failures.push((offer.clone(), reason, true));
+    }
+    (kept, failures)
+}
+
+/// Keep pending joins from outliving their offer, and report the ones whose
+/// grace ran out. Used by checks that send no join request of their own.
+async fn settle_pending_at(
+    state: &Arc<AppState>,
+    parsed: &Parsed,
+    now: DateTime<Utc>,
+    decide: bool,
+) {
+    let pending = std::mem::take(&mut state.octopus_sessions.lock().await.join_pending);
+    let (kept, failures) = settle_pending(pending, parsed, now, decide);
+    state.octopus_sessions.lock().await.join_pending = kept;
+    report_failures(state, &failures).await;
+}
+
+/// Put join failures on the page and send one message about them. One message
+/// however many sessions failed: a login or account problem fails them all,
+/// and five notifications at once is noise.
+async fn report_failures(state: &Arc<AppState>, failures: &[JoinFailure]) {
+    if failures.is_empty() {
+        return;
+    }
+    {
+        let mut current = state.octopus_sessions.lock().await;
+        for (offer, reason, _) in failures {
+            current.join_errors.insert(offer.id, reason.clone());
+        }
+    }
+    let headline = if failures.iter().all(|(_, _, unconfirmed)| *unconfirmed) {
+        "⚡ HEM — Octopus Saving Session join not confirmed"
+    } else {
+        "⚡ HEM — could not join an Octopus Saving Session"
+    };
+    let mut text = headline.to_string();
+    for (offer, reason, _) in failures {
+        text.push_str(&format!(
+            "\n{}: {reason}",
+            session_window_text(offer.start, offer.end)
+        ));
+    }
+    crate::alerts::send_text_notification(state, &text, "saving-session").await;
 }
 
 /// Whether to check for sessions at all. Also enforces that nothing booked for
@@ -2902,6 +3122,95 @@ mod tests {
         );
     }
 
+    /// What Octopus answered for a join it will not take because the account
+    /// is already in the event (#450), payload copied from the install log.
+    fn already_signed_up_answer() -> Value {
+        json!({
+            "data": { "joinSavingSessionsEvent": null },
+            "errors": [{
+                "message": "Account ineligible to join Saving Sessions event.",
+                "extensions": {
+                    "errorCode": "KT-GB-5117",
+                    "errorDescription": "Account does not meet all criteria required to join \
+                        Saving Sessions event.",
+                    "reason": "Account is already signed up to this event and cannot join again.",
+                },
+            }],
+        })
+    }
+
+    #[test]
+    fn a_refusal_keeps_octopus_own_code_and_reason() {
+        let refusal = join_outcome(&already_signed_up_answer()).unwrap_err();
+        assert_eq!(refusal.code.as_deref(), Some(ALREADY_JOINED_CODE));
+        assert!(refusal.already_joined());
+        let detail = refusal.detail();
+        assert!(detail.contains("KT-GB-5117"), "{detail}");
+        assert!(
+            detail.contains("Account ineligible to join Saving Sessions event."),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("Account is already signed up to this event"),
+            "{detail}"
+        );
+        // The description only stands in for a missing reason, since it
+        // usually repeats the message.
+        assert!(!detail.contains("does not meet all criteria"), "{detail}");
+        // The raw reply is kept for a support report.
+        assert!(refusal.raw_json().contains("KT-GB-5117"));
+        assert!(refusal.raw_json().contains("already signed up"));
+    }
+
+    #[test]
+    fn only_an_already_signed_up_refusal_counts_as_probably_joined() {
+        // The same code without a reason is the eligibility refusal it looks
+        // like, so it must still be reported as one.
+        let plain = join_outcome(&json!({ "errors": [{
+            "message": "Account ineligible to join Saving Sessions event.",
+            "extensions": { "errorCode": ALREADY_JOINED_CODE },
+        }] }))
+        .unwrap_err();
+        assert!(!plain.already_joined());
+        assert_eq!(
+            plain.detail(),
+            "KT-GB-5117: Account ineligible to join Saving Sessions event."
+        );
+
+        // A different code is never treated as a join.
+        let other = join_outcome(&json!({ "errors": [{
+            "message": "Event has ended",
+            "extensions": {
+                "errorCode": "KT-GB-5000",
+                "reason": "Account is already signed up to this event and cannot join again.",
+            },
+        }] }))
+        .unwrap_err();
+        assert!(!other.already_joined());
+
+        // With no `reason`, the description can carry the same news.
+        let described = join_outcome(&json!({ "errors": [{
+            "message": "Account ineligible to join Saving Sessions event.",
+            "extensions": {
+                "errorCode": ALREADY_JOINED_CODE,
+                "errorDescription": "Account is already signed up to this event.",
+            },
+        }] }))
+        .unwrap_err();
+        assert!(described.already_joined());
+        assert!(described
+            .detail()
+            .contains("already signed up to this event."));
+
+        // A refusal with nothing in it is still a refusal, not a success.
+        assert_eq!(
+            join_outcome(&json!({ "errors": [{}] }))
+                .unwrap_err()
+                .detail(),
+            "Octopus gave no reason"
+        );
+    }
+
     #[test]
     fn a_refused_join_is_reported_with_octopus_own_words() {
         assert_eq!(
@@ -2916,14 +3225,15 @@ mod tests {
             ),
             Ok(())
         );
+        let refusal = join_outcome(&json!({ "data": { "joinSavingSessionsEvent": null },
+            "errors": [{ "message": "Event has ended" }, { "message": "Try later" }] }))
+        .unwrap_err();
+        assert_eq!(refusal.detail(), "Event has ended; Try later");
         assert_eq!(
-            join_outcome(&json!({ "data": { "joinSavingSessionsEvent": null },
-                "errors": [{ "message": "Event has ended" }, { "message": "Try later" }] })),
-            Err("Octopus would not join it: Event has ended; Try later".to_string())
-        );
-        assert_eq!(
-            join_outcome(&json!({ "errors": [{ "message": "Cannot query field" }] })),
-            Err("Octopus would not join it: Cannot query field".to_string())
+            join_outcome(&json!({ "errors": [{ "message": "Cannot query field" }] }))
+                .unwrap_err()
+                .detail(),
+            "Cannot query field"
         );
     }
 
@@ -3022,6 +3332,200 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Event has ended"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_already_signed_up_refusal_is_never_called_a_failed_join() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(already_signed_up_answer());
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.joins().len(), 1);
+            // The account is in the session; the list just has not caught up.
+            assert!(mock.alerts().is_empty(), "nothing to report yet");
+            {
+                let current = state.octopus_sessions.lock().await.clone();
+                assert!(current.join_errors.is_empty());
+                assert_eq!(
+                    current.join_pending.get(&9).map(|join| join.since),
+                    Some(utc(NOW))
+                );
+            }
+
+            // Still not showing ten minutes later: still waiting, still quiet.
+            check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
+            assert_eq!(mock.joins().len(), 1, "never retried");
+            assert!(mock.alerts().is_empty());
+            // A join still waiting for the account to show it is not a failure
+            // on the page either, even though the attempt is on record.
+            assert!(state.octopus_sessions.lock().await.join_errors.is_empty());
+            assert_eq!(
+                state
+                    .octopus_sessions
+                    .lock()
+                    .await
+                    .join_pending
+                    .get(&9)
+                    .map(|join| join.since),
+                Some(utc(NOW)),
+                "the wait started when the refusal arrived"
+            );
+
+            // Past the grace with the session still not on the account, the
+            // user hears about it in Octopus's own words, as unconfirmed.
+            check_once(&state, utc("2026-10-17T12:35:00+00:00")).await;
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1);
+            assert!(alerts[0].body.contains("join not confirmed"));
+            assert!(!alerts[0].body.contains("could not join"));
+            assert!(alerts[0].body.contains("Mon 19 Oct, 18:00–19:00"));
+            assert!(alerts[0].body.contains("KT-GB-5117"));
+            assert!(alerts[0].body.contains("already signed up to this event"));
+
+            let (_, Json(body)) = get_sessions(State(state.clone())).await;
+            let error = body["join_failures"][0]["error"].as_str().unwrap();
+            assert!(error.contains("KT-GB-5117"), "{error}");
+            assert!(error.contains("already signed up to this event"), "{error}");
+
+            // Said once: the next check keeps the line on the page but sends
+            // no second message.
+            check_once(&state, utc("2026-10-17T12:45:00+00:00")).await;
+            assert_eq!(mock.alerts().len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_join_that_only_shows_on_a_later_check_is_still_exported() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(already_signed_up_answer());
+            // The join's own confirmation read still gets the old list.
+            mock.set_sessions_after_join_lagging(one_session_response(), 1);
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            Settings::update(|s| s.octopus_sessions_auto_join = true).unwrap();
+
+            check_once(&state, utc(EXPORT_NOW)).await;
+            assert!(
+                session_events().is_empty(),
+                "a session the account does not show is never exported"
+            );
+
+            check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
+            let events = session_events();
+            assert_eq!(events.len(), 1, "booked once the account shows it");
+            assert_eq!(events[0].source, "saving_session:9");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_pending_join_is_not_expired_by_a_check_that_could_not_re_read() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(already_signed_up_answer());
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(state.octopus_sessions.lock().await.join_pending.len(), 1);
+
+            // Past session 9's grace, but now a second offer arrives, so this
+            // check sends a join request and the read afterwards cannot be
+            // understood: nothing can be settled either way.
+            mock.set_sessions(response(
+                json!([]),
+                json!([
+                    event(
+                        9,
+                        "TURN_DOWN",
+                        "2026-10-19T17:00:00+00:00",
+                        "2026-10-19T18:00:00+00:00",
+                        73
+                    ),
+                    event(
+                        10,
+                        "TURN_DOWN",
+                        "2026-10-20T17:00:00+00:00",
+                        "2026-10-20T18:00:00+00:00",
+                        73
+                    ),
+                ]),
+            ));
+            mock.set_sessions_after_join(json!("unreadable"));
+            check_once(&state, utc("2026-10-17T12:35:00+00:00")).await;
+            assert_eq!(
+                mock.joins().len(),
+                2,
+                "the second check sent a join request"
+            );
+
+            assert!(mock.alerts().is_empty());
+            let current = state.octopus_sessions.lock().await.clone();
+            assert!(current.join_pending.contains_key(&9), "still waiting");
+            assert!(current.join_errors.is_empty(), "nothing decided");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_join_octopus_called_already_signed_up_is_announced_once_it_shows() {
+        with_isolated_config_dir_async(|| async {
+            // The refusal is right; the list only catches up after the 6-second
+            // confirmation window, which is what happened on 4 Nov (#450).
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(already_signed_up_answer());
+            // One read still answers with the old list, which is the 6-second
+            // confirmation window's only chance; the next check sees the join.
+            mock.set_sessions_after_join_lagging(one_session_response(), 1);
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.alerts().is_empty());
+            assert_eq!(state.octopus_sessions.lock().await.join_pending.len(), 1);
+
+            let later = utc("2026-10-17T12:10:00+00:00");
+            check_once(&state, later).await;
+            assert_eq!(mock.joins().len(), 1, "never retried");
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1, "announced, not reported as a failure");
+            assert!(alerts[0].body.contains("Mon 19 Oct, 18:00–19:00"));
+            assert!(!alerts[0].body.contains("could not join"));
+            assert!(!alerts[0].body.contains("join not confirmed"));
+            assert!(!alerts[0].body.contains("HEM joined this session for you"));
+            let current = state.octopus_sessions.lock().await.clone();
+            assert!(current.join_pending.is_empty());
+            assert!(current.join_errors.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_is_not_about_being_signed_up_still_fails_with_its_code() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            // Same code, but the reason is a real eligibility refusal.
+            mock.set_join_answer(json!({
+                "data": { "joinSavingSessionsEvent": null },
+                "errors": [{
+                    "message": "Account ineligible to join Saving Sessions event.",
+                    "extensions": {
+                        "errorCode": ALREADY_JOINED_CODE,
+                        "reason": "Account does not meet all criteria required to join.",
+                    },
+                }],
+            }));
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+
+            let alerts = mock.alerts();
+            assert_eq!(alerts.len(), 1);
+            assert!(alerts[0].body.contains("could not join"));
+            assert!(alerts[0].body.contains("KT-GB-5117"));
+            assert!(alerts[0].body.contains("does not meet all criteria"));
+            assert!(state.octopus_sessions.lock().await.join_pending.is_empty());
         })
         .await;
     }
