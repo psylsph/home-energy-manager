@@ -79,6 +79,7 @@ import type { InverterSnapshot } from '../lib/types';
 import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 import { useInverterStore } from '../store/useInverterStore';
 import HelpTip from '../components/HelpTip';
+import PlannerModeWarning from '../components/PlannerModeWarning';
 
 /** One-line summary and full explanation of each planner strategy (issue #423). */
 const STRATEGY_HELP: Record<PlanStrategy, { summary: string; detail: string }> = {
@@ -1217,7 +1218,8 @@ export default function ForecastPage() {
           )}
           {/* Automatic planning sits out on a Gateway (issue #428). */}
           {batteryControls && (
-          <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-3">
+          <div className="flex flex-col gap-2 border-t border-white/10 pt-3">
+          <div className="flex items-center justify-between gap-3">
             <div>
               <div className="text-xs font-medium text-text-primary">Automatic Planning</div>
               <div className="mt-0.5 text-[11px] text-text-secondary" data-testid="forecast-auto-apply-summary">
@@ -1237,6 +1239,8 @@ export default function ForecastPage() {
             <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${planAutoHandling ? 'bg-emerald-500/15 text-emerald-300' : 'bg-bg-elevated text-text-secondary'}`}>
               {planAutoHandling ? 'On' : 'Off'}
             </span>
+          </div>
+          {planAutoHandling && <PlannerModeWarning snapshot={snapshot} />}
           </div>
           )}
           <details className="group rounded-lg bg-bg-elevated/50">

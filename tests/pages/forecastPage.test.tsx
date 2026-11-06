@@ -2465,3 +2465,74 @@ describe('ForecastPage plan settings save without a blur (issue #391)', () => {
     expect(minSoc.value).toBe('35');
   });
 });
+
+describe('ForecastPage automatic planning and the charging mode (issue #437)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+  afterEach(() => {
+    cleanup();
+    useInverterStore.setState({ snapshot: null } as never);
+  });
+
+  const mockSettings = (autoRefresh: boolean) => {
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      if (path === '/api/settings') {
+        return { ok: true, data: { forecast_min_soc_pct: 20, forecast_plan_auto_refresh: autoRefresh } };
+      }
+      return { ok: true, data: {} };
+    });
+  };
+  const withMode = (charging_mode: string | undefined) => {
+    onTestFinished(() => useInverterStore.setState({ snapshot: null } as never));
+    useInverterStore.setState({
+      snapshot: { soc: 50, max_battery_power_w: 5000, device_type_code: '2001', charging_mode },
+    } as never);
+  };
+
+  it('warns that Cosy mode will overwrite the plan when automatic planning is on', async () => {
+    mockSettings(true);
+    withMode('cosy');
+    render(<ForecastPage />);
+    const warning = await screen.findByTestId('planner-mode-warning');
+    expect(warning.textContent).toMatch(/Cosy mode is on/);
+    expect(warning.textContent).toMatch(/overwrite the plan/);
+    expect(warning.textContent).toMatch(/Standard/);
+  });
+
+  it('says Adaptive Charge makes automatic planning wait', async () => {
+    mockSettings(true);
+    withMode('adaptive');
+    render(<ForecastPage />);
+    expect((await screen.findByTestId('planner-mode-warning')).textContent).toMatch(/Adaptive Charge.*waits/);
+  });
+
+  it('stays quiet in Standard mode', async () => {
+    mockSettings(true);
+    withMode('standard');
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-auto-apply-summary');
+    expect(screen.queryByTestId('planner-mode-warning')).toBeNull();
+  });
+
+  it('stays quiet when the mode is not reported', async () => {
+    mockSettings(true);
+    withMode(undefined);
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-auto-apply-summary');
+    expect(screen.queryByTestId('planner-mode-warning')).toBeNull();
+  });
+
+  it('stays quiet when automatic planning is off, even in Cosy mode', async () => {
+    mockSettings(false);
+    withMode('cosy');
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-auto-apply-summary').textContent).toMatch(/^Off/);
+    });
+    expect(screen.queryByTestId('planner-mode-warning')).toBeNull();
+  });
+});

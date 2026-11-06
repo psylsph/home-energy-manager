@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.5] - 2026-11-06
+
+### Added
+
+- **The Planner now warns when your charging mode will get in its way.** With Automatic Planning on, the Planner page and the Control page's Charging Mode section say if Cosy or Agile will overwrite the plan, or if Adaptive Charge will make it wait, and point you to Standard mode.
+- **The Status page tells you when the planned charge won't run.** If Automatic Planning has set a charge slot but Timed Charge is off, a short note appears with a link to the Control page.
+
 ## [1.8.4] - 2026-11-06
 
 ### Fixed

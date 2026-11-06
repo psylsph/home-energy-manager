@@ -3,6 +3,7 @@ import { useNow } from '../hooks/useNow';
 import { createPortal } from 'react-dom';
 import { useInverterStore } from '../store/useInverterStore';
 import type { BatteryModeKind } from '../store/useInverterStore';
+import { plannerAutomationOn, plannerModeConflict } from '../lib/plannerMode';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
 import {
@@ -1097,6 +1098,10 @@ function CosyChargingSection({
   >([]);
   const [saving, setSaving] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+  // Automatic Planning writes charge slot 1; a mode that owns the charge
+  // schedule overwrites it, so say so as the mode is chosen (issue #437).
+  const plannerPlanning = useInverterStore((st) => plannerAutomationOn(st.snapshot));
+  const plannerConflict = plannerModeConflict({ charging_mode: mode });
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
 
@@ -1229,6 +1234,12 @@ function CosyChargingSection({
           </div>
           <p className="text-[11px] text-text-secondary leading-relaxed">{MODE_HELP[mode].summary}</p>
         </div>
+      )}
+
+      {plannerPlanning && plannerConflict && (
+        <p role="status" data-testid="control-planner-mode-warning" className="text-amber-300 text-xs">
+          Automatic Planning is on. {plannerConflict.message}
+        </p>
       )}
 
       {mode === 'adaptive' && <AdaptiveChargeSection />}

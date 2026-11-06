@@ -6,6 +6,7 @@ import HouseEnergyView from '../components/house/HouseEnergyView';
 import EnergyBalanceBars from '../components/EnergyBalanceBars';
 import HouseStatusCards from '../components/house/HouseStatusCards';
 import ColdBatteryWarning from '../components/ColdBatteryWarning';
+import TimedChargeOffHint from '../components/TimedChargeOffHint';
 import AwaitingConnection from '../components/AwaitingConnection';
 import { formatPercent, formatPower } from '../lib/format';
 import { gridFaultAdvice, gridFaultReason, gridFaultTitle, hasGridFault } from '../lib/gridFault';
@@ -144,6 +145,8 @@ export default function StatusPage() {
       )}
 
       <ColdBatteryWarning />
+
+      <TimedChargeOffHint />
 
       {/* Landscape layout on lg+ (≥1024px): energy diagram on the left
           with the house cards and Today balance bars on the right, so the

@@ -178,6 +178,33 @@ describe('StatusPage', () => {
     expect(container.querySelector('[data-testid="today-balance"]')).not.toBeNull();
   });
 
+  describe('Timed Charge hint (issue #448)', () => {
+    const slot = { enabled: true, start_hour: 0, start_minute: 30, end_hour: 5, end_minute: 30, target_soc: 100 };
+    afterEach(() => {
+      useInverterStore.setState({ energyFlowDisplay: 'orbit', showTodayStats: true });
+    });
+
+    it.each(['orbit', 'house'] as const)('shows in the %s view when the planned charge cannot run', (display) => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', enable_charge: false, charge_slots: [slot], forecast_plan_auto_refresh: true }),
+        connectionState: 'connected',
+        energyFlowDisplay: display,
+        showTodayStats: false,
+      });
+      render(<StatusPage />);
+      expect(screen.getByTestId('timed-charge-off-hint').textContent).toMatch(/Timed Charge is off/);
+    });
+
+    it('stays out of the way when Timed Charge is armed', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', enable_charge: true, charge_slots: [slot], forecast_plan_auto_refresh: true }),
+        connectionState: 'connected',
+      });
+      render(<StatusPage />);
+      expect(screen.queryByTestId('timed-charge-off-hint')).toBeNull();
+    });
+  });
+
   describe('energy flow display (issue #422)', () => {
     afterEach(() => {
       useInverterStore.setState({ energyFlowDisplay: 'orbit', showTodayStats: true });
