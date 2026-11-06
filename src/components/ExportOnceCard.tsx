@@ -10,7 +10,7 @@ import {
 } from '../lib/exportOnce';
 import type { ExportOnceBooking } from '../lib/exportOnce';
 import type { ExportOnceEvent, ExportOnceListResponse, ScheduleSlot } from '../lib/types';
-import { HeadingWithHelp } from './HelpTip';
+import HelpTip, { HeadingWithHelp } from './HelpTip';
 
 const REFRESH_MS = 15_000;
 
@@ -65,7 +65,7 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
   }, [reloadTick]);
 
   const { upcoming, recent } = splitEvents(events);
-  const showFloor = maxDischargeSlots > 2;
+
 
   async function book() {
     if (!form || !nowLocal) return;
@@ -211,25 +211,28 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
               />
             </label>
           </div>
-          {showFloor && (
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-text-secondary text-sm">Stop Exporting at</span>
-                <span className="font-mono text-text-primary text-sm">{form.target_soc}%</span>
-              </div>
-              <input
-                type="range"
-                min={4}
-                max={99}
-                step={1}
-                value={form.target_soc}
-                aria-label="Stop Exporting at"
-                onChange={(e) => update({ target_soc: Number(e.target.value) })}
-                disabled={saving}
-                className="w-full"
-              />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-text-secondary text-sm">Stop Exporting at</span>
+              <span className="font-mono text-text-primary text-sm">{form.target_soc}%</span>
             </div>
-          )}
+            <input
+              type="range"
+              min={4}
+              max={99}
+              step={1}
+              value={form.target_soc}
+              aria-label="Stop Exporting at"
+              onChange={(e) => update({ target_soc: Number(e.target.value) })}
+              disabled={saving}
+              className="w-full"
+            />
+          </div>
+          <HelpTip label="Stop Exporting at">
+            The export stops when the battery reaches this level. Inverters with a per-slot floor
+            hold it there; the rest have their Minimum SOC raised to it for the window. Both go
+            back afterwards.
+          </HelpTip>
           {error && (
             <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
               {error}

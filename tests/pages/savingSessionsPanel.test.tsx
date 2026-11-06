@@ -26,6 +26,7 @@ function reply(overrides: Partial<SavingSessionsResponse> = {}): SavingSessionsR
     sessions: [],
     export_slot: 1,
     export_floor_soc: 20,
+    effective_floor_soc: 20,
     max_discharge_slots: 3,
     ...overrides,
   };
@@ -322,25 +323,63 @@ describe('SavingSessionsPanel', () => {
       );
     });
 
-    it('offers no slot choice and no Save when the inverter has a single slot', async () => {
-      // Nothing is configurable: the one slot is used. A Save button that can
-      // never enable, and a picker with one option, would only confuse.
-      apiGet.mockResolvedValue(exporting({ max_discharge_slots: 1, export_slot: 1 }));
+    it('offers the floor but no slot choice when the inverter has a single slot', async () => {
+      // Issue #446: the one slot is used, but the stop level is still the
+      // user's to choose — on this inverter HEM holds it in Minimum SOC.
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 20 }),
+      );
       render(<SavingSessionsPanel />);
       expect(await screen.findByText(/will export from your battery/)).toBeTruthy();
       expect(screen.getByText(/single export slot/)).toBeTruthy();
       expect(screen.queryByLabelText('Slot to Use')).toBeNull();
-      expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Save Export Settings' })).toBeNull();
+      expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Save Export Settings' })).toBeTruthy();
     });
 
-    it('offers the slot picker, but not the floor, on a two-slot inverter, and Save follows the change', async () => {
+    it('says where Minimum SOC stops the export above the chosen floor', async () => {
+      // A booking never lowers Minimum SOC, so a higher one is where it stops.
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_floor_soc: 20, effective_floor_soc: 45 }),
+      );
+      render(<SavingSessionsPanel />);
+      expect(
+        await screen.findByText('Your Minimum SOC is 45%, so the export stops there.'),
+      ).toBeTruthy();
+    });
+
+    it('says nothing extra when the chosen floor is where it stops', async () => {
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_floor_soc: 20, effective_floor_soc: 20 }),
+      );
+      render(<SavingSessionsPanel />);
+      await screen.findByLabelText('Stop Exporting at');
+      expect(screen.queryByTestId('session-floor-minimum-soc')).toBeNull();
+    });
+
+    it('saves a floor change on a single-slot inverter', async () => {
+      apiGet.mockResolvedValue(
+        exporting({ max_discharge_slots: 1, export_slot: 1, effective_floor_soc: 20 }),
+      );
+      apiPost.mockResolvedValue({ ok: true });
+      render(<SavingSessionsPanel />);
+      fireEvent.change(await screen.findByLabelText('Stop Exporting at'), { target: { value: '35' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Export Settings' }));
+      await waitFor(() =>
+        expect(apiPost).toHaveBeenCalledWith('/api/octopus/sessions/mode', {
+          export_slot: 1,
+          export_floor_soc: 35,
+        }),
+      );
+    });
+
+    it('offers the slot picker and the floor on a two-slot inverter, and Save follows the change', async () => {
       apiGet.mockResolvedValue(exporting({ max_discharge_slots: 2, export_slot: 1 }));
       apiPost.mockResolvedValue({ ok: true });
       render(<SavingSessionsPanel />);
       const select = (await screen.findByLabelText('Slot to Use')) as HTMLSelectElement;
       expect(Array.from(select.options).map((o) => o.value)).toEqual(['1', '2']);
-      expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
+      expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
       const save = screen.getByRole('button', { name: 'Save Export Settings' });
       expect(save).toBeDisabled();
 

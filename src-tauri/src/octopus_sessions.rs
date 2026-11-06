@@ -660,7 +660,7 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         return;
     }
     let (parsed, joined_by_hem) = auto_join(state, &settings, parsed, &token, now).await;
-    let floor_applies = max_discharge_slots(state).await > 2;
+    let stop_soc = export_stop_soc(state, &settings).await;
     let outcomes = if settings.octopus_sessions_mode == SessionsMode::Export {
         cancel_withdrawn_exports(state, &settings, &parsed.sessions).await;
         let previous_errors = state.octopus_sessions.lock().await.booking_errors.clone();
@@ -706,7 +706,7 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
         &parsed.sessions,
         now,
         &outcomes,
-        floor_applies,
+        stop_soc,
         &joined_by_hem,
     )
     .await;
@@ -1099,7 +1099,7 @@ fn export_note(
     settings: &Settings,
     session_id: i64,
     outcomes: &HashMap<i64, Result<(), String>>,
-    floor_applies: bool,
+    stop_soc: u8,
 ) -> Option<String> {
     if settings.octopus_sessions_mode != SessionsMode::Export {
         return None;
@@ -1107,20 +1107,14 @@ fn export_note(
     if settings.octopus_sessions_skipped.contains(&session_id) {
         return Some("Skipped, so HEM will not export.".to_string());
     }
-    // Only models with extended slots hold a per-slot floor; elsewhere the
-    // export runs to the battery's own reserve, so do not promise a level.
+    // Name where the export really stops: the per-slot floor on models that
+    // hold one, otherwise the same level held in Minimum SOC for the window
+    // (issue #446).
     let will_export = || {
-        if floor_applies {
-            format!(
-                "HEM will export during it: slot {}, down to {}%.",
-                settings.octopus_sessions_export_slot, settings.octopus_sessions_export_floor_soc
-            )
-        } else {
-            format!(
-                "HEM will export during it: slot {}.",
-                settings.octopus_sessions_export_slot
-            )
-        }
+        format!(
+            "HEM will export during it: slot {}, down to {stop_soc}%.",
+            settings.octopus_sessions_export_slot
+        )
     };
     match outcomes.get(&session_id) {
         Some(Ok(())) => Some(will_export()),
@@ -1138,7 +1132,7 @@ async fn send_due_alerts(
     sessions: &[Session],
     now: DateTime<Utc>,
     outcomes: &HashMap<i64, Result<(), String>>,
-    floor_applies: bool,
+    stop_soc: u8,
     joined_by_hem: &HashSet<i64>,
 ) {
     let due = due_alerts(
@@ -1152,7 +1146,7 @@ async fn send_due_alerts(
         if joined_by_hem.contains(&session.id) {
             text.push_str("\nHEM joined this session for you.");
         }
-        if let Some(note) = export_note(settings, session.id, outcomes, floor_applies) {
+        if let Some(note) = export_note(settings, session.id, outcomes, stop_soc) {
             text.push('\n');
             text.push_str(&note);
         }
@@ -1229,6 +1223,26 @@ async fn max_discharge_slots(state: &Arc<AppState>) -> u8 {
         .max_discharge_slots()
 }
 
+/// The battery level an export for a session stops at on this inverter: the
+/// per-slot floor the user chose where the model has those registers, and on
+/// the rest the same level held in the inverter's own Minimum SOC for the
+/// window (issue #446). Never below a reserve that already stops higher.
+async fn export_stop_soc(state: &Arc<AppState>, settings: &Settings) -> u8 {
+    let snapshot = state.latest_snapshot.lock().await;
+    let device_type = snapshot
+        .as_ref()
+        .map_or(crate::inverter::model::DeviceType::Gen2Hybrid, |snapshot| {
+            snapshot.device_type
+        });
+    let reserve = snapshot.as_ref().map(|snapshot| snapshot.battery_reserve);
+    drop(snapshot);
+    export_once::export_stop_soc(
+        device_type,
+        reserve,
+        settings.octopus_sessions_export_floor_soc,
+    )
+}
+
 /// How the export for one session stands, for the Octopus page.
 fn export_status(settings: &Settings, current: &SessionsState, session: &Session) -> Option<Value> {
     if settings.octopus_sessions_mode != SessionsMode::Export {
@@ -1263,6 +1277,7 @@ fn export_status(settings: &Settings, current: &SessionsState, session: &Session
 /// GET /api/octopus/sessions
 pub async fn get_sessions(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = Settings::load_async().await;
+    let effective_floor_soc = export_stop_soc(&state, &settings).await;
     let current = state.octopus_sessions.lock().await.clone();
     let alerts_ready = {
         let config = state.alert_config.lock().await;
@@ -1309,6 +1324,7 @@ pub async fn get_sessions(State(state): State<Arc<AppState>>) -> (StatusCode, Js
             "alerts_ready": alerts_ready,
             "export_slot": settings.octopus_sessions_export_slot,
             "export_floor_soc": settings.octopus_sessions_export_floor_soc,
+            "effective_floor_soc": effective_floor_soc,
             "max_discharge_slots": max_discharge_slots(&state).await,
             "checked_at": current.checked_at,
             "error": current.error,
@@ -2743,12 +2759,21 @@ mod tests {
         .await;
     }
 
+    /// Set the reserve the latest snapshot reports, as the poll loop would.
+    async fn set_reserve(state: &Arc<AppState>, reserve: u8) {
+        if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+            snapshot.battery_reserve = reserve;
+        }
+    }
+
     #[tokio::test]
-    async fn the_announcement_only_promises_a_floor_where_the_inverter_honours_one() {
+    async fn the_announcement_names_the_floor_the_booking_will_hold() {
         with_isolated_config_dir_async(|| async {
             let mock = MockOctopus::spawn(one_session_response()).await;
-            // A Gen2 hybrid has no per-slot floor register.
+            // A Gen2 hybrid has no per-slot floor register, so the booking holds
+            // the chosen level in the inverter's own Minimum SOC (issue #446).
             let state = configure_export(&mock, DeviceType::Gen2Hybrid).await;
+            set_reserve(&state, 4).await;
             Settings::update(|s| s.octopus_sessions_export_floor_soc = 35).unwrap();
             check_once(&state, utc(EXPORT_NOW)).await;
             let alert = &mock.alerts()[0].body;
@@ -2756,10 +2781,45 @@ mod tests {
                 alert.contains("HEM will export") && alert.contains("slot 1"),
                 "{alert}"
             );
-            assert!(
-                !alert.contains("down to") && !alert.contains("35%"),
-                "{alert}"
-            );
+            assert!(alert.contains("down to 35%"), "{alert}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_announcement_never_promises_below_a_reserve_that_stops_higher() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            set_reserve(&state, 45).await;
+            Settings::update(|s| s.octopus_sessions_export_floor_soc = 20).unwrap();
+            check_once(&state, utc(EXPORT_NOW)).await;
+            let alert = &mock.alerts()[0].body;
+            assert!(alert.contains("down to 20%"), "{alert}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_sessions_payload_reports_the_level_the_export_stops_at() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_session_response()).await;
+            let state = configure_export(&mock, DeviceType::Gen3Hybrid).await;
+            Settings::update(|s| s.octopus_sessions_export_floor_soc = 25).unwrap();
+            let (_, Json(body)) = get_sessions(State(state)).await;
+            assert_eq!(body["effective_floor_soc"], 25);
+
+            // No per-slot floor on a Gen2: the floor is held in Minimum SOC, so
+            // it is still the answer — unless the battery already stops higher.
+            let state = configure_export(&mock, DeviceType::Gen2Hybrid).await;
+            set_reserve(&state, 7).await;
+            let (_, Json(body)) = get_sessions(State(state.clone())).await;
+            assert_eq!(body["effective_floor_soc"], 25);
+
+            Settings::update(|s| s.octopus_sessions_export_floor_soc = 4).unwrap();
+            set_reserve(&state, 30).await;
+            let (_, Json(body)) = get_sessions(State(state)).await;
+            assert_eq!(body["effective_floor_soc"], 30, "the reserve stops higher");
         })
         .await;
     }

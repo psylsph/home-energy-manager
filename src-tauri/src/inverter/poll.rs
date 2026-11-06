@@ -3138,19 +3138,63 @@ pub(crate) fn persist_solar_meter_baselines(
     })
 }
 
+/// Whether something other than the booking `exclude` owns the inverter's
+/// Minimum SOC right now: a discharge pause, calibration, a native pause, or a
+/// booked export's floor (issue #446).
+///
+/// The two writers of the reserve ask this before touching it — a booking
+/// excludes itself, the discharge floor guard excludes nothing — so neither can
+/// capture, raise or restore over the other's value.
+pub(crate) async fn reserve_owned_by_other(state: &Arc<AppState>, exclude: Option<&str>) -> bool {
+    reserve_paused_by_owner(state).await
+        || crate::inverter::export_once::holds_reserve_floor_excluding(state, exclude).await
+}
+
+/// Whether a discharge pause, calibration or a native pause owns Minimum SOC
+/// right now. A booking's own floor is a separate owner (see
+/// `reserve_owned_by_other`), so it is not part of this answer.
+pub(crate) async fn reserve_paused_by_owner(state: &Arc<AppState>) -> bool {
+    let load_paused = state.load_limiter_state.lock().await.is_actively_pausing();
+    let temperature_paused = state
+        .temperature_limiter_state
+        .lock()
+        .await
+        .is_actively_pausing();
+    let dispatch_paused = state.dispatch_hold_state.lock().await.is_actively_pausing();
+    let calibrating = state.calibration_run.lock().await.is_some();
+    let native_paused = state.pause_mode_revert.lock().await.is_some();
+    load_paused || temperature_paused || dispatch_paused || calibrating || native_paused
+}
+
 /// Run the discharge floor guard for one poll cycle: evaluate it against the
 /// sanitized snapshot and persist the reserve it saved, so a restart inside a
 /// discharge window restores the original value rather than the raised floor.
 /// Returns the register writes to apply, if any. A persistence failure is
 /// logged but never withholds the writes.
 pub(crate) async fn evaluate_discharge_floor(
-    state: &AppState,
+    state: &Arc<AppState>,
     snapshot: &InverterSnapshot,
     inverter_minute: u16,
 ) -> Option<Vec<RegisterWrite>> {
+    // Off is the normal case (a developer-mode experiment), and it must stay
+    // cheap: working out who owns Minimum SOC reads the settings file and five
+    // shared states, which is not something to pay for on every poll.
+    if !state.discharge_floor_config.lock().await.enabled {
+        return None;
+    }
+    // A booking holding its own floor owns Minimum SOC for its window, and a
+    // pause owns it until it releases: the guard writes over neither (issue
+    // #446). It excludes no booking, since any of them outranks it.
+    let pause_owns_reserve = reserve_owned_by_other(state, None).await;
     let df_config = state.discharge_floor_config.lock().await;
     let mut df_state = state.discharge_floor_state.lock().await;
-    let writes = check_discharge_floor(snapshot, &df_config, &mut df_state, inverter_minute)?;
+    let writes = check_discharge_floor(
+        snapshot,
+        &df_config,
+        &mut df_state,
+        inverter_minute,
+        pause_owns_reserve,
+    )?;
     let persisted = match &*df_state {
         DischargeFloorState::FloorHeld { saved_reserve }
         | DischargeFloorState::HeldFromRestart { saved_reserve } => Some(*saved_reserve),
@@ -14593,6 +14637,55 @@ mod tests {
                 DischargeFloorState::Idle
             );
             assert_eq!(Settings::load().discharge_floor_saved_reserve, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn floor_guard_stands_still_while_a_booking_holds_its_own_floor() {
+        // Issue #446: two writers of Minimum SOC must not fight. A live
+        // booking's floor wins until its window ends.
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(true, 50).await;
+            let mut snapshot = floor_snapshot(40);
+            snapshot.inverter_time = "2026-10-17 20:00:00".to_string();
+            *state.latest_snapshot.lock().await = Some(snapshot.clone());
+            let event: crate::inverter::export_once::ExportOnceEvent =
+                serde_json::from_value(serde_json::json!({
+                    "id": "e1",
+                    "slot": 1,
+                    "start": "2026-10-17 19:00",
+                    "end": "2026-10-17 21:00",
+                    "target_soc": 40,
+                    "source": "saving_session:1",
+                    "state": "active",
+                    "applied": true,
+                    "original": {
+                        "slot": {
+                            "enabled": false,
+                            "start_hour": 0,
+                            "start_minute": 0,
+                            "end_hour": 0,
+                            "end_minute": 0,
+                            "target_soc": 4
+                        },
+                        "schedule_enabled": false,
+                        "reserve": 4
+                    }
+                }))
+                .expect("event fixture");
+            crate::settings::Settings::update(|s| s.export_once_events = vec![event]).unwrap();
+
+            assert!(
+                evaluate_discharge_floor(&state, &snapshot, 20 * 60)
+                    .await
+                    .is_none(),
+                "the guard leaves Minimum SOC to the booking"
+            );
+            assert_eq!(
+                *state.discharge_floor_state.lock().await,
+                DischargeFloorState::Idle
+            );
         })
         .await;
     }

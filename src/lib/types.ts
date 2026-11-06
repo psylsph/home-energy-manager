@@ -531,6 +531,11 @@ export interface SavingSessionsResponse {
   /** Discharge slot borrowed for exports, and the battery level they stop at. */
   export_slot: number;
   export_floor_soc: number;
+  /**
+   * The battery level an export actually stops at: the saved floor, or the
+   * inverter's Minimum SOC where that already stops higher.
+   */
+  effective_floor_soc: number;
   /** How many discharge slots the inverter has. */
   max_discharge_slots: number;
   checked_at: string | null;

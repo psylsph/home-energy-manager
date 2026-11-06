@@ -1007,6 +1007,29 @@ pub(crate) async fn await_required_write_outcome_with_timeout(
     }
 }
 
+/// Write the battery's Minimum SOC reserve (HR 110, or HR 1109 on the
+/// three-phase layout) and wait for the inverter to take it.
+///
+/// Used by a booked export to hold its floor for the window and to put the
+/// user's value back afterwards (issue #446). The owner decides who it may
+/// race: a booking queues as the Timed Export owner, so a paused or
+/// higher-priority automation is never undercut.
+pub(crate) async fn write_battery_reserve(
+    state: &Arc<AppState>,
+    reserve: u16,
+    owner: DischargeControlOwner,
+) -> Result<(), String> {
+    let device_type = latest_device_type(state).await;
+    let command = if device_type.uses_three_phase_schedule_slots() {
+        ControlCommand::SetThreePhaseBatterySocReserve { reserve }
+    } else {
+        ControlCommand::SetBatterySocReserve { reserve }
+    };
+    let writes = command.encode().map_err(|error| error.to_string())?;
+    let (rx, budget) = queue_owned_writes_transactional(state, writes, owner).await;
+    await_required_write_outcome_with_timeout(rx, budget).await
+}
+
 /// Capture the exact raw pause baseline for an authenticated native pause.
 ///
 /// Full-window models require fresh HR318-320 values. Legacy AC3 only has a

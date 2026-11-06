@@ -143,19 +143,28 @@ describe('ExportOnceCard', () => {
     expect(screen.queryByRole('button', { name: /Cancel export/ })).toBeNull();
   });
 
-  it('hides the slot picker with a single slot and the floor on models without per-slot SOC', async () => {
+  it('hides the slot picker with a single slot but still offers the floor', async () => {
+    // Issue #446: a model with no per-slot floor register holds the level in
+    // Minimum SOC instead, so the floor is worth setting there too.
     serve([]);
     renderCard(1);
     await screen.findByLabelText('Start');
     expect(screen.queryByLabelText('Slot to Use')).toBeNull();
-    expect(screen.queryByLabelText('Stop Exporting at')).toBeNull();
+    expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
   });
 
-  it('offers the discharge floor on models with per-slot SOC', async () => {
+  it('books the floor the user chose', async () => {
     serve([]);
-    renderCard(10);
-    await screen.findByLabelText('Start');
-    expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
+    apiPost.mockResolvedValue({ ok: true });
+    renderCard(1);
+    fireEvent.change(await screen.findByLabelText('Stop Exporting at'), { target: { value: '35' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Book Export' }));
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/export-once',
+        expect.objectContaining({ target_soc: 35 }),
+      ),
+    );
   });
 
   it('warns when the list cannot be loaded and does not offer a form', async () => {

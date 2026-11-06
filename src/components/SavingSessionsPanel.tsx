@@ -106,7 +106,6 @@ export default function SavingSessionsPanel() {
   // Only offer what can actually be chosen: nothing for a single-slot
   // inverter (the one slot is used), no floor on models that cannot hold one.
   const showSlotPicker = maxSlots > 1 || data.export_slot > maxSlots;
-  const showFloor = maxSlots > 2;
   // Neither this nor the join tick sends a mode: the one on the page may be
   // up to a minute old, and re-sending it could undo a change made elsewhere
   // and stop a running export.
@@ -270,7 +269,6 @@ export default function SavingSessionsPanel() {
               inverter at the time.
             </HelpTip>
           </p>
-          {(showSlotPicker || showFloor) && (
           <div className="flex flex-wrap items-center gap-4">
             {showSlotPicker && (
             <label className="flex items-center gap-2 text-sm text-text-secondary">
@@ -287,22 +285,32 @@ export default function SavingSessionsPanel() {
               </select>
             </label>
             )}
-            {showFloor && (
-              <label className="flex flex-1 items-center gap-2 text-sm text-text-secondary">
-                Stop Exporting at
-                <input
-                  type="range"
-                  min={4}
-                  max={99}
-                  step={1}
-                  value={floor}
-                  aria-label="Stop Exporting at"
-                  onChange={(e) => setFloorDraft(Number(e.target.value))}
-                  disabled={saving}
-                  className="min-w-24 flex-1"
-                />
-                <span className="font-mono text-text-primary">{floor}%</span>
-              </label>
+            <label className="flex flex-1 items-center gap-2 text-sm text-text-secondary">
+              Stop Exporting at
+              <input
+                type="range"
+                min={4}
+                max={99}
+                step={1}
+                value={floor}
+                aria-label="Stop Exporting at"
+                onChange={(e) => setFloorDraft(Number(e.target.value))}
+                disabled={saving}
+                className="min-w-24 flex-1"
+              />
+              <span className="font-mono text-text-primary">{floor}%</span>
+            </label>
+            <HelpTip label="Stop Exporting at">
+              The export stops when the battery reaches this level. Inverters with a per-slot floor
+              hold it there; the rest have their Minimum SOC raised to it for the session. Both go
+              back afterwards.
+            </HelpTip>
+            {data.effective_floor_soc > floor && (
+              // A booking never lowers Minimum SOC, so a higher one is where
+              // the export really stops.
+              <p className="text-xs text-text-secondary" data-testid="session-floor-minimum-soc">
+                Your Minimum SOC is {data.effective_floor_soc}%, so the export stops there.
+              </p>
             )}
             <button
               type="button"
@@ -313,7 +321,6 @@ export default function SavingSessionsPanel() {
               Save Export Settings
             </button>
           </div>
-          )}
         </div>
       )}
 
