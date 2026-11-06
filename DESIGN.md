@@ -606,15 +606,24 @@ picks:
 - Where the inverter has no per-slot target SOC register (AC-coupled and Gen1/
   Gen2 models, issue #446), the booking holds its floor in the inverter's own
   Minimum SOC instead: the value it found is saved in the booking before the
-  write, Minimum SOC is raised to the floor for the window and put back after.
-  It only ever raises, and only while nothing else owns the reserve — the pause
-  limiters, the dispatch hold, calibration, a native pause or another booking.
-  A value someone else changed mid-window wins: a restore writes only while the
-  reserve still reads back at the floor. A restore that cannot land is retried
-  about once a minute for 15 minutes, then HEM gives up on it and says which
-  value to put back by hand. The developer-mode discharge floor guard stands
-  still while a booking holds the floor, and no longer writes its saved reserve
-  over another owner's pause.
+  write, Minimum SOC is raised to the floor when the booking applies (up to ten
+  minutes before the window opens) and put back after. It only ever raises,
+  and only while nothing else owns the reserve — the pause limiters, the
+  dispatch hold, calibration, a native pause or another booking. The booking
+  owns the reserve from the raise until it has been put back, so the guard and
+  other bookings stand clear of it throughout. If something lowers it during
+  the window the booking raises it back; a refused write is not retried every
+  tick, and the page says the floor is no longer held. A value someone else
+  changed by the end wins: a restore writes only while the reserve still reads
+  back at the floor. Editing the slot mid-window leaves the slot alone but not
+  the reserve: it still goes back at the window's end. A restore waiting for
+  another control to release the reserve waits as long as that takes; only a
+  write the inverter refuses counts against the budget, about once a minute
+  for 15 minutes, after which HEM gives up, says which value to put back by
+  hand, and sends that as its own message. The developer-mode discharge floor
+  guard stands still while a booking holds the floor, no longer writes its
+  saved reserve over another owner's pause, and still gives its own raised
+  floor back when it is switched off.
 
 ## Testing
 

@@ -734,6 +734,13 @@ async fn auto_join(
 ) -> (Parsed, HashSet<i64>) {
     let mut joined_by_hem = HashSet::new();
     if !settings.octopus_sessions_auto_join || parsed.enrolled != Some(true) {
+        // A join an earlier check could not confirm still has its grace to run
+        // out, whether or not this check would join anything (#450 review). Only
+        // on a read that shows the account, though: with no enrolment to go on,
+        // the offer list says nothing about what has joined.
+        if parsed.enrolled == Some(true) {
+            settle_pending_at(state, &parsed, now, true).await;
+        }
         return (parsed, joined_by_hem);
     }
     let targets: Vec<Joinable> = parsed
@@ -771,9 +778,13 @@ async fn auto_join(
     .await;
     match recorded {
         Ok(true) => {}
-        Ok(false) => return (parsed, joined_by_hem),
+        Ok(false) => {
+            settle_pending_at(state, &parsed, now, true).await;
+            return (parsed, joined_by_hem);
+        }
         Err(error) => {
             tracing::error!("Saving Sessions: not joining, could not record the attempt: {error}");
+            settle_pending_at(state, &parsed, now, true).await;
             return (parsed, joined_by_hem);
         }
     }
@@ -3526,6 +3537,53 @@ mod tests {
             let current = state.octopus_sessions.lock().await.clone();
             assert!(current.join_pending.contains_key(&9), "still waiting");
             assert!(current.join_errors.is_empty(), "nothing decided");
+        })
+        .await;
+    }
+
+    /// Review of #450: a join waiting for the account to show it has to be
+    /// settled by every check, not only the ones that go on to join something.
+    #[tokio::test]
+    async fn a_pending_join_still_runs_out_its_grace_after_auto_join_is_switched_off() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(already_signed_up_answer());
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(state.octopus_sessions.lock().await.join_pending.len(), 1);
+
+            // The user unticks the opt-in; the account never shows the session.
+            Settings::update(|s| s.octopus_sessions_auto_join = false).unwrap();
+            check_once(&state, utc("2026-10-17T12:35:00+00:00")).await;
+
+            let current = state.octopus_sessions.lock().await.clone();
+            assert!(current.join_pending.is_empty(), "no longer waiting");
+            let reason = current
+                .join_errors
+                .get(&9)
+                .expect("the page says why it is still not joined");
+            assert!(reason.contains("still not showing"), "{reason}");
+            assert_eq!(mock.joins().len(), 1, "and nothing was sent again");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_pending_join_is_cleared_once_the_account_shows_it_with_auto_join_off() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(unjoined_response()).await;
+            mock.set_join_answer(already_signed_up_answer());
+            let state = configure_auto_join(&mock, SessionsMode::Alert).await;
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(state.octopus_sessions.lock().await.join_pending.len(), 1);
+
+            Settings::update(|s| s.octopus_sessions_auto_join = false).unwrap();
+            mock.set_sessions(one_session_response());
+            check_once(&state, utc("2026-10-17T12:10:00+00:00")).await;
+
+            let current = state.octopus_sessions.lock().await.clone();
+            assert!(current.join_pending.is_empty());
+            assert!(current.join_errors.is_empty(), "joined, so nothing failed");
         })
         .await;
     }

@@ -3178,8 +3178,12 @@ pub(crate) async fn evaluate_discharge_floor(
 ) -> Option<Vec<RegisterWrite>> {
     // Off is the normal case (a developer-mode experiment), and it must stay
     // cheap: working out who owns Minimum SOC reads the settings file and five
-    // shared states, which is not something to pay for on every poll.
-    if !state.discharge_floor_config.lock().await.enabled {
+    // shared states, which is not something to pay for on every poll. A guard
+    // switched off while it still holds a raised floor is not idle, though: it
+    // owes the reserve back, and `check_discharge_floor` writes it.
+    if !state.discharge_floor_config.lock().await.enabled
+        && *state.discharge_floor_state.lock().await == DischargeFloorState::Idle
+    {
         return None;
     }
     // A booking holding its own floor owns Minimum SOC for its window, and a
@@ -14703,6 +14707,59 @@ mod tests {
                 *state.discharge_floor_state.lock().await,
                 DischargeFloorState::Idle
             );
+            assert_eq!(Settings::load().discharge_floor_saved_reserve, None);
+        })
+        .await;
+    }
+
+    /// Review of #446: the cheap "guard is off" early return must not skip the
+    /// restore a disabled guard owes while it still holds a raised floor.
+    #[tokio::test]
+    async fn switching_the_guard_off_while_it_holds_the_floor_puts_the_reserve_back() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(true, 50).await;
+            evaluate_discharge_floor(&state, &floor_snapshot(4), 20 * 60)
+                .await
+                .expect("floor raise");
+            assert_eq!(Settings::load().discharge_floor_saved_reserve, Some(4));
+
+            *state.discharge_floor_config.lock().await = DischargeFloorConfig {
+                enabled: false,
+                floor_soc: 50,
+            };
+            let writes = evaluate_discharge_floor(&state, &floor_snapshot(50), 20 * 60 + 5)
+                .await
+                .expect("the held floor is given back");
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].value, 4, "the pre-guard reserve goes back");
+            assert_eq!(
+                *state.discharge_floor_state.lock().await,
+                DischargeFloorState::Idle
+            );
+            assert_eq!(Settings::load().discharge_floor_saved_reserve, None);
+
+            // And once given back it stays quiet.
+            assert!(
+                evaluate_discharge_floor(&state, &floor_snapshot(4), 20 * 60 + 10)
+                    .await
+                    .is_none()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_guard_left_off_across_a_restart_still_gives_back_the_floor_it_held() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_floor(false, 50).await;
+            *state.discharge_floor_state.lock().await =
+                DischargeFloorState::HeldFromRestart { saved_reserve: 4 };
+            Settings::update(|s| s.discharge_floor_saved_reserve = Some(4)).unwrap();
+
+            let writes = evaluate_discharge_floor(&state, &floor_snapshot(50), 20 * 60)
+                .await
+                .expect("the held floor is given back");
+            assert_eq!(writes[0].value, 4);
             assert_eq!(Settings::load().discharge_floor_saved_reserve, None);
         })
         .await;
