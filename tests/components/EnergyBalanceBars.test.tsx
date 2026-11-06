@@ -267,22 +267,23 @@ describe('<EnergyBalanceBars/>', () => {
   it('explains unmeasured PV in the ⓘ, not as a visible note, on AC-coupled systems', () => {
     // Issue #429 follow-up: the visible note is gone; the explanation sits
     // behind the ⓘ so the card stays to the numbers it can stand behind.
-    const { container } = renderBalance(snapshot({ device_type_code: '3001' }));
-    const card = container.querySelector('[data-testid="today-balance"]')!;
-    const tip = screen.getByRole('button', { name: "More about Today's Energy Balance" });
-    expect(document.getElementById(tip.getAttribute('aria-describedby')!)!.textContent).toContain("separate solar system isn't measured");
-    for (const code of ['3002', '8001']) {
+    for (const code of ['3001', '3002', '8001']) {
       cleanup();
-      renderBalance(snapshot({ device_type_code: code }));
+      const { container } = renderBalance(snapshot({ device_type_code: code }));
+      const card = container.querySelector('[data-testid="today-balance"]')!;
       const t = screen.getByRole('button', { name: "More about Today's Energy Balance" });
-      expect(document.getElementById(t.getAttribute('aria-describedby')!)!.textContent).toContain("isn't measured");
+      const text = document.getElementById(t.getAttribute('aria-describedby')!)!.textContent!;
+      expect(text).toContain("Solar from a separate PV system isn't measured by the inverter");
+      expect(text).toContain('Home Use leaves out what that solar powers directly');
+      // The tip rides the summary line instead of taking a line of its own.
+      expect(t.closest('p')!.textContent).toContain(' of energy in came from the grid');
+      expect(card.querySelector('[data-testid="balance-ac-note"]')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'More about unmeasured solar' })).toBeNull();
+      // The solar share would still flatter an unmeasured PV: it stays out of
+      // the summary line, the grid share still applies.
+      expect(card.textContent).toContain(' of energy in came from the grid');
+      expect(card.textContent).not.toContain('% of solar used or stored at home');
     }
-    expect(card.querySelector('[data-testid="balance-ac-note"]')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'More about unmeasured solar' })).toBeNull();
-    // The solar share would still flatter an unmeasured PV: it stays out of the
-    // summary line, the grid share still applies.
-    expect(card.textContent).toContain(' of energy in came from the grid');
-    expect(card.textContent).not.toContain('% of solar used or stored at home');
   });
 
   it('summarises every value and both totals for screen readers', () => {

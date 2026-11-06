@@ -120,8 +120,8 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
           discharges the solar share is a minimum.
           {balance.acCoupledSolarUnmeasured && (
             <>
-              {' '}Your separate solar system isn't measured, so Home Use reads
-              low, or zero on days that PV exports.
+              {' '}Solar from a separate PV system isn't measured by the
+              inverter, so Home Use leaves out what that solar powers directly.
             </>
           )}
         </HelpTip>
