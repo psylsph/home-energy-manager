@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.4] - 2026-11-06
+
+### Fixed
+
+- **A Saving Session export no longer leaves Minimum SOC raised.** On inverters without a per-slot floor, a booked export raises Minimum SOC for its window. It now keeps hold of that setting from the moment it raises it until it has put your value back, so the discharge floor guard and other bookings can see it. Switching the guard off, editing the slot mid-window or cancelling no longer strands the raised value, and waiting for another control to let go no longer uses up the restore attempts. If the restore does give up, you get one alert saying Minimum SOC was left raised.
+- **The export-started alert quotes the floor the booking actually uses**, and the page says so if the inverter refuses to hold the floor after you lower it.
+- **A refused "already signed up" Saving Session join is no longer reported as a failure,** even with auto-join switched off.
+
+### Changed
+
+- **The Today card's bars have square ends and clearer titles.** Round ends clipped the text in a short segment, and the bars are now titled Today's Energy In and Today's Energy Out.
+
 ## [1.8.3] - 2026-11-06
 
 ### Changed
