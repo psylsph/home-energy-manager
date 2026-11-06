@@ -208,12 +208,7 @@ pub fn preview_standard_blocks(
     prefilled_device_type: Option<&crate::inverter::model::DeviceType>,
 ) -> &'static [RegisterBlock] {
     let uses_lean_set = |dt: &crate::inverter::model::DeviceType| {
-        // Hybrid HV Gen3 firmware exists with both telemetry layouts in the
-        // field. Keep IR(0-59) available as a fallback when its IR(1000+)
-        // bank answers successfully but contains only zeros.
-        (dt.needs_three_phase_input_blocks()
-            && *dt != crate::inverter::model::DeviceType::HybridHvGen3)
-            || dt.needs_gateway_input_blocks()
+        dt.needs_three_phase_input_blocks() || dt.needs_gateway_input_blocks()
     };
 
     if device_type.is_some_and(uses_lean_set) || prefilled_device_type.is_some_and(uses_lean_set) {
@@ -1653,9 +1648,7 @@ impl ModbusClient {
             // core dashboard values into misleading zeros. Retry each once;
             // if one remains unavailable, fail this poll so the caller keeps
             // the previous complete snapshot.
-            if dt.needs_three_phase_input_blocks()
-                && *dt != crate::inverter::model::DeviceType::HybridHvGen3
-            {
+            if dt.needs_three_phase_input_blocks() {
                 tokio::time::sleep(self.inter_request_delay).await;
                 results.extend(
                     self.read_blocks_resilient(
@@ -1668,7 +1661,6 @@ impl ModbusClient {
 
             for block in model_specific_blocks_in_poll_order(dt, gateway_scope) {
                 if dt.needs_three_phase_input_blocks()
-                    && *dt != crate::inverter::model::DeviceType::HybridHvGen3
                     && super::registers::THREE_PHASE_CRITICAL_INPUT_BLOCKS
                         .iter()
                         .any(|critical| {
@@ -2129,12 +2121,7 @@ pub(crate) mod tests {
     fn ac_three_phase_polls_the_hr1000_high_config_block() {
         use crate::inverter::model::DeviceType;
 
-        for dt in [
-            DeviceType::ThreePhase,
-            DeviceType::ACThreePhase,
-            DeviceType::HybridHvGen3,
-            DeviceType::AllInOneHybrid,
-        ] {
+        for dt in [DeviceType::ThreePhase, DeviceType::ACThreePhase] {
             let blocks = model_specific_blocks_in_poll_order(&dt, GatewayPollScope::Detail);
             let names: Vec<&str> = blocks.iter().map(|b| b.name).collect();
             let high = names.iter().position(|n| *n == "holding_1000_1079");
@@ -2330,7 +2317,6 @@ pub(crate) mod tests {
             DeviceType::Gateway,
             DeviceType::ThreePhase,
             DeviceType::ACThreePhase,
-            DeviceType::AllInOneHybrid,
         ] {
             let lean = preview_standard_blocks(Some(&dt), None);
             assert!(

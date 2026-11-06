@@ -170,7 +170,7 @@ History API uses MAX (not AVG) for cumulative counters — AVG understates monot
 
 ### Model-specific write targets
 
-| UI control | DC hybrid (Gen2/Gen3+) | AC-coupled | Three-phase / HV |
+| UI control | DC hybrid (Gen2/Gen3+, HV Gen3, AIO Hybrid) | AC-coupled | Three-phase |
 |---|---|---|---|
 | Charge power limit | HR111 (0-50%) | HR313 (1-100%) | HR1110 (1-100%) |
 | Discharge power limit | HR112 (0-50%) | HR314 (1-100%) | HR1108 (1-100%) |
@@ -187,8 +187,8 @@ HEM convention, uniform across device families and frontend: **`battery_power` p
 
 | Path | Raw register | Raw wire sign | Decode action |
 |---|---|---|---|
-| Single-phase | `p_battery` IR(52) | **+ = discharge** (reference) | verbatim |
-| Three-phase / HV | `p_discharge - p_charge` (IR 1136-1139) | derived | computed, + = discharge |
+| Single-phase (incl. HV Gen3 / AIO Hybrid) | `p_battery` IR(52) | **+ = discharge** (reference) | verbatim |
+| Three-phase | `p_discharge - p_charge` (IR 1136-1139) | derived | computed, + = discharge |
 | Gateway aggregate | `p_aio_total` IR(1702) | **+ = charging** (opposite!) | **negate** |
 | Gateway per-AIO | `p_aioN_inverter` IR(1816-1818) | **+ = charging** | **negate** |
 
@@ -229,7 +229,7 @@ Saving an enabled Timed Export slot via `/api/control/discharge-slot` writes the
 
 ### Optional block carry-forward
 
-Optional blocks are conditionally polled by device type: `EXTENDED_SLOTS_BLOCK` HR 240-299 (Gen3, AIO, HV Gen3, AC-three-phase), `AC_CONFIG_BLOCK` HR 300-359 (AC-coupled, AIO, AC-three-phase), `THREE_PHASE_HIGH_CONFIG_BLOCK` HR 1000-1079 + `THREE_PHASE_CONFIG_BLOCK` HR 1080-1124 (three-phase control), `THREE_PHASE_INPUT_BLOCKS` ×7 IR 1000-1413, `GATEWAY_INPUT_BLOCKS` ×5 IR 1600-1859. When an optional block read fails, `carry_forward_optional_block_values()` preserves previous values instead of flashing zeros in the UI.
+Optional blocks are conditionally polled by device type: `EXTENDED_SLOTS_BLOCK` HR 240-299 (Gen3, AIO, HV Gen3, AIO Hybrid, AC-three-phase), `AC_CONFIG_BLOCK` HR 300-359 (AC-coupled, AIO, AC-three-phase), `THREE_PHASE_HIGH_CONFIG_BLOCK` HR 1000-1079 + `THREE_PHASE_CONFIG_BLOCK` HR 1080-1124 (three-phase control; the HV Gen3 and AIO Hybrid are single-phase and skip both, issue #432), `THREE_PHASE_INPUT_BLOCKS` ×7 IR 1000-1413, `GATEWAY_INPUT_BLOCKS` ×5 IR 1600-1859. When an optional block read fails, `carry_forward_optional_block_values()` preserves previous values instead of flashing zeros in the UI.
 
 ## Known issues
 

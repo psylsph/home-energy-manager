@@ -474,10 +474,16 @@ impl DeviceType {
         // Mirrors dewet22/givenergy-modbus `slot_map` (Gateway →
         // SINGLE_PHASE_SLOTS) and GivTCP ("gateway" is not "3ph" for write
         // routing).
-        matches!(
-            self,
-            Self::ThreePhase | Self::ACThreePhase | Self::HybridHvGen3 | Self::AllInOneHybrid
-        )
+        //
+        // The HV Gen3 hybrid (0x81xx) and the AIO Hybrid (0x82xx) are
+        // physically single-phase and use the single-phase map too (issue
+        // #432). GivTCP moved the AIO Hybrid out of its three-phase set after
+        // it rejected the 1000-range reads (britkat1980/giv_tcp#621), and the
+        // fork it pins dropped HYBRID_HV_GEN3 after the first 81xx capture
+        // (hass#295): that unit answers 1000-range reads with zeros, so the
+        // three-phase layout looked like a live but idle plant rather than an
+        // unreadable one.
+        matches!(self, Self::ThreePhase | Self::ACThreePhase)
     }
 
     /// Whether this device uses the extended HR240-299 slot/target block.
@@ -536,9 +542,7 @@ impl DeviceType {
         };
         match self {
             Self::ACThreePhase => AC_EXTENDED_AND_THREE_PHASE_BLOCKS,
-            Self::HybridHvGen3 | Self::AllInOneHybrid | Self::ThreePhase => {
-                EXTENDED_AND_THREE_PHASE_BLOCKS
-            }
+            Self::ThreePhase => EXTENDED_AND_THREE_PHASE_BLOCKS,
             // Residential All-in-One models carry an AC output stage and expose
             // the HR 300-359 config block (EPS, export priority, pause mode/slot).
             // Gen3 Hybrid is deliberately NOT here: per givenergy-modbus
@@ -562,7 +566,25 @@ impl DeviceType {
     /// Whether this device is a three-phase model that needs the IR(1000-1414)
     /// measurement blocks polled. These models store all real-time PV/grid/battery
     /// measurements in the 1000+ range instead of IR 0-59.
+    ///
+    /// The HV Gen3 hybrid (0x81xx) and the AIO Hybrid (0x82xx) are HV but
+    /// physically single-phase, and answer those reads with zeros (or reject
+    /// them, britkat1980/giv_tcp#621), so they poll the single-phase bank
+    /// (issue #432).
     pub fn needs_three_phase_input_blocks(&self) -> bool {
+        matches!(self, Self::ThreePhase | Self::ACThreePhase)
+    }
+
+    /// Whether this device's capacity, voltage, current and SOC come from the
+    /// HV BCU/BMU cluster rather than the inverter's own registers.
+    ///
+    /// The 1000-range layouts and the HV hybrids (0x81xx / 0x82xx) commonly
+    /// leave HR(55) at zero and carry no usable capacity in the standard bank,
+    /// so `derive_battery_fields_from_bms` has to fill those in. This is about
+    /// where the battery data lives, not about the telemetry layout: the HV
+    /// Gen3 and the AIO Hybrid are single-phase (issue #432) and still need the
+    /// cluster.
+    pub fn battery_fields_come_from_the_hv_cluster(&self) -> bool {
         matches!(
             self,
             Self::ThreePhase | Self::ACThreePhase | Self::HybridHvGen3 | Self::AllInOneHybrid
@@ -755,11 +777,7 @@ impl DeviceType {
     pub fn uses_hr50_active_power_rate(&self) -> bool {
         !matches!(
             self,
-            Self::ThreePhase
-                | Self::ACThreePhase
-                | Self::HybridHvGen3
-                | Self::AllInOneHybrid
-                | Self::Unknown(_)
+            Self::ThreePhase | Self::ACThreePhase | Self::Unknown(_)
         )
     }
 
@@ -768,11 +786,18 @@ impl DeviceType {
     /// The dashboard Timed Discharge feature requires the full HR318-320
     /// window. The authenticated API can additionally use a HEM-timed,
     /// HR318-only pause on the legacy AC3. Gen3 Hybrid is probed separately
-    /// because its full AC-config block is not readable on older dongles.
+    /// because its full AC-config block is not readable on older dongles; the
+    /// HV Gen3 (0x81xx) and the AIO Hybrid (0x82xx) are probed the same way
+    /// (issue #432) — GivTCP pauses both, and neither serves HR 300-359.
     pub fn pause_register_support(&self, arm_fw: u16) -> PauseRegisterSupport {
         if matches!(
             self,
-            Self::ACThreePhase | Self::AllInOne6kW | Self::AllInOne3_6kW | Self::AllInOne5kW
+            Self::ACThreePhase
+                | Self::AllInOne6kW
+                | Self::AllInOne3_6kW
+                | Self::AllInOne5kW
+                | Self::HybridHvGen3
+                | Self::AllInOneHybrid
         ) {
             return PauseRegisterSupport::ModeAndWindow;
         }
@@ -783,6 +808,19 @@ impl DeviceType {
             return PauseRegisterSupport::ModeOnly;
         }
         PauseRegisterSupport::Unsupported
+    }
+
+    /// Whether this device polls the HR 300-359 AC-config block, which carries
+    /// the pause mode/slot (HR 318-320) among other AC-output settings.
+    ///
+    /// Models that support the pause without this block (Gen3 Hybrid on ARM
+    /// 312+, HV Gen3, AIO Hybrid) get a targeted HR 318-320 probe instead —
+    /// see `poll.rs`.
+    pub fn polls_ac_config_block(&self) -> bool {
+        self.extra_poll_blocks().iter().any(|block| {
+            block.start == 300
+                && block.register_type == crate::modbus::registers::RegisterType::Holding
+        })
     }
 
     /// Whether this device supports writing the native pause mode (HR318).
@@ -853,7 +891,7 @@ fn default_max_slots() -> u8 {
 /// Data from one CT clamp meter.
 ///
 /// External CT clamp meters report over the CT bus at Modbus device
-/// addresses 0x01-0x08. Three-phase / HV models have no external CT bus
+/// addresses 0x01-0x08. Three-phase models have no external CT bus
 /// for grid flow — instead the inverter's built-in grid CT is published
 /// via the IR 1060-1119 block, which the decoder wraps into a synthetic
 /// `MeterData` entry using the reserved `address == 0x00`. The frontend
@@ -1156,16 +1194,16 @@ pub struct InverterSnapshot {
     /// readings forward.
     #[serde(default = "default_grid_online")]
     pub grid_online: bool,
-    /// True when grid power is lost: `system_mode` (IR(49), or three-phase/HV
+    /// True when grid power is lost: `system_mode` (IR(49), or three-phase
     /// IR(1075)) reports OFF_GRID while the AC reference is absent.
     #[serde(default = "default_grid_loss")]
     pub grid_loss: bool,
     /// True when the inverter reports itself in a fault/trip state
-    /// (IR(0), or three-phase/HV IR(1076), `status` == FAULT).
+    /// (IR(0), or three-phase IR(1076), `status` == FAULT).
     #[serde(default = "default_inverter_trip")]
     pub inverter_trip: bool,
     /// True when the inverter reports battery over-temperature
-    /// (IR(57) warning code, or three-phase/HV IR(1307) bit 6).
+    /// (IR(57) warning code, or three-phase IR(1307) bit 6).
     #[serde(default = "default_battery_over_temp")]
     pub battery_over_temp: bool,
 
@@ -2134,16 +2172,14 @@ mod tests {
     fn uses_direct_charge_limit_mirrors_frontend_classification() {
         // Mirrors deviceCapabilities.ts `usesDirectChargeLimit`: the AC-limit
         // bank (AC-coupled 0x30xx and the Gateway 0x70xx) and the three-phase
-        // banks (0x40/60/81/82) store charge/discharge limits as a direct
-        // 1–100% percentage.
+        // banks (0x40/60) store charge/discharge limits as a direct 1–100%
+        // percentage.
         for dt in [
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,
             DeviceType::ThreePhase,
             DeviceType::ACThreePhase,
             DeviceType::Gateway,
-            DeviceType::HybridHvGen3,
-            DeviceType::AllInOneHybrid,
         ] {
             assert!(dt.uses_direct_charge_limit(), "{dt:?} should be direct");
         }
@@ -2161,6 +2197,10 @@ mod tests {
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,
+            // GivTCP keeps the HV Gen3 and the AIO Hybrid on the single-phase
+            // HR 111/112 rate bank (issue #432).
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
             DeviceType::Unknown(0x9999),
         ] {
             assert!(
@@ -2193,17 +2233,15 @@ mod tests {
             // The Gateway keeps the single-phase HR 50 layout: its lean poll set
             // includes holding_0_59 and never reads HR 1002.
             DeviceType::Gateway,
+            // As do the HV Gen3 and the AIO Hybrid, now single-phase (issue #432).
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
         ] {
             assert!(dt.uses_hr50_active_power_rate(), "{dt:?} should use HR 50");
         }
         // Exactly the families that poll THREE_PHASE_HIGH_CONFIG_BLOCK, where
         // HR 1002 supersedes HR 50.
-        for dt in [
-            DeviceType::ThreePhase,
-            DeviceType::ACThreePhase,
-            DeviceType::HybridHvGen3,
-            DeviceType::AllInOneHybrid,
-        ] {
+        for dt in [DeviceType::ThreePhase, DeviceType::ACThreePhase] {
             assert!(
                 !dt.uses_hr50_active_power_rate(),
                 "{dt:?} should not use HR 50"
@@ -2503,12 +2541,7 @@ mod tests {
     fn three_phase_schedule_models_expose_10_slots_and_required_blocks() {
         use crate::modbus::registers::{EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK};
 
-        for dt in [
-            DeviceType::ThreePhase,
-            DeviceType::ACThreePhase,
-            DeviceType::HybridHvGen3,
-            DeviceType::AllInOneHybrid,
-        ] {
+        for dt in [DeviceType::ThreePhase, DeviceType::ACThreePhase] {
             assert!(
                 dt.supports_schedule_slots(),
                 "{dt:?} should expose schedules"
@@ -2530,6 +2563,45 @@ mod tests {
             assert!(
                 extras.iter().any(|b| b.start == EXTENDED_SLOTS_BLOCK.start),
                 "{dt:?} should poll HR240-299 for slots 3-10"
+            );
+        }
+    }
+
+    #[test]
+    fn hv_gen3_and_aio_hybrid_use_the_single_phase_schedule() {
+        use crate::modbus::registers::{
+            EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK, THREE_PHASE_HIGH_CONFIG_BLOCK,
+        };
+
+        for dt in [DeviceType::HybridHvGen3, DeviceType::AllInOneHybrid] {
+            assert!(
+                !dt.uses_three_phase_schedule_slots(),
+                "{dt:?} keeps the single-phase slot map (issue #432)"
+            );
+            assert!(
+                !dt.needs_three_phase_input_blocks(),
+                "{dt:?} reads IR 0-59, not the 1000-range telemetry bank"
+            );
+            assert_eq!(dt.max_charge_slots(), 10, "{dt:?} charge slot count");
+            assert_eq!(dt.max_discharge_slots(), 10, "{dt:?} discharge slot count");
+
+            let extras = dt.extra_poll_blocks();
+            assert!(
+                extras.iter().any(|b| b.start == EXTENDED_SLOTS_BLOCK.start),
+                "{dt:?} keeps the extended HR240-299 block for slots 3-10"
+            );
+            for absent in [THREE_PHASE_CONFIG_BLOCK, THREE_PHASE_HIGH_CONFIG_BLOCK] {
+                assert!(
+                    !extras.iter().any(|b| b.start == absent.start),
+                    "{dt:?} must not poll {}",
+                    absent.name
+                );
+            }
+            // Neither serves HR 300-359, so the pause is read by the targeted probe.
+            assert!(!dt.polls_ac_config_block(), "{dt:?} has no AC config block");
+            assert!(
+                dt.supports_timed_discharge(612),
+                "{dt:?} pauses with the full window, as GivTCP does"
             );
         }
     }
@@ -2803,7 +2875,8 @@ mod tests {
         //   - ACThreePhase             → AC_EXTENDED_AND_THREE_PHASE_BLOCKS
         //   - AllInOne{6kW,3_6kW,5kW}  → EXTENDED_AND_AC_CONFIG_BLOCKS
         // Other families deliberately don't poll HR 300-359. Hybrid HV Gen3
-        // does read HR1105, but that register is not confirmed safe to write.
+        // reads the pause through the targeted probe and has no EPS register
+        // HEM can safely write.
         let ac_block_models = [
             DeviceType::ACCoupled,
             DeviceType::ACCoupledMk2,
@@ -2862,6 +2935,9 @@ mod tests {
         assert!(DeviceType::AllInOne6kW.supports_timed_discharge(0));
         assert!(DeviceType::AllInOne3_6kW.supports_timed_discharge(0));
         assert!(DeviceType::AllInOne5kW.supports_timed_discharge(0));
+        // GivTCP pauses both of these, so HEM does too (issue #432).
+        assert!(DeviceType::HybridHvGen3.supports_timed_discharge(0));
+        assert!(DeviceType::AllInOneHybrid.supports_timed_discharge(0));
     }
 
     #[test]
@@ -2937,6 +3013,8 @@ mod tests {
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
         ];
         for device in always_supported {
             for operation in [
@@ -3014,8 +3092,6 @@ mod tests {
         assert!(!DeviceType::ACCoupled.supports_timed_discharge(318));
         assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(318));
         assert!(!DeviceType::ThreePhase.supports_timed_discharge(318));
-        assert!(!DeviceType::HybridHvGen3.supports_timed_discharge(318));
-        assert!(!DeviceType::AllInOneHybrid.supports_timed_discharge(318));
         assert!(!DeviceType::Gateway.supports_timed_discharge(318));
         assert!(!DeviceType::Ems.supports_timed_discharge(318));
         assert!(!DeviceType::PvInverter.supports_timed_discharge(318));
@@ -3037,7 +3113,9 @@ mod tests {
     }
 
     #[test]
-    fn supports_timed_discharge_matches_extra_poll_blocks_for_non_ac_coupled_models() {
+    fn supports_timed_discharge_matches_the_register_path_it_reads() {
+        // Either the model polls HR 300-359 (which carries HR 318-320) or it
+        // gets the targeted HR 318-320 probe the poll loop runs out-of-band.
         let models = [
             DeviceType::ACThreePhase,
             DeviceType::AllInOne6kW,
@@ -3052,10 +3130,12 @@ mod tests {
         ];
         for dt in models {
             let has_ac_config = dt.extra_poll_blocks().iter().any(|b| b.start == 300);
+            let targeted_probe =
+                matches!(dt, DeviceType::HybridHvGen3 | DeviceType::AllInOneHybrid);
             assert_eq!(
                 dt.supports_timed_discharge(0),
-                has_ac_config,
-                "supports_timed_discharge / AC_CONFIG_BLOCK polling mismatch for {:?}",
+                has_ac_config || targeted_probe,
+                "supports_timed_discharge / pause-read path mismatch for {:?}",
                 dt
             );
         }
@@ -3110,12 +3190,7 @@ mod tests {
 
     #[test]
     fn uses_three_phase_schedule_slots_for_all_device_types() {
-        let three_phase: &[DeviceType] = &[
-            DeviceType::ThreePhase,
-            DeviceType::ACThreePhase,
-            DeviceType::HybridHvGen3,
-            DeviceType::AllInOneHybrid,
-        ];
+        let three_phase: &[DeviceType] = &[DeviceType::ThreePhase, DeviceType::ACThreePhase];
         for dt in three_phase {
             assert!(
                 dt.uses_three_phase_schedule_slots(),
@@ -3135,6 +3210,10 @@ mod tests {
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,
+            // HV Gen3 (0x81xx) and AIO Hybrid (0x82xx) are HV but single-phase
+            // (issue #432), as GivTCP reads and writes them.
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
             DeviceType::Gen4Hybrid,
             DeviceType::Ems,
             // Gateway keeps the single-phase register layout (issue #149) and

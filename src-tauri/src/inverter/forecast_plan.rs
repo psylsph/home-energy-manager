@@ -893,6 +893,7 @@ mod tests {
             ("ac_coupled", DeviceType::ACCoupled),
             ("three_phase", DeviceType::ThreePhase),
             ("aio", DeviceType::AllInOne6kW),
+            ("aio_hybrid", DeviceType::AllInOneHybrid),
             ("hv_gen3", DeviceType::HybridHvGen3),
             ("gateway", DeviceType::Gateway),
         ]
@@ -965,9 +966,16 @@ mod tests {
             "94=0 95=0 96=0",
         ),
         (
+            "aio_hybrid",
+            "94=2300 95=334 20=0 96=1 111=50 242=100",
+            "94=0 95=0 96=0",
+        ),
+        // The HV Gen3 and the AIO Hybrid write the single-phase slot map like
+        // the Gen3/AIO (issue #432).
+        (
             "hv_gen3",
-            "1113=2300 1114=334 1110=100 242=100",
-            "1113=0 1114=0",
+            "94=2300 95=334 20=0 96=1 111=50 242=100",
+            "94=0 95=0 96=0",
         ),
         (
             "gateway",

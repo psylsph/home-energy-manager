@@ -26,21 +26,20 @@ export function hasNoPvInput(code: string | null | undefined): boolean {
 
 /**
  * Whether the device uses the three-phase-bank charge/discharge power limit
- * registers (HR 1108/1110, already 1-100%): 0x40/60/81/82 families.
+ * registers (HR 1108/1110, already 1-100%): the 0x40xx and 0x60xx families.
  *
  * The Gateway (0x70xx) is not one of them: it keeps its limits in the
  * single-phase AC-limit bank, HR 313/314 — see {@link usesAcLimitRegisters}.
+ * Nor are the HV Gen3 (0x81xx) or the AIO Hybrid (0x82xx): both are physically
+ * single-phase and keep the DC-hybrid HR 111/112 rates, as GivTCP writes them
+ * (issue #432).
  *
  * Mirrors the backend's `DeviceType::uses_three_phase_schedule_slots`, which
  * routes these limits to HR 1108/1110 (decoded from
  * `THREE_PHASE_CONFIG_BLOCK`, HR 1080-1124).
  */
 export function isThreePhaseLimitModel(code: string | null | undefined): boolean {
-  return !!code
-    && (code.startsWith('40')
-      || code.startsWith('60')
-      || code.startsWith('81')
-      || code.startsWith('82'));
+  return !!code && (code.startsWith('40') || code.startsWith('60'));
 }
 
 /**
@@ -67,7 +66,7 @@ export function usesDirectChargeLimit(code: string | null | undefined): boolean 
 }
 
 /** DTC prefixes the backend maps to a known family outside the 1000-range layout. */
-const HR50_ACTIVE_POWER_RATE_PREFIXES = ['10', '20', '21', '22', '23', '30', '50', '70', '80', '83'];
+const HR50_ACTIVE_POWER_RATE_PREFIXES = ['10', '20', '21', '22', '23', '30', '50', '70', '80', '81', '82', '83'];
 
 /**
  * Whether `active_power_rate` lives at HR 50 for this device — the only place
@@ -106,9 +105,11 @@ export function deviceUsesHr50ActivePowerRate(code: string | null | undefined): 
  *   - 0x60xx — AC three-phase
  *   - 0x80xx — Residential All-in-One (AIO 6kW, 3.6kW, 5kW)
  *
- * Hybrid HV Gen3 exposes read-back state at HR 1105, but that register is not
- * in either reference implementation's safe-write set. It and other DC hybrid
- * families remain hidden until a safe write is confirmed.
+ * The HV Gen3 (0x81xx) exposes read-back state at HR 1105, but that register is
+ * not in either reference implementation's safe-write set, and since issue
+ * #432 HEM no longer reads the HR 1000-range bank on it at all. It and the
+ * other DC hybrid families remain hidden until a safe single-phase write is
+ * confirmed.
  *
  * Returns false when the device type code is missing (pre-snapshot state) so
  * the UI doesn't briefly flash a control that will be rejected.
@@ -137,15 +138,18 @@ export function deviceSupportsEps(
  *   - 0x50xx — EMS            → HR 2071
  *   - 0x40xx — three-phase    → HR 1063 (`p_export_limit`, deci-W)
  *   - 0x60xx — AC three-phase → HR 1063
- *   - 0x81xx — HV Gen3 hybrid → HR 1063
- *   - 0x82xx — All-in-One hybrid → HR 1063
  *
- * Single-phase / AC-coupled hybrids (Gen1/2/3/4, Polar, Gen3+, AC, AC Mk2)
- * and residential All-in-One 0x80xx models have NO configurable export limit:
- * their HR(26) `grid_port_max_power_output` is the read-only rated hardware
- * max output, not an export-limit setting, and `/api/control/export-limit`
- * refuses the write for them. Used by `InverterPage` to show the "Grid Export
- * Limit" row only where it is meaningful.
+ * The HV Gen3 (0x81xx) and the AIO Hybrid (0x82xx) are physically single-phase
+ * and read the single-phase HR 26 rated-output register instead, so like every
+ * other single-phase model they have no configurable export limit (issue #432).
+ *
+ * Single-phase / AC-coupled hybrids (Gen1/2/3/4, Polar, Gen3+, AC, AC Mk2,
+ * HV Gen3, AIO Hybrid) and residential All-in-One 0x80xx models have NO
+ * configurable export limit: their HR(26) `grid_port_max_power_output` is the
+ * read-only rated hardware max output, not an export-limit setting, and
+ * `/api/control/export-limit` refuses the write for them. Used by
+ * `InverterPage` to show the "Grid Export Limit" row only where it is
+ * meaningful.
  *
  * Returns false when the device type code is missing (pre-snapshot state).
  */
@@ -159,8 +163,6 @@ export function deviceSupportsExportLimit(
     || code.startsWith('50')
     || code.startsWith('60')
     || code.startsWith('70')
-    || code.startsWith('81')
-    || code.startsWith('82')
   );
 }
 
@@ -175,17 +177,16 @@ export function deviceSupportsExportLimit(
  * expose the AC-config block for EPS, but field logs show HR319/320 reject
  * Timed Discharge slot writes with Modbus exception 1, so they are gated out
  * until a safe write path is confirmed. On every other family (AC-coupled,
- * DC hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, AIO Hybrid,
- * HV Gen3, Gateway, EMS, PV inverter) the registers don't exist:
- * the write is dropped/times out and `battery_pause_mode` never reflects an
- * enabled state, so the toggle appeared broken (the originally reported
- * Gen1 Hybrid symptom).
+ * DC hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, Gateway, EMS, PV
+ * inverter) the registers don't exist: the write is dropped/times out and
+ * `battery_pause_mode` never reflects an enabled state, so the toggle appeared
+ * broken (the originally reported Gen1 Hybrid symptom).
  *
- * Gen3 Hybrid is the deliberate exception: the full HR 300-359 block times
- * out on this family, but a targeted 3-register probe of HR 318-320 succeeds
- * on ARM firmware >= 312 (reported working on fw 318). So Gen3 Hybrid with
- * `device_type_code` 0x20xx + ARM fw century 3 (>= 312) qualifies here, and
- * the backend probes those registers out-of-band in `poll.rs`.
+ * Three models support the pause without the AC-config block, so the backend
+ * probes HR 318-320 with a targeted read: the Gen3 Hybrid on ARM firmware
+ * >= 312 (the full block times out on that family, #162), and the HV Gen3
+ * (0x81xx) and the AIO Hybrid (0x82xx), which are single-phase and never
+ * serve HR 300-359 (issue #432). GivTCP pauses all three.
  *
  * Mirrors the backend's `DeviceType::supports_timed_discharge` (which takes
  * the ARM firmware version).
@@ -206,6 +207,8 @@ export function deviceSupportsTimedDischarge(
   if (
     code.startsWith('60')
     || code.startsWith('80')
+    || code.startsWith('81')
+    || code.startsWith('82')
   ) {
     return true;
   }

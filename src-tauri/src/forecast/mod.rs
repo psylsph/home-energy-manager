@@ -1208,29 +1208,26 @@ mod tests {
         use crate::inverter::model::DeviceType;
         let mut snap = rate_snapshot();
 
-        // Three-phase and HV control banks store a direct 1–100 percentage.
-        // Every battery-capable family must therefore turn raw 50 into half
-        // of the hardware maximum, not the DC-hybrid doubled value.
-        for device_type in [
-            DeviceType::ThreePhase,
-            DeviceType::ACThreePhase,
-            DeviceType::HybridHvGen3,
-            DeviceType::AllInOneHybrid,
-        ] {
+        // Three-phase control banks store a direct 1–100 percentage, so raw
+        // 50 is half of the hardware maximum.
+        for device_type in [DeviceType::ThreePhase, DeviceType::ACThreePhase] {
             snap.device_type = device_type;
             assert_eq!(
                 battery_rate_limits_kw(&snap),
                 (2.5, 2.5),
-                "{device_type:?} uses direct three-phase/HV limits"
+                "{device_type:?} uses direct three-phase limits"
             );
         }
 
-        // Residential AIO variants are HV batteries but remain on the
-        // single-phase HR111/112 0–50 scale.
+        // The residential and HV AIO variants (and the single-phase HV Gen3)
+        // are HV batteries but stay on the single-phase HR111/112 0-50 scale,
+        // as GivTCP reads and writes them (issue #432).
         for device_type in [
             DeviceType::AllInOne6kW,
             DeviceType::AllInOne3_6kW,
             DeviceType::AllInOne5kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
         ] {
             snap.device_type = device_type;
             assert_eq!(

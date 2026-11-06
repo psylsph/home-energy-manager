@@ -875,6 +875,19 @@ mod tests {
                 true,
                 json!(["charge", "discharge", "both"]),
             ),
+            // The single-phase HV models gain the pause with issue #432.
+            (
+                DeviceType::HybridHvGen3,
+                "612",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            (
+                DeviceType::AllInOneHybrid,
+                "612",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
             (DeviceType::Gen3Hybrid, "311", true, json!([])),
             (
                 DeviceType::Gen3Hybrid,

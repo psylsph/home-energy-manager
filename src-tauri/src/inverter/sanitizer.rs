@@ -344,16 +344,15 @@ pub(crate) fn carry_forward_optional_block_values(
         }
     }
 
-    // Three-phase/HV models get limit/reserve values from optional
+    // Three-phase models get limit/reserve values from optional
     // HR(1080-1124). If that optional block is skipped for one poll, keep the
-    // previous values rather than flashing defaults/zeros in the UI.
+    // previous values rather than flashing defaults/zeros in the UI. The HV
+    // Gen3 and the AIO Hybrid read those values from the single-phase bank
+    // (issue #432), so they are not part of this carry-forward.
     if !has_three_phase_config_block
         && matches!(
             snap.device_type,
-            DeviceType::ThreePhase
-                | DeviceType::ACThreePhase
-                | DeviceType::HybridHvGen3
-                | DeviceType::AllInOneHybrid
+            DeviceType::ThreePhase | DeviceType::ACThreePhase
         )
         && snap.device_type == prev.device_type
         && (snap.charge_rate != prev.charge_rate
@@ -593,7 +592,10 @@ pub(crate) fn derive_battery_fields_from_bms(
         return;
     }
 
-    let is_three_phase = snap.device_type.needs_three_phase_input_blocks();
+    // Where the battery data lives, not the telemetry layout: the HV Gen3 and
+    // the AIO Hybrid are single-phase but still report capacity from the BCU
+    // cluster (issue #432).
+    let is_three_phase = snap.device_type.battery_fields_come_from_the_hv_cluster();
     // Preserve the full-DTC hardware limit decoded before BMS enrichment.
     // Coarse DeviceType variants cannot distinguish 0x8101/02/03 (6/8/10 kW),
     // so falling straight back to DeviceType::max_battery_power_w() would
@@ -1617,11 +1619,11 @@ pub(crate) fn sanitize_snapshot(
     let max_battery_power: i32 = 10_000; // 10 kW - residential battery limit
     let max_grid_power: i32 = 15_000; // 15 kW - UK single-phase import can exceed 10 kW with EV charging (100A fuse ≈ 23 kW); matches max_home_power which carries the same EV-charging margin. Corruption spikes (e.g. ±32767) are still well above this.
     let max_solar_power: i32 = match snap.device_type {
-        DeviceType::HybridHvGen3 => {
-            // Hybrid HV Gen3 permits DC oversizing to 150% of rated AC power
-            // (0x8103: 10 kW AC / 15 kW PV input). Derive this from the full
-            // DTC because the coarse family fallback cannot distinguish
-            // 6/8/10 kW.
+        DeviceType::HybridHvGen3 | DeviceType::AllInOneHybrid => {
+            // The HV hybrids permit DC oversizing to 150% of rated AC power
+            // (0x8103: 10 kW AC / 15 kW PV input; 0x8204: 12 kW AC / 18 kW PV).
+            // Derive this from the full DTC because the coarse family fallback
+            // cannot distinguish 6/8/10/12 kW.
             let raw_dtc = u16::from_str_radix(&snap.device_type_code, 16).unwrap_or(0);
             let rated_ac = DeviceType::max_ac_power_for_dtc(
                 raw_dtc,
@@ -3667,6 +3669,58 @@ mod tests {
             let mut snap = InverterSnapshot {
                 timestamp: 4_600,
                 device_type: DeviceType::HybridHvGen3,
+                device_type_code: code.to_string(),
+                solar_power: pv_w,
+                home_power: pv_w,
+                soc: 50,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let mut delta_corrections = DeltaCorrectionCounts::default();
+            let mut suspect_counts = ConsecutiveSuspectCounts::default();
+            let mut rate_release_counts = RateReleaseCounts::default();
+
+            sanitize_snapshot(
+                &mut snap,
+                Some(&prev),
+                true,
+                &mut pending_mode,
+                &mut delta_corrections,
+                &mut suspect_counts,
+                &mut rate_release_counts,
+            );
+
+            assert_eq!(snap.solar_power, pv_w, "DTC {code}");
+        }
+    }
+
+    #[test]
+    fn aio_hybrid_variants_accept_rated_pv_input() {
+        // The 0x8201..04 AIO Hybrids permit PV input up to 150% of their
+        // 6/8/10/12 kW AC ratings (issue #432 gave them the single-phase
+        // layout; before, the 12 kW unit's PV could look corrupt).
+        for (code, pv_w) in [
+            ("8201", 9_000),
+            ("8202", 12_000),
+            ("8203", 15_000),
+            ("8204", 18_000),
+        ] {
+            let prev = InverterSnapshot {
+                timestamp: 1_000,
+                device_type: DeviceType::AllInOneHybrid,
+                device_type_code: code.to_string(),
+                solar_power: pv_w - 1_000,
+                home_power: pv_w - 1_000,
+                soc: 50,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                timestamp: 4_600,
+                device_type: DeviceType::AllInOneHybrid,
                 device_type_code: code.to_string(),
                 solar_power: pv_w,
                 home_power: pv_w,
@@ -6126,57 +6180,30 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn optional_three_phase_config_carries_forward_for_hybrid_hv_gen3() {
-        let prev = InverterSnapshot {
-            device_type: DeviceType::HybridHvGen3,
-            charge_rate: 75,
-            discharge_rate: 65,
-            battery_reserve: 20,
-            target_soc: 90,
-            ac_eps_enabled: true,
-            ..Default::default()
-        };
-        let mut snap = InverterSnapshot {
-            device_type: DeviceType::HybridHvGen3,
-            ..Default::default()
-        };
-
-        let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false, true);
-        assert!(changed);
-        assert_eq!(snap.charge_rate, 75);
-        assert_eq!(snap.discharge_rate, 65);
-        assert_eq!(snap.battery_reserve, 20);
-        assert_eq!(snap.target_soc, 90);
-        assert!(snap.ac_eps_enabled);
-    }
-
-    #[test]
-    fn optional_three_phase_high_config_carries_forward_for_all_8100_variants() {
-        for code in ["8101", "8102", "8103"] {
+    fn optional_three_phase_high_config_is_not_carried_forward_on_single_phase_hv_models() {
+        // The HV Gen3 and the AIO Hybrid read active rate and export limit from
+        // the single-phase bank (issue #432), so a missing 1000-range block must
+        // never overwrite their fresh readings with old three-phase ones.
+        for device_type in [DeviceType::HybridHvGen3, DeviceType::AllInOneHybrid] {
             let prev = InverterSnapshot {
-                device_type: DeviceType::HybridHvGen3,
-                device_type_code: code.to_string(),
+                device_type,
                 active_power_rate: 83,
                 battery_power_cutoff: 17,
                 export_limit_w: 5_000,
                 ..Default::default()
             };
             let mut snap = InverterSnapshot {
-                device_type: DeviceType::HybridHvGen3,
-                device_type_code: code.to_string(),
-                active_power_rate: 17, // stale standard-bank HR(50)
+                device_type,
+                active_power_rate: 40,
                 ..Default::default()
             };
 
-            assert!(carry_forward_three_phase_high_config_values(
+            assert!(!carry_forward_three_phase_high_config_values(
                 &mut snap,
                 Some(&prev),
                 false,
             ));
-            assert_eq!(snap.active_power_rate, 83, "DTC {code}");
-            assert_eq!(snap.battery_power_cutoff, 17, "DTC {code}");
-            assert_eq!(snap.export_limit_w, 5_000, "DTC {code}");
+            assert_eq!(snap.active_power_rate, 40, "{device_type:?}");
         }
     }
 
@@ -6223,10 +6250,10 @@ mod tests {
     }
 
     #[test]
-    fn optional_three_phase_fault_block_carries_forward_for_all_8100_variants() {
-        for code in ["8101", "8102", "8103"] {
+    fn optional_three_phase_fault_block_carries_forward_for_three_phase() {
+        for code in ["4001", "4002", "4003"] {
             let prev = InverterSnapshot {
-                device_type: DeviceType::HybridHvGen3,
+                device_type: DeviceType::ThreePhase,
                 device_type_code: code.to_string(),
                 battery_over_temp: true,
                 firmware_version: "ARM-HV".to_string(),
@@ -6235,7 +6262,7 @@ mod tests {
                 ..Default::default()
             };
             let mut snap = InverterSnapshot {
-                device_type: DeviceType::HybridHvGen3,
+                device_type: DeviceType::ThreePhase,
                 device_type_code: code.to_string(),
                 ..Default::default()
             };
@@ -6298,30 +6325,6 @@ mod tests {
         assert_eq!(snap.discharge_rate, 60);
         assert_eq!(snap.battery_reserve, 10);
         assert_eq!(snap.target_soc, 95);
-    }
-
-    #[test]
-    fn optional_three_phase_config_carries_forward_for_all_in_one_hybrid() {
-        let prev = InverterSnapshot {
-            device_type: DeviceType::AllInOneHybrid,
-            charge_rate: 80,
-            discharge_rate: 70,
-            battery_reserve: 25,
-            target_soc: 88,
-            ..Default::default()
-        };
-        let mut snap = InverterSnapshot {
-            device_type: DeviceType::AllInOneHybrid,
-            ..Default::default()
-        };
-
-        let changed =
-            carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, false, true);
-        assert!(changed);
-        assert_eq!(snap.charge_rate, 80);
-        assert_eq!(snap.discharge_rate, 70);
-        assert_eq!(snap.battery_reserve, 25);
-        assert_eq!(snap.target_soc, 88);
     }
 
     #[test]

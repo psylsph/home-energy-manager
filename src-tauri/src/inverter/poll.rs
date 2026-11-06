@@ -991,6 +991,17 @@ fn warmup_blocks_for(
     preview_standard_blocks(None, prefilled)
 }
 
+/// Whether this snapshot's model needs the out-of-band HR 318-320 pause probe.
+///
+/// True when the model supports the pause window but doesn't poll the HR
+/// 300-359 AC-config block that would otherwise carry HR 318-320: the Gen3
+/// Hybrid on ARM 312 and later, the HV Gen3, and the AIO Hybrid (issue #432).
+fn needs_pause_probe(snapshot: &InverterSnapshot) -> bool {
+    let arm_fw = snapshot.firmware_version.parse::<u16>().unwrap_or(0);
+    snapshot.device_type.supports_pause_registers(arm_fw)
+        && !snapshot.device_type.polls_ac_config_block()
+}
+
 /// Whether to probe for external CT clamp meters on this cycle.
 ///
 /// The discovery policy is:
@@ -1019,12 +1030,11 @@ fn should_probe_external_meters(
         Some(dt) => dt,
         None => return false,
     };
-    // True three-phase models use their built-in grid CT. Hybrid HV Gen3
-    // (0x81xx) shares the 1000-range register layout but is physically
-    // single-phase and can have an external EM115/CT meter, so keep probing it.
-    if (dt.needs_three_phase_input_blocks() && dt != DeviceType::HybridHvGen3)
-        || dt.is_batteryless()
-    {
+    // Three-phase models use their built-in grid CT. The HV Gen3 (0x81xx) and
+    // the AIO Hybrid (0x82xx) are physically single-phase (issue #432), so they
+    // reach this point and can have an external EM115/CT meter like any other
+    // single-phase inverter.
+    if dt.needs_three_phase_input_blocks() || dt.is_batteryless() {
         return false;
     }
 
@@ -3850,23 +3860,18 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     solar_position,
                                 );
 
-                                // Gen3 Hybrid targeted pause-register probe. The
-                                // full HR 300-359 AC-config block times out on
-                                // this family (#162 / commit fdd8272), but a
-                                // 3-register read of HR 318-320 succeeds on ARM
-                                // fw >= 312 — the path that lets the
-                                // portal-style Timed Discharge feature work on
-                                // Gen3 Hybrid. Read it out-of-band here so a
-                                // timeout can't fail the whole poll cycle; on
-                                // failure carry forward the previous pause
+                                // Targeted pause-register probe. Some models
+                                // support the pause window (HR 318-320) without
+                                // polling the HR 300-359 AC-config block that
+                                // carries it: the Gen3 Hybrid's full block times
+                                // out on this family (#162 / commit fdd8272) but
+                                // the 3-register read succeeds on ARM fw >= 312,
+                                // and the HV Gen3 / AIO Hybrid never serve that
+                                // block at all (#432). Read it out-of-band here
+                                // so a timeout can't fail the whole poll cycle;
+                                // on failure carry forward the previous pause
                                 // values so the UI doesn't flicker to "off".
-                                if snapshot.device_type
-                                    == DeviceType::Gen3Hybrid
-                                    && snapshot
-                                        .firmware_version
-                                        .parse::<u16>()
-                                        .is_ok_and(|fw| fw >= 312)
-                                {
+                                if needs_pause_probe(&snapshot) {
                                     match client
                                         .read_registers(
                                             crate::modbus::framer::RegisterType::Holding,
@@ -10056,9 +10061,8 @@ mod tests {
 
     #[test]
     fn external_meter_probe_runs_for_single_phase_hybrid_hv_gen3() {
-        // Every 0x81xx variant uses the 1000-range register layout but is
-        // physically single-phase. The reference implementation still probes
-        // meter addresses 0x01-0x08 for this family.
+        // Every 0x81xx variant is physically single-phase (issue #432), so it
+        // probes meter addresses 0x01-0x08 like any other single-phase model.
         assert!(should_probe_external_meters(
             Some(DeviceType::HybridHvGen3),
             false,
@@ -10067,6 +10071,62 @@ mod tests {
             0,
             0,
         ));
+        assert!(should_probe_external_meters(
+            Some(DeviceType::AllInOneHybrid),
+            false,
+            false,
+            0,
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn pause_probe_covers_the_models_that_cannot_poll_hr300_359() {
+        let snapshot = |device_type: DeviceType, fw: &str| InverterSnapshot {
+            device_type,
+            firmware_version: fw.to_string(),
+            ..Default::default()
+        };
+
+        // Supported pause with no HR 300-359 block: read HR 318-320 directly.
+        for (device_type, fw) in [
+            (DeviceType::Gen3Hybrid, "318"),
+            (DeviceType::HybridHvGen3, "612"),
+            (DeviceType::AllInOneHybrid, "612"),
+        ] {
+            assert!(
+                needs_pause_probe(&snapshot(device_type, fw)),
+                "{device_type:?} ARM {fw}"
+            );
+        }
+
+        // Gen3 Hybrid below ARM 312 doesn't claim the pause window.
+        assert!(!needs_pause_probe(&snapshot(DeviceType::Gen3Hybrid, "311")));
+
+        // Models that poll HR 300-359 decode the pause from it.
+        for device_type in [
+            DeviceType::AllInOne6kW,
+            DeviceType::ACThreePhase,
+            DeviceType::ACCoupled,
+        ] {
+            assert!(
+                !needs_pause_probe(&snapshot(device_type, "620")),
+                "{device_type:?}"
+            );
+        }
+
+        // No pause at all.
+        for device_type in [
+            DeviceType::Gen2Hybrid,
+            DeviceType::ThreePhase,
+            DeviceType::Gateway,
+        ] {
+            assert!(
+                !needs_pause_probe(&snapshot(device_type, "620")),
+                "{device_type:?}"
+            );
+        }
     }
 
     #[test]

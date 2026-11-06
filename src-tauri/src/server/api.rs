@@ -4170,8 +4170,10 @@ pub async fn set_timed_discharge(
     //  - AC-three-phase / residential All-in-One models expose confirmed
     //    writable HR319/320 Timed Discharge slots. AC-coupled models expose
     //    the AC-config block but field logs show those slot writes fail.
-    //  - Gen3 Hybrid (ARM fw >= 312) reaches them via a targeted 3-register
-    //    probe — the full HR 300-359 block times out on this family (#162).
+    //  - Gen3 Hybrid (ARM fw >= 312), the HV Gen3 (0x81xx) and the AIO Hybrid
+    //    (0x82xx) reach them via a targeted 3-register probe — the full
+    //    HR 300-359 block times out on the Gen3 (#162) and neither HV
+    //    single-phase model serves it at all (#432).
     // On every other family the registers are absent: the write times out or
     // is silently dropped and `battery_pause_mode` stays 0 forever, so the
     // toggle could never reflect an enabled state. Refuse up front with a
@@ -5378,7 +5380,7 @@ pub async fn set_active_power_rate(
 ///
 /// Routes the write to the correct register based on the active device type:
 ///   - EMS / Gateway → HR 2071 (`SetEmsExportLimit`, raw W)
-///   - Three-phase / HV / AIO → HR 1063 (`SetThreePhaseExportLimit`, deci-W)
+///   - Three-phase (0x40xx / 0x60xx) → HR 1063 (`SetThreePhaseExportLimit`, deci-W)
 ///   - All other models                → 400 (single-phase models have no
 ///     user-writable export limit register in the givenergy-modbus reference;
 ///
@@ -9760,26 +9762,11 @@ pub(crate) mod tests {
             }
         ));
         assert!(matches!(
-            charge_slot_command_for_device(DeviceType::AllInOneHybrid, 2, true, 600, 900).unwrap(),
-            ControlCommand::SetThreePhaseChargeSlot2 {
-                start: 600,
-                end: 900
-            }
-        ));
-        assert!(matches!(
             discharge_slot_command_for_device(DeviceType::ACThreePhase, 1, true, 1600, 1900)
                 .unwrap(),
             ControlCommand::SetThreePhaseDischargeSlot1 {
                 start: 1600,
                 end: 1900
-            }
-        ));
-        assert!(matches!(
-            discharge_slot_command_for_device(DeviceType::HybridHvGen3, 2, true, 2000, 2230)
-                .unwrap(),
-            ControlCommand::SetThreePhaseDischargeSlot2 {
-                start: 2000,
-                end: 2230
             }
         ));
     }
@@ -9791,7 +9778,7 @@ pub(crate) mod tests {
             ControlCommand::SetThreePhaseChargeSlot1 { start: 0, end: 0 }
         ));
         assert!(matches!(
-            discharge_slot_command_for_device(DeviceType::AllInOneHybrid, 2, false, 2000, 2230)
+            discharge_slot_command_for_device(DeviceType::ACThreePhase, 2, false, 2000, 2230)
                 .unwrap(),
             ControlCommand::SetThreePhaseDischargeSlot2 { start: 0, end: 0 }
         ));
@@ -9865,11 +9852,11 @@ pub(crate) mod tests {
                 end: 200
             }
         ));
-        // HV Gen3 uses three-phase schedule slots, so slot 2 should NOT
-        // use the Gen3 extended variant — it goes through 3ph dispatch.
+        // The HV Gen3 uses the single-phase schedule, so slot 2 goes to the
+        // Gen3 extended HR 243-244 copy like the Gen3/AIO (issue #432).
         assert!(matches!(
             charge_slot_command_for_device(DeviceType::HybridHvGen3, 2, true, 300, 400).unwrap(),
-            ControlCommand::SetThreePhaseChargeSlot2 {
+            ControlCommand::SetGen3ChargeSlot2 {
                 start: 300,
                 end: 400
             }
@@ -14449,8 +14436,6 @@ pub(crate) mod tests {
                 DeviceType::ACCoupled,
                 DeviceType::ACCoupledMk2,
                 DeviceType::ThreePhase,
-                DeviceType::HybridHvGen3,
-                DeviceType::AllInOneHybrid,
                 DeviceType::Gateway,
                 DeviceType::Ems,
                 DeviceType::PvInverter,
@@ -14477,13 +14462,16 @@ pub(crate) mod tests {
     async fn timed_discharge_accepted_on_every_supported_device() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::HR_BATTERY_PAUSE_MODE;
-            // AC-three-phase / residential All-in-One expose confirmed
-            // HR318-320 Timed Discharge slot support and must accept writes.
+            // AC-three-phase, the residential All-in-Ones and the two
+            // single-phase HV models (issue #432) expose confirmed HR318-320
+            // Timed Discharge slot support and must accept writes.
             for dt in [
                 DeviceType::ACThreePhase,
                 DeviceType::AllInOne6kW,
                 DeviceType::AllInOne3_6kW,
                 DeviceType::AllInOne5kW,
+                DeviceType::HybridHvGen3,
+                DeviceType::AllInOneHybrid,
             ] {
                 let state = make_state_with_device(dt).await;
                 let body = serde_json::json!({
@@ -16345,8 +16333,10 @@ pub(crate) mod tests {
                 (DeviceType::ACCoupledMk2, PowerLimitBank::AcBank),
                 (DeviceType::ThreePhase, PowerLimitBank::ThreePhase),
                 (DeviceType::ACThreePhase, PowerLimitBank::ThreePhase),
-                (DeviceType::HybridHvGen3, PowerLimitBank::ThreePhase),
-                (DeviceType::AllInOneHybrid, PowerLimitBank::ThreePhase),
+                // Single-phase HV models keep the DC-hybrid HR 111/112 rates
+                // (issue #432).
+                (DeviceType::HybridHvGen3, PowerLimitBank::HalfScale),
+                (DeviceType::AllInOneHybrid, PowerLimitBank::HalfScale),
                 // Gateway is single-phase-class for schedule slots (issue
                 // #149) but keeps its power limits in the AC bank, HR 313/314.
                 (DeviceType::Gateway, PowerLimitBank::AcBank),
@@ -16391,7 +16381,11 @@ pub(crate) mod tests {
                 (DeviceType::ACCoupled, HR_AC_BATTERY_CHARGE_LIMIT),
                 (DeviceType::ACCoupledMk2, HR_AC_BATTERY_CHARGE_LIMIT),
                 (DeviceType::ThreePhase, HR_3PH_BATTERY_CHARGE_LIMIT),
-                (DeviceType::HybridHvGen3, HR_3PH_BATTERY_CHARGE_LIMIT),
+                (DeviceType::ACThreePhase, HR_3PH_BATTERY_CHARGE_LIMIT),
+                // Single-phase HV models take the DC-hybrid HR 111/112 rate
+                // (issue #432).
+                (DeviceType::HybridHvGen3, HR_BATTERY_CHARGE_LIMIT),
+                (DeviceType::AllInOneHybrid, HR_BATTERY_CHARGE_LIMIT),
                 // All-in-One family uses the DC-hybrid HR 111 (not AC HR 313).
                 (DeviceType::AllInOne6kW, HR_BATTERY_CHARGE_LIMIT),
                 (DeviceType::AllInOne3_6kW, HR_BATTERY_CHARGE_LIMIT),
@@ -16428,8 +16422,6 @@ pub(crate) mod tests {
             for dt in [
                 DeviceType::ThreePhase,
                 DeviceType::ACThreePhase,
-                DeviceType::HybridHvGen3,
-                DeviceType::AllInOneHybrid,
                 DeviceType::from_register(0x4101),
                 DeviceType::from_register(0x5101),
             ] {
@@ -16510,6 +16502,9 @@ pub(crate) mod tests {
                 DeviceType::Gen3Hybrid,
                 DeviceType::ACCoupled,
                 DeviceType::AllInOne6kW,
+                // Single-phase HV models write and read HR 50 (issue #432).
+                DeviceType::HybridHvGen3,
+                DeviceType::AllInOneHybrid,
                 DeviceType::Gateway,
             ] {
                 let state = make_state_with_device(dt).await;
@@ -16541,7 +16536,11 @@ pub(crate) mod tests {
                 (DeviceType::ACCoupled, HR_AC_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::ACCoupledMk2, HR_AC_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::ThreePhase, HR_3PH_BATTERY_DISCHARGE_LIMIT),
-                (DeviceType::AllInOneHybrid, HR_3PH_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::ACThreePhase, HR_3PH_BATTERY_DISCHARGE_LIMIT),
+                // Single-phase HV models take the DC-hybrid HR 112 rate
+                // (issue #432).
+                (DeviceType::HybridHvGen3, HR_BATTERY_DISCHARGE_LIMIT),
+                (DeviceType::AllInOneHybrid, HR_BATTERY_DISCHARGE_LIMIT),
                 // All-in-One family uses the DC-hybrid HR 112 (not AC HR 314).
                 (DeviceType::AllInOne6kW, HR_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::AllInOne3_6kW, HR_BATTERY_DISCHARGE_LIMIT),
@@ -16581,11 +16580,18 @@ pub(crate) mod tests {
             let writes = drain_pending_writes(&state).await;
             assert_eq!(writes[0].address, HR_3PH_BATTERY_SOC_RESERVE);
 
-            // All-in-One uses the single-phase path (HR 110).
-            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
-            let _ = set_reserve(State(state.clone()), Json(json!({ "soc": 20 }))).await;
-            let writes = drain_pending_writes(&state).await;
-            assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
+            // All-in-One and the single-phase HV models use the single-phase
+            // path (HR 110, issue #432).
+            for dt in [
+                DeviceType::AllInOne6kW,
+                DeviceType::HybridHvGen3,
+                DeviceType::AllInOneHybrid,
+            ] {
+                let state = make_state_with_device(dt).await;
+                let _ = set_reserve(State(state.clone()), Json(json!({ "soc": 20 }))).await;
+                let writes = drain_pending_writes(&state).await;
+                assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE, "{dt:?}");
+            }
         })
         .await;
     }

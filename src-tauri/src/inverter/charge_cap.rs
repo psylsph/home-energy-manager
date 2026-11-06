@@ -7,10 +7,11 @@
 //! poll loop with the native battery pause (HR 318 mode 1, "pause charge").
 //!
 //! Only models GivTCP pauses that way are supported (`supports`): the
-//! single-phase All-in-Ones, Gen3 hybrids on ARM firmware 312 or later, and
-//! the AC-coupled (0x3001) from ARM firmware 200. The AC takes the mode
-//! alone, with no pause window, so the cap pauses and releases it with
-//! HR 318 only. The AC Mk2 waits for #433. Everything else, the Gateway included, hides the option.
+//! single-phase All-in-Ones, Gen3 hybrids on ARM firmware 312 or later, the
+//! HV Gen3 and the AIO Hybrid, and the AC-coupled (0x3001) from ARM firmware
+//! 200. The AC takes the mode alone, with no pause window, so the cap pauses
+//! and releases it with HR 318 only. The AC Mk2 waits for #433. Everything
+//! else, the Gateway included, hides the option.
 //!
 //! HR 318 is shared with the user's own pause, Timed Discharge, Force
 //! Discharge's restore and the calibration cycle, several of which save it and
@@ -397,6 +398,11 @@ pub fn shown_state(shared: &ChargeCapShared, supported: bool) -> ChargeCapState 
 pub fn supports(device: DeviceType, arm_fw: u16) -> bool {
     match device {
         DeviceType::AllInOne6kW | DeviceType::AllInOne3_6kW | DeviceType::AllInOne5kW => true,
+        // The HV Gen3 (0x81xx) and the AIO Hybrid (0x82xx) are on GivTCP's pause
+        // list with the full window (issue #432), so the cap can hold them too.
+        DeviceType::HybridHvGen3 | DeviceType::AllInOneHybrid => {
+            device.supports_pause_registers(arm_fw)
+        }
         DeviceType::Gen3Hybrid => device.supports_pause_registers(arm_fw),
         // GivTCP's ARM 200 floor on HEM's mode-only AC pause. Not the Mk2
         // yet, although GivTCP pauses it the same way: HEM's own pause table
@@ -847,6 +853,9 @@ mod tests {
         assert!(supports(DeviceType::AllInOne3_6kW, 0));
         assert!(supports(DeviceType::AllInOne5kW, 0));
         assert!(supports(DeviceType::Gen3Hybrid, 312));
+        // The single-phase HV models, on GivTCP's pause list (issue #432).
+        assert!(supports(DeviceType::HybridHvGen3, 612));
+        assert!(supports(DeviceType::AllInOneHybrid, 612));
     }
 
     /// Aligned with GivTCP, whose users have tested the pause far more
@@ -876,8 +885,6 @@ mod tests {
             DeviceType::Gen1Hybrid,
             DeviceType::Gen2Hybrid,
             DeviceType::ThreePhase,
-            DeviceType::HybridHvGen3,
-            DeviceType::AllInOneHybrid,
             DeviceType::Ems,
             DeviceType::PvInverter,
             DeviceType::Gen4Hybrid,

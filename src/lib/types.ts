@@ -86,8 +86,10 @@ export interface InverterSnapshot {
   /**
    * Export power limit in watts (0 = unlimited / not configured).
    * Populated only for models that expose the relevant register:
-   *   - Single-phase / AC-coupled: read from HR(26) `grid_port_max_power_output`
-   *   - Three-phase / HV / AIO: read from HR(1063) `p_export_limit` (deci-W)
+   *   - Single-phase (incl. HV Gen3 / AIO Hybrid): read from HR(26)
+   *     `grid_port_max_power_output`, the rated hardware max (not a setting)
+   *   - Three-phase (0x40xx / 0x60xx): read from HR(1063) `p_export_limit`
+   *     (deci-W)
    *   - EMS / Gateway: read from HR(2071)
    * On other models this stays at its default of 0.
    */

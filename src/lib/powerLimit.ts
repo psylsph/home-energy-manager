@@ -6,7 +6,7 @@
  * The slider always means **a percentage of the inverter's maximum battery
  * power**. How that is stored depends on the register family:
  *
- * - **Direct registers** (AC-coupled HR 313/314, three-phase / HV HR
+ * - **Direct registers** (AC-coupled HR 313/314, three-phase HR
  *   1110/1108, Gateway HR 313/314) hold 1-100 directly as a percentage of the
  *   inverter's maximum (GivTCP `read.py`: `batmaxrate * limit / 100`).
  * - **Half-scale registers** (every single-phase DC hybrid, HR 111/112, 0-50)
