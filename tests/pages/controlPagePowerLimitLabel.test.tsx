@@ -787,8 +787,10 @@ describe('<ControlPage/> — charge-limit readout across every device family', (
     { code: '8001', family: 'AIO 6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
     { code: '8002', family: 'AIO 3.6kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 3600, chargeRegister: 25, expected: '66% (2.4 kW)', showsActivePower: true },
     { code: '8003', family: 'AIO 5kW', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
-    { code: '8101', family: 'Hybrid HV Gen3', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
-    { code: '8201', family: 'AIO Hybrid', caption: 'Three-Phase Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 66, expected: '66% (4.0 kW)', showsActivePower: false },
+    // The HV Gen3 and the AIO Hybrid are physically single-phase: HR 111/112
+    // (0-50) and the HR 50 active power rate (issue #432).
+    { code: '8101', family: 'Hybrid HV Gen3', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 25, expected: '50% (3.0 kW)', showsActivePower: true },
+    { code: '8201', family: 'AIO Hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 6000, chargeRegister: 25, expected: '50% (3.0 kW)', showsActivePower: true },
     { code: '8301', family: 'Gen4 hybrid', caption: 'Battery Charge Power Limit', maxBatteryPowerW: 4750, chargeRegister: 25, expected: '50% (2.4 kW)', showsActivePower: true },
   ];
 

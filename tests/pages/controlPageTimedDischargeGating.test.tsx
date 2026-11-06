@@ -206,13 +206,12 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     return section;
   }
 
-  describe('hidden on devices without the HR 300-359 block', () => {
+  describe('hidden on devices without a pause', () => {
     it.each([
       ['1001', 'Gen1 hybrid (reported case)'],
       ['3001', 'AC-coupled (HR319/320 rejected)'],
       ['3002', 'AC-coupled Mk2 (HR319/320 gated)'],
       ['4001', 'Three-phase'],
-      ['8101', 'Hybrid HV Gen3'],
       ['8301', 'Gen4 hybrid'],
       ['2301', 'PV inverter'],
     ])('hides the button and section for %s (%s)', async (code) => {
@@ -255,10 +254,14 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     expect(ecoButton!.className).not.toContain('battery');
   });
 
-  describe('shown on devices with the HR 300-359 block', () => {
+  describe('shown on devices with the pause registers', () => {
     it.each([
       ['8001', 'AIO 6kW'],
       ['80FF', 'AIO family'],
+      // The single-phase HV models pause through the targeted HR 318-320
+      // probe (issue #432).
+      ['8101', 'Hybrid HV Gen3'],
+      ['8201', 'AIO Hybrid'],
     ])('shows the button and section for %s (%s)', async (code) => {
       useInverterStore.setState({
         snapshot: makeSnapshot({ device_type_code: code }),

@@ -100,18 +100,18 @@ describe('isAcCoupledDevice', () => {
 });
 
 /**
- * Three-phase-bank charge/discharge limit register models: 0x40/60/81/82.
+ * Three-phase-bank charge/discharge limit register models: 0x40/60.
  *
  * The Gateway (0x70xx) is NOT one of them: it keeps its limits in the
  * single-phase AC-limit bank (HR 313/314), like GivTCP's
- * `set_battery_charge_limit_ac` routing.
+ * `set_battery_charge_limit_ac` routing. Nor are the HV Gen3 (0x81xx) or the
+ * AIO Hybrid (0x82xx), which are physically single-phase and keep the
+ * DC-hybrid HR 111/112 rates (issue #432).
  */
 describe('isThreePhaseLimitModel', () => {
   it.each([
     ['4001', 'ThreePhase'],
     ['6001', 'AC three-phase'],
-    ['8101', 'Hybrid HV Gen3'],
-    ['8201', 'AIO Hybrid'],
   ])('returns true for %s (%s)', (code) => {
     expect(isThreePhaseLimitModel(code)).toBe(true);
   });
@@ -122,6 +122,8 @@ describe('isThreePhaseLimitModel', () => {
     ['2001', 'Gen hybrid'],
     ['4101', 'unvalidated device family'],
     ['8001', 'AIO'],
+    ['8101', 'Hybrid HV Gen3 is single-phase (issue #432)'],
+    ['8201', 'AIO Hybrid is single-phase (issue #432)'],
   ])('returns false for %s (%s)', (code) => {
     expect(isThreePhaseLimitModel(code)).toBe(false);
   });
@@ -144,8 +146,6 @@ describe('usesDirectChargeLimit', () => {
     ['4001', 'ThreePhase'],
     ['6001', 'AC three-phase'],
     ['7001', 'Gateway (HR 313/314)'],
-    ['8101', 'Hybrid HV Gen3'],
-    ['8201', 'AIO Hybrid'],
   ])('returns true for %s (%s)', (code) => {
     expect(usesDirectChargeLimit(code)).toBe(true);
   });
@@ -155,6 +155,8 @@ describe('usesDirectChargeLimit', () => {
     ['2001', 'Gen hybrid (HR111/112 are 0-50)'],
     ['4101', 'unvalidated device family'],
     ['8001', 'AIO'],
+    ['8101', 'Hybrid HV Gen3 keeps HR111/112 (issue #432)'],
+    ['8201', 'AIO Hybrid keeps HR111/112 (issue #432)'],
     ['8301', 'Gen4 hybrid'],
   ])('returns false for %s (%s)', (code) => {
     expect(usesDirectChargeLimit(code)).toBe(false);
@@ -181,6 +183,8 @@ describe('deviceUsesHr50ActivePowerRate', () => {
     ['8001', 'AIO 6kW'],
     ['8301', 'Gen4 hybrid'],
     ['7001', 'Gateway keeps the single-phase HR50 layout'],
+    ['8101', 'Hybrid HV Gen3 is single-phase (issue #432)'],
+    ['8201', 'AIO Hybrid is single-phase (issue #432)'],
     ['5001', 'EMS'],
     ['2301', 'PV inverter'],
   ])('returns true for %s (%s)', (code) => {
@@ -190,8 +194,6 @@ describe('deviceUsesHr50ActivePowerRate', () => {
   it.each([
     ['4001', 'ThreePhase reads HR1002'],
     ['6001', 'AC three-phase reads HR1002'],
-    ['8101', 'Hybrid HV Gen3 reads HR1002'],
-    ['8201', 'AIO Hybrid reads HR1002'],
     ['4101', 'unsupported commercial AIO'],
     ['5101', 'unsupported commercial EMS'],
     ['9999', 'unknown family'],
@@ -234,6 +236,10 @@ describe('deviceSupportsTimedDischarge', () => {
       ['8002', 'AIO 3.6kW'],
       ['8003', 'AIO 5kW'],
       ['80FF', 'AIO family (any 80xx)'],
+      ['8101', 'Hybrid HV Gen3 6kW (issue #432)'],
+      ['8103', 'Hybrid HV Gen3 10kW (issue #432)'],
+      ['8201', 'AIO Hybrid (issue #432)'],
+      ['82FF', 'AIO Hybrid family (any 82xx)'],
     ])('returns true for %s (%s)', (code) => {
       expect(
         deviceSupportsTimedDischarge({ device_type_code: code } as never),
@@ -254,11 +260,6 @@ describe('deviceSupportsTimedDischarge', () => {
       ['5001', 'EMS'],
       ['5101', 'unvalidated device family'],
       ['7001', 'Gateway'],
-      ['8101', 'Hybrid HV Gen3 6kW'],
-      ['8102', 'Hybrid HV Gen3 8kW'],
-      ['8103', 'Hybrid HV Gen3 10kW'],
-      ['81FF', 'Hybrid HV Gen3 family'],
-      ['8201', 'AIO Hybrid'],
       ['8301', 'Gen4 hybrid'],
       ['2301', 'PV inverter'],
     ])('returns false for %s (%s)', (code) => {
