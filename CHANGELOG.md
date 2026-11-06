@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.2] - 2026-11-06
+
+### Fixed
+
+- **The AIO Hybrid and the HV Gen3 hybrid now follow their charge schedule.** Both are single-phase inverters, but HEM was saving their slots to the registers the three-phase models use, so a slot looked saved and the battery never charged. Slots, target SOC, charge and discharge limits, Force Charge and Force Discharge, and the Planner's Apply now use the registers these inverters actually read. If you saved a schedule on either model before this update, save it once more, as the old writes never reached the inverter.
+- **Timed Discharge and the Charge Cap now work on both models.** They were missing from the battery pause, so HEM wouldn't offer either on them. Both take the pause now, and the charge cap can hold them.
+
+### Changed
+
+- **The AIO Hybrid and the HV Gen3 hybrid show their charge and discharge power limit like the other hybrids**, and the Inverter Active Power Limit is offered again. Their Grid Export Limit has gone: single-phase models have no writable export limit, and the old row was setting a register the inverter ignores.
+
 ## [1.8.1] - 2026-11-05
 
 ### Changed
