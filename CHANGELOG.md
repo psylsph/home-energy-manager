@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.3] - 2026-11-06
+
+### Changed
+
+- **The Today card's note on unmeasured solar is clearer.** On AC-coupled inverters and the All-in-Ones, the ⓘ now says solar from a separate PV system isn't measured by the inverter, so Home Use leaves out what that solar powers directly. It no longer assumes an All-in-One owner has a second PV system.
+
 ## [1.8.2] - 2026-11-06
 
 ### Fixed
@@ -18,7 +24,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - **The house view's sky shows the sun, and only the sun.** After sunset the arc now moves on to the next day's sunrise and sunset instead of plotting the moon's rise and set, so its two times always mean daylight. The moon's pass read as an implausibly long day, and after dark at a Scottish latitude as a sunrise in the small hours.
-- **The Today card explains missing solar only where it applies.** On AC-coupled inverters and the All-in-Ones the note that the separate solar system isn't measured now sits behind the ⓘ instead of taking a line of its own, and other models no longer see it.
+- **The Today card explains missing solar only where it applies.** On AC-coupled inverters and the All-in-Ones, the note that a separate solar system isn't measured now sits behind the ⓘ instead of taking a line of its own.
 
 ## [1.8.0] - 2026-11-05
 
