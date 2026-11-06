@@ -286,12 +286,31 @@ describe('<EnergyBalanceBars/>', () => {
     }
   });
 
+  // Issue #429 follow-up (BrianUK6): the page says nothing else about the bars
+  // being for today, and rounded ends clipped the text in the end segments.
+  it("titles the bars Today's Energy In and Today's Energy Out", () => {
+    const { container } = renderBalance(snapshot());
+    const bars = container.querySelectorAll('[data-testid="balance-bar"]');
+    expect(bars).toHaveLength(2);
+    expect(bars[0].textContent).toContain("Today's Energy In");
+    expect(bars[1].textContent).toContain("Today's Energy Out");
+  });
+
+  it('draws the bars with square ends so the end segments are not clipped', () => {
+    const { container } = renderBalance(snapshot());
+    const fills = container.querySelectorAll('[data-testid="balance-fill"]');
+    expect(fills.length).toBeGreaterThan(0);
+    for (const track of new Set([...fills].map((fill) => fill.parentElement!))) {
+      expect(track.className).not.toMatch(/rounded/);
+    }
+  });
+
   it('summarises every value and both totals for screen readers', () => {
     const { container } = renderBalance(snapshot());
     const card = container.querySelector('[data-testid="today-balance"]')!;
     const list = card.querySelector('ul.sr-only')!;
-    expect(list.textContent).toContain('Energy In 15.0kWh');
-    expect(list.textContent).toContain('Energy Out 12.5kWh');
+    expect(list.textContent).toContain("Today's Energy In 15.0kWh");
+    expect(list.textContent).toContain("Today's Energy Out 12.5kWh");
     for (const label of ['Solar', 'Grid Import', 'Battery Out', 'Home Use', 'Grid Export', 'Battery In']) {
       expect(list.textContent).toContain(label);
     }

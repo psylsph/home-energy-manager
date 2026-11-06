@@ -50,7 +50,8 @@ function BalanceBar({ title, segments, total }: {
         <span className="min-w-0 text-text-secondary text-xs font-medium">{title}</span>
         <span className="text-text-primary text-xs font-mono font-bold">{formatEnergy(total)}</span>
       </div>
-      <div className="mt-1 flex min-h-9 w-full overflow-hidden rounded-full bg-bg-elevated">
+      {/* Square ends: a rounded track clipped the text in the first and last segment. */}
+      <div className="mt-1 flex min-h-9 w-full overflow-hidden bg-bg-elevated">
         {segments.filter((s) => s.fraction > 0).map((s) => (
           <div
             key={s.key}
@@ -100,8 +101,8 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
         <p className="text-xs text-text-secondary">No energy recorded yet today.</p>
       ) : (
         <>
-          <BalanceBar title="Energy In" segments={balance.inSegments} total={balance.inTotal} />
-          <BalanceBar title="Energy Out" segments={balance.outSegments} total={balance.outTotal} />
+          <BalanceBar title="Today's Energy In" segments={balance.inSegments} total={balance.inTotal} />
+          <BalanceBar title="Today's Energy Out" segments={balance.outSegments} total={balance.outTotal} />
         </>
       )}
       {/* The ⓘ rides the end of the summary line. There isn't always a summary
@@ -129,12 +130,12 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
       {/* Text alternative for the figure: every value, plus both totals. */}
       <ul className="sr-only">
         <li>
-          {`Energy In ${formatEnergy(balance.inTotal)} — ${
+          {`Today's Energy In ${formatEnergy(balance.inTotal)} — ${
             balance.inSegments.map((s) => `${s.label} ${formatEnergy(s.kwh)}`).join(', ')
           }`}
         </li>
         <li>
-          {`Energy Out ${formatEnergy(balance.outTotal)} — ${
+          {`Today's Energy Out ${formatEnergy(balance.outTotal)} — ${
             balance.outSegments.map((s) => `${s.label} ${formatEnergy(s.kwh)}`).join(', ')
           }`}
         </li>

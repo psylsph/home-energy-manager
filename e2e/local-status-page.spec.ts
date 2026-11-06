@@ -92,8 +92,8 @@ test.describe('Status Page - Today Balance (issue #429)', () => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.getByText('Energy In', { exact: true })).toBeVisible({ timeout: 5_000 });
-    await expect(page.getByText('Energy Out', { exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText("Today's Energy In", { exact: true })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText("Today's Energy Out", { exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show the Home Use segment', async ({ page }) => {
