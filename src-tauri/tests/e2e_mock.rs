@@ -667,6 +667,34 @@ async fn latest_version_disabled_when_check_for_updates_off() {
 }
 
 // ====================================================================
+// GET /api/dongle-page (issue #452)
+// ====================================================================
+
+#[tokio::test]
+async fn dongle_page_without_a_configured_host_is_null_not_an_error() {
+    // Fresh state: no host, so there is nothing to probe.
+    let router = fresh_router();
+    let (status, body) = get_json(&router, "/api/dongle-page").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert!(body["url"].is_null());
+}
+
+#[tokio::test]
+async fn dongle_page_never_probes_a_host_that_is_not_a_plain_address() {
+    // A host that isn't a bare IP or hostname must not be turned into a URL
+    // to fetch (the candidate rules are unit-tested in `dongle_page`).
+    let config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    state.settings.lock().await.host = "evil.example/path?x=1".to_string();
+    let router = create_router(state);
+    let (status, body) = get_json(&router, "/api/dongle-page").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["url"].is_null());
+    drop(config);
+}
+
+// ====================================================================
 // GET /api/mini/status
 // ====================================================================
 

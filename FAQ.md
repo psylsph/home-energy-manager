@@ -110,6 +110,32 @@ nuke their cache each time.
 
 ---
 
+### On Linux, the spinner or other animations freeze in the app window
+
+On some Linux desktops the app window shows the waiting spinner (or the
+power-flow animation) as a still picture, although the numbers around it
+keep updating. The page is fine: the same dashboard animates normally in a
+browser at `http://<this-computer's-ip>:7337`. The cause is WebKitGTK's GPU
+compositing, which can stall animations on some graphics setups (it was seen
+on an AMD Radeon under X11).
+
+**Fix** — start the app with compositing turned off:
+
+```bash
+WEBKIT_DISABLE_COMPOSITING_MODE=1 givenergy-local
+```
+
+It has to be set before the app starts, so to make it permanent put it in
+the launcher, not in the app. Copy the app's `.desktop` file to
+`~/.local/share/applications/` and change its `Exec=` line to
+`env WEBKIT_DISABLE_COMPOSITING_MODE=1 givenergy-local`.
+
+Raspberry Pi installs already do this automatically. The wrapper in
+[INSTALL.md](INSTALL.md) sets this variable too, if you prefer a script.
+The Docker image runs headless, with no window, so it isn't affected.
+
+---
+
 ### On macOS, the app says it "can't be opened because it is from an unidentified developer"
 
 1. Right-click (or Control-click) the app and select **Open**.
@@ -183,6 +209,33 @@ On **Intel** Macs, use the **x64 .dmg** download.
 - Check that your inverter's data adapter hasn't rebooted or lost its network connection.
 - If you've changed or reset your router recently, the inverter has probably moved to a new IP address — see [I got a new router and the app can't find my inverter](#i-got-a-new-router-and-the-app-cant-find-my-inverter).
 - If the problem persists, restart the app.
+- If the app keeps failing to connect and shows a "Can't reach the dongle" message, see [The app says it can't reach the dongle](#the-app-says-it-cant-reach-the-dongle).
+
+---
+
+### The app says it can't reach the dongle
+
+After five failed connection attempts the app suggests the dongle (the small
+WiFi or Ethernet adapter on the inverter) has locked up. There are two ways to
+get it going again, gentlest first.
+
+1. **Restart just the dongle from its own web page.** If the app can find the
+   page, the message shows an **Open Dongle Page** button; in developer mode
+   the same button is under **Control → Dongle Web Page**. Otherwise type the
+   inverter's address into a browser, using the **Host** shown on the Status
+   page: `http://192.168.1.50/home.html` on the older dongles, or
+   `https://192.168.1.50/web/info` on the newer AIO 2 and Gateway 2 ones (your
+   browser will warn about the certificate; that is expected). Log in, then
+   choose **Device Management** and **Restart**. The usual login is `admin` /
+   `admin` unless you've changed it; the newer dongles may want `admin` /
+   `123456`, and some use the inverter serial number as the password. This
+   restarts only the dongle, not the inverter.
+2. **Power-cycle the inverter.** A locked-up dongle often doesn't answer its web
+   page either. Switch the inverter's AC isolator off for 30 seconds, then on;
+   it should reconnect within a few minutes.
+
+If the dongle isn't on your network at all, join its own WiFi hotspot and open
+`http://10.10.100.254` instead.
 
 ---
 

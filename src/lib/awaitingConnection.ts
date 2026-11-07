@@ -16,3 +16,6 @@ export function awaitingConnectionMessage(state: ConnectionState): string {
   if (state === 'disconnected') return 'Disconnected — will retry automatically';
   return 'Waiting for Data…';
 }
+
+/** Failed connect attempts after which the "can't reach the dongle" advice shows. */
+export const DONGLE_ADVICE_AFTER_FAILURES = 5;

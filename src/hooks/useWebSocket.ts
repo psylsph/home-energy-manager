@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { getWsUrl, apiGet } from '../lib/api';
+import { DONGLE_ADVICE_AFTER_FAILURES } from '../lib/awaitingConnection';
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, ConnectionState } from '../lib/types';
 import type { EvcConnectionState } from '../store/useInverterStore';
@@ -10,6 +11,9 @@ import type { EvcConnectionState } from '../store/useInverterStore';
  * connection cannot present frozen values as live data indefinitely.
  */
 export const SNAPSHOT_STALE_AFTER_MS = 2 * 60 * 1000;
+
+/** How often the failed-connect count is re-read while the inverter is away; short, so the advice appears at 5 attempts, not 7. */
+export const CONNECT_FAILURES_REFRESH_MS = 2_000;
 
 export interface EvcSnapshot {
   charging_state: string;
@@ -283,6 +287,41 @@ export function useWebSocket() {
       wsRef.current?.close(1000, 'Unmount');
     };
   }, [connect, fetchInitialStatus, fetchInitialEvcStatus]);
+
+  // The failed-connect count is read once at load, and the socket never carries
+  // it, so a page that was open when the dongle dropped would never reach the
+  // "can't reach the dongle" advice (issue #452). While the inverter is away
+  // and the advice isn't due yet, re-read just the count; the connection state
+  // stays with the socket. It stops once the advice shows (the card says "5+"),
+  // and never runs without a configured host, where no attempts are counted.
+  const needsFailureCount = useInverterStore(
+    (s) => s.connectionState !== 'connected'
+      && !!s.connectedHost
+      && s.connectFailures < DONGLE_ADVICE_AFTER_FAILURES,
+  );
+  useEffect(() => {
+    if (!needsFailureCount) return;
+    let cancelled = false;
+    const id = window.setInterval(async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; connect_failures?: number }>('/api/status');
+        if (
+          !cancelled
+          && res.ok
+          && typeof res.connect_failures === 'number'
+          && useInverterStore.getState().connectionState !== 'connected'
+        ) {
+          useInverterStore.setState({ connectFailures: res.connect_failures });
+        }
+      } catch {
+        // Keep the last count; the next tick asks again.
+      }
+    }, CONNECT_FAILURES_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [needsFailureCount]);
 
   // A half-open WebSocket can remain apparently connected in the browser even
   // after the network route disappears. The backend timestamp is not enough

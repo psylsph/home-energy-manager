@@ -127,19 +127,26 @@ afterEach(() => {
   });
 });
 
-describe('<ControlPage/> — Battery Calibration', () => {
-  const start = () => screen.getByRole('button', { name: /Start Calibration|Sending|Sent|Error/ });
+describe('<ControlPage/> — Inverter Built-in Calibration', () => {
+  const start = () => screen.getByRole('button', { name: /Start Built-in Calibration|Sending|Sent|Error/ });
 
   it('is hidden when the battery auto-calibrates', () => {
     connect({ supports_battery_calibration: false }, true);
     render(<ControlPage />);
-    expect(screen.queryByText('Battery Calibration')).toBeNull();
+    expect(screen.queryByText('Inverter Built-in Calibration')).toBeNull();
   });
 
   it('is hidden outside developer mode even on a battery that supports it', () => {
     connect({ supports_battery_calibration: true }, false);
     render(<ControlPage />);
-    expect(screen.queryByText('Battery Calibration')).toBeNull();
+    expect(screen.queryByText('Inverter Built-in Calibration')).toBeNull();
+  });
+
+  it('points at the guided cycle so the two controls are not confused', () => {
+    connect({ supports_battery_calibration: true }, true);
+    render(<ControlPage />);
+    expect(screen.getByRole('heading', { name: 'Inverter Built-in Calibration' })).toBeTruthy();
+    expect(screen.getByText(/Battery Calibration Cycle above/)).toBeTruthy();
   });
 
   it('does nothing when the confirmation is declined', async () => {
@@ -152,7 +159,7 @@ describe('<ControlPage/> — Battery Calibration', () => {
     expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(confirmSpy.mock.calls[0][0]).toMatch(/BATTERY CALIBRATION/);
     expect(calls('/api/control/calibration')).toHaveLength(0);
-    expect(start().textContent).toBe('Start Calibration');
+    expect(start().textContent).toBe('Start Built-in Calibration');
   });
 
   it('starts stage 1 once the user confirms', async () => {

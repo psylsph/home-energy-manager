@@ -53,7 +53,8 @@ vi.stubGlobal('WebSocket', MockWebSocket);
 // Mock setTimeout/clearTimeout for controlled timing
 vi.useFakeTimers();
 
-const { SNAPSHOT_STALE_AFTER_MS, useWebSocket } = await import('../../src/hooks/useWebSocket');
+const { SNAPSHOT_STALE_AFTER_MS, CONNECT_FAILURES_REFRESH_MS, useWebSocket } = await import('../../src/hooks/useWebSocket');
+const { DONGLE_ADVICE_AFTER_FAILURES } = await import('../../src/lib/awaitingConnection');
 const apiGetMock = vi.mocked(apiGet);
 
 function resetStore() {
@@ -361,6 +362,81 @@ describe('useWebSocket', () => {
     expect(state.evcStale).toBe(true);
     expect(state.evcConnectionState).toBe('disconnected');
     expect(state.evcAgeSeconds).toBe(31);
+  });
+
+  describe('failed-connect count while the inverter is away (issue #452)', () => {
+    const status = (failures: number) => ({
+      ok: true, connection: 'disconnected', host: '192.168.1.5', connected_since_epoch_ms: null,
+      connect_failures: failures,
+    });
+
+    const statusCalls = () => apiGetMock.mock.calls.filter(([p]) => p === '/api/status').length;
+
+    it('follows the backend count so the dongle advice appears without a page reload', async () => {
+      let failures = 0;
+      apiGetMock.mockImplementation(async (path: string) =>
+        path === '/api/status' ? status(failures) : { ok: false });
+      renderHook(() => useWebSocket());
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(useInverterStore.getState().connectFailures).toBe(0);
+
+      failures = 3;
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECT_FAILURES_REFRESH_MS); });
+      expect(useInverterStore.getState().connectFailures).toBe(3);
+
+      failures = DONGLE_ADVICE_AFTER_FAILURES;
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECT_FAILURES_REFRESH_MS); });
+      expect(useInverterStore.getState().connectFailures).toBe(DONGLE_ADVICE_AFTER_FAILURES);
+    });
+
+    it('stops asking once the advice is due, so a long outage costs nothing', async () => {
+      apiGetMock.mockImplementation(async (path: string) =>
+        path === '/api/status' ? status(DONGLE_ADVICE_AFTER_FAILURES) : { ok: false });
+      renderHook(() => useWebSocket());
+      await act(async () => { await vi.advanceTimersByTimeAsync(CONNECT_FAILURES_REFRESH_MS); });
+      const calls = statusCalls();
+      await act(async () => { await vi.advanceTimersByTimeAsync(10 * 60_000); });
+      expect(statusCalls()).toBe(calls);
+    });
+
+    it('does not ask at all when no inverter host is configured', async () => {
+      apiGetMock.mockImplementation(async (path: string) =>
+        path === '/api/status' ? { ...status(0), host: '' } : { ok: false });
+      renderHook(() => useWebSocket());
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const calls = statusCalls();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(statusCalls()).toBe(calls);
+    });
+
+    it('stops asking once connected, and leaves the connection state to the socket', async () => {
+      apiGetMock.mockImplementation(async (path: string) =>
+        path === '/api/status' ? status(3) : { ok: false });
+      renderHook(() => useWebSocket());
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      act(() => {
+        mockWsInstances[0].onmessage?.({
+          data: JSON.stringify({ type: 'connection', state: 'connected', host: '192.168.1.5' }),
+        });
+      });
+      const calls = apiGetMock.mock.calls.filter(([p]) => p === '/api/status').length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(apiGetMock.mock.calls.filter(([p]) => p === '/api/status').length).toBe(calls);
+      expect(useInverterStore.getState().connectionState).toBe('connected');
+      expect(useInverterStore.getState().connectFailures).toBe(0);
+    });
+
+    it('keeps the last count when the status request fails', async () => {
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/status') throw new Error('offline');
+        return { ok: false };
+      });
+      useInverterStore.setState({ connectFailures: 3, connectedHost: '192.168.1.5' });
+      renderHook(() => useWebSocket());
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(statusCalls()).toBeGreaterThan(1);
+      expect(useInverterStore.getState().connectFailures).toBe(3);
+    });
   });
 
   it('reconnects after close with non-1000 code', () => {

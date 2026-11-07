@@ -3,6 +3,7 @@ import { useNow } from '../hooks/useNow';
 import { createPortal } from 'react-dom';
 import { useInverterStore } from '../store/useInverterStore';
 import type { BatteryModeKind } from '../store/useInverterStore';
+import DongleWebPageSection from '../components/DongleWebPageSection';
 import { plannerAutomationOn, plannerModeConflict } from '../lib/plannerMode';
 import { useAction } from '../hooks/useAction';
 import { apiPost, apiGet } from '../lib/api';
@@ -37,7 +38,7 @@ import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import ExportOnceCard from '../components/ExportOnceCard';
 import ChargeCapSection from '../components/ChargeCapSection';
 import Toggle from '../components/Toggle';
-import HelpTip from '../components/HelpTip';
+import HelpTip, { HeadingWithHelp } from '../components/HelpTip';
 import SlotScheduleWarnings from '../components/SlotScheduleWarnings';
 import {
   LOGARITHMIC_RANGE_MAX,
@@ -1962,7 +1963,7 @@ function BatteryCalibrationSection() {
   if (!supported) return null;
 
   const handleStartCalibration = async () => {
-    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThe battery will discharge, charge and balance over several hours. It cannot be cancelled once started.\n\nContinue?')) return;
+    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThe inverter will run its own calibration. The battery will discharge, charge and balance over several hours. It cannot be cancelled once started.\n\nContinue?')) return;
     setSaving(true);
     setFeedback(null);
     try {
@@ -1990,7 +1991,12 @@ function BatteryCalibrationSection() {
 
   return (
     <div className="space-y-3">
-      <h3 className="text-text-primary font-medium text-base">Battery Calibration</h3>
+      <HeadingWithHelp
+        as="h3"
+        className="text-text-primary font-medium text-base"
+        title="Inverter Built-in Calibration"
+        help="Starts the inverter's own calibration routine (a raw register write). HEM only shows its stage and cannot cancel or restore settings. For Gen1/Gen2 batteries only (BMS firmware below 3000); Gen3+ batteries calibrate themselves via BMS OCV."
+      />
 
       <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-3">
         <p className="text-text-primary text-xs font-medium">⚠️  WARNING</p>
@@ -1999,8 +2005,7 @@ function BatteryCalibrationSection() {
           started it cannot be cancelled.
         </p>
         <p className="text-amber-300/70 text-xs">
-          ℹ️  This control is for Gen1/Gen2 batteries only (BMS firmware &lt; 3000).
-          Gen3+ batteries auto-calibrate via BMS OCV and do not need manual calibration.
+          Prefer Battery Calibration Cycle above, which HEM runs and can cancel.
         </p>
 
         <div className="flex items-center gap-3 pt-3 border-t border-amber-700/20">
@@ -2009,7 +2014,7 @@ function BatteryCalibrationSection() {
             disabled={saving || isActive}
             className="flex-1 py-1.5 bg-amber-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
           >
-            {saving ? 'Sending...' : feedback === 'saved' ? '✓ Sent' : feedback === 'error' ? '✗ Error' : 'Start Calibration'}
+            {saving ? 'Sending...' : feedback === 'saved' ? '✓ Sent' : feedback === 'error' ? '✗ Error' : 'Start Built-in Calibration'}
           </button>
           <span className="text-text-secondary text-xs shrink-0">
             Stage: <span className={`font-mono ${isActive ? 'text-amber-400' : 'text-text-primary'}`}>
@@ -3700,6 +3705,7 @@ export default function ControlPage() {
               <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
             </div>
             <RebootInverterSection />
+            <DongleWebPageSection />
           </section>
         )}
       </div>
@@ -4431,6 +4437,7 @@ export default function ControlPage() {
             </div>
             <BatteryCalibrationSection />
             <RebootInverterSection />
+            <DongleWebPageSection />
           </section>
         )}
       </section>

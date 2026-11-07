@@ -1,6 +1,9 @@
 import type { ConnectionState } from '../lib/types';
-import { awaitingConnectionMessage } from '../lib/awaitingConnection';
+import { awaitingConnectionMessage, DONGLE_ADVICE_AFTER_FAILURES } from '../lib/awaitingConnection';
 import { useReconnect } from '../hooks/useReconnect';
+import { useDonglePage } from '../hooks/useDonglePage';
+import { openExternal } from '../lib/openExternal';
+import DongleLoginTip from './DongleLoginTip';
 
 const FAQ_URL = 'https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md';
 
@@ -41,7 +44,7 @@ export default function AwaitingConnection({
   faqExtraNote,
 }: AwaitingConnectionProps) {
   const { reconnect, reconnecting } = useReconnect();
-  const showFailureAdvice = connectionState === 'disconnected' && connectFailures >= 5;
+  const showFailureAdvice = connectionState === 'disconnected' && connectFailures >= DONGLE_ADVICE_AFTER_FAILURES;
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -57,28 +60,11 @@ export default function AwaitingConnection({
       )}
 
       {showFailureAdvice && (
-        <div className="rounded-2xl border border-amber-500/40 bg-amber-950/30 px-5 py-4 text-amber-100 shadow-lg max-w-md">
-          <div className="flex items-start gap-3">
-            <span className="text-2xl" aria-hidden="true">💡</span>
-            <div className="flex flex-col gap-2">
-              <p className="text-sm font-semibold">
-                Can't reach the dongle after {Math.min(connectFailures, 99)}+ attempts
-              </p>
-              <p className="text-xs text-amber-100/80 leading-relaxed">
-                The dongle has probably locked up. <strong>Power-cycle the inverter</strong>{' '}
-                (AC isolator off for 30&nbsp;seconds, then on); it should reconnect within a few
-                minutes.
-              </p>
-              <button
-                onClick={reconnect}
-                disabled={reconnecting}
-                className="self-start mt-1 px-4 py-1.5 text-xs font-semibold rounded-lg bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/30 transition-colors disabled:opacity-50"
-              >
-                {reconnecting ? 'Reconnecting…' : 'Retry Now'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <DongleFailureAdvice
+          connectFailures={connectFailures}
+          reconnect={reconnect}
+          reconnecting={reconnecting}
+        />
       )}
 
       {showRetry && (
@@ -113,6 +99,80 @@ export default function AwaitingConnection({
           for help.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * The amber "can't reach the dongle" card. Mounted only while it shows, so the
+ * dongle-page probe (issue #452) runs only then: once on appearing, again
+ * after Retry Now. The dongle's own restart is gentler than an isolator
+ * power-cycle, so it comes first when its page answers.
+ */
+function DongleFailureAdvice({
+  connectFailures,
+  reconnect,
+  reconnecting,
+}: {
+  connectFailures: number;
+  reconnect: () => void;
+  reconnecting: boolean;
+}) {
+  const { url, loading, recheck } = useDonglePage();
+  const isolator = (
+    <>(AC isolator off for 30&nbsp;seconds, then on); it should reconnect within a few minutes.</>
+  );
+
+  return (
+    <div className="rounded-2xl border border-amber-500/40 bg-amber-950/30 px-5 py-4 text-amber-100 shadow-lg max-w-md">
+      <div className="flex items-start gap-3">
+        <span className="text-2xl" aria-hidden="true">💡</span>
+        <div className="flex flex-col gap-2">
+          <p className="text-sm font-semibold">
+            Can't reach the dongle after {Math.min(connectFailures, 99)}+ attempts
+          </p>
+          {url ? (
+            <>
+              <p className="text-xs text-amber-100/80 leading-relaxed">
+                The dongle has probably locked up. Restart it from its web page: Device Management,
+                then Restart.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => void openExternal(url)}
+                  className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/30 transition-colors"
+                >
+                  Open Dongle Page
+                </button>
+                <DongleLoginTip />
+              </div>
+              <p className="text-xs text-amber-100/80 leading-relaxed">
+                If that doesn't help, <strong>power-cycle the inverter</strong> {isolator}
+              </p>
+            </>
+          ) : loading ? (
+            // Don't advise the isolator before the gentler restart has been ruled out.
+            <p className="text-xs text-amber-100/80 leading-relaxed">
+              The dongle has probably locked up. Checking whether its web page answers…
+            </p>
+          ) : (
+            <p className="text-xs text-amber-100/80 leading-relaxed">
+              The dongle has probably locked up, and its own web page isn&apos;t answering either.{' '}
+              <strong>Power-cycle the inverter</strong> {isolator}
+            </p>
+          )}
+          <button
+            onClick={() => {
+              reconnect();
+              recheck();
+            }}
+            disabled={reconnecting}
+            className="self-start mt-1 px-4 py-1.5 text-xs font-semibold rounded-lg bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/30 transition-colors disabled:opacity-50"
+          >
+            {reconnecting ? 'Reconnecting…' : 'Retry Now'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

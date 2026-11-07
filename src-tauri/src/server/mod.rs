@@ -9,6 +9,7 @@ pub mod authenticated_lifecycle;
 pub(crate) mod calibration;
 pub(crate) mod charge_cap;
 pub(crate) mod control_status;
+pub mod dongle_page;
 pub mod export_once;
 pub mod external_commands;
 mod external_control;
@@ -318,6 +319,9 @@ fn create_router_at(
             "/api/octopus/comparison",
             get(crate::octopus::get_comparison),
         )
+        // Which of the WiFi dongle's own web pages answers (issue #452).
+        // Probes only the saved inverter host, on demand.
+        .route("/api/dongle-page", get(dongle_page::get_dongle_page))
         // "New version available" detection. Read-only cache populated by
         // the background `run_update_loop`; never fetches on the request path.
         .route(

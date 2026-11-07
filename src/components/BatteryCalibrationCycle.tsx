@@ -113,8 +113,8 @@ export default function BatteryCalibrationCycle() {
   return (
     <div className="space-y-3">
       <HeadingWithHelp
-        as="h3"
-        className="text-text-primary font-medium text-base"
+        as="h2"
+        className="text-text-primary font-semibold text-lg"
         title="Battery Calibration Cycle"
         help={
           <>

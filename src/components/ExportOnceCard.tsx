@@ -10,7 +10,7 @@ import {
 } from '../lib/exportOnce';
 import type { ExportOnceBooking } from '../lib/exportOnce';
 import type { ExportOnceEvent, ExportOnceListResponse, ScheduleSlot } from '../lib/types';
-import HelpTip, { HeadingWithHelp } from './HelpTip';
+import { HeadingWithHelp } from './HelpTip';
 
 const REFRESH_MS = 15_000;
 
@@ -113,6 +113,9 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
           <>
             Book a single export on a date. HEM puts it into the slot you pick shortly before it
             starts, then puts that slot back to how it was when it ends. Keep HEM running until then.
+            The export stops when the battery reaches the Stop Exporting at level. Inverters with a
+            per-slot floor hold it there; the rest have their Minimum SOC raised to it for the
+            window. Both go back afterwards.
           </>
         }
       />
@@ -228,11 +231,6 @@ export default function ExportOnceCard({ maxDischargeSlots, dischargeSlots }: Ex
               className="w-full"
             />
           </div>
-          <HelpTip label="Stop Exporting at">
-            The export stops when the battery reaches this level. Inverters with a per-slot floor
-            hold it there; the rest have their Minimum SOC raised to it for the window. Both go
-            back afterwards.
-          </HelpTip>
           {error && (
             <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
               {error}

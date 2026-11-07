@@ -153,6 +153,19 @@ describe('ExportOnceCard', () => {
     expect(screen.getByLabelText('Stop Exporting at')).toBeTruthy();
   });
 
+  it('has one help tip, covering the booking and the stop level', async () => {
+    serve([]);
+    renderCard(1);
+    await screen.findByLabelText('Start');
+    const tips = screen.getAllByRole('button', { name: /^More about / });
+    expect(tips).toHaveLength(1);
+    expect(tips[0].getAttribute('aria-label')).toBe('More about Export Once');
+    const text = document.getElementById(tips[0].getAttribute('aria-describedby') ?? '')?.textContent ?? '';
+    expect(text).toMatch(/Book a single export on a date/);
+    expect(text).toMatch(/stops when the battery reaches the Stop Exporting at level/);
+    expect(text).toMatch(/Minimum SOC raised to it/);
+  });
+
   it('books the floor the user chose', async () => {
     serve([]);
     apiPost.mockResolvedValue({ ok: true });

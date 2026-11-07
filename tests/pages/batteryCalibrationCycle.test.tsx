@@ -75,6 +75,14 @@ describe('BatteryCalibrationCycle', () => {
     expect(screen.getByText(/on a time-of-use tariff/i).getAttribute('role')).toBe('tooltip');
   });
 
+  it('uses the same section heading style as the other Control page sections', async () => {
+    serve(status());
+    render(<BatteryCalibrationCycle />);
+    const heading = await screen.findByRole('heading', { name: 'Battery Calibration Cycle', level: 2 });
+    expect(heading.className).toContain('text-lg');
+    expect(heading.className).toContain('font-semibold');
+  });
+
   it('says when the inverter is not supported, with no start button', async () => {
     serve(status({ supported: false }));
     render(<BatteryCalibrationCycle />);

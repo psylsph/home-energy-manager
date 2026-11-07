@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.7] - 2026-11-07
+
+### Added
+
+- **The connection-problem message now offers the dongle's own restart page.** After five failed connection attempts, if the dongle's web page answers, the message offers an Open Dongle Page button, where Device Management then Restart restarts just the dongle. The AC isolator power-cycle stays as the fallback, and the message says when the page isn't answering either. A new Dongle Web Page section in the Control page's Developer Controls opens the same page, and the ⓘ has the login to try.
+- **The FAQ covers a dongle that can't be reached,** and a Linux window whose spinner or animations freeze, which is fixed by starting the app with `WEBKIT_DISABLE_COMPOSITING_MODE=1`.
+
+### Fixed
+
+- **The "can't reach the dongle" advice now appears while the app is already open.** It used to show only after a page reload, so a dongle that dropped while you were watching never got it.
+
+### Changed
+
+- **Export Once has a single ⓘ.** The note about the Stop Exporting at level is now part of the Export Once tip.
+- **The Control page's two calibration sections are easier to tell apart.** The inverter's own routine is now titled Inverter Built-in Calibration and points to the Battery Calibration Cycle, which HEM runs and can cancel; the cycle's heading now matches the other sections.
+- **The Today card's bars have slightly rounded corners again,** small enough not to clip the text in the end segments.
+
 ## [1.8.6] - 2026-11-07
 
 ### Added
