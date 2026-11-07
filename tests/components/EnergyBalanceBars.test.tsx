@@ -296,12 +296,14 @@ describe('<EnergyBalanceBars/>', () => {
     expect(bars[1].textContent).toContain("Today's Energy Out");
   });
 
-  it('draws the bars with square ends so the end segments are not clipped', () => {
+  it('draws the bars with a small corner radius so the end segments are not clipped', () => {
     const { container } = renderBalance(snapshot());
     const fills = container.querySelectorAll('[data-testid="balance-fill"]');
     expect(fills.length).toBeGreaterThan(0);
     for (const track of new Set([...fills].map((fill) => fill.parentElement!))) {
-      expect(track.className).not.toMatch(/rounded/);
+      // Softened corners, but never a large radius that would clip the end text.
+      expect(track.className).toMatch(/(^|\s)rounded(\s|$)/);
+      expect(track.className).not.toMatch(/rounded-(md|lg|xl|2xl|3xl|full)/);
     }
   });
 

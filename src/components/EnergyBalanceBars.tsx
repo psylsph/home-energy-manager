@@ -50,8 +50,8 @@ function BalanceBar({ title, segments, total }: {
         <span className="min-w-0 text-text-secondary text-xs font-medium">{title}</span>
         <span className="text-text-primary text-xs font-mono font-bold">{formatEnergy(total)}</span>
       </div>
-      {/* Square ends: a rounded track clipped the text in the first and last segment. */}
-      <div className="mt-1 flex min-h-9 w-full overflow-hidden bg-bg-elevated">
+      {/* Only a small radius: a large one clipped the text in the first and last segment. */}
+      <div className="mt-1 flex min-h-9 w-full overflow-hidden rounded bg-bg-elevated">
         {segments.filter((s) => s.fraction > 0).map((s) => (
           <div
             key={s.key}
