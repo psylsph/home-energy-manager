@@ -1,6 +1,6 @@
 //! Daily battery health summary (issue #393).
 //!
-//! One row per battery module slot per local day in `battery_health_daily`, so a
+//! One row per battery per local day in `battery_health_daily`, so a
 //! failing cell or fading capacity shows as a trend over months. Nothing here
 //! touches `readings`: that table is one row per minute for the whole
 //! system, this one is one row per module per day.
@@ -12,13 +12,23 @@
 //! a restart mid-day continues the day's row instead of replacing it, and a
 //! day's row is never deleted.
 //!
+//! A row is keyed by the slot the battery sat in and its serial (issue #427),
+//! and [`HistoryDb::query_battery_health`] reports each battery under the slot
+//! it sits in now, so adding a battery that takes over the master slot moves
+//! nothing: the old battery's history follows it to its new slot. BMS serials
+//! sometimes read back corrupt, so a slot's serial only changes once a new one
+//! reads the same [`SERIAL_CONFIRM_READS`] polls running, and the polls that
+//! read it before it settles are left out rather than filed under the old
+//! battery. Until a slot has any confirmed serial (and for modules that never
+//! report a usable one) the row's serial is empty and it belongs to the slot.
+//!
 //! Cell spread (max minus min cell voltage) depends heavily on state of
 //! charge: cells drift apart near full and near empty even on a healthy pack.
 //! Two spread figures are therefore kept: the day's worst (`max_spread_mv`)
 //! and the worst while the module was nearly full (`full_spread_mv`), the
 //! like-for-like figure to trend.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Local, NaiveDate};
 use rusqlite::params;
@@ -55,13 +65,69 @@ const TEMP_C_VALID: std::ops::RangeInclusive<f32> = -40.0..=100.0;
 /// The lowest number of cells a spread is meaningful for.
 const MIN_CELLS_FOR_SPREAD: usize = 2;
 
+/// Consecutive polls a new serial must read back identically before a slot
+/// adopts it, so a corrupt read can't make a battery look like a new one.
+pub const SERIAL_CONFIRM_READS: u8 = 3;
+
+/// A battery serial is ten alphanumeric characters; anything outside this
+/// shape is a failed read (zeros, 0xFFFF fill, a half-read register).
+fn plausible_serial(serial: &str) -> Option<&str> {
+    let serial = serial.trim();
+    ((6..=20).contains(&serial.len()) && serial.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then_some(serial)
+}
+
+/// The serial each slot has settled on, for telling apart a battery that
+/// moved slot from one that is still being read.
+#[derive(Default)]
+struct SlotSerial {
+    confirmed: Option<String>,
+    candidate: Option<String>,
+    streak: u8,
+    /// The last poll read a serial that hasn't settled, so it was left out.
+    unsettled: bool,
+}
+
+impl SlotSerial {
+    /// Take one poll's serial in. Returns whether the poll must be left out:
+    /// it reads a serial other than the one this slot has settled on, and that
+    /// one hasn't settled yet, so the poll belongs to no battery we can name.
+    fn read(&mut self, serial: Option<&str>) -> bool {
+        let Some(serial) = serial else {
+            self.unsettled = false;
+            return false;
+        };
+        if self.candidate.as_deref() == Some(serial) {
+            self.streak = self.streak.saturating_add(1);
+        } else {
+            self.candidate = Some(serial.to_string());
+            self.streak = 1;
+        }
+        if self.streak >= SERIAL_CONFIRM_READS && self.confirmed.as_deref() != Some(serial) {
+            self.confirmed = Some(serial.to_string());
+        }
+        self.unsettled = self.confirmed.as_deref().is_some_and(|c| c != serial);
+        self.unsettled
+    }
+
+    fn key(&self) -> String {
+        self.confirmed.clone().unwrap_or_default()
+    }
+}
+
 /// One module's summary for one local day.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BatteryHealthRow {
     /// Local date, `YYYY-MM-DD`.
     pub day: String,
-    /// Module slot (0-based), as in the snapshot's `battery_modules`.
+    /// Module slot (0-based), as in the snapshot's `battery_modules`. In the
+    /// table this is the slot the battery sat in that day; a query reports the
+    /// slot it sits in now.
     pub module_index: i64,
+    /// The serial confirmed for the battery that day; empty when none was.
+    /// Storage detail, not part of the API.
+    #[serde(skip)]
+    pub serial: String,
     pub min_cell_v: Option<f64>,
     pub max_cell_v: Option<f64>,
     /// Largest max-minus-min cell voltage seen that day, in mV.
@@ -84,10 +150,11 @@ pub struct BatteryHealthRow {
 }
 
 impl BatteryHealthRow {
-    fn new(day: &str, module_index: i64) -> Self {
+    fn new(day: &str, module_index: i64, serial: &str) -> Self {
         Self {
             day: day.to_string(),
             module_index,
+            serial: serial.to_string(),
             min_cell_v: None,
             max_cell_v: None,
             max_spread_mv: None,
@@ -178,15 +245,42 @@ impl BatteryHealthRow {
     }
 }
 
-/// Polls since the last flush, per (day, module slot).
+/// Polls since the last flush, per (day, module slot, serial).
 #[derive(Default)]
 pub(super) struct HealthAccumulator {
-    rows: HashMap<(String, i64), BatteryHealthRow>,
+    rows: HashMap<(String, i64, String), BatteryHealthRow>,
+    serials: HashMap<i64, SlotSerial>,
     /// Unix seconds of the last flush request, 0 before the first.
     last_flush_ts: i64,
 }
 
 impl HealthAccumulator {
+    /// An accumulator that starts out expecting each slot to hold the battery
+    /// last recorded in it, so a restart's first polls land on that battery's
+    /// row instead of waiting for the serial to settle again. A read that
+    /// fails leaves it empty: the serials then settle from the polls.
+    pub(super) fn seeded(conn: &rusqlite::Connection) -> Self {
+        let mut accumulator = Self::default();
+        let loaded = SerialOwners::load(conn);
+        match loaded {
+            Ok(owners) => {
+                for (slot, history) in owners.by_slot {
+                    if let Some((_, serial)) = history.last() {
+                        accumulator.serials.insert(
+                            slot,
+                            SlotSerial {
+                                confirmed: Some(serial.clone()),
+                                ..SlotSerial::default()
+                            },
+                        );
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Could not read the batteries' serials: {e}"),
+        }
+        accumulator
+    }
+
     /// Fold one poll in. Returns whether a flush is now due: the first poll,
     /// [`FLUSH_INTERVAL_SECS`] since the last, a clock that moved backwards,
     /// or rows held for a day that has ended.
@@ -194,17 +288,31 @@ impl HealthAccumulator {
         let today = now.format("%Y-%m-%d").to_string();
         for module in &snap.battery_modules {
             let slot = module.index as i64;
+            // A serial two modules report is no identity for either.
+            let serial = plausible_serial(&module.serial).filter(|serial| {
+                snap.battery_modules
+                    .iter()
+                    .filter(|other| plausible_serial(&other.serial) == Some(*serial))
+                    .count()
+                    == 1
+            });
+            let slot_serial = self.serials.entry(slot).or_default();
+            if slot_serial.read(serial) {
+                tracing::debug!(slot, "Battery health poll left out: serial not settled yet");
+                continue;
+            }
+            let serial = slot_serial.key();
             let effective_soc = if module.soc > 0 { module.soc } else { snap.soc };
             self.rows
-                .entry((today.clone(), slot))
-                .or_insert_with(|| BatteryHealthRow::new(&today, slot))
+                .entry((today.clone(), slot, serial.clone()))
+                .or_insert_with(|| BatteryHealthRow::new(&today, slot, &serial))
                 .fold(module, effective_soc);
         }
         if self.rows.is_empty() {
             return false;
         }
         let now_ts = now.timestamp();
-        let day_ended = self.rows.keys().any(|(day, _)| *day != today);
+        let day_ended = self.rows.keys().any(|(day, _, _)| *day != today);
         let elapsed = now_ts - self.last_flush_ts;
         if day_ended || !(0..FLUSH_INTERVAL_SECS).contains(&elapsed) {
             self.last_flush_ts = now_ts;
@@ -217,7 +325,7 @@ impl HealthAccumulator {
     /// so a transient failure loses nothing. Mirrors the SQL merge.
     fn restore(&mut self, rows: Vec<BatteryHealthRow>) {
         for row in rows {
-            let key = (row.day.clone(), row.module_index);
+            let key = (row.day.clone(), row.module_index, row.serial.clone());
             match self.rows.get_mut(&key) {
                 Some(held) => held.absorb(&row),
                 None => {
@@ -228,10 +336,20 @@ impl HealthAccumulator {
     }
 
     fn count_soc_event(&mut self, day: &str, slot: i64, kind: &SocEventKind) {
+        // An event about a battery whose serial hasn't settled can't be
+        // placed on the old battery's row, nor yet on a new one.
+        if self.serials.get(&slot).is_some_and(|s| s.unsettled) {
+            return;
+        }
+        let serial = self
+            .serials
+            .get(&slot)
+            .map(SlotSerial::key)
+            .unwrap_or_default();
         let row = self
             .rows
-            .entry((day.to_string(), slot))
-            .or_insert_with(|| BatteryHealthRow::new(day, slot));
+            .entry((day.to_string(), slot, serial.clone()))
+            .or_insert_with(|| BatteryHealthRow::new(day, slot, &serial));
         match kind {
             SocEventKind::Jump { .. } => row.soc_jumps += 1,
             SocEventKind::Stuck { .. } => row.soc_stuck += 1,
@@ -247,9 +365,9 @@ const UPSERT_SQL: &str = "\
 INSERT INTO battery_health_daily \
  (day, module_index, min_cell_v, max_cell_v, max_spread_mv, full_spread_mv, \
   cycles, max_temp_c, capacity_ah, design_capacity_ah, bms_firmware, samples, updated_at, \
-  soc_jumps, soc_stuck) \
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
-ON CONFLICT(day, module_index) DO UPDATE SET \
+  soc_jumps, soc_stuck, serial) \
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+ON CONFLICT(day, module_index, serial) DO UPDATE SET \
  min_cell_v = MIN(COALESCE(min_cell_v, excluded.min_cell_v), COALESCE(excluded.min_cell_v, min_cell_v)), \
  max_cell_v = MAX(COALESCE(max_cell_v, excluded.max_cell_v), COALESCE(excluded.max_cell_v, max_cell_v)), \
  max_spread_mv = MAX(COALESCE(max_spread_mv, excluded.max_spread_mv), COALESCE(excluded.max_spread_mv, max_spread_mv)), \
@@ -345,6 +463,7 @@ impl HistoryDb {
                         updated_at,
                         row.soc_jumps,
                         row.soc_stuck,
+                        row.serial,
                     ])?;
                 }
             }
@@ -365,7 +484,12 @@ impl HistoryDb {
     }
 
     /// Daily summaries with `since <= day <= until`, oldest day first, then
-    /// by module slot.
+    /// by module slot. Each battery is reported under the slot it sits in now
+    /// (issue #427): a row recorded under a serial moves to that serial's
+    /// latest slot, and a row with no serial (history from before serials
+    /// were kept, or reads that never settled) goes with the battery that
+    /// reported a serial in its slot nearest in time. Rows that land on one
+    /// (day, slot) are merged.
     pub fn query_battery_health(
         &self,
         since: NaiveDate,
@@ -375,13 +499,14 @@ impl HistoryDb {
             .conn
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        let owners = SerialOwners::load(&conn)?;
         let mut stmt = conn
             .prepare(
                 "SELECT day, module_index, min_cell_v, max_cell_v, max_spread_mv, \
                  full_spread_mv, cycles, max_temp_c, capacity_ah, design_capacity_ah, \
-                 bms_firmware, samples, soc_jumps, soc_stuck \
+                 bms_firmware, samples, soc_jumps, soc_stuck, serial \
                  FROM battery_health_daily WHERE day >= ?1 AND day <= ?2 \
-                 ORDER BY day ASC, module_index ASC",
+                 ORDER BY day ASC, updated_at ASC, module_index ASC",
             )
             .map_err(|e| format!("Failed to prepare battery health query: {e}"))?;
         let rows = stmt
@@ -406,13 +531,127 @@ impl HistoryDb {
                         samples: row.get(11)?,
                         soc_jumps: row.get(12)?,
                         soc_stuck: row.get(13)?,
+                        serial: row.get(14)?,
                     })
                 },
             )
             .map_err(|e| format!("Battery health query failed: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("Failed to read battery health row: {e}"))?;
-        Ok(rows)
+
+        // Rows arrive oldest first, so a later row absorbs an earlier one.
+        let mut merged: BTreeMap<(String, i64), BatteryHealthRow> = BTreeMap::new();
+        for mut row in rows {
+            row.module_index = owners.slot_now(&row.day, row.module_index, &row.serial);
+            let key = (row.day.clone(), row.module_index);
+            if let Some(earlier) = merged.remove(&key) {
+                row.absorb(&earlier);
+            }
+            merged.insert(key, row);
+        }
+        Ok(merged.into_values().collect())
+    }
+}
+
+/// Which serial sat in which slot, from every row that has a serial (the whole
+/// table, not the queried range: a battery's current slot can lie outside it).
+struct SerialOwners {
+    /// Each serial's slot in its newest row.
+    latest_slot: HashMap<String, i64>,
+    /// Per slot, its serial-bearing rows as (day, serial), oldest first.
+    by_slot: HashMap<i64, Vec<(String, String)>>,
+}
+
+impl SerialOwners {
+    fn load(conn: &rusqlite::Connection) -> Result<Self, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT day, module_index, serial FROM battery_health_daily \
+                 WHERE serial != '' ORDER BY day ASC, updated_at ASC, module_index ASC",
+            )
+            .map_err(|e| format!("Failed to prepare battery serial query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("Battery serial query failed: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("Failed to read battery serial row: {e}"))?;
+        let mut owners = Self {
+            latest_slot: HashMap::new(),
+            by_slot: HashMap::new(),
+        };
+        // The order each serial was last seen in, and the days it was seen.
+        let mut last_seen: HashMap<String, usize> = HashMap::new();
+        let mut days: HashMap<String, HashSet<String>> = HashMap::new();
+        for (position, (day, slot, serial)) in rows.into_iter().enumerate() {
+            owners.latest_slot.insert(serial.clone(), slot);
+            last_seen.insert(serial.clone(), position);
+            days.entry(serial.clone()).or_default().insert(day.clone());
+            owners.by_slot.entry(slot).or_default().push((day, serial));
+        }
+        owners.retire_blended(&last_seen, &days);
+        Ok(owners)
+    }
+
+    /// Two batteries can end up claiming one slot: a replacement (never there
+    /// together, so one continuous line, as it always was), or a battery
+    /// removed while another slid into its slot. The latter were both present
+    /// on the same days, so sharing a slot would blend two packs into one
+    /// line: the one seen longest ago is moved to a spare slot instead.
+    fn retire_blended(
+        &mut self,
+        last_seen: &HashMap<String, usize>,
+        days: &HashMap<String, HashSet<String>>,
+    ) {
+        let mut claims: BTreeMap<i64, Vec<&String>> = BTreeMap::new();
+        for (serial, slot) in &self.latest_slot {
+            claims.entry(*slot).or_default().push(serial);
+        }
+        // Past every slot a battery was ever in, so a retired line never
+        // lands on one a live battery's history uses.
+        let mut spare = self.by_slot.keys().max().map_or(0, |max| max + 1);
+        let mut retired: Vec<(usize, String)> = Vec::new();
+        for serials in claims.values().filter(|s| s.len() > 1) {
+            let Some(keeper) = serials.iter().max_by_key(|s| last_seen[**s]) else {
+                continue;
+            };
+            for serial in serials.iter().filter(|s| *s != keeper) {
+                if !days[*serial].is_disjoint(&days[*keeper]) {
+                    retired.push((last_seen[*serial], (*serial).clone()));
+                }
+            }
+        }
+        retired.sort();
+        for (_, serial) in retired {
+            self.latest_slot.insert(serial, spare);
+            spare += 1;
+        }
+    }
+
+    /// The slot the battery behind a row sits in now. A row with a serial
+    /// follows it; one without goes with the newest serial its slot had by
+    /// that day, else the first it ever had (history from before serials were
+    /// kept), else stays where it is.
+    fn slot_now(&self, day: &str, slot: i64, serial: &str) -> i64 {
+        let serial = if serial.is_empty() {
+            let Some(history) = self.by_slot.get(&slot) else {
+                return slot;
+            };
+            // `history` is oldest first: the newest entry on or before `day`.
+            let on_or_before = history.partition_point(|(seen, _)| seen.as_str() <= day);
+            history
+                .get(on_or_before.saturating_sub(1))
+                .map(|(_, serial)| serial.as_str())
+                .unwrap_or_default()
+        } else {
+            serial
+        };
+        self.latest_slot.get(serial).copied().unwrap_or(slot)
     }
 }
 
@@ -1023,5 +1262,442 @@ mod tests {
         let rows = all_rows(&db);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].samples, 200);
+    }
+
+    // ---- Batteries that move slot (issue #427) ----
+
+    const GEN2: &str = "BM0000002A";
+    const GEN3: &str = "BM0000003B";
+
+    /// A module in `slot` reporting `serial`, its cells `spread_mv` apart.
+    fn battery(slot: usize, serial: &str, spread_mv: f32) -> BatteryModule {
+        let mut m = module(slot, &[3.300, 3.300 + spread_mv / 1000.0], 60);
+        m.serial = serial.to_string();
+        m
+    }
+
+    /// Enough polls for a slot to adopt its serial.
+    fn settle(db: &HistoryDb, modules: Vec<BatteryModule>, now: DateTime<Local>) {
+        let s = snap(modules);
+        for _ in 0..SERIAL_CONFIRM_READS {
+            record(db, &s, now);
+        }
+    }
+
+    fn spreads(db: &HistoryDb, slot: i64) -> Vec<(String, i64)> {
+        all_rows(db)
+            .into_iter()
+            .filter(|r| r.module_index == slot)
+            .map(|r| (r.day, r.max_spread_mv.unwrap().round() as i64))
+            .collect()
+    }
+
+    /// Gen 2 alone for two days, then a Gen 3 takes the master slot and the
+    /// Gen 2 becomes the second battery.
+    fn gen3_added_as_master(db: &HistoryDb) {
+        for d in [1, 2] {
+            settle(db, vec![battery(0, GEN2, 40.0)], at(2026, 10, d, 12, 0));
+        }
+        for d in [3, 4] {
+            settle(
+                db,
+                vec![battery(0, GEN3, 10.0), battery(1, GEN2, 40.0)],
+                at(2026, 10, d, 12, 0),
+            );
+        }
+    }
+
+    #[test]
+    fn a_battery_that_moves_slot_takes_its_history_with_it() {
+        let db = test_db();
+        gen3_added_as_master(&db);
+
+        // The Gen 2's days before the swap are reported under slot 1, where
+        // it sits now, and slot 0 holds only the Gen 3.
+        assert_eq!(
+            spreads(&db, 1),
+            vec![
+                ("2026-10-01".to_string(), 40),
+                ("2026-10-02".to_string(), 40),
+                ("2026-10-03".to_string(), 40),
+                ("2026-10-04".to_string(), 40),
+            ]
+        );
+        assert_eq!(
+            spreads(&db, 0),
+            vec![
+                ("2026-10-03".to_string(), 10),
+                ("2026-10-04".to_string(), 10)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_swap_day_does_not_mix_the_two_batteries() {
+        let db = test_db();
+        settle(&db, vec![battery(0, GEN2, 40.0)], at(2026, 9, 30, 12, 0));
+        settle(&db, vec![battery(0, GEN2, 40.0)], at(2026, 10, 1, 9, 0));
+        settle(
+            &db,
+            vec![battery(0, GEN3, 10.0), battery(1, GEN2, 40.0)],
+            at(2026, 10, 1, 15, 0),
+        );
+
+        // The Gen 3's afternoon polls make one row on slot 0, and nothing of
+        // the Gen 2's 40 mV reaches it.
+        let slot0 = spreads(&db, 0);
+        assert_eq!(slot0, vec![("2026-10-01".to_string(), 10)]);
+        let slot1: Vec<_> = spreads(&db, 1);
+        assert_eq!(
+            slot1,
+            vec![
+                ("2026-09-30".to_string(), 40),
+                ("2026-10-01".to_string(), 40)
+            ]
+        );
+    }
+
+    #[test]
+    fn history_from_before_serials_were_kept_follows_the_first_battery_seen() {
+        // Rows written by an earlier release have no serial. They belong to
+        // whichever battery then reported a serial in that slot.
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-battery-health-pre-serial-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("h.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE battery_health_daily (
+                    day TEXT NOT NULL, module_index INTEGER NOT NULL,
+                    min_cell_v REAL, max_cell_v REAL, max_spread_mv REAL,
+                    full_spread_mv REAL, cycles INTEGER, max_temp_c REAL,
+                    capacity_ah REAL, design_capacity_ah REAL, bms_firmware INTEGER,
+                    samples INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    soc_jumps INTEGER NOT NULL DEFAULT 0,
+                    soc_stuck INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (day, module_index));
+                 INSERT INTO battery_health_daily (day, module_index, max_spread_mv, cycles,
+                    samples, updated_at) VALUES ('2026-09-29', 0, 41.0, 300, 1440, 1),
+                    ('2026-09-30', 0, 42.0, 301, 1440, 2);",
+            )
+            .unwrap();
+        }
+        let db = HistoryDb::open(&path).unwrap();
+        gen3_added_as_master(&db);
+
+        let slot1: Vec<_> = spreads(&db, 1).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(
+            slot1,
+            vec![
+                "2026-09-29",
+                "2026-09-30",
+                "2026-10-01",
+                "2026-10-02",
+                "2026-10-03",
+                "2026-10-04"
+            ]
+        );
+        assert_eq!(spreads(&db, 0).len(), 2, "only the Gen 3's own days");
+    }
+
+    #[test]
+    fn rows_with_no_serial_stay_in_their_slot_when_no_serial_was_ever_seen() {
+        let db = test_db();
+        record(
+            &db,
+            &snap(vec![
+                module(0, &[3.3, 3.31], 60),
+                module(1, &[3.3, 3.32], 60),
+            ]),
+            at(2026, 10, 1, 12, 0),
+        );
+        assert_eq!(all_rows(&db).len(), 2);
+        assert_eq!(spreads(&db, 1), vec![("2026-10-01".to_string(), 20)]);
+    }
+
+    #[test]
+    fn a_removed_battery_keeps_its_last_slot() {
+        let db = test_db();
+        settle(
+            &db,
+            vec![battery(0, GEN3, 10.0), battery(1, GEN2, 40.0)],
+            at(2026, 10, 1, 12, 0),
+        );
+        settle(&db, vec![battery(0, GEN3, 10.0)], at(2026, 10, 2, 12, 0));
+        assert_eq!(spreads(&db, 1), vec![("2026-10-01".to_string(), 40)]);
+        assert_eq!(spreads(&db, 0).len(), 2);
+    }
+
+    #[test]
+    fn a_corrupt_serial_read_cannot_move_a_batterys_history() {
+        // Reads that look like serials but disagree, short of a settled run,
+        // leave the battery's serial alone: one row, every poll counted.
+        let db = test_db();
+        let now = at(2026, 10, 1, 12, 0);
+        settle(&db, vec![battery(0, GEN2, 40.0)], now);
+        for serial in ["BM0000002B", "BM0000002A", "XM0000002A", "BM0000002A"] {
+            record(&db, &snap(vec![battery(0, serial, 40.0)]), now);
+        }
+        let rows = all_rows(&db);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].samples, 5,
+            "the two odd reads are left out, not split off"
+        );
+    }
+
+    #[test]
+    fn polls_of_a_new_serial_are_not_filed_under_the_old_battery() {
+        // Until a new serial has settled, its polls belong to neither
+        // battery: they must not reach the previous one's row (its capacity,
+        // firmware, extremes and sample count).
+        let db = test_db();
+        settle(&db, vec![battery(0, GEN2, 40.0)], at(2026, 10, 1, 12, 0));
+
+        let mut gen3 = battery(0, GEN3, 90.0);
+        gen3.capacity_ah = 150.0;
+        let swapped = snap(vec![gen3, battery(1, GEN2, 40.0)]);
+        let now = at(2026, 10, 2, 12, 0);
+        for _ in 0..SERIAL_CONFIRM_READS {
+            record(&db, &swapped, now);
+        }
+
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        let gen2_in_slot0_today: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM battery_health_daily \
+                 WHERE day = '2026-10-02' AND module_index = 0 AND serial = ?1",
+                [GEN2],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            gen2_in_slot0_today, 0,
+            "the Gen 3's polls reached the Gen 2's row"
+        );
+
+        let gen3_today = all_rows(&db)
+            .into_iter()
+            .find(|r| r.day == "2026-10-02" && r.module_index == 0)
+            .unwrap();
+        assert_eq!(
+            gen3_today.samples, 1,
+            "only the poll that settled the serial"
+        );
+        assert_eq!(gen3_today.capacity_ah.map(f64::round), Some(150.0));
+    }
+
+    #[test]
+    fn removing_the_master_does_not_blend_it_with_the_battery_that_takes_its_slot() {
+        // A and B coexist in slots 0 and 1; A is removed and B becomes the
+        // master. Both now claim slot 0, but their days overlap, so merging
+        // them would blend two packs into one line: A's history goes to a
+        // spare slot instead.
+        let db = test_db();
+        for d in [1, 2] {
+            settle(
+                &db,
+                vec![battery(0, GEN2, 40.0), battery(1, GEN3, 15.0)],
+                at(2026, 10, d, 12, 0),
+            );
+        }
+        for d in [3, 4] {
+            settle(&db, vec![battery(0, GEN3, 15.0)], at(2026, 10, d, 12, 0));
+        }
+        let days = |slot| spreads(&db, slot).into_iter().collect::<Vec<_>>();
+        let gen3: Vec<_> = (1..=4).map(|d| (format!("2026-10-0{d}"), 15)).collect();
+        assert_eq!(
+            days(0),
+            gen3,
+            "the Gen 3 keeps one line under the master slot"
+        );
+        assert!(days(1).is_empty());
+        assert_eq!(
+            days(2),
+            vec![
+                ("2026-10-01".to_string(), 40),
+                ("2026-10-02".to_string(), 40)
+            ],
+            "the removed Gen 2 keeps its own line"
+        );
+    }
+
+    #[test]
+    fn a_replacement_in_the_same_slot_continues_the_line() {
+        // Days that never overlap are one slot's history, as before.
+        let db = test_db();
+        settle(&db, vec![battery(0, GEN2, 40.0)], at(2026, 10, 1, 12, 0));
+        settle(&db, vec![battery(0, GEN3, 10.0)], at(2026, 10, 2, 12, 0));
+        assert_eq!(spreads(&db, 0).len(), 2);
+        assert!(spreads(&db, 1).is_empty());
+    }
+
+    #[test]
+    fn a_soc_event_while_a_new_serial_settles_is_not_counted_on_the_old_battery() {
+        let db = test_db();
+        settle(&db, vec![battery(0, GEN2, 40.0)], at(2026, 10, 1, 12, 0));
+        let now = at(2026, 10, 2, 12, 0);
+        let swapped = snap(vec![battery(0, GEN3, 10.0)]);
+        db.observe_battery_health(&swapped, now);
+        db.record_soc_events(&[soc_jump(SocSource::Module(0))], &swapped, now);
+        db.flush_battery_health();
+        let jumps: i64 = all_rows(&db).iter().map(|r| r.soc_jumps).sum();
+        assert_eq!(
+            jumps, 0,
+            "an event about the unsettled battery is not the Gen 2's"
+        );
+
+        for _ in 1..SERIAL_CONFIRM_READS {
+            db.observe_battery_health(&swapped, now);
+        }
+        db.record_soc_events(&[soc_jump(SocSource::Module(0))], &swapped, now);
+        db.flush_battery_health();
+        let today = all_rows(&db)
+            .into_iter()
+            .find(|r| r.day == "2026-10-02")
+            .unwrap();
+        assert_eq!(today.soc_jumps, 1, "once settled, it counts on the Gen 3");
+    }
+
+    #[test]
+    fn a_serial_two_modules_share_identifies_neither() {
+        let db = test_db();
+        settle(
+            &db,
+            vec![battery(0, GEN2, 40.0), battery(1, GEN2, 15.0)],
+            at(2026, 10, 1, 12, 0),
+        );
+        assert_eq!(spreads(&db, 0), vec![("2026-10-01".to_string(), 40)]);
+        assert_eq!(spreads(&db, 1), vec![("2026-10-01".to_string(), 15)]);
+    }
+
+    #[test]
+    fn a_restart_continues_a_batterys_row_as_one() {
+        // A restart expects the battery it last saw, so its first polls join
+        // that battery's row rather than waiting for the serial to settle.
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-battery-health-serial-restart-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = dir.join("h.db");
+        let now = at(2026, 10, 1, 12, 0);
+        let stored = || -> i64 {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM battery_health_daily", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            settle(&db, vec![battery(0, GEN2, 40.0)], now);
+        }
+        let first_run = stored();
+        let db = HistoryDb::open(&path).unwrap();
+        record(&db, &snap(vec![battery(0, GEN2, 40.0)]), now);
+        assert_eq!(
+            stored(),
+            first_run,
+            "the first poll after a restart made no new row"
+        );
+        let rows = all_rows(&db);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].samples, 4);
+    }
+
+    #[test]
+    fn soc_events_follow_the_battery_that_moved() {
+        let db = test_db();
+        gen3_added_as_master(&db);
+        let now = at(2026, 10, 5, 12, 0);
+        let s = snap(vec![battery(0, GEN3, 10.0), battery(1, GEN2, 40.0)]);
+        settle(&db, s.battery_modules.clone(), now);
+        db.record_soc_events(&[soc_jump(SocSource::Module(1))], &s, now);
+        db.flush_battery_health();
+        let rows = all_rows(&db);
+        let gen2_today = rows
+            .iter()
+            .find(|r| r.day == "2026-10-05" && r.module_index == 1)
+            .unwrap();
+        assert_eq!(gen2_today.soc_jumps, 1);
+    }
+
+    #[test]
+    fn the_serial_key_migration_is_idempotent_and_keeps_every_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "givenergy-battery-health-rekey-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = dir.join("h.db");
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            settle(&db, vec![battery(0, GEN2, 40.0)], at(2026, 10, 1, 12, 0));
+        }
+        let before = {
+            let db = HistoryDb::open(&path).unwrap();
+            all_rows(&db)
+        };
+        let again = HistoryDb::open(&path).unwrap();
+        assert_eq!(all_rows(&again), before);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'battery_health_daily_v1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "the rebuild leaves no old table behind");
+    }
+
+    #[test]
+    fn plausible_serials_are_ten_character_alphanumerics_not_fill() {
+        assert_eq!(plausible_serial(" BM0000002A "), Some("BM0000002A"));
+        for bad in [
+            "",
+            "\0\0 ",
+            "BAT0",
+            "BM00\u{ff}0002A",
+            "BM-0000002A",
+            "A234567890123456789012",
+        ] {
+            assert_eq!(plausible_serial(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_slot_changes_serial_only_after_a_settled_run() {
+        let mut slot = SlotSerial::default();
+        // Nothing settled yet: polls are kept, filed under no serial.
+        assert!(!slot.read(Some("BM0000002A")));
+        assert!(!slot.read(Some("BM0000002A")));
+        assert_eq!(slot.key(), "", "two reads are not settled");
+        assert!(!slot.read(Some("BM0000002A")));
+        assert_eq!(slot.key(), "BM0000002A");
+        // A different serial is left out until it settles; a failed read
+        // neither counts towards it nor is left out.
+        assert!(slot.read(Some("BM0000003B")));
+        assert!(!slot.read(None));
+        assert!(slot.read(Some("BM0000003B")));
+        assert_eq!(
+            slot.key(),
+            "BM0000002A",
+            "a failed read doesn't count as a new serial"
+        );
+        assert!(
+            !slot.read(Some("BM0000003B")),
+            "the poll that settles it is kept"
+        );
+        assert_eq!(slot.key(), "BM0000003B");
+        // A stray read of another serial, then the settled one again.
+        assert!(slot.read(Some("BM0000009Z")));
+        assert!(!slot.read(Some("BM0000003B")));
     }
 }

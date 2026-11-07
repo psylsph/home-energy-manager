@@ -893,6 +893,34 @@ fn repair_cumulative_points(points: &mut [TimePoint]) {
 // Schema
 // ---------------------------------------------------------------------------
 
+/// Daily battery health summary (issue #393): one row per battery per local
+/// day, kept apart from `readings` (one row per minute, whole system).
+/// `module_index` is the slot the battery sat in that day and `serial` the
+/// serial confirmed for it (issue #427: empty when none was read back
+/// reliably), so a battery that moves slot keeps its own history; see
+/// `battery_health::query_battery_health`. Created apart from [`SCHEMA_SQL`]
+/// so the migration that adds `serial` to the key can rebuild it.
+const BATTERY_HEALTH_DAILY_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS battery_health_daily (
+    day                TEXT NOT NULL,
+    module_index       INTEGER NOT NULL,
+    serial             TEXT NOT NULL DEFAULT '',
+    min_cell_v         REAL,
+    max_cell_v         REAL,
+    max_spread_mv      REAL,
+    full_spread_mv     REAL,
+    cycles             INTEGER,
+    max_temp_c         REAL,
+    capacity_ah        REAL,
+    design_capacity_ah REAL,
+    bms_firmware       INTEGER,
+    samples            INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    soc_jumps          INTEGER NOT NULL DEFAULT 0,
+    soc_stuck          INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, module_index, serial)
+);";
+
 const SCHEMA_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS readings (
     timestamp       INTEGER PRIMARY KEY,
@@ -996,27 +1024,6 @@ CREATE TABLE IF NOT EXISTS plan_snapshots (
     plan_json     TEXT NOT NULL,
     forecast_json TEXT NOT NULL,
     PRIMARY KEY (recorded_at, kind)
-);
--- Daily battery health summary (issue #393): one row per module per local
--- day (keyed by slot: BMS serials can read back corrupt), kept apart from
--- `readings` (one row per minute, whole system).
-CREATE TABLE IF NOT EXISTS battery_health_daily (
-    day                TEXT NOT NULL,
-    module_index       INTEGER NOT NULL,
-    min_cell_v         REAL,
-    max_cell_v         REAL,
-    max_spread_mv      REAL,
-    full_spread_mv     REAL,
-    cycles             INTEGER,
-    max_temp_c         REAL,
-    capacity_ah        REAL,
-    design_capacity_ah REAL,
-    bms_firmware       INTEGER,
-    samples            INTEGER NOT NULL,
-    updated_at         INTEGER NOT NULL,
-    soc_jumps          INTEGER NOT NULL DEFAULT 0,
-    soc_stuck          INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, module_index)
 );
 CREATE TABLE IF NOT EXISTS forecast_values (
     timestamp  INTEGER NOT NULL,
@@ -1183,6 +1190,38 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
     .map_err(|e| format!("failed to inspect {table} columns: {e}"))
 }
 
+/// Rebuild `battery_health_daily` with `serial` in its key if the table still
+/// has the slot-only key (issue #427). Every existing row is kept, with an
+/// empty serial: `battery_health::query_battery_health` attributes those to
+/// the battery that first reported a serial in that slot. One transaction, so
+/// a failure leaves the old table untouched.
+fn add_battery_health_serial_key(conn: &Connection) -> Result<(), String> {
+    if table_has_column(conn, "battery_health_daily", "serial")? {
+        return Ok(());
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("failed to start the battery health migration: {e}"))?;
+    tx.execute_batch("ALTER TABLE battery_health_daily RENAME TO battery_health_daily_v1")
+        .and_then(|()| tx.execute_batch(BATTERY_HEALTH_DAILY_DDL))
+        .and_then(|()| {
+            tx.execute_batch(
+                "INSERT INTO battery_health_daily \
+                 (day, module_index, serial, min_cell_v, max_cell_v, max_spread_mv, \
+                  full_spread_mv, cycles, max_temp_c, capacity_ah, design_capacity_ah, \
+                  bms_firmware, samples, updated_at, soc_jumps, soc_stuck) \
+                 SELECT day, module_index, '', min_cell_v, max_cell_v, max_spread_mv, \
+                  full_spread_mv, cycles, max_temp_c, capacity_ah, design_capacity_ah, \
+                  bms_firmware, samples, updated_at, soc_jumps, soc_stuck \
+                 FROM battery_health_daily_v1; \
+                 DROP TABLE battery_health_daily_v1;",
+            )
+        })
+        .map_err(|e| format!("failed to add the serial to the battery health key: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("failed to commit the battery health migration: {e}"))
+}
+
 fn readings_has_column(conn: &Connection, column: &str) -> Result<bool, String> {
     table_has_column(conn, "readings", column)
 }
@@ -1343,6 +1382,8 @@ impl HistoryDb {
 
         conn.execute_batch(SCHEMA_SQL)
             .map_err(|e| format!("Failed to create schema: {e}"))?;
+        conn.execute_batch(BATTERY_HEALTH_DAILY_DDL)
+            .map_err(|e| format!("Failed to create the battery health table: {e}"))?;
 
         // Stage 2 development builds stored only a standing/not-standing flag.
         // Migrate those local databases before adding the lookup index so
@@ -1434,6 +1475,10 @@ impl HistoryDb {
             "soc_stuck",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+
+        // Migration: a battery's serial joins the key, so its history follows
+        // it when it moves slot (issue #427).
+        add_battery_health_serial_key(&conn)?;
 
         // One-time backfill: populate home_energy_today_kwh for historic rows
         // recorded before this column existed. Commit 5e1da32 renamed the
@@ -1775,13 +1820,14 @@ impl HistoryDb {
             }
         }
 
+        let health = battery_health::HealthAccumulator::seeded(&conn);
         tracing::info!("History database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
             poll_rows: Mutex::new(minute::PollRows::new()),
             owned_rows: Mutex::new(OwnedRows::new()),
-            health: Mutex::new(battery_health::HealthAccumulator::default()),
+            health: Mutex::new(health),
         })
     }
 

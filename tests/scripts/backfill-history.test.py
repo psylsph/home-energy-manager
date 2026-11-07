@@ -21,6 +21,7 @@ assert spec and spec.loader
 backfill = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = backfill
 spec.loader.exec_module(backfill)
+FULL_SPREAD = backfill.BATTERY_HEALTH_COLUMNS.index("full_spread_mv")
 
 
 READING_COLUMNS = (
@@ -261,6 +262,46 @@ class BackfillHistoryTests(unittest.TestCase):
             self.assertEqual(rows[0]["soc_jumps"], 0)
             self.assertGreater(len(rows), 1)
 
+    def test_a_table_from_before_serials_is_left_for_the_app_to_migrate(self) -> None:
+        # Adding a serial column here would make the app's migration think the
+        # key already has it and skip the rebuild (issue #427), so the script
+        # fills the old shape and leaves the migration to the app.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    "CREATE TABLE battery_health_daily ("
+                    "day TEXT NOT NULL, module_index INTEGER NOT NULL, min_cell_v REAL, "
+                    "max_cell_v REAL, max_spread_mv REAL, full_spread_mv REAL, cycles INTEGER, "
+                    "max_temp_c REAL, capacity_ah REAL, design_capacity_ah REAL, "
+                    "bms_firmware INTEGER, samples INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+                    "soc_jumps INTEGER NOT NULL DEFAULT 0, soc_stuck INTEGER NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY (day, module_index))"
+                )
+
+            result = self.run_script("--db", str(path), "--days", "3", "--interval", "3600")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with sqlite3.connect(path) as conn:
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(battery_health_daily)")]
+                count = conn.execute("SELECT COUNT(*) FROM battery_health_daily").fetchone()[0]
+            self.assertNotIn("serial", columns)
+            self.assertGreater(count, 0)
+
+    def test_each_simulated_module_has_its_own_serial(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "history.db"
+            create_history_db(path)
+
+            result = self.run_script("--db", str(path), "--days", "3", "--interval", "3600")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            serials = {row["module_index"]: row["serial"] for row in self.health_rows(path)}
+            self.assertEqual(len(serials), 2)
+            self.assertEqual(len(set(serials.values())), 2)
+            self.assertTrue(all(len(serial) == 10 for serial in serials.values()))
+
     def test_modules_zero_skips_battery_health_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "history.db"
@@ -289,7 +330,7 @@ class BackfillHistoryTests(unittest.TestCase):
         def spread(day: date, module: int) -> float:
             rows = backfill.generate_day(day, 3600, {"soc": 100.0}, tz)
             health = backfill.generate_battery_health(day, rows, 2, 3600)
-            return health[module][4]  # max_spread_mv
+            return health[module][backfill.BATTERY_HEALTH_COLUMNS.index('max_spread_mv')]
 
         early, late = date(2026, 8, 5), date(2026, 12, 5)
         self.assertGreater(spread(late, 1), spread(early, 1) + 30)
@@ -299,8 +340,8 @@ class BackfillHistoryTests(unittest.TestCase):
         day = date(2026, 10, 1)
         low = [(1_000_000 + i,) + (0,) * 10 + (60,) + (0, 0, 20.0) for i in range(3)]
         full = [(1_000_000 + i,) + (0,) * 10 + (97,) + (0, 0, 20.0) for i in range(3)]
-        self.assertIsNone(backfill.generate_battery_health(day, low, 1, 60)[0][5])
-        self.assertIsNotNone(backfill.generate_battery_health(day, full, 1, 60)[0][5])
+        self.assertIsNone(backfill.generate_battery_health(day, low, 1, 60)[0][FULL_SPREAD])
+        self.assertIsNotNone(backfill.generate_battery_health(day, full, 1, 60)[0][FULL_SPREAD])
 
     def test_health_is_deterministic_and_independent_of_the_days_range(self) -> None:
         tz = ZoneInfo("Europe/London")

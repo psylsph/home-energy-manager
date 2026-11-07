@@ -18,12 +18,12 @@ test.describe('Control Page - Quick Actions', () => {
 
   test('should show Force Charge button', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Force Charge')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Force Charge', { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Force Discharge button', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Force Discharge')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Force Discharge', { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Pause Discharge button', async ({ page }) => {
@@ -224,7 +224,7 @@ test.describe('Control Page - Battery and Power Controls', () => {
 
   test('should show Minimum SOC section', async ({ page }) => {
     await page.goto('/#/control');
-    await expect(page.locator('text=Minimum SOC')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Minimum SOC', { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
   test('should show Charge Power Limit section', async ({ page }) => {

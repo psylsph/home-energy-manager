@@ -142,6 +142,7 @@ mod tests {
         BatteryHealthRow {
             day: day.format("%Y-%m-%d").to_string(),
             module_index: module,
+            serial: String::new(),
             min_cell_v: Some(3.30),
             max_cell_v: Some(3.40),
             max_spread_mv: Some(100.0),

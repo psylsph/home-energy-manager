@@ -453,18 +453,26 @@ Two things it needs:
 
 ### I added a battery and my old battery's health history now shows under the new one
 
-The **Battery Health** panel on the Battery page records each battery by its
-position in the stack, not by its serial number (serials sometimes read back
-corrupt, which would split a battery's history in two). Adding a Gen 3 battery
-to a Gen 2 system makes the new Gen 3 the master and the Gen 2 the second
-battery, so the Gen 2's earlier history ends up under the Gen 3. Your main
-history (power, SOC, daily totals) covers the whole system and isn't affected.
-See [issue #427](https://github.com/psylsph/home-energy-manager/issues/427)
-for the background.
+Older releases recorded the **Battery Health** panel's history by each battery's
+position in the stack, not by its serial number. Adding a Gen 3 battery to a
+Gen 2 system makes the new Gen 3 the master and the Gen 2 the second battery,
+so the Gen 2's earlier history ended up under the Gen 3. Your main history
+(power, SOC, daily totals) covers the whole system and isn't affected. See
+[issue #427](https://github.com/psylsph/home-energy-manager/issues/427) for the
+background.
 
-This assumes you went from **one battery to two**. With more batteries, or if a
-battery was replaced in the same position, don't run the statements below:
-open an issue and we'll work out the right ones with you.
+Newer releases record each battery's serial alongside its days (once the serial
+has read back the same several times in a row, so one corrupt read can't split a
+battery in two) and show the history under the slot the battery sits in now. If
+you add a battery on a newer release, you don't need to do anything: the old
+battery's history, including the days before the upgrade, follows it to its new
+position.
+
+The statements below are only for a battery you added **before** upgrading,
+because HEM can't tell afterwards which battery those days belonged to. They
+assume you went from **one battery to two**. With more batteries, or if a
+battery was replaced in the same position, don't run them: open an issue and
+we'll work out the right ones with you.
 
 You can move the old rows across with the SQLite command-line tool:
 

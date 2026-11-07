@@ -34,7 +34,7 @@ export interface HealthModule {
   label: string;
 }
 
-/** Modules are told apart by slot, not serial: a corrupt serial read must not split a battery into several lines. */
+/** Modules are told apart by slot: the backend already reports each battery under the slot it sits in now (issue #427), so a corrupt serial read can never split one into several lines. */
 export function moduleKey(moduleIndex: number): string {
   return `m${moduleIndex}`;
 }

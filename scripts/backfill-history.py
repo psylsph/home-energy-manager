@@ -89,6 +89,7 @@ BATTERY_HEALTH_DDL = '''
 CREATE TABLE IF NOT EXISTS battery_health_daily (
     day                TEXT NOT NULL,
     module_index       INTEGER NOT NULL,
+    serial             TEXT NOT NULL DEFAULT '',
     min_cell_v         REAL,
     max_cell_v         REAL,
     max_spread_mv      REAL,
@@ -102,12 +103,12 @@ CREATE TABLE IF NOT EXISTS battery_health_daily (
     updated_at         INTEGER NOT NULL,
     soc_jumps          INTEGER NOT NULL DEFAULT 0,
     soc_stuck          INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, module_index)
+    PRIMARY KEY (day, module_index, serial)
 )
 '''
 
 BATTERY_HEALTH_COLUMNS = (
-    'day', 'module_index', 'min_cell_v', 'max_cell_v',
+    'day', 'module_index', 'serial', 'min_cell_v', 'max_cell_v',
     'max_spread_mv', 'full_spread_mv', 'cycles', 'max_temp_c', 'capacity_ah',
     'design_capacity_ah', 'bms_firmware', 'samples', 'updated_at',
     'soc_jumps', 'soc_stuck',
@@ -169,6 +170,11 @@ def validate_database(path):
         raise ValueError(f'invalid SQLite database: {exc}') from exc
 
 
+def health_serial(index):
+    """A stable ten-character serial per simulated module, as the BMS reports."""
+    return f'BM{index + 1:08d}'
+
+
 def generate_battery_health(date_obj, day_rows, modules, interval_secs):
     """
     Daily battery health rows (one per module) for one day of generated readings.
@@ -211,6 +217,7 @@ def generate_battery_health(date_obj, day_rows, modules, interval_secs):
         out.append((
             date_obj.strftime('%Y-%m-%d'),
             index,
+            health_serial(index),
             round(min_cell, 3),
             round(max_cell, 3),
             round(worst, 1),
@@ -566,6 +573,10 @@ def main():
     if args.modules > 0:
         cur.execute(BATTERY_HEALTH_DDL)
         existing = {row[1] for row in cur.execute("PRAGMA table_info(battery_health_daily)")}
+        # A table from before serials joined the key (issue #427) is filled in
+        # its own shape: the app rebuilds its key, and a serial column added
+        # here would make it skip that.
+        health_columns = [c for c in BATTERY_HEALTH_COLUMNS if c != 'serial' or 'serial' in existing]
         for column, definition in BATTERY_HEALTH_ADDED_COLUMNS:
             if column not in existing:
                 cur.execute(f"ALTER TABLE battery_health_daily ADD COLUMN {column} {definition}")
@@ -604,10 +615,11 @@ def main():
         health_rows = generate_battery_health(current, day_rows, args.modules, args.interval)
         if health_rows:
             health_sql = (
-                f"INSERT OR IGNORE INTO battery_health_daily ({', '.join(BATTERY_HEALTH_COLUMNS)}) "
-                f"VALUES ({','.join(['?'] * len(BATTERY_HEALTH_COLUMNS))})"
+                f"INSERT OR IGNORE INTO battery_health_daily ({', '.join(health_columns)}) "
+                f"VALUES ({','.join(['?'] * len(health_columns))})"
             )
-            cur.executemany(health_sql, health_rows)
+            keep = [i for i, c in enumerate(BATTERY_HEALTH_COLUMNS) if c in health_columns]
+            cur.executemany(health_sql, [tuple(row[i] for i in keep) for row in health_rows])
             health_inserted = cur.rowcount
             total_health_inserted += health_inserted
 
