@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.8] - 2026-11-07
+
+### Fixed
+
+- **Battery health history now follows a battery when it changes position.** Adding a second battery that takes over the master slot used to leave the first battery's history under the new one (#427). HEM now records each battery's serial with its days, so the history stays with the battery, including the days before this update. Anyone who already added a battery before updating can still use the FAQ steps to move the old days across.
+- **The test-data script writes the new battery health layout,** so a history database it fills opens cleanly after updating.
+
 ## [1.8.7] - 2026-11-07
 
 ### Added
