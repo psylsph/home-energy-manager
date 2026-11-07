@@ -1,6 +1,6 @@
 import type { InverterSnapshot } from '../lib/types';
 import { plannerModeConflict } from '../lib/plannerMode';
-import ControlPageLink from './ControlPageLink';
+import PageLink from './PageLink';
 
 /**
  * Beside Automatic Planning: names the charging mode that will overwrite the
@@ -12,7 +12,7 @@ export default function PlannerModeWarning({ snapshot }: { snapshot: InverterSna
   if (!conflict) return null;
   return (
     <p role="status" data-testid="planner-mode-warning" className="text-[11px] text-amber-300">
-      {conflict.message} Switch Charging Mode to Standard on the <ControlPageLink />.
+      {conflict.message} Switch Charging Mode to Standard on the <PageLink to="/control">Control page</PageLink>.
     </p>
   );
 }

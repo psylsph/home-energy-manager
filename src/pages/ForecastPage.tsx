@@ -80,6 +80,7 @@ import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 import { useInverterStore } from '../store/useInverterStore';
 import HelpTip from '../components/HelpTip';
 import PlannerModeWarning from '../components/PlannerModeWarning';
+import PageLink from '../components/PageLink';
 
 /** One-line summary and full explanation of each planner strategy (issue #423). */
 const STRATEGY_HELP: Record<PlanStrategy, { summary: string; detail: string }> = {
@@ -1547,6 +1548,10 @@ export default function ForecastPage() {
                 : 'The inverter repeats the applied slot every night, so re-apply tomorrow to keep it in step with the battery.'}
             </p>
           )}
+          <p data-testid="forecast-plan-tariff-pointer" className="text-[11px] text-text-secondary">
+            Charge windows come from your import tariff in{' '}
+            <PageLink to="/settings">Settings → Energy Tariffs</PageLink>.
+          </p>
           {applyState === 'sending' && <ForecastApplyProgress />}
         </section>
       )}

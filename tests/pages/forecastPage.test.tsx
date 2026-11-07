@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, act, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { useInverterStore } from '../../src/store/useInverterStore';
 
 // ---------------------------------------------------------------------------
@@ -2525,6 +2526,21 @@ describe('ForecastPage automatic planning and the charging mode (issue #437)', (
     await screen.findByTestId('forecast-auto-apply-summary');
     expect(screen.queryByTestId('planner-mode-warning')).toBeNull();
   });
+
+  it.each(['charge', 'no_charge_needed', 'no_plan'] as const)(
+    'points back to Settings → Energy Tariffs under a %s recommendation',
+    async (kind) => {
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+        if (path === '/api/forecast/plan') return planPayload(kind);
+        return { ok: true, data: {} };
+      });
+      render(<MemoryRouter><ForecastPage /></MemoryRouter>);
+      const pointer = await screen.findByTestId('forecast-plan-tariff-pointer');
+      expect(pointer.textContent).toMatch(/import tariff/);
+      expect(within(pointer).getByRole('link', { name: 'Settings → Energy Tariffs' }).getAttribute('href')).toBe('/settings');
+    },
+  );
 
   it('stays quiet when automatic planning is off, even in Cosy mode', async () => {
     mockSettings(false);

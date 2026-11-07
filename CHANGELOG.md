@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.6] - 2026-11-07
+
+### Added
+
+- **The Planner page now points to where its cheap windows are set.** A line under the recommendation links to Settings → Energy Tariffs, so you can see that the Planner reads your import tariff windows from there.
+
 ## [1.8.5] - 2026-11-06
 
 ### Added

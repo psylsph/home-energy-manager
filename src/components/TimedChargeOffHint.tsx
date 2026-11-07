@@ -1,6 +1,6 @@
 import { useInverterStore } from '../store/useInverterStore';
 import { plannerTimedChargeOff } from '../lib/plannerMode';
-import ControlPageLink from './ControlPageLink';
+import PageLink from './PageLink';
 
 /**
  * Status page hint (issue #448): Automatic Planning left a charge slot set,
@@ -19,7 +19,7 @@ export default function TimedChargeOffHint() {
       className="rounded-lg border border-amber-500/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-100"
     >
       Timed Charge is off, so the planned charge won&apos;t run. Turn it on from the{' '}
-      <ControlPageLink />.
+      <PageLink to="/control">Control page</PageLink>.
     </section>
   );
 }
