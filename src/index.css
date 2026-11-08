@@ -31,20 +31,21 @@
   --app-grid: #EF4444;
   --app-home: #14B8A6;
   --app-export: #22C55E;
-  /* Balance-bar fills and in-fill text (issue #429): the fills are the flow
-     colours; black clears 4.7:1 on every one. */
-  --app-fill-solar: var(--app-solar);
-  --app-fill-grid: var(--app-grid);
-  --app-fill-battery: var(--app-battery);
-  --app-fill-home: var(--app-home);
-  --app-fill-export: var(--app-export);
-  --app-fill-car: #C084FC;
-  --app-on-solar: #000000;
-  --app-on-grid: #000000;
-  --app-on-battery: #000000;
-  --app-on-home: #000000;
-  --app-on-export: #000000;
-  --app-on-car: #000000;
+  /* Balance-bar fills and in-fill text (issue #429): the primary text colour
+     on every fill, so amber, red, teal and green go a shade darker than their
+     flow colours to keep it above 4.5:1. */
+  --app-fill-solar: #B45309;
+  --app-fill-grid: #B91C1C;
+  --app-fill-battery: #4F46E5;
+  --app-fill-home: #0F766E;
+  --app-fill-export: #15803D;
+  --app-fill-car: #7E22CE;
+  --app-on-solar: var(--app-text-primary);
+  --app-on-grid: var(--app-text-primary);
+  --app-on-battery: var(--app-text-primary);
+  --app-on-home: var(--app-text-primary);
+  --app-on-export: var(--app-text-primary);
+  --app-on-car: var(--app-text-primary);
   --app-flow-active: #22D3EE;
   --app-accent: #22D3EE;
   --app-accent-active: #67E8F9;

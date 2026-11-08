@@ -51,6 +51,23 @@ describe('balance-bar colours', () => {
     }
   });
 
+  it('uses the primary text colour on every fill in the dark theme', () => {
+    const block = themeBlock(THEMES[0].selector);
+    const primary = cssHex(block, '--app-text-primary').toUpperCase();
+    for (const seg of [...SEGMENTS, 'car']) {
+      expect(cssHex(block, `--app-on-${seg}`).toUpperCase(), seg).toBe(primary);
+    }
+  });
+
+  it('keeps the car fill readable in both themes', () => {
+    for (const { selector } of THEMES) {
+      const block = themeBlock(selector);
+      expect(
+        contrast(cssHex(block, '--app-fill-car'), cssHex(block, '--app-on-car')),
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   it('puts white text on every fill in the light theme', () => {
     const block = themeBlock('\\[data-theme="light"\\]');
     for (const seg of SEGMENTS) {
