@@ -20,13 +20,11 @@
   "rows": [
     {
       "code": "2001", "arm_fw": 186, "hem": "Gen1Hybrid", "sim": "Gen1Hybrid", "givtcp_model": "HYBRID_GEN1",
-      "givtcp": { "pause": "none", "three_phase": false },
-      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on every single-phase hybrid" } }
+      "givtcp": { "pause": "none", "three_phase": false }
     },
     {
       "code": "2001", "arm_fw": 252, "hem": "Gen1Hybrid", "sim": "Gen1Hybrid", "givtcp_model": "HYBRID_GEN1",
-      "givtcp": { "pause": "mode", "three_phase": false },
-      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the window on the Gen1 too" } }
+      "givtcp": { "pause": "mode", "three_phase": false }
     },
     {
       "code": "2001", "arm_fw": 852, "hem": "Gen2Hybrid", "sim": "Gen2Hybrid", "givtcp_model": "HYBRID_GEN2",
@@ -58,13 +56,11 @@
     },
     {
       "code": "4001", "arm_fw": 612, "hem": "ThreePhase", "sim": "ThreePhase", "givtcp_model": "HYBRID_3PH",
-      "givtcp": { "pause": "none", "three_phase": true },
-      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on the three-phase hybrid" } }
+      "givtcp": { "pause": "none", "three_phase": true }
     },
     {
       "code": "5001", "arm_fw": 612, "hem": "Ems", "sim": "EMS", "givtcp_model": "EMS",
-      "givtcp": { "pause": "none", "three_phase": false },
-      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on the EMS" } }
+      "givtcp": { "pause": "none", "three_phase": false }
     },
     {
       "code": "6001", "arm_fw": 612, "hem": "ACThreePhase", "sim": "ACCoupledThreePhase6kW", "givtcp_model": "AC_3PH",
@@ -102,8 +98,7 @@
     },
     {
       "code": "8304", "arm_fw": 612, "hem": "Gen4Hybrid", "sim": "Gen4Hybrid6kW", "givtcp_model": "HYBRID_GEN4",
-      "givtcp": { "pause": "none", "three_phase": false },
-      "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the pause on the Gen4" } }
+      "givtcp": { "pause": "none", "three_phase": false }
     }
   ]
 }

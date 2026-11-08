@@ -1474,6 +1474,11 @@ pub struct InverterSnapshot {
     /// Snapshot timestamp at which HR318-320 were read together.
     #[serde(default)]
     pub battery_pause_registers_observed_at: Option<i64>,
+    /// The out-of-band HR 318 read has failed repeatedly and the poll loop
+    /// has backed off (issue #433, the Gen1's old 4xx firmware): the pause
+    /// can't be read back, so the charge cap can't start.
+    #[serde(default)]
+    pub battery_pause_read_failing: bool,
     /// Exact raw HR242 (charge slot 1's own target SOC) from the latest read
     /// of the HR240-299 block, kept whether or not slot 1 is enabled. On
     /// 10-slot inverters the firmware stops charging at the lower of the
@@ -1687,6 +1692,7 @@ impl InverterSnapshot {
             battery_pause_slot_start_raw: None,
             battery_pause_slot_end_raw: None,
             battery_pause_registers_observed_at: None,
+            battery_pause_read_failing: false,
             raw_charge_slot_1_target_soc: None,
             enable_ammeter: false,
             enable_reversed_ct_clamp: false,

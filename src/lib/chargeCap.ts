@@ -15,7 +15,8 @@ export type ChargeCapStateName =
   | 'holding'
   | 'releasing'
   | 'yielding'
-  | 'blocked';
+  | 'blocked'
+  | 'unreadable';
 
 /** `GET`/`POST /api/charge-cap`. */
 export interface ChargeCapStatus {
@@ -62,7 +63,21 @@ export function chargeCapError(cap: number | null, resume: number | null, limits
 }
 
 /** What the cap is doing now, as a sentence for the Control page. */
-export function describeChargeCapState(state: ChargeCapStateName, cap: number, resume: number): string {
+export function describeChargeCapState(
+  state: ChargeCapStateName,
+  cap: number,
+  resume: number,
+  pauseUnreadable = false,
+): string {
+  const text = describeState(state, cap, resume);
+  // A pause the cap started stays on until a read lets it release it.
+  if (pauseUnreadable && (state === 'holding' || state === 'releasing')) {
+    return `${text} HEM can't read the pause, so it can't let go yet.`;
+  }
+  return text;
+}
+
+function describeState(state: ChargeCapStateName, cap: number, resume: number): string {
   switch (state) {
     case 'off':
       return 'Off.';
@@ -80,6 +95,8 @@ export function describeChargeCapState(state: ChargeCapStateName, cap: number, r
       return 'A charge slot or calibration is charging the battery; the cap waits until it ends.';
     case 'blocked':
       return 'Another pause is set on the inverter; the cap waits until it ends.';
+    case 'unreadable':
+      return "HEM can't read this inverter's pause setting right now, so the cap can't start.";
   }
 }
 

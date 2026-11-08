@@ -3926,6 +3926,11 @@ export default function ControlPage() {
         {batteryModeError && (
           <p className="text-red-400 text-xs" role="alert">{batteryModeError}</p>
         )}
+        {supportsTimedDischarge && snapshot?.battery_pause_read_failing && (
+          <p className="text-warning text-xs" role="status">
+            HEM can&apos;t read the pause right now, so Timed Discharge may be out of date.
+          </p>
+        )}
         {!timedExportEnabled && !hasConfiguredTimedExportSlot && (
           <p className="text-text-secondary text-xs" role="status">
             Configure at least one discharge slot before enabling Timed Export.
@@ -4115,6 +4120,11 @@ export default function ControlPage() {
           <p className="text-text-secondary/60 text-xs">
             Saving an enabled slot also enables Timed Discharge. Please allow up to 10 seconds for changes to save.
           </p>
+          {snapshot?.battery_pause_read_failing && (
+            <p className="text-warning text-xs" data-testid="timed-discharge-unreadable">
+              HEM can&apos;t read the pause right now, so this may be out of date.
+            </p>
+          )}
           <ScheduleSlotEditor
             slotIndex={0}
             slot={timedDischargeSlot}

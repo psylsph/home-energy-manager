@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.1] - 2026-11-08
+
+### Changed
+
+- **The Charge Cap says when it can't see the inverter's pause.** On a Gen 1 with older firmware that can't report its pause setting, the cap used to read "Charging normally" and never start. It now says HEM can't read the pause, and a cap that is already holding says it can't let go yet.
+- **Timed Discharge warns when its state may be out of date.** If HEM can't read the inverter's pause for a few minutes, the Timed Discharge section and its Battery Mode button now say what you see may be out of date, instead of showing the last known state as fact.
+
 ## [1.10.0] - 2026-11-08
 
 ### Added

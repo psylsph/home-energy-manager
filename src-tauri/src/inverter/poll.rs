@@ -1029,6 +1029,12 @@ impl PauseProbe {
         *self = Self::default();
     }
 
+    /// Whether reads have failed enough in a row that the probe has backed
+    /// off: the pause can't be read back, until a retry succeeds.
+    pub(crate) fn backed_off(&self) -> bool {
+        self.failures >= PAUSE_PROBE_MAX_FAILURES
+    }
+
     /// Records a failed read; true when this one started the back-off.
     pub(crate) fn failed(&mut self) -> bool {
         self.failures = self.failures.saturating_add(1);
@@ -4032,6 +4038,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             carry_forward_pause_display(&mut snapshot, p);
                                         }
                                     }
+                                    snapshot.battery_pause_read_failing =
+                                        pause_probe.backed_off();
                                 }
 
                                 // Check all 60-register blocks against the known dongle
@@ -10334,6 +10342,29 @@ mod tests {
     }
 
     #[test]
+    fn pause_probe_reports_only_a_back_off_as_unreadable() {
+        let mut probe = PauseProbe::default();
+        assert!(!probe.backed_off());
+        for _ in 0..PAUSE_PROBE_MAX_FAILURES - 1 {
+            probe.due();
+            probe.failed();
+            assert!(!probe.backed_off(), "a couple of failures is a busy dongle");
+        }
+        probe.due();
+        probe.failed();
+        assert!(probe.backed_off());
+        // Stays so through the back-off and a retry that fails again.
+        for _ in 0..PAUSE_PROBE_BACKOFF_CYCLES {
+            probe.due();
+            assert!(probe.backed_off());
+        }
+        assert!(probe.due());
+        assert!(probe.backed_off(), "the retry hasn't succeeded yet");
+        probe.succeeded();
+        assert!(!probe.backed_off());
+    }
+
+    #[test]
     fn pause_probe_failures_must_be_consecutive() {
         let mut probe = PauseProbe::default();
         for _ in 0..10 {
@@ -13661,6 +13692,17 @@ mod tests {
     /// script the test can change while the session is running, and it keeps
     /// accepting connections so a forced reconnect does not hang the test.
     async fn run_scripted_register_mock(listener: tokio::net::TcpListener, script: RegisterScript) {
+        run_refusing_register_mock(listener, script, Arc::new(|_| false)).await;
+    }
+
+    /// [`run_scripted_register_mock`] that answers the reads `refuse` picks
+    /// with a Modbus exception (illegal data address) instead of data, as an
+    /// old dongle does for a register it doesn't serve.
+    async fn run_refusing_register_mock(
+        listener: tokio::net::TcpListener,
+        script: RegisterScript,
+        refuse: Arc<dyn Fn(&ReadRequest) -> bool + Send + Sync>,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         loop {
@@ -13687,11 +13729,26 @@ mod tests {
                 }
                 let base = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
                 let count = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]) as usize;
-                let mut data = script(&ReadRequest {
+                let request = ReadRequest {
                     function: decoded.function,
                     base,
                     count,
-                });
+                };
+                if refuse(&request) {
+                    let mut payload = b"TEST123456".to_vec();
+                    payload.push(2); // illegal data address
+                    let response = crate::modbus::framer::encode_frame(
+                        "TEST123456",
+                        decoded.slave,
+                        decoded.function | 0x80,
+                        &payload,
+                    );
+                    if stream.write_all(&response).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                let mut data = script(&request);
                 data.resize(count, 0);
 
                 let mut payload = Vec::with_capacity(14 + count * 2);
@@ -13933,6 +13990,112 @@ mod tests {
             assert_eq!(count_logs(&ring, "HR(0)/ARM firmware decoded"), 0);
             assert_eq!(count_logs(&ring, "Device model identified"), 0);
             assert!(count_logs(&ring, "0x4101") >= 1);
+        })
+        .await;
+    }
+
+    /// Issue #433: a Gen1 on the old 4xx firmware refuses the HR 318 read.
+    /// The probe backs off after three failures in a row, the snapshot says
+    /// so, and the charge cap (switched on, SOC well below its cap) reports
+    /// `unreadable` instead of `waiting` and writes nothing. Before that the
+    /// flag is off: a couple of failures is only a busy dongle.
+    #[tokio::test]
+    async fn poll_loop_flags_a_gen1_pause_that_cannot_be_read_back() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            // A serial matters: the cap won't record a hold, let alone start
+            // one, for an inverter it can't name.
+            let script: RegisterScript = Arc::new(|req: &ReadRequest| {
+                let mut data = healthy_registers(req, 0x2001, 252);
+                if req.function == 3 && req.base == 0 && data.len() > 17 {
+                    for (i, pair) in b"CE12345678".chunks(2).enumerate() {
+                        data[13 + i] = u16::from_be_bytes([pair[0], pair[1]]);
+                    }
+                }
+                data
+            });
+            let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let pause_writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let refuse: Arc<dyn Fn(&ReadRequest) -> bool + Send + Sync> = {
+                let refused = refused.clone();
+                let pause_writes = pause_writes.clone();
+                Arc::new(move |req| {
+                    // Any write to the pause registers (FC6 to HR 318-320)
+                    // is the cap starting; the poll loop drains its write
+                    // queue every cycle, so the mock is what sees it.
+                    if req.function == 6 && (318..=320).contains(&req.base) {
+                        pause_writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    let pause = req.function == 3 && req.base == 318;
+                    if pause {
+                        refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    pause
+                })
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_refusing_register_mock(listener, script, refuse));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            state.charge_cap.lock().await.config = crate::inverter::charge_cap::ChargeCapConfig {
+                enabled: true,
+                // At the mock's 50% SOC: with a readable pause the cap
+                // would engage after two readings.
+                cap_soc: 50,
+                resume_soc: 40,
+            };
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let snaps = tokio::time::timeout(Duration::from_secs(120), async {
+                let mut seen = Vec::new();
+                let mut after_backoff = 0;
+                while let Ok(message) = rx.recv().await {
+                    if let PollMessage::Snapshot(snapshot) = message {
+                        let failing = snapshot.battery_pause_read_failing;
+                        seen.push(*snapshot);
+                        if failing {
+                            after_backoff += 1;
+                        }
+                        // Watch a few polls past the back-off: a cap that
+                        // starts blind would write by then.
+                        if after_backoff >= 4 {
+                            break;
+                        }
+                    }
+                }
+                seen
+            })
+            .await
+            .expect("the pause probe never backed off");
+            poll_task.abort();
+            server.abort();
+
+            let last = snaps.last().unwrap();
+            let first_failing = snaps
+                .iter()
+                .position(|s| s.battery_pause_read_failing)
+                .expect("a snapshot flagged the failing pause");
+            assert!(last.battery_pause_read_failing);
+            assert_eq!(last.device_type, DeviceType::Gen1Hybrid);
+            assert_eq!(last.battery_pause_registers_observed_at, None);
+            assert_eq!(last.charge_cap_state, "unreadable");
+            assert!(
+                snaps[first_failing..]
+                    .iter()
+                    .all(|s| s.battery_pause_read_failing),
+                "once the probe has backed off the flag stays on through the back-off"
+            );
+            assert!(
+                refused.load(std::sync::atomic::Ordering::SeqCst)
+                    >= PAUSE_PROBE_MAX_FAILURES as usize,
+                "not before {PAUSE_PROBE_MAX_FAILURES} failed reads"
+            );
+            assert_eq!(
+                pause_writes.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the cap never starts blind"
+            );
         })
         .await;
     }

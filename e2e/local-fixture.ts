@@ -9,6 +9,7 @@
 import { test as base, expect } from '@playwright/test';
 
 const HTTP_PORT = 17337;
+export const BASE_URL = `http://127.0.0.1:${HTTP_PORT}`;
 
 export interface LocalFixtures {
   /** Base URL of the HTTP server. */
@@ -17,7 +18,7 @@ export interface LocalFixtures {
 
 export const test = base.extend<LocalFixtures>({
   baseUrl: async ({}, use) => {
-    await use(`http://127.0.0.1:${HTTP_PORT}`);
+    await use(BASE_URL);
   },
 });
 

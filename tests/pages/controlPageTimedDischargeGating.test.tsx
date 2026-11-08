@@ -254,6 +254,86 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     expect(ecoButton!.className).not.toContain('battery');
   });
 
+  describe('a pause that cannot be read back (issue #433)', () => {
+    const NOTE = "HEM can't read the pause right now, so this may be out of date.";
+
+    it('says the Timed Discharge slot may be out of date while the pause read is failing', async () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', battery_pause_read_failing: true }),
+        developerMode: false,
+        connectionState: 'connected',
+      });
+      render(<ControlPage />);
+
+      const heading = await screen.findByRole('heading', { name: 'Timed Discharge' });
+      const section = heading.closest('section')!;
+      expect(within(section).getByText(NOTE)).toBeDefined();
+    });
+
+    it('stays quiet while the pause reads fine', async () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', battery_pause_read_failing: false }),
+        developerMode: false,
+        connectionState: 'connected',
+      });
+      render(<ControlPage />);
+
+      await screen.findByRole('heading', { name: 'Timed Discharge' });
+      expect(screen.queryByText(NOTE)).toBeNull();
+    });
+
+    it('stays quiet when the snapshot has no flag', async () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001' }),
+        developerMode: false,
+        connectionState: 'connected',
+      });
+      render(<ControlPage />);
+
+      await screen.findByRole('heading', { name: 'Timed Discharge' });
+      expect(screen.queryByText(NOTE)).toBeNull();
+    });
+
+    it('also flags the Timed Discharge button in Battery Mode, which shows the same last-known pause', async () => {
+      const BUTTON_NOTE = "HEM can't read the pause right now, so Timed Discharge may be out of date.";
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', battery_pause_read_failing: true }),
+        developerMode: false,
+        connectionState: 'connected',
+      });
+      render(<ControlPage />);
+
+      const section = await batteryModeSection();
+      expect(within(section).getByText(BUTTON_NOTE)).toBeDefined();
+
+      cleanup();
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ device_type_code: '2001', battery_pause_read_failing: false }),
+      });
+      render(<ControlPage />);
+      const readable = await batteryModeSection();
+      expect(within(readable).queryByText(BUTTON_NOTE)).toBeNull();
+    });
+
+    it('shows nothing extra where there is no Timed Discharge (the Gen1 takes the mode alone)', async () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          device_type_code: '2001',
+          firmware_version: '252',
+          battery_pause_read_failing: true,
+        }),
+        developerMode: false,
+        connectionState: 'connected',
+      });
+      render(<ControlPage />);
+
+      await batteryModeSection();
+      expect(screen.queryByRole('heading', { name: 'Timed Discharge' })).toBeNull();
+      expect(screen.queryByText(NOTE)).toBeNull();
+      expect(screen.queryByText(/so Timed Discharge may be out of date/)).toBeNull();
+    });
+  });
+
   describe('shown on devices with the pause registers', () => {
     it.each([
       ['8001', 'AIO 6kW'],

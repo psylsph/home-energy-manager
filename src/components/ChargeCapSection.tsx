@@ -129,7 +129,7 @@ export default function ChargeCapSection() {
         </div>
 
         <p className="text-text-secondary text-xs" data-testid="charge-cap-state">
-          {describeChargeCapState(liveState, status.cap_soc, status.resume_soc)}
+          {describeChargeCapState(liveState, status.cap_soc, status.resume_soc, snapshot?.battery_pause_read_failing === true)}
         </p>
 
         {enabled && (

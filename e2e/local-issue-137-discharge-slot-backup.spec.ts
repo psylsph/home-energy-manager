@@ -49,7 +49,7 @@
  * bug ("/api/snapshot reports… discharge_slots: [all 10 slots …]").
  */
 
-import { test, expect } from './local-fixture.js';
+import { test, expect, BASE_URL } from './local-fixture.js';
 
 /**
  * GET /api/settings — returns the persisted Settings struct including the
@@ -104,6 +104,19 @@ test.describe('Issue #137 — discharge slot backup & restore', () => {
   // pacing, so the round-trip POSTs legitimately hold well past the default
   // 30 s test timeout.
   test.describe.configure({ timeout: 180_000 });
+
+  // The simulator and backend are shared with every other local spec, and
+  // the one before this (the Control page's) leaves a discharge slot and
+  // Timed Export armed. The backend's arbiter then fights this spec's mode
+  // switches and pause, each POST stalls for minutes and the two that
+  // wait on a confirmation time out. Start from the harness's clean slate
+  // (harness-only endpoint, armed by --e2e-admin in the local global
+  // setup), once: the tests below read what the earlier ones captured.
+  test.beforeAll(async () => {
+    const resp = await fetch(`${BASE_URL}/api/test/reset`, { method: 'POST' });
+    if (!resp.ok) throw new Error(`test reset failed: ${resp.status}`);
+  });
+
   test('eco response carries captured backup so frontend can stage pending edits', async ({
     baseUrl,
   }) => {

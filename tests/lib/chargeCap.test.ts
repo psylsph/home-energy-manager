@@ -39,7 +39,7 @@ describe('chargeCapError', () => {
 describe('describeChargeCapState', () => {
   it('has a sentence for every state', () => {
     const states: ChargeCapStateName[] = [
-      'off', 'unsupported', 'waiting', 'pending', 'holding', 'releasing', 'yielding', 'blocked',
+      'off', 'unsupported', 'waiting', 'pending', 'holding', 'releasing', 'yielding', 'blocked', 'unreadable',
     ];
     for (const state of states) {
       const text = describeChargeCapState(state, 95, 92);
@@ -48,6 +48,24 @@ describe('describeChargeCapState', () => {
     }
     expect(describeChargeCapState('holding', 95, 92)).toBe('Charging paused at 95%. Charges again at 92%.');
     expect(describeChargeCapState('waiting', 90, 85)).toMatch(/reaches 90%/);
+    expect(describeChargeCapState('unreadable', 95, 92)).toMatch(/can't read this inverter's pause/);
+  });
+});
+
+describe('describeChargeCapState with an unreadable pause', () => {
+  it('adds that the cap cannot let go while it is holding or releasing', () => {
+    for (const state of ['holding', 'releasing'] as const) {
+      const plain = describeChargeCapState(state, 95, 92);
+      const text = describeChargeCapState(state, 95, 92, true);
+      expect(text.startsWith(plain), state).toBe(true);
+      expect(text, state).toMatch(/can't read the pause, so it can't let go yet/);
+    }
+  });
+
+  it('leaves every other state alone', () => {
+    for (const state of ['off', 'unsupported', 'waiting', 'pending', 'yielding', 'blocked', 'unreadable'] as const) {
+      expect(describeChargeCapState(state, 95, 92, true), state).toBe(describeChargeCapState(state, 95, 92));
+    }
   });
 });
 

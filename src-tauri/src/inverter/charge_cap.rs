@@ -13,7 +13,8 @@
 //! The Gen1 and AC take the mode alone, so the cap pauses and releases them
 //! with HR 318 only. Everything else, the Gateway included, hides the option.
 //! The cap only starts from a fresh read of HR 318, so a Gen1 that can't be
-//! read back (the old 4xx firmware) offers it but never holds charging.
+//! read back (the old 4xx firmware) offers it but never holds charging, and
+//! shows `Unreadable` so the Control page says why.
 //!
 //! HR 318 is shared with the user's own pause, Timed Discharge, Force
 //! Discharge's restore and the calibration cycle, several of which save it and
@@ -156,6 +157,9 @@ pub enum ChargeCapState {
     /// Another pause (the user's own, Timed Discharge, or a remote command)
     /// owns the register; the cap won't overwrite it.
     Blocked,
+    /// The inverter's pause can't be read back (the Gen1's old 4xx
+    /// firmware), and the cap only starts from a fresh read, so it never will.
+    Unreadable,
 }
 
 impl ChargeCapState {
@@ -169,6 +173,7 @@ impl ChargeCapState {
             Self::Releasing => "releasing",
             Self::Yielding => "yielding",
             Self::Blocked => "blocked",
+            Self::Unreadable => "unreadable",
         }
     }
 }
@@ -461,6 +466,13 @@ pub fn evaluate(
     // Only a fresh read taken after the last write says anything about the
     // register; anything else leaves the state as it was.
     let Some(mode) = fresh_pause_mode(snapshot) else {
+        // With no cap pause to release, say why nothing will start rather
+        // than sit at "charging normally". A record keeps its state: the
+        // pause may still be on, and a read will settle it.
+        if hold.is_none() && supported && config.enabled && snapshot.battery_pause_read_failing {
+            runtime.state = ChargeCapState::Unreadable;
+            runtime.readings_at_cap = 0;
+        }
         return Vec::new();
     };
     if snapshot.soc > 100 || runtime.last_write_at == Some(snapshot.timestamp) {
@@ -831,6 +843,170 @@ mod tests {
         );
         assert_eq!(writes, hold_writes());
         (runtime, hold)
+    }
+
+    // -- Pause that can't be read back (issue #433) ---------------------
+
+    /// A Gen1 whose HR 318 read keeps failing (the old 4xx firmware): no
+    /// fresh pause read, and the poll loop has stopped retrying every poll.
+    fn unreadable_gen1(soc: u8) -> InverterSnapshot {
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen1Hybrid,
+            device_type_code: "2001".into(),
+            inverter_serial: "CE9999".into(),
+            firmware_version: "252".into(),
+            soc,
+            timestamp: TS,
+            ..Default::default()
+        };
+        snap.battery_pause_read_failing = true;
+        snap
+    }
+
+    #[test]
+    fn an_unreadable_pause_says_so_instead_of_waiting() {
+        let mut runtime = ChargeCapRuntime::default();
+        let mut hold = None;
+        let writes = run(
+            &unreadable_gen1(99),
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert!(writes.is_empty(), "the cap never starts blind");
+        assert!(hold.is_none());
+        assert_eq!(runtime.state, ChargeCapState::Unreadable);
+        assert_eq!(runtime.state.api_name(), "unreadable");
+    }
+
+    #[test]
+    fn a_cap_that_is_off_never_says_it_cant_read_the_pause() {
+        let mut runtime = ChargeCapRuntime::default();
+        let mut hold = None;
+        let off = ChargeCapConfig {
+            enabled: false,
+            ..enabled()
+        };
+        run(
+            &unreadable_gen1(99),
+            &off,
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert_eq!(runtime.state, ChargeCapState::Off);
+
+        // Switched on, then off again before the next poll: shown off.
+        let shared = ChargeCapShared {
+            config: off,
+            runtime: ChargeCapRuntime {
+                state: ChargeCapState::Unreadable,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            shown_state(&shared, true),
+            ChargeCapState::Off,
+            "a cap that is off never says it can't read the pause"
+        );
+    }
+
+    #[test]
+    fn a_pause_that_reads_again_lets_the_cap_start() {
+        let mut runtime = ChargeCapRuntime::default();
+        let mut hold = None;
+        run(
+            &unreadable_gen1(90),
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert_eq!(runtime.state, ChargeCapState::Unreadable);
+
+        let mut readable = unreadable_gen1(90);
+        readable.battery_pause_read_failing = false;
+        readable.battery_pause_mode_raw = Some(PAUSE_NONE);
+        readable.battery_pause_registers_observed_at = Some(TS);
+        run(
+            &readable,
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert_eq!(runtime.state, ChargeCapState::Waiting);
+    }
+
+    #[test]
+    fn an_unreadable_pause_does_not_hide_a_hold_that_is_still_on() {
+        // The record says the cap's pause may be on the inverter, so the
+        // state stays as it was until a read can release it.
+        let mut runtime = ChargeCapRuntime {
+            state: ChargeCapState::Holding,
+            ..Default::default()
+        };
+        let mut hold = Some(ChargeCapHold {
+            inverter_serial: "CE9999".into(),
+            device_type_code: "2001".into(),
+            prior_slot_start: 0,
+            prior_slot_end: 0,
+            mode_only: true,
+        });
+        let writes = run(
+            &unreadable_gen1(96),
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert!(writes.is_empty());
+        assert!(hold.is_some());
+        assert_eq!(runtime.state, ChargeCapState::Holding);
+    }
+
+    #[test]
+    fn unreadable_stays_until_a_read_arrives_or_the_cap_is_off() {
+        // A reconnect restarts the poll loop's failure count, so the flag
+        // drops while the pause is still unread. The cap keeps saying it
+        // can't read until a read lands, rather than flipping to "waiting"
+        // on a register it has never seen.
+        let mut runtime = ChargeCapRuntime::default();
+        let mut hold = None;
+        run(
+            &unreadable_gen1(90),
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        let mut reconnected = unreadable_gen1(90);
+        reconnected.battery_pause_read_failing = false;
+        let writes = run(
+            &reconnected,
+            &enabled(),
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert!(writes.is_empty());
+        assert_eq!(runtime.state, ChargeCapState::Unreadable);
+
+        // Switching the cap off clears it at once.
+        let off = ChargeCapConfig {
+            enabled: false,
+            ..enabled()
+        };
+        run(
+            &reconnected,
+            &off,
+            Default::default(),
+            &mut runtime,
+            &mut hold,
+        );
+        assert_eq!(runtime.state, ChargeCapState::Off);
     }
 
     // -- Support --------------------------------------------------------

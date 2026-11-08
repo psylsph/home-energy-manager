@@ -165,6 +165,8 @@ export interface InverterSnapshot {
   battery_pause_mode?: number;
   /** Battery pause slot HR319/320. For Timed Discharge, HEM displays the inverse as the demand window. */
   battery_pause_slot?: ScheduleSlot;
+  /** The pause registers keep failing to read (the poll loop backed off), so the pause values shown are the last good ones. */
+  battery_pause_read_failing?: boolean;
 
   // -- Gateway-specific (absent on every other device; optional for backward compat) --
   parallel_aio_count?: number;

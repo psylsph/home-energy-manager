@@ -109,6 +109,26 @@ describe('ChargeCapSection', () => {
     );
   });
 
+  it('says so when the inverter\'s pause can\'t be read back', async () => {
+    apiGet.mockResolvedValue(status({ enabled: true, state: 'waiting' }));
+    useInverterStore.setState({ snapshot: makeSnapshot({ charge_cap_state: 'unreadable' }) });
+    render(<ChargeCapSection />);
+    expect((await screen.findByTestId('charge-cap-state')).textContent).toBe(
+      "HEM can't read this inverter's pause setting right now, so the cap can't start.",
+    );
+  });
+
+  it('says a holding cap cannot let go while the pause is unreadable', async () => {
+    apiGet.mockResolvedValue(status({ enabled: true, state: 'holding' }));
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ charge_cap_state: 'holding', battery_pause_read_failing: true }),
+    });
+    render(<ChargeCapSection />);
+    expect((await screen.findByTestId('charge-cap-state')).textContent).toBe(
+      "Charging paused at 95%. Charges again at 92%. HEM can't read the pause, so it can't let go yet.",
+    );
+  });
+
   it('blocks a save with levels the backend would refuse', async () => {
     apiGet.mockResolvedValue(status({ enabled: true, state: 'waiting' }));
     render(<ChargeCapSection />);
