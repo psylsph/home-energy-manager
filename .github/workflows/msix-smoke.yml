@@ -41,8 +41,16 @@ jobs:
           # prebuilt binary and compiles from source instead.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/94dc7fe43d6ed7bfa6a6ea24f60f85e3f41dd104/install-from-binstall-release.sh | bash
-          cargo binstall --force --locked --no-confirm tauri-cli@2.11.2
+          # Retry to absorb transient GitHub-release download blips,
+          # including the binstall bootstrap download itself.
+          for attempt in 1 2 3; do
+            if curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/94dc7fe43d6ed7bfa6a6ea24f60f85e3f41dd104/install-from-binstall-release.sh | bash \
+              && cargo binstall --force --locked --no-confirm tauri-cli@2.11.2; then exit 0; fi
+            echo "tauri-cli install failed on attempt $attempt; retrying in 15s..."
+            sleep 15
+          done
+          echo "::error::Failed to install tauri-cli after 3 attempts"
+          exit 1
 
       - name: Build Tauri executable
         run: cargo tauri build --target x86_64-pc-windows-msvc --no-bundle
