@@ -111,11 +111,11 @@ async fn latest_device_type(state: &Arc<AppState>) -> DeviceType {
 /// ARM firmware version (HR 21) from the latest snapshot, parsed to a u16.
 ///
 /// Used where a capability decision depends on firmware — notably
-/// `DeviceType::supports_timed_discharge`, which enables the Gen3 Hybrid
-/// pause-register probe only at ARM fw >= 312. Returns 0 when no snapshot is
-/// available or the firmware string is empty/unparseable, which safely
-/// evaluates as "below threshold" so the feature stays hidden until a real
-/// reading arrives.
+/// `DeviceType::pause_register_support`, whose Gen1 (ARM 187) and AC-coupled
+/// (ARM 200) floors come from GivTCP. Returns 0 when no snapshot is available
+/// or the firmware string is empty/unparseable, which safely evaluates as
+/// "below threshold" so the feature stays hidden until a real reading
+/// arrives.
 async fn latest_arm_fw(state: &Arc<AppState>) -> u16 {
     state
         .latest_snapshot
@@ -4218,10 +4218,11 @@ pub async fn set_timed_discharge(
     //  - AC-three-phase / residential All-in-One models expose confirmed
     //    writable HR319/320 Timed Discharge slots. AC-coupled models expose
     //    the AC-config block but field logs show those slot writes fail.
-    //  - Gen3 Hybrid (ARM fw >= 312), the HV Gen3 (0x81xx) and the AIO Hybrid
+    //  - The Gen2, Gen3 Hybrid, the HV Gen3 (0x81xx) and the AIO Hybrid
     //    (0x82xx) reach them via a targeted 3-register probe — the full
-    //    HR 300-359 block times out on the Gen3 (#162) and neither HV
-    //    single-phase model serves it at all (#432).
+    //    HR 300-359 block times out on the Gen3 (#162) and the others don't
+    //    serve it at all (#432, #433). The Gen1 and AC-coupled take the
+    //    mode alone, so they get no Timed Discharge.
     // On every other family the registers are absent: the write times out or
     // is silently dropped and `battery_pause_mode` stays 0 forever, so the
     // toggle could never reflect an enabled state. Refuse up front with a
@@ -10162,8 +10163,8 @@ pub(crate) mod tests {
     }
 
     /// Like [`make_state_with_device`] but also sets the ARM firmware version
-    /// string, so firmware-gated capability checks (e.g. Gen3 Hybrid's
-    /// ARM fw >= 312 threshold for Timed Discharge) can be exercised.
+    /// string, so firmware-gated capability checks (e.g. the Gen1's ARM 187
+    /// and the AC-coupled models' ARM 200 pause floors) can be exercised.
     async fn make_state_with_device_and_fw(device_type: DeviceType, arm_fw: u16) -> Arc<AppState> {
         let state = Arc::new(AppState::new());
         let snapshot = crate::inverter::model::InverterSnapshot {
@@ -14557,22 +14558,6 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn timed_discharge_refused_on_gen3_hybrid_after_ac_config_block_removal() {
-        with_isolated_config_dir_async(|| async {
-            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
-            let body = serde_json::json!({ "enabled": true });
-            let (status, _res) = set_timed_discharge(State(state.clone()), Json(body)).await;
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "Gen3 Hybrid must refuse now that it no longer polls HR 300-359"
-            );
-            assert!(drain_pending_writes(&state).await.is_empty());
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn timed_discharge_refused_on_ac_coupled_three_phase_gateway_ems_and_pv() {
         with_isolated_config_dir_async(|| async {
             for dt in [
@@ -14615,6 +14600,9 @@ pub(crate) mod tests {
                 DeviceType::AllInOne5kW,
                 DeviceType::HybridHvGen3,
                 DeviceType::AllInOneHybrid,
+                // GivTCP pauses the Gen2 with the window too (issue #433);
+                // HEM reads it back with the targeted HR 318-320 probe.
+                DeviceType::Gen2Hybrid,
             ] {
                 let state = make_state_with_device(dt).await;
                 let body = serde_json::json!({
@@ -14641,26 +14629,13 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn timed_discharge_gen3_hybrid_gated_on_arm_firmware_312() {
+    async fn timed_discharge_gen3_hybrid_accepted_on_every_firmware() {
         with_isolated_config_dir_async(|| async {
             use crate::modbus::registers::HR_BATTERY_PAUSE_MODE;
-            // Gen3 Hybrid reaches the pause registers via the targeted
-            // HR 318-320 probe, enabled only at ARM fw >= 312.
-            for fw in [0u16, 300, 311] {
-                let state = make_state_with_device_and_fw(DeviceType::Gen3Hybrid, fw).await;
-                let (status, _res) = set_timed_discharge(
-                    State(state.clone()),
-                    Json(serde_json::json!({ "enabled": true })),
-                )
-                .await;
-                assert_eq!(
-                    status,
-                    StatusCode::BAD_REQUEST,
-                    "Gen3 fw {fw} must refuse Timed Discharge"
-                );
-                assert!(drain_pending_writes(&state).await.is_empty());
-            }
-            for fw in [312u16, 318, 399] {
+            // GivTCP pauses every Gen3 with the window, whatever its ARM
+            // firmware (issue #433); the targeted HR 318-320 probe reads it
+            // back and gives up if an older firmware doesn't answer.
+            for fw in [0u16, 300, 311, 312, 318, 399] {
                 let state = make_state_with_device_and_fw(DeviceType::Gen3Hybrid, fw).await;
                 let (status, _res) = set_timed_discharge(
                     State(state.clone()),
@@ -19517,7 +19492,7 @@ pub(crate) mod tests {
             battery_pause_slot: Default::default(),
         };
         assert!(
-            build_force_discharge_stop_writes(DeviceType::ACCoupledMk2, "400", &revert).is_empty(),
+            build_force_discharge_stop_writes(DeviceType::ACCoupledMk2, "199", &revert).is_empty(),
             "the entire restoration must wait until the current model can restore HR318"
         );
 
@@ -19528,9 +19503,9 @@ pub(crate) mod tests {
         full_window.battery_pause_slot_start_raw = Some(0);
         full_window.battery_pause_slot_end_raw = Some(0);
         assert!(
-            build_force_discharge_stop_writes(DeviceType::Gen3Hybrid, "311", &full_window)
+            build_force_discharge_stop_writes(DeviceType::Gen1Hybrid, "252", &full_window)
                 .is_empty(),
-            "a firmware downgrade must not receive a full-window restoration"
+            "a model that takes the mode alone must not receive a full-window restoration"
         );
 
         let mut no_pause_baseline = revert;

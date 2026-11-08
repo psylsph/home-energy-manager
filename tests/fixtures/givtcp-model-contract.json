@@ -26,27 +26,15 @@
     {
       "code": "2001", "arm_fw": 252, "hem": "Gen1Hybrid", "sim": "Gen1Hybrid", "givtcp_model": "HYBRID_GEN1",
       "givtcp": { "pause": "mode", "three_phase": false },
-      "hem_deviations": {
-        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the Gen1 yet" },
-        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" }
-      },
       "sim_deviations": { "pause": { "value": "mode_and_window", "issue": 433, "why": "the simulator takes the window on the Gen1 too" } }
     },
     {
       "code": "2001", "arm_fw": 852, "hem": "Gen2Hybrid", "sim": "Gen2Hybrid", "givtcp_model": "HYBRID_GEN2",
-      "givtcp": { "pause": "mode_and_window", "three_phase": false },
-      "hem_deviations": {
-        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the Gen2 yet" },
-        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" }
-      }
+      "givtcp": { "pause": "mode_and_window", "three_phase": false }
     },
     {
       "code": "2001", "arm_fw": 311, "hem": "Gen3Hybrid", "sim": "Gen3Hybrid", "givtcp_model": "HYBRID_GEN3",
-      "givtcp": { "pause": "mode_and_window", "three_phase": false },
-      "hem_deviations": {
-        "pause": { "value": "none", "issue": 433, "why": "HEM only probes the pause from ARM 312" },
-        "charge_cap": { "value": false, "issue": 433, "why": "follows HEM's pause" }
-      }
+      "givtcp": { "pause": "mode_and_window", "three_phase": false }
     },
     {
       "code": "2001", "arm_fw": 318, "hem": "Gen3Hybrid", "sim": "Gen3Hybrid", "givtcp_model": "HYBRID_GEN3",
@@ -58,8 +46,7 @@
     },
     {
       "code": "3001", "arm_fw": 199, "hem": "ACCoupled", "sim": "ACCoupled", "givtcp_model": "AC",
-      "givtcp": { "pause": "none", "three_phase": false },
-      "hem_deviations": { "pause": { "value": "mode", "issue": 433, "why": "HEM has no ARM 200 floor on the AC's pause yet" } }
+      "givtcp": { "pause": "none", "three_phase": false }
     },
     {
       "code": "3001", "arm_fw": 200, "hem": "ACCoupled", "sim": "ACCoupled", "givtcp_model": "AC",
@@ -67,11 +54,7 @@
     },
     {
       "code": "3002", "arm_fw": 200, "hem": "ACCoupledMk2", "sim": "ACCoupled2", "givtcp_model": "AC",
-      "givtcp": { "pause": "mode", "three_phase": false },
-      "hem_deviations": {
-        "pause": { "value": "none", "issue": 433, "why": "HEM has no pause on the AC Mk2 yet" },
-        "charge_cap": { "value": false, "issue": 433, "why": "calibration and Force Discharge's restore only lift a pause HEM's own table knows, so the cap waits for the Mk2's" }
-      }
+      "givtcp": { "pause": "mode", "three_phase": false }
     },
     {
       "code": "4001", "arm_fw": 612, "hem": "ThreePhase", "sim": "ThreePhase", "givtcp_model": "HYBRID_3PH",

@@ -269,16 +269,22 @@ describe('deviceSupportsTimedDischarge', () => {
     });
   });
 
-  describe('Gen3 Hybrid firmware-gated targeted probe', () => {
-    // Gen3 Hybrid (device code 0x20xx, ARM fw century 3) reaches the pause
-    // registers via a targeted 3-register probe, enabled only at ARM fw >= 312.
+  describe('Gen2 and Gen3 hybrids, read by the targeted probe', () => {
+    // The 0x20xx hybrids are split by ARM firmware century: 3xx is the Gen3
+    // and 8xx/9xx the Gen2. GivTCP pauses both with the window on every
+    // firmware, so the front end follows the backend (issue #433).
     it.each([
-      ['2001', '312'],
-      ['2001', '318'],
-      ['2001', '399'],
-      ['2003', '350'],
+      ['2001', '300', 'Gen3 below the old 312 gate'],
+      ['2001', '311', 'Gen3 just below the old 312 gate'],
+      ['2001', '312', 'Gen3'],
+      ['2001', '318', 'Gen3'],
+      ['2001', '399', 'Gen3'],
+      ['2003', '350', 'Gen3'],
+      ['2001', '812', 'Gen2'],
+      ['2001', '852', 'Gen2'],
+      ['2001', '912', 'Gen2'],
     ])(
-      'returns true for Gen3 code %s at ARM fw %s',
+      'returns true for code %s at ARM fw %s (%s)',
       (code, fw) => {
         expect(
           deviceSupportsTimedDischarge({
@@ -290,13 +296,11 @@ describe('deviceSupportsTimedDischarge', () => {
     );
 
     it.each([
-      ['2001', '300', 'below threshold'],
-      ['2001', '311', 'just below threshold'],
       ['2001', '', 'no firmware reported'],
       ['2001', 'garbage', 'unparseable firmware'],
-      // Gen2 shares the 0x20xx prefix (ARM fw century 8/9); must NOT qualify
-      // even at high firmware, since it's a different generation.
-      ['2001', '812', 'Gen2 firmware century'],
+      // The Gen1 takes the pause mode alone and rejects the window.
+      ['2001', '187', 'Gen1 pause floor'],
+      ['2001', '252', 'Gen1'],
       ['2001', '449', 'Gen1 firmware century'],
     ])('returns false for code %s at ARM fw %s (%s)', (code, fw) => {
       expect(

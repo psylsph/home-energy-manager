@@ -3382,7 +3382,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_readback_rejects_hr318_for_unconfirmed_ac_coupled() {
+    fn pause_readback_rejects_hr318_below_the_ac_coupled_arm_floor() {
         let ledger = isolated_ledger();
         let command_id = match ledger
             .reserve_start("fp", "pause_discharge", 30, "ac3-unsupported-key", 1_000)
@@ -3396,7 +3396,7 @@ mod tests {
             .record_recovery(
                 &command_id,
                 r#"{"requested_mode":2,"requested_slot_start":0,"requested_slot_end":0,
-                    "device_type":"ACCoupledMk2","inverter_serial":"AC3-TEST","firmware_version":"400"}"#,
+                    "device_type":"ACCoupledMk2","inverter_serial":"AC3-TEST","firmware_version":"199"}"#,
             )
             .unwrap();
         ledger
@@ -3404,7 +3404,7 @@ mod tests {
                 2_000,
                 Some(2_000),
                 "AC3-TEST",
-                "400",
+                "199",
                 crate::inverter::model::DeviceType::ACCoupledMk2,
                 2,
                 2461,

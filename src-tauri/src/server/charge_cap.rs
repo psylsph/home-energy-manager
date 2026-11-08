@@ -269,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn cannot_be_switched_on_where_charging_cannot_be_paused() {
         with_isolated_config_dir_async(|| async {
-            for device in [DeviceType::Gateway, DeviceType::Gen2Hybrid] {
+            for device in [DeviceType::Gateway, DeviceType::Gen4Hybrid] {
                 let state = state_with(Some(device)).await;
                 let (code, _) = post(
                     &state,

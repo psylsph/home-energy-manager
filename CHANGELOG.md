@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.0] - 2026-11-08
+
+### Added
+
+- **Timed Discharge and the Charge Cap on more inverters.** Gen 1 (ARM firmware 187 and later), Gen 2, Gen 3 on any firmware and both AC Coupled models (ARM firmware 200 and later) now get the battery pause the way GivTCP offers it, so the Charge Cap appears for all of them and Timed Discharge for the Gen 2 and Gen 3. The Gen 1 and AC Coupled models can pause but take no timed window, so they get no Timed Discharge. Nothing changes until you switch one on.
+
+### Changed
+
+- **A pause that can't be read back is retried, not dropped.** If an inverter doesn't answer the pause read, HEM now tries again every few minutes instead of giving up, and keeps showing the last pause it saw. The Charge Cap on the oldest Gen 1 firmware (ARM 4xx), which can't be read back at all, is offered but never starts.
+
 ## [1.9.1] - 2026-11-08
 
 ### Changed

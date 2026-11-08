@@ -7,10 +7,11 @@
  *     window, gives charging back to Force Charge, resumes at the resume
  *     level and on switch-off with the old window put back, releases on a
  *     graceful shutdown, and carries on from its record after a hard kill.
- *   - Gen3 hybrid on ARM firmware ≥ 312 (window via the HR 318-320 probe).
+ *   - Gen3 and Gen2 hybrids (window via the HR 318-320 probe, issue #433), and
+ *     the Gen1 (HR 318 alone, read and written without the window).
  *   - AC-coupled (ARM ≥ 200): HR 318 alone, as GivTCP does there, so the
  *     window is never written; also released on shutdown and after a kill.
- *   - Gen2 hybrid and AC three-phase: refused and hidden. GivTCP, with far
+ *   - Gen4 hybrid and AC three-phase: refused and hidden. GivTCP, with far
  *     more user feedback, gives these no pause-charge.
  *
  * Prerequisites: npm run build; (cd src-tauri && cargo build --release);
@@ -245,12 +246,15 @@ interface Family {
 const SUPPORTED: Family[] = [
   { inverter: 'AllInOne6', port: 18960, forceCharge: true, modeOnly: false, restarts: true },
   { inverter: 'Gen3Hybrid', port: 18962, forceCharge: true, modeOnly: false, restarts: false },
+  { inverter: 'Gen2Hybrid', port: 18968, forceCharge: true, modeOnly: false, restarts: false },
   { inverter: 'ACCoupled', port: 18964, forceCharge: true, modeOnly: true, restarts: true },
+  // Reads HR 318 alone (the window stays unread) and writes it alone, issue #433.
+  { inverter: 'Gen1Hybrid', port: 18972, forceCharge: true, modeOnly: true, restarts: false },
 ];
 
 /** Families GivTCP gives no pause-charge: the cap is refused and hidden. */
 const UNSUPPORTED: { inverter: string; port: number; why: string }[] = [
-  { inverter: 'Gen2Hybrid', port: 18968, why: 'no native pause' },
+  { inverter: 'Gen4Hybrid6kW', port: 18970, why: 'no pause in GivTCP' },
   { inverter: 'ACCoupledThreePhase6kW', port: 18966, why: 'no pause in GivTCP' },
 ];
 

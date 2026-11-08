@@ -1211,8 +1211,8 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 
 /// Decode the targeted HR 318-320 pause-register probe.
 ///
-/// On Gen3 Hybrid (ARM fw >= 312) the full HR 300-359 AC-config block times
-/// out on the dongle (#162), but a 3-register read of HR 318-320 succeeds.
+/// On the Gen3 Hybrid the full HR 300-359 AC-config block times out on the
+/// dongle (#162), but a 3-register read of HR 318-320 usually succeeds.
 /// `data` is therefore indexed from HR 318 (index 0), not HR 300 — this is a
 /// distinct entry point from `decode_holding_300_359`, which indexes the
 /// same fields from the base-300 block. Only the pause fields are decoded
@@ -1228,6 +1228,18 @@ pub fn decode_holding_318_320(data: &[u16], snap: &mut InverterSnapshot) {
     snap.battery_pause_mode = mode as u8;
     snap.battery_pause_slot = decode_timeslot(data, 1, 2);
     record_raw_pause_registers(snap, mode, start, end);
+}
+
+/// Decode the mode-only HR 318 probe, for the models that take the pause mode
+/// without a window (the Gen1, which rejects a read that includes HR 319-320).
+/// `data` is indexed from HR 318. The window fields are left as they were.
+pub fn decode_holding_318(data: &[u16], snap: &mut InverterSnapshot) {
+    let Some(&mode) = data.first() else {
+        return;
+    };
+    snap.battery_pause_mode = mode as u8;
+    snap.battery_pause_mode_raw = Some(mode);
+    snap.battery_pause_registers_observed_at = Some(snap.timestamp);
 }
 
 fn record_raw_pause_registers(snap: &mut InverterSnapshot, mode: u16, start: u16, end: u16) {
@@ -6400,6 +6412,34 @@ mod tests {
         assert_eq!(snap.battery_pause_slot_start_raw, Some(2461));
         assert_eq!(snap.battery_pause_slot_end_raw, Some(9999));
         assert!(!snap.battery_pause_slot.enabled);
+    }
+
+    #[test]
+    fn decode_holding_318_reads_the_mode_alone() {
+        let mut snap = InverterSnapshot {
+            timestamp: 1_800_000_000,
+            ..Default::default()
+        };
+        decode_holding_318(&[1], &mut snap);
+        assert_eq!(snap.battery_pause_mode, 1);
+        assert_eq!(snap.battery_pause_mode_raw, Some(1));
+        assert_eq!(
+            snap.battery_pause_registers_observed_at,
+            Some(1_800_000_000)
+        );
+        assert_eq!(snap.battery_pause_slot_start_raw, None);
+        assert_eq!(snap.battery_pause_slot_end_raw, None);
+    }
+
+    #[test]
+    fn decode_holding_318_empty_read_is_noop() {
+        let mut snap = InverterSnapshot {
+            battery_pause_mode: 2,
+            ..Default::default()
+        };
+        decode_holding_318(&[], &mut snap);
+        assert_eq!(snap.battery_pause_mode, 2);
+        assert_eq!(snap.battery_pause_mode_raw, None);
     }
 
     /// A short read (fewer than 3 registers) must be a no-op rather than

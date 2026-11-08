@@ -168,7 +168,7 @@ function makeSnapshot(overrides: Partial<InverterSnapshot> = {}): InverterSnapsh
 describe('<ControlPage/> — Timed Discharge device gating', () => {
   // Timed Discharge slot writes are only enabled where HR318-320 are safely
   // writable: AC three-phase (60xx), residential All-in-One (80xx), and the
-  // Gen3 targeted probe below. AC-coupled (3001/3002) exposes HR318 but field
+  // Gen2/Gen3 targeted probe below. AC-coupled (3001/3002) exposes HR318 but field
   // logs show HR319/320 reject writes, so it is hidden too. On every other family both the Quick
   // Action button (Battery Mode section) and the dedicated schedule section
   // (heading "Timed Discharge") must be hidden, and no /api/control/
@@ -276,14 +276,18 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     });
   });
 
-  describe('Gen3 Hybrid firmware-gated targeted probe', () => {
-    // Gen3 Hybrid (device code 2001, ARM fw century 3) reaches the pause
-    // registers via a targeted 3-register probe, not the HR 300-359 block.
-    // The default fixture's firmware_version is '318' (>= 312) so the
-    // feature shows; override to a sub-threshold firmware to prove it hides.
-    it('shows the button and section for 2001 at ARM fw 318', async () => {
+  describe('Gen2 and Gen3 hybrids, read by the targeted probe', () => {
+    // The 0x20xx hybrids (device code 2001) are split by ARM firmware century:
+    // 3xx is the Gen3 and 8xx the Gen2. Both reach the pause registers via a
+    // targeted 3-register probe, not the HR 300-359 block, and GivTCP pauses
+    // them on every firmware (issue #433). The Gen1 takes the mode alone.
+    it.each([
+      ['318', 'Gen3'],
+      ['311', 'Gen3 below the old 312 gate'],
+      ['852', 'Gen2'],
+    ])('shows the button and section for 2001 at ARM fw %s (%s)', async (fw) => {
       useInverterStore.setState({
-        snapshot: makeSnapshot({ device_type_code: '2001', firmware_version: '318' }),
+        snapshot: makeSnapshot({ device_type_code: '2001', firmware_version: fw }),
         developerMode: false,
         connectionState: 'connected',
       });
@@ -295,8 +299,7 @@ describe('<ControlPage/> — Timed Discharge device gating', () => {
     });
 
     it.each([
-      ['300', 'below threshold'],
-      ['311', 'just below threshold'],
+      ['252', 'Gen1, which takes the pause mode alone'],
       ['', 'no firmware reported'],
     ])('hides the button and section for 2001 at ARM fw %s (%s)', async (fw) => {
       useInverterStore.setState({

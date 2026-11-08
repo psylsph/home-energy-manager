@@ -596,9 +596,10 @@ pub const AC_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
 /// Targeted 3-register probe of the battery pause registers (HR 318-320).
 ///
 /// Used where the pause is supported but the full `AC_CONFIG_BLOCK`
-/// (HR 300-359) isn't readable: the Gen3 Hybrid on ARM fw >= 312, whose full
-/// block times out on the dongle (#162), and the HV Gen3 / AIO Hybrid, which
-/// never serve it (#432). The narrow read succeeds on all three. Polled
+/// (HR 300-359) isn't readable: the Gen3 Hybrid, whose full block times out
+/// on the dongle (#162), the Gen2, and the HV Gen3 / AIO Hybrid, which never
+/// serve it (#432, #433). The narrow read usually succeeds (the Gen1 reads
+/// HR 318 alone), and the poll loop stops asking after a few failures. Polled
 /// separately in `poll.rs`, not part of any model's `extra_poll_blocks`. The
 /// writes themselves go through `SAFE_WRITE_REGS` (which already lists
 /// 318-320) and are independent of this read.

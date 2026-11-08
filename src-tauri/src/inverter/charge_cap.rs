@@ -7,11 +7,13 @@
 //! poll loop with the native battery pause (HR 318 mode 1, "pause charge").
 //!
 //! Only models GivTCP pauses that way are supported (`supports`): the
-//! single-phase All-in-Ones, Gen3 hybrids on ARM firmware 312 or later, the
-//! HV Gen3 and the AIO Hybrid, and the AC-coupled (0x3001) from ARM firmware
-//! 200. The AC takes the mode alone, with no pause window, so the cap pauses
-//! and releases it with HR 318 only. The AC Mk2 waits for #433. Everything
-//! else, the Gateway included, hides the option.
+//! single-phase All-in-Ones, the Gen2 and Gen3 hybrids, the HV Gen3 and the
+//! AIO Hybrid (all with the pause window), the Gen1 from ARM firmware 187
+//! and the AC-coupled models (0x3001 and the Mk2) from ARM firmware 200.
+//! The Gen1 and AC take the mode alone, so the cap pauses and releases them
+//! with HR 318 only. Everything else, the Gateway included, hides the option.
+//! The cap only starts from a fresh read of HR 318, so a Gen1 that can't be
+//! read back (the old 4xx firmware) offers it but never holds charging.
 //!
 //! HR 318 is shared with the user's own pause, Timed Discharge, Force
 //! Discharge's restore and the calibration cycle, several of which save it and
@@ -54,9 +56,6 @@ pub const ENGAGE_READINGS: u32 = 2;
 /// Consecutive readings from a different inverter before a hold record is
 /// dropped, so one misread serial can't orphan the cap's pause.
 pub const FOREIGN_READINGS: u32 = 3;
-/// Lowest AC-coupled ARM firmware GivTCP's users have confirmed takes the
-/// pause mode (`AC_PAUSE_MIN_ARM_FW` in GivTCP's `modbus_patches.py`).
-pub const AC_PAUSE_MIN_ARM_FW: u16 = 200;
 /// Lowest cap the user can choose.
 pub const MIN_CAP_SOC: u8 = 50;
 /// Highest cap the user can choose (100 would be no cap).
@@ -397,21 +396,10 @@ pub fn shown_state(shared: &ChargeCapShared, supported: bool) -> ChargeCapState 
 /// keeps them to itself (issue #428).
 pub fn supports(device: DeviceType, arm_fw: u16) -> bool {
     match device {
-        DeviceType::AllInOne6kW | DeviceType::AllInOne3_6kW | DeviceType::AllInOne5kW => true,
-        // The HV Gen3 (0x81xx) and the AIO Hybrid (0x82xx) are on GivTCP's pause
-        // list with the full window (issue #432), so the cap can hold them too.
-        DeviceType::HybridHvGen3 | DeviceType::AllInOneHybrid => {
-            device.supports_pause_registers(arm_fw)
-        }
-        DeviceType::Gen3Hybrid => device.supports_pause_registers(arm_fw),
-        // GivTCP's ARM 200 floor on HEM's mode-only AC pause. Not the Mk2
-        // yet, although GivTCP pauses it the same way: HEM's own pause table
-        // (and so calibration and Force Discharge's restore, which lift a
-        // pause through it) doesn't know it (issue #433).
-        DeviceType::ACCoupled => {
-            arm_fw >= AC_PAUSE_MIN_ARM_FW && device.supports_pause_mode(arm_fw)
-        }
-        _ => false,
+        // The AC three-phase has a pause for Timed Discharge, but GivTCP gives
+        // it none and nothing here has run on one, so it hides the cap.
+        DeviceType::ACThreePhase => false,
+        _ => device.supports_pause_mode(arm_fw),
     }
 }
 
@@ -852,38 +840,47 @@ mod tests {
         assert!(supports(DeviceType::AllInOne6kW, 0));
         assert!(supports(DeviceType::AllInOne3_6kW, 0));
         assert!(supports(DeviceType::AllInOne5kW, 0));
-        assert!(supports(DeviceType::Gen3Hybrid, 312));
         // The single-phase HV models, on GivTCP's pause list (issue #432).
         assert!(supports(DeviceType::HybridHvGen3, 612));
         assert!(supports(DeviceType::AllInOneHybrid, 612));
     }
 
     /// Aligned with GivTCP, whose users have tested the pause far more
-    /// widely: the single-phase AC takes the pause mode alone from ARM
-    /// firmware 200, and the three-phase models have no pause at all.
+    /// widely: the single-phase AC (and its Mk2) and the Gen1 take the pause
+    /// mode alone from their ARM floors, and the three-phase models have no
+    /// pause at all.
     #[test]
-    fn supports_the_ac_coupled_from_arm_200() {
-        assert!(supports(DeviceType::ACCoupled, 200));
-        assert!(!supports(DeviceType::ACCoupled, 199));
+    fn supports_the_mode_only_models_from_their_arm_floors() {
+        for (device, floor) in [
+            (DeviceType::ACCoupled, 200),
+            (DeviceType::ACCoupledMk2, 200),
+            (DeviceType::Gen1Hybrid, 187),
+        ] {
+            assert!(supports(device, floor), "{device:?}");
+            assert!(supports(device, 999), "{device:?}");
+            assert!(!supports(device, floor - 1), "{device:?}");
+            assert!(!supports(device, 0), "{device:?}");
+            assert!(pauses_with_mode_alone(device, floor), "{device:?}");
+        }
         assert!(!supports(DeviceType::ACThreePhase, 999));
     }
 
-    /// GivTCP pauses the Mk2 like the AC, but calibration and Force
-    /// Discharge's restore only lift a pause on models HEM's own pause
-    /// table knows, which the Mk2 isn't yet (issue #433): calibration would
-    /// sit at 4% with the cap's pause still on.
+    /// The Gen2 and the Gen3 pause with the window on every firmware, as in
+    /// GivTCP (issue #433).
     #[test]
-    fn hides_the_cap_on_the_ac_mk2_until_hem_knows_its_pause() {
-        assert!(!DeviceType::ACCoupledMk2.supports_pause_mode(999));
-        assert!(!supports(DeviceType::ACCoupledMk2, 999));
+    fn supports_the_gen2_and_gen3_on_every_firmware() {
+        for device in [DeviceType::Gen2Hybrid, DeviceType::Gen3Hybrid] {
+            for firmware in [0, 311, 312, 852] {
+                assert!(supports(device, firmware), "{device:?} ARM {firmware}");
+                assert!(!pauses_with_mode_alone(device, firmware));
+            }
+        }
     }
 
     #[test]
     fn hides_the_cap_where_the_pause_is_missing() {
         for device in [
             DeviceType::Gateway,
-            DeviceType::Gen1Hybrid,
-            DeviceType::Gen2Hybrid,
             DeviceType::ThreePhase,
             DeviceType::Ems,
             DeviceType::PvInverter,
@@ -892,7 +889,6 @@ mod tests {
         ] {
             assert!(!supports(device, 999), "{device:?}");
         }
-        assert!(!supports(DeviceType::Gen3Hybrid, 311));
     }
 
     // -- Validation -----------------------------------------------------

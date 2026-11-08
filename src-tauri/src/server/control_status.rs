@@ -776,6 +776,8 @@ mod tests {
             timestamp: NOW / 1000,
             inverter_time: "2027-01-15 12:00:00".into(),
             device_type: DeviceType::ACCoupled,
+            // GivTCP's floor for the AC-coupled pause (ARM 200).
+            firmware_version: "200".into(),
             battery_power_mode: 1,
             grid_online: true,
             battery_mode: BatteryMode::Eco,
@@ -864,7 +866,29 @@ mod tests {
         for (device_type, firmware, force, pause_modes) in [
             (
                 DeviceType::ACCoupled,
-                "",
+                "200",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            (DeviceType::ACCoupled, "199", true, json!([])),
+            (
+                DeviceType::ACCoupledMk2,
+                "200",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            // The Gen1 takes the pause mode alone from ARM 187, the Gen2 with
+            // the window (issue #433).
+            (
+                DeviceType::Gen1Hybrid,
+                "187",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
+            (DeviceType::Gen1Hybrid, "186", true, json!([])),
+            (
+                DeviceType::Gen2Hybrid,
+                "852",
                 true,
                 json!(["charge", "discharge", "both"]),
             ),
@@ -888,7 +912,13 @@ mod tests {
                 true,
                 json!(["charge", "discharge", "both"]),
             ),
-            (DeviceType::Gen3Hybrid, "311", true, json!([])),
+            // GivTCP pauses the Gen3 on every firmware.
+            (
+                DeviceType::Gen3Hybrid,
+                "311",
+                true,
+                json!(["charge", "discharge", "both"]),
+            ),
             (
                 DeviceType::Gen3Hybrid,
                 "312",

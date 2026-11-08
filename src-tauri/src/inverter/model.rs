@@ -781,41 +781,40 @@ impl DeviceType {
         )
     }
 
-    /// Return the confirmed native battery-pause capability for this model.
+    /// Return the native battery-pause capability for this model, as GivTCP
+    /// gives it (`pause_registers` in its `modbus_patches.py`; the model list
+    /// is checked by `tests/fixtures/givtcp-model-contract.json`).
     ///
     /// The dashboard Timed Discharge feature requires the full HR318-320
     /// window. The authenticated API can additionally use a HEM-timed,
-    /// HR318-only pause on the legacy AC3. Gen3 Hybrid is probed separately
-    /// because its full AC-config block is not readable on older dongles; the
-    /// HV Gen3 (0x81xx) and the AIO Hybrid (0x82xx) are probed the same way
-    /// (issue #432) — GivTCP pauses both, and neither serves HR 300-359.
+    /// HR318-only pause on the Gen1 (ARM 187 and later, which rejects the
+    /// window registers) and the AC-coupled models (ARM 200 and later).
+    /// Models without the HR 300-359 AC-config block (Gen2, Gen3, HV Gen3, AIO
+    /// Hybrid, Gen1) are probed with a targeted read instead — see `poll.rs`.
     pub fn pause_register_support(&self, arm_fw: u16) -> PauseRegisterSupport {
-        if matches!(
-            self,
+        match self {
             Self::ACThreePhase
-                | Self::AllInOne6kW
-                | Self::AllInOne3_6kW
-                | Self::AllInOne5kW
-                | Self::HybridHvGen3
-                | Self::AllInOneHybrid
-        ) {
-            return PauseRegisterSupport::ModeAndWindow;
+            | Self::AllInOne6kW
+            | Self::AllInOne3_6kW
+            | Self::AllInOne5kW
+            | Self::HybridHvGen3
+            | Self::AllInOneHybrid
+            | Self::Gen2Hybrid
+            | Self::Gen3Hybrid => PauseRegisterSupport::ModeAndWindow,
+            Self::Gen1Hybrid if arm_fw >= GEN1_PAUSE_MIN_ARM_FW => PauseRegisterSupport::ModeOnly,
+            Self::ACCoupled | Self::ACCoupledMk2 if arm_fw >= AC_PAUSE_MIN_ARM_FW => {
+                PauseRegisterSupport::ModeOnly
+            }
+            _ => PauseRegisterSupport::Unsupported,
         }
-        if matches!(self, Self::Gen3Hybrid) && arm_fw >= 312 {
-            return PauseRegisterSupport::ModeAndWindow;
-        }
-        if matches!(self, Self::ACCoupled) {
-            return PauseRegisterSupport::ModeOnly;
-        }
-        PauseRegisterSupport::Unsupported
     }
 
     /// Whether this device polls the HR 300-359 AC-config block, which carries
     /// the pause mode/slot (HR 318-320) among other AC-output settings.
     ///
-    /// Models that support the pause without this block (Gen3 Hybrid on ARM
-    /// 312+, HV Gen3, AIO Hybrid) get a targeted HR 318-320 probe instead —
-    /// see `poll.rs`.
+    /// Models that support the pause without this block (the Gen1, Gen2 and
+    /// Gen3 hybrids, HV Gen3, AIO Hybrid) get a targeted HR 318 (or 318-320)
+    /// probe instead — see `poll.rs`.
     pub fn polls_ac_config_block(&self) -> bool {
         self.extra_poll_blocks().iter().any(|block| {
             block.start == 300
@@ -878,6 +877,13 @@ impl DeviceType {
         self.supports_pause_registers(arm_fw)
     }
 }
+
+/// Lowest AC-coupled ARM firmware GivTCP's users have confirmed takes the
+/// pause mode (`AC_PAUSE_MIN_ARM_FW` in GivTCP's `modbus_patches.py`).
+pub const AC_PAUSE_MIN_ARM_FW: u16 = 200;
+/// Lowest Gen1 ARM firmware GivTCP pauses (`GEN1_PAUSE_MIN_ARM_FW`): the one
+/// that added real-time control. The Gen1 takes the mode alone.
+pub const GEN1_PAUSE_MIN_ARM_FW: u16 = 187;
 
 /// Serde default for max slot counts (2 = safe for all models).
 fn default_max_slots() -> u8 {
@@ -2686,10 +2692,9 @@ mod tests {
         );
         // Sanity: Gen3 never polls the HR300-359 block, so EPS (which is
         // block-bound) stays unsupported. Timed Discharge is different — it
-        // reaches HR 318-320 via a targeted probe gated on ARM fw >= 312, so
-        // at fw 0 (below threshold) it's unsupported here; see
-        // `supports_timed_discharge_gen3_hybrid_gated_on_arm_firmware_312`.
-        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge(0));
+        // reaches HR 318-320 via a targeted probe, on every firmware as in
+        // GivTCP; see `supports_timed_discharge_gen3_hybrid_on_every_firmware`.
+        assert!(DeviceType::Gen3Hybrid.supports_timed_discharge(0));
         assert!(!DeviceType::Gen3Hybrid.supports_eps());
     }
 
@@ -2919,17 +2924,25 @@ mod tests {
     fn supports_timed_discharge_for_ac_three_phase_and_aio_families() {
         // AC-three-phase and residential AIO models have confirmed support
         // for the full pause slot (HR 318-320). arm_fw is ignored for these.
-        assert!(!DeviceType::ACCoupled.supports_timed_discharge(0));
-        assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(0));
-        assert!(DeviceType::ACCoupled.supports_pause_mode(0));
-        assert!(!DeviceType::ACCoupledMk2.supports_pause_mode(0));
+        assert!(!DeviceType::ACCoupled.supports_timed_discharge(200));
+        assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(200));
+        // Both AC-coupled models take the mode alone, from ARM 200 (GivTCP's
+        // floor); below it or with no firmware read, neither pauses.
+        for device in [DeviceType::ACCoupled, DeviceType::ACCoupledMk2] {
+            assert!(device.supports_pause_mode(200), "{device:?}");
+            assert!(device.supports_pause_mode(999), "{device:?}");
+            assert!(!device.supports_pause_mode(199), "{device:?}");
+            assert!(!device.supports_pause_mode(0), "{device:?}");
+        }
         for operation in [
             ExternalControlOperation::PauseCharge,
             ExternalControlOperation::PauseDischarge,
             ExternalControlOperation::PauseBoth,
         ] {
-            assert!(DeviceType::ACCoupled.supports_external_control(operation, 0));
-            assert!(!DeviceType::ACCoupledMk2.supports_external_control(operation, 0));
+            assert!(DeviceType::ACCoupled.supports_external_control(operation, 200));
+            assert!(DeviceType::ACCoupledMk2.supports_external_control(operation, 200));
+            assert!(!DeviceType::ACCoupled.supports_external_control(operation, 199));
+            assert!(!DeviceType::ACCoupledMk2.supports_external_control(operation, 199));
         }
         assert!(DeviceType::ACThreePhase.supports_timed_discharge(0));
         assert!(DeviceType::AllInOne6kW.supports_timed_discharge(0));
@@ -2996,7 +3009,7 @@ mod tests {
     #[test]
     fn native_pause_capabilities_share_the_timed_discharge_register_boundary() {
         assert_eq!(
-            DeviceType::ACCoupled.pause_register_support(0),
+            DeviceType::ACCoupled.pause_register_support(200),
             PauseRegisterSupport::ModeOnly
         );
         assert_eq!(
@@ -3005,6 +3018,10 @@ mod tests {
         );
         assert_eq!(
             DeviceType::Gen2Hybrid.pause_register_support(0),
+            PauseRegisterSupport::ModeAndWindow
+        );
+        assert_eq!(
+            DeviceType::Gen4Hybrid.pause_register_support(620),
             PauseRegisterSupport::Unsupported
         );
 
@@ -3015,6 +3032,8 @@ mod tests {
             DeviceType::AllInOne5kW,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
         ];
         for device in always_supported {
             for operation in [
@@ -3032,60 +3051,49 @@ mod tests {
             assert!(device.supports_pause_mode(0));
         }
 
-        for firmware in [311, 312] {
-            assert_eq!(
-                DeviceType::Gen3Hybrid.supports_pause_registers(firmware),
-                firmware >= 312
-            );
-            assert_eq!(
-                DeviceType::Gen3Hybrid
-                    .supports_external_control(ExternalControlOperation::PauseBoth, firmware,),
-                firmware >= 312
-            );
-            assert_eq!(
-                DeviceType::Gen3Hybrid.supports_pause_registers(firmware),
-                DeviceType::Gen3Hybrid.supports_timed_discharge(firmware)
+        // The firmware-gated models: the Gen1 and the AC-coupled take the mode
+        // alone from GivTCP's ARM floors, so they never have the window.
+        for (device, floor) in [
+            (DeviceType::Gen1Hybrid, GEN1_PAUSE_MIN_ARM_FW),
+            (DeviceType::ACCoupled, AC_PAUSE_MIN_ARM_FW),
+            (DeviceType::ACCoupledMk2, AC_PAUSE_MIN_ARM_FW),
+        ] {
+            for firmware in [0, floor - 1, floor, floor + 300] {
+                let pauses = firmware >= floor;
+                assert_eq!(
+                    device.supports_pause_mode(firmware),
+                    pauses,
+                    "{device:?} ARM {firmware}"
+                );
+                assert_eq!(
+                    device.supports_external_control(ExternalControlOperation::PauseBoth, firmware),
+                    pauses,
+                    "{device:?} ARM {firmware}"
+                );
+                assert!(!device.supports_pause_registers(firmware));
+                assert!(!device.supports_timed_discharge(firmware));
+            }
+        }
+    }
+
+    #[test]
+    fn supports_timed_discharge_gen3_hybrid_on_every_firmware() {
+        // GivTCP pauses every Gen3 with the window, whatever its ARM firmware
+        // (`PAUSE_MODELS`); HEM reads it back with a targeted probe that
+        // gives up if an older firmware doesn't answer.
+        for firmware in [0, 300, 311, 312, 318, 399] {
+            assert!(
+                DeviceType::Gen3Hybrid.supports_timed_discharge(firmware),
+                "fw {firmware}"
             );
         }
     }
 
     #[test]
-    fn supports_timed_discharge_gen3_hybrid_gated_on_arm_firmware_312() {
-        // Gen3 Hybrid reaches the pause registers via a targeted 3-register
-        // probe (not the HR 300-359 block), which only succeeds on newer
-        // firmware. fw 312 is the confirmed threshold; below it the feature
-        // is gated out to avoid probing registers the dongle won't answer.
-        assert!(
-            !DeviceType::Gen3Hybrid.supports_timed_discharge(0),
-            "no firmware"
-        );
-        assert!(
-            !DeviceType::Gen3Hybrid.supports_timed_discharge(300),
-            "fw 300"
-        );
-        assert!(
-            !DeviceType::Gen3Hybrid.supports_timed_discharge(311),
-            "fw 311"
-        );
-        assert!(
-            DeviceType::Gen3Hybrid.supports_timed_discharge(312),
-            "fw 312"
-        );
-        assert!(
-            DeviceType::Gen3Hybrid.supports_timed_discharge(318),
-            "fw 318"
-        );
-        assert!(
-            DeviceType::Gen3Hybrid.supports_timed_discharge(399),
-            "fw 399"
-        );
-    }
-
-    #[test]
     fn supports_timed_discharge_rejects_unsupported_families() {
         assert!(!DeviceType::Gen1Hybrid.supports_timed_discharge(318));
-        assert!(!DeviceType::Gen2Hybrid.supports_timed_discharge(318));
-        assert!(!DeviceType::Gen3Hybrid.supports_timed_discharge(300));
+        // The Gen1 takes the mode alone, never the window.
+        assert!(!DeviceType::Gen1Hybrid.supports_timed_discharge(999));
         assert!(!DeviceType::Gen4Hybrid.supports_timed_discharge(318));
         assert!(!DeviceType::PolarHybrid.supports_timed_discharge(318));
         assert!(!DeviceType::Gen3PlusHybrid.supports_timed_discharge(318));
@@ -3108,8 +3116,8 @@ mod tests {
             .extra_poll_blocks()
             .iter()
             .any(|b| b.start == 300));
-        assert!(!DeviceType::ACCoupled.supports_timed_discharge(0));
-        assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(0));
+        assert!(!DeviceType::ACCoupled.supports_timed_discharge(200));
+        assert!(!DeviceType::ACCoupledMk2.supports_timed_discharge(200));
     }
 
     #[test]
@@ -3123,6 +3131,7 @@ mod tests {
             DeviceType::AllInOne5kW,
             DeviceType::Gen1Hybrid,
             DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
             DeviceType::ThreePhase,
             DeviceType::HybridHvGen3,
             DeviceType::AllInOneHybrid,
@@ -3130,8 +3139,13 @@ mod tests {
         ];
         for dt in models {
             let has_ac_config = dt.extra_poll_blocks().iter().any(|b| b.start == 300);
-            let targeted_probe =
-                matches!(dt, DeviceType::HybridHvGen3 | DeviceType::AllInOneHybrid);
+            let targeted_probe = matches!(
+                dt,
+                DeviceType::Gen2Hybrid
+                    | DeviceType::Gen3Hybrid
+                    | DeviceType::HybridHvGen3
+                    | DeviceType::AllInOneHybrid
+            );
             assert_eq!(
                 dt.supports_timed_discharge(0),
                 has_ac_config || targeted_probe,

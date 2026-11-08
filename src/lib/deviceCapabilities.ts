@@ -171,22 +171,21 @@ export function deviceSupportsExportLimit(
  * Discharge" feature.
  *
  * The feature is implemented with the battery pause registers —
- * `battery_pause_mode` (HR 318) and `battery_pause_slot` (HR 319-320) — which
- * live in the HR 300-359 AC-config block. That block is present only on
- * AC-three-phase and residential All-in-One models. Legacy AC-coupled models
- * expose the AC-config block for EPS, but field logs show HR319/320 reject
- * Timed Discharge slot writes with Modbus exception 1, so they are gated out
- * until a safe write path is confirmed. On every other family (AC-coupled,
- * DC hybrids incl. Gen1/2/4, Polar, Gen3+, pure three-phase, Gateway, EMS, PV
- * inverter) the registers don't exist: the write is dropped/times out and
- * `battery_pause_mode` never reflects an enabled state, so the toggle appeared
- * broken (the originally reported Gen1 Hybrid symptom).
+ * `battery_pause_mode` (HR 318) and `battery_pause_slot` (HR 319-320). It
+ * needs the whole window, as GivTCP gives it: the AC-three-phase and
+ * residential All-in-One models (which poll the HR 300-359 AC-config block
+ * that carries the registers), and the Gen2, Gen3, HV Gen3 (0x81xx) and AIO
+ * Hybrid (0x82xx), which the backend reads with a targeted HR 318-320 probe
+ * instead because the full block times out on them (#162) or isn't served
+ * (#432). The Gen1 (ARM 187+) and the AC-coupled models (ARM 200+) take the
+ * pause mode alone and reject the window (field logs show HR319/320 writes
+ * fail with Modbus exception 1), so they get no Timed Discharge. Every other
+ * family has no pause registers: the write is dropped/times out and
+ * `battery_pause_mode` never reflects an enabled state.
  *
- * Three models support the pause without the AC-config block, so the backend
- * probes HR 318-320 with a targeted read: the Gen3 Hybrid on ARM firmware
- * >= 312 (the full block times out on that family, #162), and the HV Gen3
- * (0x81xx) and the AIO Hybrid (0x82xx), which are single-phase and never
- * serve HR 300-359 (issue #432). GivTCP pauses all three.
+ * The 0x20xx family is split by ARM firmware century, as the backend does:
+ * 3xx is the Gen3 and 8xx/9xx the Gen2, both with the window on every
+ * firmware (issue #433); anything else is the Gen1.
  *
  * Mirrors the backend's `DeviceType::supports_timed_discharge` (which takes
  * the ARM firmware version).
@@ -212,15 +211,15 @@ export function deviceSupportsTimedDischarge(
   ) {
     return true;
   }
-  // Gen3 Hybrid (device code 0x20xx, ARM firmware century 3) reaches the
-  // pause registers via a targeted 3-register probe rather than the full
-  // HR 300-359 block (which times out on this family). Enabled only at
-  // ARM fw >= 312. Mirrors the backend's
-  // `DeviceType::Gen3Hybrid && arm_fw >= 312` rule.
+  // The 0x20xx hybrids are told apart by ARM firmware century (the backend's
+  // `refine_with_arm_fw`): 3xx is the Gen3, 8xx and 9xx the Gen2. Both reach
+  // the pause window via the targeted HR 318-320 probe. Anything else is the
+  // Gen1, which takes the mode alone.
   if (code.startsWith('20')) {
     const armFw = parseInt(snapshot?.firmware_version ?? '', 10);
-    if (Number.isFinite(armFw) && Math.floor(armFw / 100) === 3 && armFw >= 312) {
-      return true;
+    if (Number.isFinite(armFw)) {
+      const century = Math.floor(armFw / 100);
+      return century === 3 || century === 8 || century === 9;
     }
   }
   return false;

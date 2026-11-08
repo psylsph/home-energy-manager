@@ -994,15 +994,76 @@ fn warmup_blocks_for(
     preview_standard_blocks(None, prefilled)
 }
 
-/// Whether this snapshot's model needs the out-of-band HR 318-320 pause probe.
+/// Consecutive failed pause probes after which the poll loop backs off
+/// (GivTCP's `EXTRA_READ_MAX_FAILURES`): the inverter probably doesn't answer
+/// the read, and each try waits out a timeout.
+pub(crate) const PAUSE_PROBE_MAX_FAILURES: u8 = 3;
+/// Polls skipped between tries once the probe has backed off (about five
+/// minutes at the usual interval). It never stops for good: a busy dongle
+/// recovers, and the charge cap can only release a pause it has read back.
+pub(crate) const PAUSE_PROBE_BACKOFF_CYCLES: u16 = 30;
+
+/// How the out-of-band HR 318 pause probe paces itself on one connection.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PauseProbe {
+    failures: u8,
+    skipped: u16,
+}
+
+impl PauseProbe {
+    /// Whether to read this poll. Each call while backed off counts as a
+    /// skipped poll, and the one after the back-off is due.
+    pub(crate) fn due(&mut self) -> bool {
+        if self.failures < PAUSE_PROBE_MAX_FAILURES {
+            return true;
+        }
+        if self.skipped >= PAUSE_PROBE_BACKOFF_CYCLES {
+            self.skipped = 0;
+            return true;
+        }
+        self.skipped += 1;
+        false
+    }
+
+    pub(crate) fn succeeded(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Records a failed read; true when this one started the back-off.
+    pub(crate) fn failed(&mut self) -> bool {
+        self.failures = self.failures.saturating_add(1);
+        self.failures == PAUSE_PROBE_MAX_FAILURES
+    }
+}
+
+/// How many registers from HR 318 the out-of-band pause probe reads for this
+/// snapshot's model, or `None` when it has nothing to read.
 ///
-/// True when the model supports the pause window but doesn't poll the HR
-/// 300-359 AC-config block that would otherwise carry HR 318-320: the Gen3
-/// Hybrid on ARM 312 and later, the HV Gen3, and the AIO Hybrid (issue #432).
-fn needs_pause_probe(snapshot: &InverterSnapshot) -> bool {
+/// It runs for models that support the pause but don't poll the HR 300-359
+/// AC-config block that would otherwise carry it: the Gen2, the Gen3 and the
+/// HV Gen3 / AIO Hybrid (issue #432) read the window (3 registers), the Gen1
+/// reads the mode alone because it rejects a read that includes HR 319-320
+/// (issue #433). The read is best-effort: [`PauseProbe`] paces it.
+fn pause_probe_count(snapshot: &InverterSnapshot) -> Option<u16> {
+    use crate::inverter::model::PauseRegisterSupport;
+    if snapshot.device_type.polls_ac_config_block() {
+        return None;
+    }
     let arm_fw = snapshot.firmware_version.parse::<u16>().unwrap_or(0);
-    snapshot.device_type.supports_pause_registers(arm_fw)
-        && !snapshot.device_type.polls_ac_config_block()
+    match snapshot.device_type.pause_register_support(arm_fw) {
+        PauseRegisterSupport::ModeAndWindow => Some(3),
+        PauseRegisterSupport::ModeOnly => Some(1),
+        PauseRegisterSupport::Unsupported => None,
+    }
+}
+
+/// Keep the last known pause mode and window on a snapshot whose pause probe
+/// didn't produce a reading (failed, or backed off). Only the displayed
+/// fields: the raw read-back stays unset, so nothing that needs a fresh read
+/// (the charge cap, the authenticated pause API) acts on a stale one.
+fn carry_forward_pause_display(snapshot: &mut InverterSnapshot, prev: &InverterSnapshot) {
+    snapshot.battery_pause_mode = prev.battery_pause_mode;
+    snapshot.battery_pause_slot = prev.battery_pause_slot.clone();
 }
 
 /// Whether to probe for external CT clamp meters on this cycle.
@@ -3700,6 +3761,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // INFO on every successful read).
                 let mut known_battery_addrs: Vec<u8> = Vec::new();
                 let mut meter_probe_done = false;
+                // Pacing of the out-of-band HR 318 pause read.
+                let mut pause_probe = PauseProbe::default();
                 let mut cached_external_meters: std::collections::BTreeMap<
                     u8,
                     crate::inverter::model::MeterData,
@@ -3912,40 +3975,61 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 );
 
                                 // Targeted pause-register probe. Some models
-                                // support the pause window (HR 318-320) without
-                                // polling the HR 300-359 AC-config block that
-                                // carries it: the Gen3 Hybrid's full block times
-                                // out on this family (#162 / commit fdd8272) but
-                                // the 3-register read succeeds on ARM fw >= 312,
-                                // and the HV Gen3 / AIO Hybrid never serve that
-                                // block at all (#432). Read it out-of-band here
-                                // so a timeout can't fail the whole poll cycle;
-                                // on failure carry forward the previous pause
-                                // values so the UI doesn't flicker to "off".
-                                if needs_pause_probe(&snapshot) {
-                                    match client
-                                        .read_registers(
-                                            crate::modbus::framer::RegisterType::Holding,
-                                            crate::modbus::registers::HR_BATTERY_PAUSE_MODE,
-                                            3,
-                                        )
-                                        .await
-                                    {
-                                        Ok(data) => {
-                                            crate::inverter::decoder::
-                                                decode_holding_318_320(&data, &mut snapshot);
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!(
-                                                "Gen3 pause-register targeted read failed: {e}"
-                                            );
-                                            let prev = state.latest_snapshot.lock().await;
-                                            if let Some(p) = prev.as_ref() {
-                                                snapshot.battery_pause_mode =
-                                                    p.battery_pause_mode;
-                                                snapshot.battery_pause_slot =
-                                                    p.battery_pause_slot.clone();
+                                // support the pause (HR 318, plus the window
+                                // HR 319-320 on most) without polling the
+                                // HR 300-359 AC-config block that carries it:
+                                // the Gen3 Hybrid's full block times out on
+                                // this family (#162 / commit fdd8272), the HV
+                                // Gen3 / AIO Hybrid never serve it (#432), and
+                                // the Gen1 and Gen2 don't have it (#433). Read
+                                // it out-of-band here so a timeout can't fail
+                                // the whole poll cycle; on failure carry
+                                // forward the previous pause values so the UI
+                                // doesn't flicker to "off". The raw read-back
+                                // stays unset, so nothing that needs a fresh
+                                // read (the charge cap, the authenticated
+                                // pause API) acts on a stale one. After a few
+                                // failures in a row the probe backs off, and
+                                // keeps carrying the values forward meanwhile.
+                                if let Some(count) = pause_probe_count(&snapshot) {
+                                    let mut read_ok = false;
+                                    if pause_probe.due() {
+                                        match client
+                                            .read_registers(
+                                                crate::modbus::framer::RegisterType::Holding,
+                                                crate::modbus::registers::HR_BATTERY_PAUSE_MODE,
+                                                count,
+                                            )
+                                            .await
+                                        {
+                                            Ok(data) => {
+                                                pause_probe.succeeded();
+                                                read_ok = true;
+                                                if count >= 3 {
+                                                    crate::inverter::decoder::
+                                                        decode_holding_318_320(&data, &mut snapshot);
+                                                } else {
+                                                    crate::inverter::decoder::
+                                                        decode_holding_318(&data, &mut snapshot);
+                                                }
                                             }
+                                            Err(e) => {
+                                                if pause_probe.failed() {
+                                                    tracing::warn!(
+                                                        "Pause-register read failed {PAUSE_PROBE_MAX_FAILURES} times in a row ({e}) - trying again every {PAUSE_PROBE_BACKOFF_CYCLES} polls; the pause can still be set but its state won't be read back meanwhile"
+                                                    );
+                                                } else {
+                                                    tracing::debug!(
+                                                        "Pause-register targeted read failed: {e}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !read_ok {
+                                        let prev = state.latest_snapshot.lock().await;
+                                        if let Some(p) = prev.as_ref() {
+                                            carry_forward_pause_display(&mut snapshot, p);
                                         }
                                     }
                                 }
@@ -10184,45 +10268,127 @@ mod tests {
             firmware_version: fw.to_string(),
             ..Default::default()
         };
+        let probe =
+            |device_type: DeviceType, fw: &str| pause_probe_count(&snapshot(device_type, fw));
 
-        // Supported pause with no HR 300-359 block: read HR 318-320 directly.
+        // The pause window with no HR 300-359 block: read HR 318-320, on every
+        // firmware GivTCP pauses (the Gen2 and the Gen3 below ARM 312 included).
         for (device_type, fw) in [
+            (DeviceType::Gen2Hybrid, "852"),
+            (DeviceType::Gen3Hybrid, "311"),
             (DeviceType::Gen3Hybrid, "318"),
             (DeviceType::HybridHvGen3, "612"),
             (DeviceType::AllInOneHybrid, "612"),
         ] {
-            assert!(
-                needs_pause_probe(&snapshot(device_type, fw)),
-                "{device_type:?} ARM {fw}"
-            );
+            assert_eq!(probe(device_type, fw), Some(3), "{device_type:?} ARM {fw}");
         }
 
-        // Gen3 Hybrid below ARM 312 doesn't claim the pause window.
-        assert!(!needs_pause_probe(&snapshot(DeviceType::Gen3Hybrid, "311")));
+        // The Gen1 takes the mode alone and rejects a read that includes the
+        // window registers, so it reads HR 318 by itself, from ARM 187.
+        assert_eq!(probe(DeviceType::Gen1Hybrid, "187"), Some(1));
+        assert_eq!(probe(DeviceType::Gen1Hybrid, "252"), Some(1));
+        assert_eq!(probe(DeviceType::Gen1Hybrid, "186"), None);
 
         // Models that poll HR 300-359 decode the pause from it.
-        for device_type in [
-            DeviceType::AllInOne6kW,
-            DeviceType::ACThreePhase,
-            DeviceType::ACCoupled,
+        for (device_type, fw) in [
+            (DeviceType::AllInOne6kW, "620"),
+            (DeviceType::ACThreePhase, "620"),
+            (DeviceType::ACCoupled, "200"),
+            (DeviceType::ACCoupledMk2, "200"),
         ] {
-            assert!(
-                !needs_pause_probe(&snapshot(device_type, "620")),
-                "{device_type:?}"
-            );
+            assert_eq!(probe(device_type, fw), None, "{device_type:?}");
         }
 
         // No pause at all.
         for device_type in [
-            DeviceType::Gen2Hybrid,
             DeviceType::ThreePhase,
             DeviceType::Gateway,
+            DeviceType::Gen4Hybrid,
         ] {
-            assert!(
-                !needs_pause_probe(&snapshot(device_type, "620")),
-                "{device_type:?}"
-            );
+            assert_eq!(probe(device_type, "620"), None, "{device_type:?}");
         }
+    }
+
+    /// An inverter that rejects the read (the old Gen3 firmware, the Gen1 4xx)
+    /// would otherwise time out on every poll, so the probe backs off after a
+    /// few failures in a row. It never stops for good: the charge cap can only
+    /// release a pause it has read back, so a busy dongle that recovers must
+    /// be read again.
+    #[test]
+    fn pause_probe_backs_off_after_repeated_failures_and_retries() {
+        let mut probe = PauseProbe::default();
+        for _ in 0..PAUSE_PROBE_MAX_FAILURES - 1 {
+            assert!(probe.due());
+            assert!(!probe.failed(), "not the failure that starts the back-off");
+        }
+        assert!(probe.due());
+        assert!(probe.failed(), "the third failure starts the back-off");
+
+        for skipped in 0..PAUSE_PROBE_BACKOFF_CYCLES {
+            assert!(!probe.due(), "poll {skipped} of the back-off");
+        }
+        assert!(probe.due(), "tries again once the back-off has run");
+        // Still failing: another full back-off, without a second warning.
+        assert!(!probe.failed());
+        assert!(!probe.due());
+    }
+
+    #[test]
+    fn pause_probe_failures_must_be_consecutive() {
+        let mut probe = PauseProbe::default();
+        for _ in 0..10 {
+            assert!(probe.due());
+            assert!(!probe.failed());
+            assert!(probe.due());
+            probe.succeeded();
+        }
+        assert_eq!(probe, PauseProbe::default());
+    }
+
+    #[test]
+    fn a_good_read_after_a_back_off_resumes_every_poll() {
+        let mut probe = PauseProbe::default();
+        for _ in 0..PAUSE_PROBE_MAX_FAILURES {
+            probe.due();
+            probe.failed();
+        }
+        for _ in 0..PAUSE_PROBE_BACKOFF_CYCLES {
+            assert!(!probe.due());
+        }
+        assert!(probe.due());
+        probe.succeeded();
+        for _ in 0..5 {
+            assert!(probe.due());
+        }
+    }
+
+    /// With no reading (failed or backed off) the displayed pause survives but
+    /// the raw read-back stays unset, so the charge cap and the pause API see
+    /// "not read" rather than a stale value.
+    #[test]
+    fn a_missed_probe_keeps_the_display_but_not_the_read_back() {
+        let prev = InverterSnapshot {
+            battery_pause_mode: 2,
+            battery_pause_slot: crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 1,
+                end_hour: 5,
+                ..Default::default()
+            },
+            battery_pause_mode_raw: Some(2),
+            battery_pause_registers_observed_at: Some(10),
+            timestamp: 10,
+            ..Default::default()
+        };
+        let mut next = InverterSnapshot {
+            timestamp: 20,
+            ..Default::default()
+        };
+        carry_forward_pause_display(&mut next, &prev);
+        assert_eq!(next.battery_pause_mode, 2);
+        assert!(next.battery_pause_slot.enabled);
+        assert_eq!(next.battery_pause_mode_raw, None);
+        assert_eq!(next.battery_pause_registers_observed_at, None);
     }
 
     #[test]
@@ -11856,12 +12022,13 @@ mod tests {
             });
 
             // Same serial and the same single-phase register family still
-            // pass the identity refinement, but AC3 Mk2 has no confirmed
-            // HR318 capability and must not receive the captured HR318 write.
+            // pass the identity refinement, but an AC Mk2 below GivTCP's
+            // ARM 200 floor has no confirmed HR318 capability and must not
+            // receive the captured HR318 write.
             let snapshot = InverterSnapshot {
                 device_type: DeviceType::ACCoupledMk2,
                 inverter_serial: "AC3-TEST".into(),
-                firmware_version: "400".into(),
+                firmware_version: "199".into(),
                 ..Default::default()
             };
             expire_native_pause_if_needed_at(&state, &snapshot, FIXED_NOW_MS).await;
