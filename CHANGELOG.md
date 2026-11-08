@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.1] - 2026-11-08
+
+### Changed
+
+- **The Today bars read better in dark mode.** The text on the coloured bars is now the light text colour instead of black, on slightly deeper bar colours so it stays easy to read.
+
 ## [1.9.0] - 2026-11-08
 
 ### Added
