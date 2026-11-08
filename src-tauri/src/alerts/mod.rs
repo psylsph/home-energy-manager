@@ -6,6 +6,7 @@
 //! Also handles daily consumption report generation and sending.
 
 pub mod battery_health;
+pub mod car_charging;
 pub mod full_charge;
 pub mod report;
 
@@ -1914,8 +1915,9 @@ fn parse_command(text: &str) -> String {
 async fn get_readings_for_date_blocking(
     db: std::sync::Arc<crate::history::HistoryDb>,
     date: chrono::NaiveDate,
+    car: Option<crate::history::car_charging::CarChargingConfig>,
 ) -> Result<Vec<crate::alerts::report::ReadingRow>, String> {
-    tokio::task::spawn_blocking(move || db.get_readings_for_date(date))
+    tokio::task::spawn_blocking(move || db.get_readings_for_date_with_car(date, car.as_ref()))
         .await
         .map_err(|error| format!("history database worker failed: {error}"))?
 }
@@ -1932,7 +1934,11 @@ async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
         return "⚠️ History database not available.".to_string();
     };
 
-    let rows = match get_readings_for_date_blocking(db, today).await {
+    // One read of the settings, so the rows and the summary agree on whether
+    // the car is split out (issue #454).
+    let settings = crate::settings::Settings::load_async().await;
+    let car = crate::history::car_charging::CarChargingConfig::from_settings(&settings);
+    let rows = match get_readings_for_date_blocking(db, today, car).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!("Telegram /today query failed: {e}");
@@ -1943,7 +1949,6 @@ async fn build_today_reply(state: &crate::inverter::poll::AppState) -> String {
         return "⚠️ No history data for today yet.".to_string();
     }
 
-    let settings = crate::settings::Settings::load_async().await;
     match crate::alerts::report::generate_daily_summary_text(&rows, &date_str, &settings) {
         Some(s) => s,
         None => "⚠️ Not enough data to summarise today yet.".to_string(),
@@ -1965,13 +1970,16 @@ async fn build_report_reply(
     let db = db_guard.clone();
     drop(db_guard);
 
-    let rows = get_readings_for_date_blocking(db?, yesterday).await.ok()?;
+    let settings = crate::settings::Settings::load_async().await;
+    let car = crate::history::car_charging::CarChargingConfig::from_settings(&settings);
+    let rows = get_readings_for_date_blocking(db?, yesterday, car)
+        .await
+        .ok()?;
     if rows.len() < 2 {
         return None;
     }
 
     let html = crate::alerts::report::generate_daily_report_html(&rows, &date_str)?;
-    let settings = crate::settings::Settings::load_async().await;
     let caption = crate::alerts::report::generate_daily_summary_text(&rows, &date_str, &settings)
         .unwrap_or_else(|| "📊 Daily report".to_string());
 
@@ -2470,6 +2478,7 @@ mod tests {
             cell_spread_alert_enabled: true,
             soc_anomaly_alert_enabled: true,
             full_charge_alert_enabled: true,
+            car_charging_alert_enabled: false,
             full_charge_alert_days: 30,
             ntfy_topic: String::new(),
             ntfy_server: "https://ntfy.sh".to_string(),

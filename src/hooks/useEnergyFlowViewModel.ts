@@ -35,6 +35,13 @@ export interface EnergyFlowSourceProps {
   evcEverConnected?: boolean;
   /** Whether EV Charger is configured (non-empty host). When falsy, EV node is hidden. */
   showEvc?: boolean;
+  /**
+   * The EV node's power is an estimate from home load above the car-charging
+   * threshold (issue #454), not a charger's own reading. There is no charger
+   * to ask, so the node says only Charging / Idle: no cable state, no session
+   * energy.
+   */
+  evcEstimated?: boolean;
 }
 
 export function useEnergyFlowViewModel({
@@ -47,20 +54,23 @@ export function useEnergyFlowViewModel({
   evcSessionEnergyKwh = 0,
   evcEverConnected,
   showEvc = false,
+  evcEstimated = false,
 }: EnergyFlowSourceProps): EnergyFlowViewModel {
   const noise = useInverterStore((st) => st.visualNoiseThreshold);
   const gridMeterAddress = useInverterStore((st) => st.gridMeterAddress);
 
-  const evcLabel = showEvc
-    ? evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected, evcChargingState)
-    : undefined;
+  const evcLabel = !showEvc
+    ? undefined
+    : evcEstimated
+      ? undefined // buildEnergyFlows words it Charging / Idle from the power
+      : evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected, evcChargingState);
   // Cable indicator under the kW value (HR 2 `connection_status`). It's
   // only meaningful while we have a *fresh* frame — when the charger is
   // offline or never reached we genuinely can't see the cable, so we omit
   // the sub-label rather than assert a state. Gating on `evcConnected`
   // (network) keeps the last good cable value from lingering after a drop.
   const evcCableLabel =
-    showEvc && evcConnected ? (evcCableConnected ? 'Cable In' : 'No Cable') : undefined;
+    showEvc && !evcEstimated && evcConnected ? (evcCableConnected ? 'Cable In' : 'No Cable') : undefined;
 
   return buildEnergyFlows(snapshot, {
     noiseThresholdW: noise,
@@ -68,7 +78,7 @@ export function useEnergyFlowViewModel({
     showEvc,
     evcLabel,
     evcCableLabel,
-    evcSessionEnergyKwh,
+    evcSessionEnergyKwh: evcEstimated ? 0 : evcSessionEnergyKwh,
     gridMeterAddress,
   });
 }

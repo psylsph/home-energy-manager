@@ -1537,6 +1537,11 @@ pub struct Settings {
     /// recorded. `None` keeps all load.
     #[serde(default)]
     pub forecast_exclude_load_above_kw: Option<f64>,
+    /// Charger current in amps for the car-charging estimate (issue #454):
+    /// a minute above the threshold is the car drawing this many amps at
+    /// the grid voltage. Always a number; 6–80.
+    #[serde(default = "default_car_charger_current_a")]
+    pub car_charger_current_a: u16,
 
     // -- Update checking ("new version available" banner) --
     /// When true, the backend periodically asks GitHub for the latest
@@ -1844,6 +1849,11 @@ fn default_api_port() -> u16 {
     7338
 }
 
+/// Default for [`Settings::car_charger_current_a`] — a 32 A (7 kW) home charger.
+fn default_car_charger_current_a() -> u16 {
+    crate::history::car_charging::DEFAULT_CHARGER_AMPS
+}
+
 /// Default for [`Settings::check_for_updates`] — on, so the "new version
 /// available" banner works out of the box. Users who'd rather the app never
 /// contact GitHub can turn it off in Settings.
@@ -2001,6 +2011,11 @@ pub struct AlertsConfig {
     /// charge). Checked once a day; on by default.
     #[serde(default = "default_true")]
     pub full_charge_alert_enabled: bool,
+    /// Notify when car charging starts and finishes (issue #454), worked out
+    /// from the car-charging threshold or a polled GivEnergy charger. Off by
+    /// default, and silent until a threshold is set.
+    #[serde(default)]
+    pub car_charging_alert_enabled: bool,
     /// Days without a full charge before [`Self::full_charge_alert_enabled`]
     /// notifies (7–90).
     #[serde(default = "default_full_charge_alert_days")]
@@ -2094,6 +2109,7 @@ impl Default for AlertsConfig {
             cell_spread_alert_enabled: true,
             soc_anomaly_alert_enabled: true,
             full_charge_alert_enabled: true,
+            car_charging_alert_enabled: false,
             full_charge_alert_days: default_full_charge_alert_days(),
             ntfy_topic: String::new(),
             ntfy_server: default_ntfy_server(),
@@ -2175,6 +2191,7 @@ impl Default for Settings {
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
+            car_charger_current_a: default_car_charger_current_a(),
             check_for_updates: default_check_for_updates(),
             history_backup: HistoryBackupConfig::default(),
             octopus_api_key: String::new(),
@@ -2891,6 +2908,7 @@ mod tests {
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
+            car_charger_current_a: default_car_charger_current_a(),
             weather_config: WeatherConfig {
                 enabled: true,
                 postcode: "SW1A 1AA".to_string(),
@@ -3682,6 +3700,7 @@ mod tests {
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
+            car_charger_current_a: default_car_charger_current_a(),
             octopus_api_key: String::new(),
             octopus_account_number: String::new(),
             octopus_api_base_url: String::new(),

@@ -207,7 +207,7 @@ describe('<HouseEnergyView/>', () => {
     );
     expect(tid('house-ev-post')).not.toBeNull();
     expect(tid('house-reading-ev')).not.toBeNull();
-    expect(tid('house-route-ev')!.getAttribute('data-color')).toBe(FLOW_COLORS.home);
+    expect(tid('house-route-ev')!.getAttribute('data-color')).toBe(FLOW_COLORS.ev);
   });
 
   it('hides the weather when there is none to show', () => {

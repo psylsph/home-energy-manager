@@ -2278,7 +2278,12 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
 
   return (
     <div className="space-y-3">
-      <h2 className="text-text-primary font-semibold text-lg">Load Discharge Limiter</h2>
+      <HeadingWithHelp
+        as="h2"
+        className="text-text-primary font-semibold text-lg"
+        title="Load Discharge Limiter"
+        help="Runs in this app, so keep it running. It monitors home power over Modbus and pauses battery discharge when the load is high, so the app must stay running for it to work."
+      />
 
       {/* Only warn when the mode is something the limiter can't run in
           (Timed, Export). When the limiter is the reason we're in EcoPaused,
@@ -2393,16 +2398,6 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
                   />
                 </div>
               </div>
-            </div>
-
-            {/* App-must-stay-running note */}
-            <div className="text-xs bg-blue-900/30 text-text-primary px-3 py-2 rounded-lg">
-              Runs in this app, so keep it running.{' '}
-              <HelpTip label="the load-based discharge pause">
-                This is implemented locally within this app. It monitors home power via Modbus
-                and pauses battery discharge when the load is high. The app must stay running
-                for this to work.
-              </HelpTip>
             </div>
           </>
         )}

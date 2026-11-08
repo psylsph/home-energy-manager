@@ -78,4 +78,43 @@ describe('useEnergyFlowViewModel', () => {
     const { result } = renderHook(() => useEnergyFlowViewModel({ snapshot: snap(), showEvc: true }));
     expect(result.current.nodes.find((n) => n.id === 'ev')!.unit).toBe('Not Found');
   });
+
+  describe('estimated car charging (issue #454, no charger polled)', () => {
+    const ev = (r: { current: ReturnType<typeof useEnergyFlowViewModel> }) =>
+      r.current.nodes.find((n) => n.id === 'ev');
+
+    it('draws the post and the flow from the estimate, without inventing charger details', () => {
+      const s = snap({ home_power: 9000, grid_power: -9000 });
+      const { result } = renderHook(() =>
+        useEnergyFlowViewModel({ snapshot: s, evcPower: 7360, showEvc: true, evcEstimated: true }),
+      );
+      const node = ev(result)!;
+      expect(node.unit).toBe('Charging');
+      expect(node.active).toBe(true);
+      // No cable state or session energy: there is no charger to ask.
+      expect(node.subLabel).toBeUndefined();
+      expect(node.value).not.toMatch(/\(/);
+      expect(result.current.flows.map((f) => f.id)).toContain('ev');
+    });
+
+    it('shows the post idle while the load is under the threshold', () => {
+      const { result } = renderHook(() =>
+        useEnergyFlowViewModel({ snapshot: snap({ home_power: 800 }), evcPower: 0, showEvc: true, evcEstimated: true }),
+      );
+      const node = ev(result)!;
+      expect(node.unit).toBe('Idle');
+      expect(node.active).toBe(false);
+      expect(result.current.flows.map((f) => f.id)).not.toContain('ev');
+    });
+
+    it('does not claim a missing cable the way an unreachable charger does', () => {
+      const { result } = renderHook(() =>
+        useEnergyFlowViewModel({
+          snapshot: snap({ home_power: 9000 }), evcPower: 7360, showEvc: true, evcEstimated: true,
+          evcConnected: true, evcCableConnected: false,
+        }),
+      );
+      expect(ev(result)!.subLabel).toBeUndefined();
+    });
+  });
 });

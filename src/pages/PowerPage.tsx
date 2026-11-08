@@ -32,6 +32,8 @@ import {
 } from '../lib/historyRangeConfig';
 import { formatPower, formatTimestamp } from '../lib/format';
 import { getSeriesOpacity } from '../lib/chartSeries';
+import { estimateCarPower } from '../lib/carCharging';
+import HelpTip from '../components/HelpTip';
 import { SeriesLegend } from '../components/SeriesLegend';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, PollSettings, TimePoint } from '../lib/types';
@@ -53,7 +55,7 @@ type PowerSeriesKey =
   | 'gridPower'
   | 'homePower';
 
-type PowerChartKey = PowerSeriesKey | 'soc';
+type PowerChartKey = PowerSeriesKey | 'soc' | 'carPower';
 
 interface PowerHistoryState {
   range: HistoryRange | null;
@@ -69,6 +71,9 @@ interface PowerCostState {
   standingChargeGbp: number;
   standingChargePPerDay: number;
   daysInRange: number;
+  /** The car's grid-sourced cost and energy (issue #454); null when off. */
+  carCostGbp: number | null;
+  carGridKwh: number | null;
 }
 
 function emptyPowerCost(requestKey: string): PowerCostState {
@@ -80,6 +85,8 @@ function emptyPowerCost(requestKey: string): PowerCostState {
     standingChargeGbp: 0,
     standingChargePPerDay: 0,
     daysInRange: 0,
+    carCostGbp: null,
+    carGridKwh: null,
   };
 }
 
@@ -92,6 +99,9 @@ function emptyPowerCost(requestKey: string): PowerCostState {
 const HISTORY_FIELDS = [
   'solar_power', 'battery_power', 'grid_power', 'home_power', 'soc',
   '_charge_power', '_discharge_power', '_grid_import_power', '_grid_export_power',
+  // Car charging split (issue #454): the server omits these unless a
+  // car-charging threshold is set, so asking is always safe.
+  '_car_power', '_home_excl_car_power',
 ];
 const EMPTY_HISTORY_DATA: Record<string, TimePoint[]> = {};
 
@@ -105,8 +115,17 @@ const POWER_SERIES: { key: PowerSeriesKey; label: string; color: string }[] = [
 const HOME_POWER_SERIES = POWER_SERIES.find((series) => series.key === 'homePower');
 const DIRECTIONAL_POWER_SERIES = POWER_SERIES.filter((series) => series.key !== 'homePower');
 const SOC_SERIES = { key: 'soc', label: 'Battery SOC', color: '#A78BFA' } as const;
+const CAR_POWER_SERIES = { key: 'carPower', label: 'Car Charging', color: '#C084FC' } as const;
+const HOUSE_POWER_LABEL = 'Home (Excl. Car)';
 const POWER_CHART_SERIES: SeriesLegendItem<PowerChartKey>[] = [
   ...POWER_SERIES,
+  { ...SOC_SERIES, marker: 'line' },
+];
+/** The legend with the car split out of Home, when the server returned one. */
+const CAR_POWER_CHART_SERIES: SeriesLegendItem<PowerChartKey>[] = [
+  ...POWER_SERIES.map((series) =>
+    series.key === 'homePower' ? { ...series, label: HOUSE_POWER_LABEL } : series),
+  CAR_POWER_SERIES,
   { ...SOC_SERIES, marker: 'line' },
 ];
 
@@ -146,6 +165,8 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
   const discharge = pointsByTimestamp(data._discharge_power);
   const gridImport = pointsByTimestamp(data._grid_import_power);
   const gridExport = pointsByTimestamp(data._grid_export_power);
+  const car = pointsByTimestamp(data._car_power);
+  const house = pointsByTimestamp(data._home_excl_car_power);
   const timestamps = new Set<number>();
 
   for (const field of HISTORY_FIELDS) {
@@ -164,6 +185,8 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
     const dischargeValue = discharge.get(t);
     const gridImportValue = gridImport.get(t);
     const gridExportValue = gridExport.get(t);
+    const carValue = car.get(t);
+    const houseValue = house.get(t);
 
     return {
       t,
@@ -176,6 +199,8 @@ function buildPowerRows(data: Record<string, TimePoint[]>): PowerRow[] {
       dischargePower: dischargeValue == null ? null : Math.max(dischargeValue, 0),
       gridImportPower: gridImportValue == null ? null : Math.max(gridImportValue, 0),
       gridExportPower: gridExportValue == null ? null : Math.max(gridExportValue, 0),
+      carPower: carValue == null ? null : Math.max(carValue, 0),
+      housePower: houseValue == null ? null : Math.max(houseValue, 0),
     };
   });
 }
@@ -202,17 +227,22 @@ function formatAxisPercent(value: number): string {
   return `${Math.round(value)}%`;
 }
 
-function PowerStat({ label, value, color, direction, waiting }: {
+function PowerStat({ label, value, color, direction, waiting, help }: {
   label: string;
   value: number;
   color: string;
   direction: string;
   waiting?: boolean;
+  /** The full explanation, behind an ⓘ beside the label. */
+  help?: string;
 }) {
   return (
     <div className="bg-bg-elevated rounded-xl px-4 py-3">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-text-secondary text-xs font-sans">{label}</span>
+        <span className="text-text-secondary text-xs font-sans">
+          {label}
+          {help && <>{' '}<HelpTip label={label}>{help}</HelpTip></>}
+        </span>
         <span className="text-[10px] uppercase tracking-wide font-semibold" style={{ color }}>
           {direction}
         </span>
@@ -335,6 +365,7 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
     ['Generated', s.generatedAt.toLocaleString()],
     ['Total Solar Generation kWh', s.solarKwh.toFixed(3)],
     ['Total Home Load kWh', s.homeKwh.toFixed(3)],
+    ...(s.carEnabled ? [['Car Charging kWh', s.carKwh.toFixed(3)]] : []),
     ['Total Grid Import kWh', s.importKwh.toFixed(3)],
     ['Total Grid Export kWh', s.exportKwh.toFixed(3)],
     ['Net Grid kWh', s.netGridKwh.toFixed(3)],
@@ -346,11 +377,18 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
     ['Total Import Cost GBP', s.importCostGbp.toFixed(2)],
     ['Total Export Income GBP', s.exportIncomeGbp.toFixed(2)],
     ['Total Net Cost GBP', s.netCostGbp.toFixed(2)],
+    ...(s.carEnabled && s.carCostGbp != null
+      ? [
+          ['Car Charging Cost GBP', s.carCostGbp.toFixed(2)],
+          ['Car Charging Grid kWh', (s.carGridKwh ?? 0).toFixed(3)],
+        ]
+      : []),
     ['Standing Charge GBP', s.standingChargeGbp.toFixed(2)],
     ['Standing Charge p/day', s.standingChargePPerDay.toFixed(3)],
     ['Days in Range', s.daysInRange.toString()],
     ['Peak Solar W', Math.round(s.peakSolarW).toString()],
     ['Peak Home Load W', Math.round(s.peakHomeW).toString()],
+    ...(s.carEnabled ? [['Peak Car Charging W', Math.round(s.peakCarW).toString()]] : []),
     ['Peak Grid Import W', Math.round(s.peakGridImportW).toString()],
     ['Peak Grid Export W', Math.round(s.peakGridExportW).toString()],
     ['Peak Battery Charge W', Math.round(s.peakBatteryChargeW).toString()],
@@ -362,7 +400,7 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
     ['Grid Dependency %', s.gridDependencyPct == null ? '' : s.gridDependencyPct.toFixed(1)],
     [],
     ['Bucket Breakdown'],
-    ['Bucket', 'Solar kWh', 'Home Load kWh', 'Grid Import kWh', 'Grid Export kWh', 'Battery Charge kWh', 'Battery Discharge kWh', 'Min SOC %', 'Avg SOC %', 'Max SOC %'],
+    ['Bucket', 'Solar kWh', 'Home Load kWh', ...(s.carEnabled ? ['Car Charging kWh'] : []), 'Grid Import kWh', 'Grid Export kWh', 'Battery Charge kWh', 'Battery Discharge kWh', 'Min SOC %', 'Avg SOC %', 'Max SOC %'],
   );
 
   for (const bucket of report.buckets) {
@@ -370,6 +408,7 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
       bucket.label,
       bucket.solarKwh.toFixed(3),
       bucket.homeKwh.toFixed(3),
+      ...(s.carEnabled ? [bucket.carKwh.toFixed(3)] : []),
       bucket.importKwh.toFixed(3),
       bucket.exportKwh.toFixed(3),
       bucket.batteryChargeKwh.toFixed(3),
@@ -383,7 +422,7 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
   sections.push(
     [],
     ['Detailed Samples'],
-    ['Timestamp ISO', 'Timestamp Local', 'Solar W', 'Battery W', 'Battery Direction', 'Grid W', 'Grid Direction', 'Home Load W', 'SOC %'],
+    ['Timestamp ISO', 'Timestamp Local', 'Solar W', 'Battery W', 'Battery Direction', 'Grid W', 'Grid Direction', 'Home Load W', ...(s.carEnabled ? ['Car Charging W'] : []), 'SOC %'],
   );
 
   for (const row of rows) {
@@ -396,6 +435,7 @@ function exportPowerCSV(report: PowerReport, rows: PowerRow[]) {
       row.gridPower == null ? '' : Math.round(row.gridPower).toString(),
       gridDirection(row.gridPower),
       row.homePower == null ? '' : Math.round(row.homePower).toString(),
+      ...(s.carEnabled ? [row.carPower == null ? '' : Math.round(row.carPower).toString()] : []),
       row.soc == null ? '' : row.soc.toFixed(1),
     ]);
   }
@@ -629,6 +669,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
   <section class="grid-cards">
     <div class="card"><span>Solar Generated</span><strong style="color:#d97706">${formatKwh(s.solarKwh)}</strong></div>
     <div class="card"><span>Home Consumed</span><strong style="color:#0f766e">${formatKwh(s.homeKwh)}</strong></div>
+    ${s.carEnabled ? `<div class="card"><span>Of Which Car Charging</span><strong style="color:#9333ea">${formatKwh(s.carKwh)}</strong></div>` : ''}
     <div class="card"><span>Grid Import</span><strong style="color:#dc2626">${formatKwh(s.importKwh)}</strong></div>
     <div class="card"><span>Grid Export</span><strong style="color:#0284c7">${formatKwh(s.exportKwh)}</strong></div>
     <div class="card"><span>Net Grid</span><strong>${formatKwh(s.netGridKwh)}</strong></div>
@@ -638,6 +679,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
     <div class="card"><span>Solar Coverage</span><strong>${formatPercentValue(s.solarCoveragePct)}</strong></div>
     <div class="card"><span>Grid Dependency</span><strong>${formatPercentValue(s.gridDependencyPct)}</strong></div>
     <div class="card"><span>Peak Home Load</span><strong>${formatWatts(s.peakHomeW)}</strong></div>
+    ${s.carEnabled ? `<div class="card"><span>Peak Car Charging</span><strong>${formatWatts(s.peakCarW)}</strong></div>` : ''}
     <div class="card"><span>Peak Import/Export</span><strong>${formatWatts(s.peakGridImportW)} / ${formatWatts(s.peakGridExportW)}</strong></div>
   </section>
 
@@ -650,6 +692,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
     <div class="card"><span>Import Cost</span><strong style="color:#dc2626">${formatGbp(s.importCostGbp)}</strong></div>
     <div class="card"><span>Export Income</span><strong style="color:#0284c7">${formatGbp(s.exportIncomeGbp)}</strong></div>
     <div class="card"><span>Net Cost</span><strong>${formatGbp(s.netCostGbp)}</strong></div>
+    ${s.carEnabled && s.carCostGbp != null ? `<div class="card"><span>Car Charging Cost</span><strong style="color:#9333ea">${formatGbp(s.carCostGbp)} <span style="font-size:11px;color:#64748b;display:inline;text-transform:none;letter-spacing:0;font-weight:400">(${formatKwh(s.carGridKwh ?? 0)} from the grid, included in Import Cost)</span></strong></div>` : ''}
     <div class="card"><span>Standing Charge</span><strong>${formatGbp(s.standingChargeGbp)}${standingChargeSubtitle(s)}</strong></div>
   </section>
 
@@ -657,6 +700,7 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
   ${renderBarChart('Solar Generation vs Home Load', report.buckets, [
     { key: 'solarKwh', label: 'Solar', color: '#F59E0B' },
     { key: 'homeKwh', label: 'Home/Load', color: '#14B8A6' },
+    ...(s.carEnabled ? [{ key: 'carKwh' as const, label: 'Of Which Car', color: '#C084FC' }] : []),
   ])}
   ${renderBarChart('Grid Import vs Export', report.buckets, [
     { key: 'importKwh', label: 'Import', color: '#EF4444' },
@@ -701,9 +745,9 @@ function exportPowerPDF(report: PowerReport, rows: PowerRow[]): 'opened' | 'down
   <section class="table-card">
     <h2>Bucket Breakdown</h2>
     <table>
-      <thead><tr><th>Bucket</th><th>Solar</th><th>Home</th><th>Import</th><th>Export</th><th>Charge</th><th>Discharge</th><th>Avg SOC</th></tr></thead>
+      <thead><tr><th>Bucket</th><th>Solar</th><th>Home</th>${s.carEnabled ? '<th>Car</th>' : ''}<th>Import</th><th>Export</th><th>Charge</th><th>Discharge</th><th>Avg SOC</th></tr></thead>
       <tbody>
-        ${report.buckets.map((bucket) => `<tr><td>${escapeHtml(bucket.label)}</td><td>${bucket.solarKwh.toFixed(2)}</td><td>${bucket.homeKwh.toFixed(2)}</td><td>${bucket.importKwh.toFixed(2)}</td><td>${bucket.exportKwh.toFixed(2)}</td><td>${bucket.batteryChargeKwh.toFixed(2)}</td><td>${bucket.batteryDischargeKwh.toFixed(2)}</td><td>${bucketSocAvg(bucket) == null ? '—' : bucketSocAvg(bucket)!.toFixed(0) + '%'}</td></tr>`).join('')}
+        ${report.buckets.map((bucket) => `<tr><td>${escapeHtml(bucket.label)}</td><td>${bucket.solarKwh.toFixed(2)}</td><td>${bucket.homeKwh.toFixed(2)}</td>${s.carEnabled ? `<td>${bucket.carKwh.toFixed(2)}</td>` : ''}<td>${bucket.importKwh.toFixed(2)}</td><td>${bucket.exportKwh.toFixed(2)}</td><td>${bucket.batteryChargeKwh.toFixed(2)}</td><td>${bucket.batteryDischargeKwh.toFixed(2)}</td><td>${bucketSocAvg(bucket) == null ? '—' : bucketSocAvg(bucket)!.toFixed(0) + '%'}</td></tr>`).join('')}
       </tbody>
     </table>
   </section>
@@ -757,6 +801,11 @@ export default function PowerPage() {
   const costRequestKey = `${range}:${offset}:${rolling}`;
   const [cost, setCost] = useState<PowerCostState>(() => emptyPowerCost(costRequestKey));
   const [costFallbackConfig, setCostFallbackConfig] = useState<PowerCostFallbackConfig | null>(null);
+  // The car-charging threshold and charger current (issue #454), for the live tiles.
+  const [carSettings, setCarSettings] = useState<Pick<PollSettings, 'forecast_exclude_load_above_kw' | 'car_charger_current_a'>>({});
+  const evcHost = useInverterStore((state) => state.evcHost);
+  const evcConnected = useInverterStore((state) => state.evcConnected);
+  const evcPower = useInverterStore((state) => state.evcPower);
 
   useEffect(() => {
     let cancelled = false;
@@ -764,6 +813,10 @@ export default function PowerPage() {
       .then((res) => {
         if (cancelled || !res.ok) return;
         const settings = res.data;
+        setCarSettings({
+          forecast_exclude_load_above_kw: settings.forecast_exclude_load_above_kw,
+          car_charger_current_a: settings.car_charger_current_a,
+        });
         setCostFallbackConfig({
           importTariff: settings.import_tariff ?? 0,
           exportTariff: settings.export_tariff ?? 0,
@@ -798,6 +851,8 @@ export default function PowerPage() {
       standing_charge_gbp: number;
       days_in_range: number;
       standing_charge_p_per_day: number;
+      car_cost_gbp?: number | null;
+      car_grid_kwh?: number | null;
     }>(`/api/report?${params.toString()}`)
       .then((res) => {
         if (cancelled) return;
@@ -810,6 +865,8 @@ export default function PowerPage() {
           standingChargeGbp: res.standing_charge_gbp ?? 0,
           standingChargePPerDay: res.standing_charge_p_per_day ?? 0,
           daysInRange: res.days_in_range ?? 0,
+          carCostGbp: res.car_cost_gbp ?? null,
+          carGridKwh: res.car_grid_kwh ?? null,
         });
       })
       .catch(() => {
@@ -835,7 +892,9 @@ export default function PowerPage() {
         if (cancelled) return;
         const cleaned: Record<string, TimePoint[]> = {};
         for (const [field, points] of Object.entries(result)) {
-          cleaned[field] = removePowerSpikes(points);
+          // The car is a fixed block that really does start and stop within a
+          // minute, so a one-minute charge is not a spike.
+          cleaned[field] = field === '_car_power' ? points : removePowerSpikes(points);
         }
         setHistory({ range, data: cleaned, error: '' });
       })
@@ -906,6 +965,10 @@ export default function PowerPage() {
         importCostGbp,
         exportIncomeGbp,
         netCostGbp: importCostGbp - exportIncomeGbp,
+        // Only alongside the car's energy: a figure without car data in the
+        // rows would be a cost with nothing to explain it.
+        carCostGbp: r.summary.carEnabled ? activeCost.carCostGbp : null,
+        carGridKwh: r.summary.carEnabled ? activeCost.carGridKwh : null,
         standingChargeGbp,
         standingChargePPerDay: activeCost.standingChargePPerDay > 0
           ? activeCost.standingChargePPerDay
@@ -915,6 +978,7 @@ export default function PowerPage() {
     };
   }, [rows, range, displayDomain, offset, cost, costFallbackConfig, costRequestKey]);
   const hasData = rows.length > 0;
+  const carInChart = useMemo(() => rows.some((row) => row.carPower != null), [rows]);
   const waitingForLiveData = snapshot == null;
   const toggleSeries = (key: PowerChartKey) => {
     setMutedSeries((current) => ({ ...current, [key]: !current[key] }));
@@ -930,6 +994,15 @@ export default function PowerPage() {
   const currentBattery = snapshot?.battery_power ?? 0;
   const currentGrid = snapshot?.grid_power ?? 0;
   const currentHome = Math.max(snapshot?.home_power ?? 0, 0);
+  // The car's share of the load (issue #454): a polled charger's measured
+  // power, else the estimate from the load above the threshold. Null when no
+  // threshold is set, which keeps the single Load / Home tile. Never more
+  // than the load, so the house can't go negative.
+  const estimatedCar = estimateCarPower(currentHome, snapshot?.grid_voltage, carSettings);
+  const chargerPolled = evcHost !== '' && evcConnected;
+  const currentCar = estimatedCar == null
+    ? null
+    : Math.min(chargerPolled ? Math.max(evcPower, 0) : estimatedCar, currentHome);
   // Solar direction + value honour the visual noise threshold (same rule as
   // the orbit diagram): the PV meters read a few tens of watts of inverter
   // self-consumption at night, and that standby draw must not light up the
@@ -957,7 +1030,7 @@ export default function PowerPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div data-testid="power-stats" className={`grid grid-cols-2 gap-3 ${currentCar == null ? 'lg:grid-cols-4' : 'lg:grid-cols-5'}`}>
         <PowerStat
           label="Combined PV"
           value={solarDisplay}
@@ -979,13 +1052,35 @@ export default function PowerPage() {
           direction={gridDirection}
           waiting={waitingForLiveData}
         />
-        <PowerStat
-          label="Load / Home"
-          value={currentHome}
-          color="#14B8A6"
-          direction="Load"
-          waiting={waitingForLiveData}
-        />
+        {currentCar == null ? (
+          <PowerStat
+            label="Load / Home"
+            value={currentHome}
+            color="#14B8A6"
+            direction="Load"
+            waiting={waitingForLiveData}
+          />
+        ) : (
+          <>
+            <PowerStat
+              label="Home"
+              value={Math.max(currentHome - currentCar, 0)}
+              color="#14B8A6"
+              direction="Load"
+              waiting={waitingForLiveData}
+            />
+            <PowerStat
+              label="Car Charging"
+              value={currentCar}
+              color={CAR_POWER_SERIES.color}
+              direction={currentCar > noise ? 'Charging' : 'Idle'}
+              waiting={waitingForLiveData}
+              help={chargerPolled
+                ? "Measured by your GivEnergy EV charger. Home is the load without it."
+                : "An estimate: home load above your car charging threshold is treated as the car, drawing the charger current at the grid voltage. Home is the load without it. Change the threshold in Settings → EV Charger."}
+            />
+          </>
+        )}
       </div>
 
       <div className="flex flex-col gap-2">
@@ -1103,7 +1198,7 @@ export default function PowerPage() {
       <div className="bg-bg-elevated rounded-xl p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
           <h2 className="text-text-primary text-sm font-sans font-bold">Power Flow</h2>
-          <SeriesLegend items={POWER_CHART_SERIES} muted={mutedSeries} onToggle={toggleSeries} />
+          <SeriesLegend items={carInChart ? CAR_POWER_CHART_SERIES : POWER_CHART_SERIES} muted={mutedSeries} onToggle={toggleSeries} />
         </div>
 
         {loading ? (
@@ -1197,6 +1292,8 @@ export default function PowerPage() {
                   if (key === SOC_SERIES.key) {
                     return [formatAxisPercent(n), SOC_SERIES.label];
                   }
+                  if (String(name) === 'housePower') return [formatPower(Math.abs(n)), HOUSE_POWER_LABEL];
+                  if (key === CAR_POWER_SERIES.key) return [formatPower(Math.abs(n)), CAR_POWER_SERIES.label];
                   const label = POWER_SERIES.find((series) => series.key === key)?.label ?? name;
                   const batteryDirection = n < 0 ? 'Charge' : n > 0 ? 'Discharge' : '';
                   const gridDirection = n < 0 ? 'Export' : n > 0 ? 'Import' : '';
@@ -1227,12 +1324,26 @@ export default function PowerPage() {
                 <Line
                   yAxisId="power"
                   type="monotone"
-                  dataKey={HOME_POWER_SERIES.key}
+                  dataKey={carInChart ? 'housePower' : HOME_POWER_SERIES.key}
                   stroke={HOME_POWER_SERIES.color}
                   opacity={getSeriesOpacity(mutedSeries[HOME_POWER_SERIES.key] ?? false)}
                   strokeWidth={3}
                   dot={false}
                   activeDot={mutedSeries[HOME_POWER_SERIES.key] ? false : { r: 4 }}
+                  isAnimationActive={false}
+                  connectNulls
+                />
+              )}
+              {carInChart && (
+                <Line
+                  yAxisId="power"
+                  type="monotone"
+                  dataKey={CAR_POWER_SERIES.key}
+                  stroke={CAR_POWER_SERIES.color}
+                  opacity={getSeriesOpacity(mutedSeries[CAR_POWER_SERIES.key] ?? false)}
+                  strokeWidth={3}
+                  dot={false}
+                  activeDot={mutedSeries[CAR_POWER_SERIES.key] ? false : { r: 4 }}
                   isAnimationActive={false}
                   connectNulls
                 />

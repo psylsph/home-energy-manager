@@ -60,6 +60,11 @@ export const SPIKE_THRESHOLDS: Record<string, number> = {
   _discharge_power: 4000,
   _grid_import_power: 4000,
   _grid_export_power: 4000,
+  // The car's estimated power is a fixed block (amps x volts, up to ~22 kW)
+  // derived from already-sanitised home power, so a one-minute charge is
+  // real, not a spike. The house series keeps the home_power threshold.
+  _car_power: 25000,
+  _home_excl_car_power: 4000,
   // Daily energy counters (kWh) — these are cumulative monotonic counters
   // used to derive cost via delta computation. Even a small corruption of
   // 3-5 kWh produces a ~£1 cost spike at standard tariff rates.
@@ -110,6 +115,10 @@ const CUMULATIVE_DERIVED_FIELDS = new Set([
   '_import_energy_cost',
   '_import_standing_charge',
   '_export_income',
+  // The car's running cost and server-integrated energy since midnight (issue #454).
+  '_car_cost',
+  '_car_energy_today',
+  '_home_excl_car_energy_today',
 ]);
 
 /**

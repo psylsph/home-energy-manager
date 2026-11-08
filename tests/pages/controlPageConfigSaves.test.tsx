@@ -195,7 +195,9 @@ describe('<ControlPage/> — Load Discharge Limiter save', () => {
   // This component's root is a div, not a section, so scope to the heading's
   // own container rather than the enclosing "Battery and Power Controls" one.
   const save = () =>
-    within(screen.getByRole('heading', { name: 'Load Discharge Limiter' }).parentElement as HTMLElement).getByRole(
+    within(
+      screen.getByRole('heading', { name: 'Load Discharge Limiter' }).parentElement!.parentElement as HTMLElement,
+    ).getByRole(
       'button',
       { name: /^(Save|Saving\.\.\.|✓ Saved|✗ Error)$/ },
     );
@@ -220,6 +222,26 @@ describe('<ControlPage/> — Load Discharge Limiter save', () => {
 
     await waitFor(() => expect(save().textContent).toBe('✓ Saved'));
     expect(apiPost).toHaveBeenCalledWith('/api/load-limiter', state.limiter);
+  });
+
+  it('explains that it runs in the app in a tooltip on the title, not a visible note', async () => {
+    state.limiter = { enabled: true, threshold_w: 3500, trigger_delay_minutes: 7, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0 };
+    connect();
+    render(<ControlPage />);
+    await screen.findByText('7 min');
+
+    // The only copy of the sentence is the tooltip's own (hidden until opened).
+    for (const el of screen.queryAllByText(/Runs in this app, so keep it running/)) {
+      expect(el.getAttribute('role')).toBe('tooltip');
+    }
+    const heading = screen.getByRole('heading', { name: 'Load Discharge Limiter' });
+    const tip = within(heading.parentElement as HTMLElement).getByRole('button', {
+      name: 'More about Load Discharge Limiter',
+    });
+    expect(tip.getAttribute('aria-describedby')).toBeTruthy();
+    const text = document.getElementById(tip.getAttribute('aria-describedby')!)!.textContent;
+    expect(text).toMatch(/runs in this app/i);
+    expect(text).toMatch(/must stay running/i);
   });
 
   it('saves the enabled flag after its switch is turned on', async () => {

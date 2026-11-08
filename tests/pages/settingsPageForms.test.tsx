@@ -219,6 +219,39 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
     expect(within(s).queryByLabelText('Days Without a Full Charge (7–90)')).toBeNull();
   });
 
+  /** The always-visible note, not the same words inside the ⓘ's tooltip. */
+  const visibleNote = (section: HTMLElement) =>
+    within(section)
+      .queryAllByText(/Needs a Car Charging Threshold/)
+      .filter((el) => el.getAttribute('role') !== 'tooltip');
+
+  it('saves the car charging switch, which starts off, and says it needs a threshold (issue #454)', async () => {
+    useInverterStore.setState({ carCharging: {} });
+    mount({ alerts: { enabled: true } });
+    render(<SettingsPage />);
+    const s = await heading('Notifications');
+    await waitFor(() => expect(within(s).getByRole('button', { name: 'Save Notification Settings' })).toBeEnabled());
+
+    const toggle = within(s).getByRole('switch', { name: 'Car Charging Started or Finished' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    // A visible note, not one behind an ⓘ: nothing will be sent until a threshold is set.
+    expect(visibleNote(s)).toHaveLength(1);
+    fireEvent.click(toggle);
+    fireEvent.click(within(s).getByRole('button', { name: 'Save Notification Settings' }));
+    await waitFor(() => expect(postsTo('/api/alerts')).toHaveLength(1));
+    expect(lastPost('/api/alerts')).toMatchObject({ car_charging_alert_enabled: true });
+  });
+
+  it('drops the car charging note once a threshold is set', async () => {
+    useInverterStore.setState({ carCharging: { forecast_exclude_load_above_kw: 7.4 } });
+    mount({ alerts: { enabled: true } });
+    render(<SettingsPage />);
+    const s = await heading('Notifications');
+    await waitFor(() => expect(within(s).getByRole('button', { name: 'Save Notification Settings' })).toBeEnabled());
+    expect(within(s).getByRole('switch', { name: 'Car Charging Started or Finished' })).toBeTruthy();
+    expect(visibleNote(s)).toHaveLength(0);
+  });
+
   it('explains a days value it cannot save instead of failing the whole save', async () => {
     mount();
     render(<SettingsPage />);

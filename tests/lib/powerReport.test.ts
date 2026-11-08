@@ -263,3 +263,55 @@ describe('powerReport — primitives', () => {
     expect(report.summary.gridDependencyPct).toBeNull();
   });
 });
+
+describe('powerReport — car charging split (issue #454)', () => {
+  const t0 = 1_700_000_000_000;
+  const HOUR = 3_600_000;
+
+  it('integrates the car and leaves the house as the rest of the load', () => {
+    const rows = [
+      row(t0, { homePower: 9000, carPower: 7360, housePower: 1640 }),
+      row(t0 + HOUR, { homePower: 9000, carPower: 7360, housePower: 1640 }),
+    ];
+    const r = calculatePowerReport(rows, '1h', [t0 - 1, t0 + HOUR + 1], 'Test');
+    expect(r.summary.carEnabled).toBe(true);
+    expect(r.summary.homeKwh).toBeCloseTo(9, 6);
+    expect(r.summary.carKwh).toBeCloseTo(7.36, 6);
+    expect(r.summary.houseKwh).toBeCloseTo(1.64, 6);
+    expect(r.summary.peakCarW).toBe(7360);
+    const bucketCar = r.buckets.reduce((acc, b) => acc + b.carKwh, 0);
+    expect(bucketCar).toBeCloseTo(7.36, 6);
+    for (const b of r.buckets) expect(b.carKwh + b.houseKwh).toBeCloseTo(b.homeKwh, 9);
+  });
+
+  it('never lets the house go negative', () => {
+    const rows = [
+      row(t0, { homePower: 5000, carPower: 9000 }),
+      row(t0 + HOUR, { homePower: 5000, carPower: 9000 }),
+    ];
+    const r = calculatePowerReport(rows, '1h', [t0 - 1, t0 + HOUR + 1], 'Test');
+    expect(r.summary.houseKwh).toBe(0);
+  });
+
+  it('is off, with no car energy, when no row carries a car figure', () => {
+    const rows = [
+      row(t0, { homePower: 9000 }),
+      row(t0 + HOUR, { homePower: 9000 }),
+    ];
+    const r = calculatePowerReport(rows, '1h', [t0 - 1, t0 + HOUR + 1], 'Test');
+    expect(r.summary.carEnabled).toBe(false);
+    expect(r.summary.carKwh).toBe(0);
+    expect(r.summary.peakCarW).toBe(0);
+    expect(r.summary.houseKwh).toBeCloseTo(r.summary.homeKwh, 9);
+  });
+
+  it('treats a row with a car figure of zero as on', () => {
+    const rows = [
+      row(t0, { homePower: 500, carPower: 0 }),
+      row(t0 + HOUR, { homePower: 500, carPower: 0 }),
+    ];
+    const r = calculatePowerReport(rows, '1h', [t0 - 1, t0 + HOUR + 1], 'Test');
+    expect(r.summary.carEnabled).toBe(true);
+    expect(r.summary.carKwh).toBe(0);
+  });
+});

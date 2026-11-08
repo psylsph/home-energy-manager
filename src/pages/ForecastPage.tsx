@@ -19,7 +19,6 @@ import { apiGet, apiPost } from '../lib/api';
 import { openExternal } from '../lib/openExternal';
 import { useDeferredSave } from '../hooks/useDeferredSave';
 import Toggle from '../components/Toggle';
-import LoadAboveSetting from '../components/LoadAboveSetting';
 import { timeAxisProps } from '../lib/chartAxis';
 import { tooltipStyleProps } from '../lib/chartTooltip';
 import { formatEnergy } from '../lib/format';
@@ -381,10 +380,8 @@ export default function ForecastPage() {
   const [minSocPctInput, setMinSocPctInput] = useState<string>('20');
   const [minSocError, setMinSocError] = useState<string | null>(null);
   const [minSocPct, setMinSocPct] = useState<number>(20);
+  // The car-charging threshold, shown read-only; it is set in Settings.
   const [loadAboveKw, setLoadAboveKw] = useState<number | null>(null);
-  // Bumped when the form syncs from saved settings, remounting the load
-  // threshold field; its own saves don't, so an edit keeps its focus.
-  const [settingsSyncs, setSettingsSyncs] = useState(0);
   const [planStrategy, setPlanStrategy] = useState<PlanStrategy>('min_soc');
   const [planStrategySaving, setPlanStrategySaving] = useState(false);
   const [planStrategyError, setPlanStrategyError] = useState<string | null>(null);
@@ -496,9 +493,8 @@ export default function ForecastPage() {
           ? settingsRes.data.forecast_plan_strategy
           : 'min_soc',
       );
+      setLoadAboveKw(settingsRes.data.forecast_exclude_load_above_kw ?? null);
       if (syncForm) {
-        setLoadAboveKw(settingsRes.data.forecast_exclude_load_above_kw ?? null);
-        setSettingsSyncs((n) => n + 1);
         if (settingsRes.data.forecast_min_soc_pct != null) {
           setMinSocPctInput(String(Math.round(settingsRes.data.forecast_min_soc_pct)));
         }
@@ -1333,14 +1329,27 @@ export default function ForecastPage() {
               </p>
             )}
           </div>
-          {/* EV charging left out of the consumption prediction (issue
-              #400). */}
-          <LoadAboveSetting
-            key={settingsSyncs}
-            savedKw={loadAboveKw}
-            disabled={!data}
-            onSaved={() => load(false)}
-          />
+          {/* The car-charging threshold (issues #400, #454) is set in
+              Settings → EV Charger; shown here read-only because it decides
+              what the consumption prediction leaves out. */}
+          <div
+            className="pt-3 flex items-center gap-3 flex-wrap"
+            data-testid="forecast-car-threshold"
+          >
+            <span className="text-text-primary text-xs font-sans font-medium">
+              Car Charging Threshold
+            </span>
+            <span className="text-text-primary text-sm font-mono">
+              {loadAboveKw == null ? 'Off' : `${loadAboveKw} kW`}
+            </span>
+            <HelpTip label="Car Charging Threshold">
+              Home load above this counts as the car charging and is left out of the
+              consumption prediction, so an evening the car charged doesn't make the planner
+              charge more every night. To change it, go to Settings → EV Charger. While HEM
+              is connected to a GivEnergy EV charger it takes out the charger's own power
+              instead.
+            </HelpTip>
+          </div>
           {/* Automatic plan handling — one control for keeping charge slot 1
               in step with the plan: the backend applies the calculated plan
               (or clears the slot when no charge is needed) the configured

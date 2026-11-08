@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot, LatestVersionInfo } from '../lib/types';
+import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot, LatestVersionInfo, PollSettings } from '../lib/types';
 import type { GridLineWeight } from '../lib/historyRangeConfig';
 import type { InverterTemperatureAlertConfig } from '../lib/gridFault';
 
@@ -93,6 +93,13 @@ interface InverterState {
   timedExportArmFailed: boolean;
   /** EV Charger host — non-empty when configured in Settings. */
   evcHost: string;
+  /**
+   * The car-charging threshold and charger current from Settings (issue
+   * #454), mirrored here so the Status diagrams can draw the charge post and
+   * the estimated car without their own fetch. Empty until the settings load
+   * (the feature is off).
+   */
+  carCharging: Pick<PollSettings, 'forecast_exclude_load_above_kw' | 'car_charger_current_a'>;
   /** EV Charger active power (watts), updated by EVC poll loop. */
   evcPower: number;
   /**
@@ -222,6 +229,7 @@ interface InverterState {
   setHiddenPanels: (panels: string[]) => void;
   setInverterTempConfig: (config: InverterTemperatureAlertConfig) => void;
   setEvcHost: (host: string) => void;
+  setCarCharging: (settings: Pick<PollSettings, 'forecast_exclude_load_above_kw' | 'car_charger_current_a'>) => void;
   setEvcData: (
     power: number,
     charging: boolean,
@@ -531,6 +539,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   batteryModeError: null,
   timedExportArmFailed: false,
   evcHost: '',
+  carCharging: {},
   evcPower: 0,
   evcChargingState: '',
   evcCharging: false,
@@ -673,6 +682,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   setHiddenPanels: (panels) => set({ hiddenPanels: panels }),
   setInverterTempConfig: (config) => set({ inverterTempConfig: config }),
   setEvcHost: (host) => set({ evcHost: host }),
+  setCarCharging: (settings) => set({ carCharging: settings }),
   setEvcData: (
     power,
     charging,

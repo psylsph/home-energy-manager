@@ -571,6 +571,8 @@ pub struct AppState {
     pub charge_cap: Arc<Mutex<crate::inverter::charge_cap::ChargeCapShared>>,
     /// Daily full-charge reminder gate (issue #426).
     pub full_charge_check: Arc<Mutex<crate::alerts::full_charge::FullChargeCheck>>,
+    /// "Car charging started / finished" session and its resend box (issue #454).
+    pub car_session: Arc<Mutex<crate::alerts::car_charging::CarSessionRunner>>,
     /// Discharge floor guard configuration (developer mode only).
     pub discharge_floor_config: Arc<Mutex<DischargeFloorConfig>>,
     /// Discharge floor guard runtime state.
@@ -795,6 +797,7 @@ impl AppState {
             calibration_run: Arc::new(Mutex::new(None)),
             charge_cap: Arc::new(Mutex::new(Default::default())),
             full_charge_check: Arc::new(Mutex::new(Default::default())),
+            car_session: Arc::new(Mutex::new(Default::default())),
             discharge_floor_config: Arc::new(Mutex::new({
                 let s = crate::settings::Settings::load();
                 DischargeFloorConfig {
@@ -5831,6 +5834,51 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         )
                                         .await;
                                     });
+                                }
+
+                                // ---- Car charging started / finished (issue #454) ----
+                                // Off unless the user set a car-charging threshold and
+                                // turned the alert on; read-only. Skipped during the
+                                // post-connect grace period, whose readings aren't
+                                // settled enough to start or end a session on.
+                                if readings_since_connect > GRACE_READINGS {
+                                    let polled_charger_w = if poll_settings.evc_host.is_empty() {
+                                        None
+                                    } else {
+                                        state
+                                            .latest_evc
+                                            .lock()
+                                            .await
+                                            .as_ref()
+                                            .map(|evc| evc.active_power)
+                                    };
+                                    let car_input =
+                                        crate::history::car_charging::CarChargingConfig::from_settings(
+                                            &poll_settings,
+                                        )
+                                        .map(|cfg| {
+                                            crate::alerts::car_charging::car_input_w(
+                                                &cfg,
+                                                f64::from(snapshot.home_power),
+                                                f64::from(snapshot.grid_voltage),
+                                                polled_charger_w,
+                                            )
+                                        });
+                                    crate::alerts::car_charging::run_car_session(
+                                        &state,
+                                        car_input,
+                                        polled_charger_w.is_none(),
+                                        chrono::Utc::now().timestamp(),
+                                        |config: crate::settings::AlertsConfig, text: String| async move {
+                                            crate::alerts::dispatch_alert_text(
+                                                &config,
+                                                &text,
+                                                "car charging",
+                                            )
+                                            .await
+                                        },
+                                    )
+                                    .await;
                                 }
 
                                 // ---- Daily consumption report ----

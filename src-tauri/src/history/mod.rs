@@ -7,6 +7,7 @@
 pub mod backup;
 pub mod battery_health;
 pub mod battery_health_trend;
+pub mod car_charging;
 pub mod dispatch_log;
 pub mod evc_power;
 pub mod minute;
@@ -322,7 +323,8 @@ pub const EXPORT_INCOME_FIELD: &str = "_export_income";
 pub const IMPORT_ENERGY_COST_FIELD: &str = "_import_energy_cost";
 pub const IMPORT_STANDING_CHARGE_FIELD: &str = "_import_standing_charge";
 
-/// True for the server-derived cost/income fields.
+/// True for the server-derived cost/income fields, including the car's
+/// running cost (issue #454).
 pub fn is_cost_field(field: &str) -> bool {
     matches!(
         field,
@@ -330,6 +332,7 @@ pub fn is_cost_field(field: &str) -> bool {
             | EXPORT_INCOME_FIELD
             | IMPORT_ENERGY_COST_FIELD
             | IMPORT_STANDING_CHARGE_FIELD
+            | CAR_COST_FIELD
     )
 }
 
@@ -349,6 +352,11 @@ pub const CHARGE_POWER_FIELD: &str = "_charge_power";
 pub const DISCHARGE_POWER_FIELD: &str = "_discharge_power";
 pub const GRID_IMPORT_POWER_FIELD: &str = "_grid_import_power";
 pub const GRID_EXPORT_POWER_FIELD: &str = "_grid_export_power";
+
+/// The car's running cost (£) across the window, a derived cumulative series
+/// like `_import_cost` (issue #454). Served by the HTTP layer, only with a
+/// car-charging threshold set.
+pub const CAR_COST_FIELD: &str = "_car_cost";
 
 /// Map a directional field to `(source_column, signed-magnitude SQL)`.
 ///
@@ -2206,6 +2214,29 @@ impl HistoryDb {
         fields: &[String],
         explicit_window: Option<(i64, i64)>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        self.query_history_with_car(
+            range_secs,
+            bucket_secs,
+            offset,
+            fields,
+            explicit_window,
+            None,
+        )
+    }
+
+    /// [`Self::query_history`] plus the derived car-charging series
+    /// (`_car_power`, `_home_excl_car_power`, issue #454). Those are
+    /// computed only when `car` is `Some`; without it they are skipped, like
+    /// any unrecognised field, so a feature that is off adds nothing.
+    pub fn query_history_with_car(
+        &self,
+        range_secs: i64,
+        bucket_secs: i64,
+        offset: i64,
+        fields: &[String],
+        explicit_window: Option<(i64, i64)>,
+        car: Option<&car_charging::CarChargingConfig>,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
         validate_bucket_secs(bucket_secs)?;
         let conn = self
             .conn
@@ -2220,8 +2251,48 @@ impl HistoryDb {
         .resolve()?;
 
         let mut result = serde_json::Map::new();
+        let mut energy_walk: Option<car_charging::EnergyWalk> = None;
 
         for field in fields {
+            // Derived car-charging series (issue #454): only with a config.
+            if car_charging::is_car_energy_field(field) {
+                if let Some(cfg) = car {
+                    // The car's and the house's series come from one pass.
+                    if energy_walk.is_none() {
+                        energy_walk = Some(car_charging::energy_walk(
+                            &conn,
+                            bucket_secs,
+                            start_ts,
+                            end_ts,
+                            cfg,
+                            &chrono::Local,
+                        )?);
+                    }
+                    if let Some(points) = energy_walk
+                        .as_ref()
+                        .and_then(|walk| car_charging::energy_points(walk, field))
+                    {
+                        result.insert(
+                            field.clone(),
+                            serde_json::to_value(&points).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                }
+                continue;
+            }
+            if car_charging::is_car_field(field) {
+                if let Some(cfg) = car {
+                    if let Some(points) =
+                        car_charging::query_series(&conn, field, bucket_secs, start_ts, end_ts, cfg)
+                    {
+                        result.insert(
+                            field.clone(),
+                            serde_json::to_value(&points?).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                }
+                continue;
+            }
             // Directional power fields (`_charge_power`, `_grid_import_power`, …)
             // are derived: they average a SIGNED-SPLIT magnitude of an existing
             // column so charge/discharge (or import/export) don't cancel within a
@@ -3790,6 +3861,18 @@ impl HistoryDb {
         &self,
         date: chrono::NaiveDate,
     ) -> Result<Vec<crate::alerts::report::ReadingRow>, String> {
+        self.get_readings_for_date_with_car(date, None)
+    }
+
+    /// [`Self::get_readings_for_date`] with each row's `car_power` filled in
+    /// (issue #454) when a car-charging config is given: a polled charger's
+    /// measured power for the minute, else the estimate, from the same SQL
+    /// History uses. `None` leaves `car_power` empty and the query as it was.
+    pub fn get_readings_for_date_with_car(
+        &self,
+        date: chrono::NaiveDate,
+        car: Option<&car_charging::CarChargingConfig>,
+    ) -> Result<Vec<crate::alerts::report::ReadingRow>, String> {
         let local_tz = chrono::Local;
         let midnight_start = match local_tz
             .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
@@ -3817,18 +3900,30 @@ impl HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT timestamp, solar_power, pv1_power, pv2_power, \
-                 battery_power, grid_power, home_power, soc \
+        let sql = match car {
+            None => "SELECT timestamp, solar_power, pv1_power, pv2_power, \
+                 battery_power, grid_power, home_power, soc, NULL \
                  FROM readings \
                  WHERE timestamp >= ?1 AND timestamp < ?2 \
-                 ORDER BY timestamp",
-            )
+                 ORDER BY timestamp"
+                .to_string(),
+            Some(_) => car_charging::report_rows_sql(),
+        };
+        let mut stmt = conn
+            .prepare(&sql)
             .map_err(|e| format!("Failed to prepare query: {e}"))?;
+        let query_params: Vec<rusqlite::types::Value> = match car {
+            None => vec![start_ts.into(), end_ts.into()],
+            Some(cfg) => vec![
+                start_ts.into(),
+                end_ts.into(),
+                cfg.threshold_w.into(),
+                cfg.amps.into(),
+            ],
+        };
 
         let rows = stmt
-            .query_map(rusqlite::params![start_ts, end_ts], |row| {
+            .query_map(rusqlite::params_from_iter(query_params), |row| {
                 Ok(crate::alerts::report::ReadingRow {
                     timestamp: row.get(0)?,
                     solar_power: row.get::<_, Option<f64>>(1)?.map(|v| v as i32),
@@ -3838,6 +3933,7 @@ impl HistoryDb {
                     grid_power: row.get::<_, Option<f64>>(5)?.map(|v| v as i32),
                     home_power: row.get::<_, Option<f64>>(6)?.map(|v| v as i32),
                     soc: row.get::<_, Option<f64>>(7)?.map(|v| v as f32),
+                    car_power: row.get::<_, Option<f64>>(8)?,
                 })
             })
             .map_err(|e| format!("Failed to query readings: {e}"))?;
@@ -5949,12 +6045,13 @@ mod tests {
         assert!(!is_directional_field(""));
     }
 
-    /// `is_cost_field` is the single chokepoint that keeps the four derived
-    /// cost fields out of `query_history`'s column-whitelist SQL path and
-    /// routes them to the cost engine instead. Pin all four positives (incl.
-    /// the two breakdown fields) and a few negatives.
+    /// `is_cost_field` is the single chokepoint that keeps the derived cost
+    /// fields out of `query_history`'s column-whitelist SQL path and routes
+    /// them to the cost engine instead. Pin the positives (incl. the two
+    /// breakdown fields and the car's cost) and a few negatives.
     #[test]
     fn is_cost_field_helper() {
+        assert!(is_cost_field(CAR_COST_FIELD));
         assert!(is_cost_field(IMPORT_COST_FIELD));
         assert!(is_cost_field(EXPORT_INCOME_FIELD));
         assert!(is_cost_field(IMPORT_ENERGY_COST_FIELD));

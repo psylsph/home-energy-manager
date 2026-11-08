@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { apiGet, apiPost } from '../../lib/api';
-import type { DiscoveredEvc } from '../../lib/types';
+import type { DiscoveredEvc, PollSettings } from '../../lib/types';
 import { scannedHost } from '../../lib/settingsForm';
 import { isValidIpv4Host } from '../../lib/validators';
 import { useInverterStore } from '../../store/useInverterStore';
+import CarChargingEstimate from './CarChargingEstimate';
 import { DiscoveredList, HostField } from './HostField';
 import { SettingsSection } from './SettingsSection';
 import { errorText, useSettingsSave, type Flash } from './useSettingsSave';
@@ -14,11 +15,14 @@ export default function EvChargerSection({
   flash,
   initialHost,
   initialPort,
+  initial,
 }: {
   id?: string;
   flash: Flash;
   initialHost: string;
   initialPort: number;
+  /** The loaded settings, for the car charging estimate's fields. */
+  initial: Partial<PollSettings>;
 }) {
   const developerMode = useInverterStore((s) => s.developerMode);
   const [evcHost, setEvcHost] = useState(initialHost);
@@ -118,6 +122,8 @@ export default function EvChargerSection({
           },
         }))}
       />
+
+      <CarChargingEstimate flash={flash} initial={initial} />
     </SettingsSection>
   );
 }

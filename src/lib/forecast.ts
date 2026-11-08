@@ -1,3 +1,4 @@
+import { isCarThresholdKw, MAX_THRESHOLD_KW, MIN_THRESHOLD_KW } from './carCharging';
 import { formatSessionWindow } from './savingSessions';
 
 /**
@@ -762,12 +763,8 @@ export function shouldRefetchForecast(
 /** Days of history the consumption profile is built from. */
 export const CONSUMPTION_WINDOW_DAYS = 28;
 
-/** Limits of the "Leave out load above" setting, kW (issue #400). */
-export const LOAD_ABOVE_MIN_KW = 1;
-export const LOAD_ABOVE_MAX_KW = 25;
-
 /**
- * Parse the "Leave out load above" field: empty turns it off (null),
+ * Parse the car charging threshold field: empty turns it off (null),
  * otherwise a number of kW within the limits.
  */
 export function parseLoadAboveKw(
@@ -776,10 +773,10 @@ export function parseLoadAboveKw(
   const trimmed = text.trim();
   if (trimmed === '') return { ok: true, kw: null };
   const kw = Number(trimmed);
-  if (!Number.isFinite(kw) || kw < LOAD_ABOVE_MIN_KW || kw > LOAD_ABOVE_MAX_KW) {
+  if (!Number.isFinite(kw) || !isCarThresholdKw(kw)) {
     return {
       ok: false,
-      error: `Enter between ${LOAD_ABOVE_MIN_KW} and ${LOAD_ABOVE_MAX_KW} kW, or leave it empty`,
+      error: `Enter between ${MIN_THRESHOLD_KW} and ${MAX_THRESHOLD_KW} kW, or leave it empty`,
     };
   }
   return { ok: true, kw };

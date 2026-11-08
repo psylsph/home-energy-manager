@@ -20,6 +20,11 @@ pub struct ReadingRow {
     pub grid_power: Option<i32>,
     pub home_power: Option<i32>,
     pub soc: Option<f32>,
+    /// The car's share of `home_power`, in watts (issue #454): a polled
+    /// charger's measured power, else the estimate from the load above the
+    /// car-charging threshold. `None` when the feature is off, which keeps
+    /// the report exactly as it was.
+    pub car_power: Option<f64>,
 }
 
 /// One bucket in a time-bucketed breakdown (1-hour buckets for a daily report).
@@ -28,6 +33,8 @@ pub struct Bucket {
     pub hour_label: String,
     pub solar_kwh: f64,
     pub home_kwh: f64,
+    /// The car's share of `home_kwh` (issue #454); 0 when the feature is off.
+    pub car_kwh: f64,
     pub import_kwh: f64,
     pub export_kwh: f64,
     pub battery_charge_kwh: f64,
@@ -36,6 +43,13 @@ pub struct Bucket {
     pub soc_max: Option<f32>,
     pub soc_sum: f32,
     pub soc_count: u32,
+}
+
+impl Bucket {
+    /// The load without the car, never negative.
+    pub fn house_kwh(&self) -> f64 {
+        (self.home_kwh - self.car_kwh).max(0.0)
+    }
 }
 
 fn positive_part(v: Option<i32>) -> f64 {
@@ -57,6 +71,18 @@ fn integrate_pair(
         (None, Some(b)) => transform(Some(b)) * hours / 1000.0,
         (Some(a), None) => transform(Some(a)) * hours / 1000.0,
         (Some(a), Some(b)) => (transform(Some(a)) + transform(Some(b))) / 2.0 * hours / 1000.0,
+    }
+}
+
+/// Trapezoid energy of the car's power over `hours`, kWh. A missing reading
+/// counts as the other end's, like [`integrate_pair`].
+fn integrate_car(a: Option<f64>, b: Option<f64>, hours: f64) -> f64 {
+    let w = |v: Option<f64>| v.filter(|v| v.is_finite()).unwrap_or(0.0).max(0.0);
+    match (a, b) {
+        (None, None) => 0.0,
+        (None, Some(b)) => w(Some(b)) * hours / 1000.0,
+        (Some(a), None) => w(Some(a)) * hours / 1000.0,
+        (Some(a), Some(b)) => (w(Some(a)) + w(Some(b))) / 2.0 * hours / 1000.0,
     }
 }
 
@@ -123,6 +149,15 @@ pub struct DailyTotals {
     pub export_kwh: f64,
     pub battery_charge_kwh: f64,
     pub battery_discharge_kwh: f64,
+    /// True when the rows carry a car figure (issue #454).
+    pub car_enabled: bool,
+    /// The car's share of `home_kwh`, kWh; 0 when the feature is off.
+    pub car_kwh: f64,
+    /// The part of `car_kwh` that came off the grid, kWh.
+    pub car_grid_kwh: f64,
+    /// Each interval's grid-sourced car energy, so its cost can be split at
+    /// tariff boundaries like the import: `(start_ts, end_ts, kwh)`.
+    car_grid_intervals: Vec<(i64, i64, f64)>,
     /// Per-hour buckets: `hour_start_unix_ts -> (import_kwh, export_kwh)`,
     /// used to split import cost between peak and off-peak windows.
     pub hourly_import_export: BTreeMap<i64, (f64, f64)>,
@@ -133,6 +168,14 @@ pub struct DailyTotals {
     pub soc_min: Option<f32>,
     pub soc_max: Option<f32>,
     pub row_count: usize,
+}
+
+impl DailyTotals {
+    /// The load without the car, never negative; the whole load when the
+    /// feature is off.
+    pub fn house_kwh(&self) -> f64 {
+        (self.home_kwh - self.car_kwh).max(0.0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +191,7 @@ struct DailyIntegration<'a> {
     totals: DailyTotals,
     buckets: BTreeMap<i64, Bucket>,
     peak_home_w: f64,
+    peak_car_w: f64,
     peak_grid_import_w: f64,
 }
 
@@ -182,13 +226,16 @@ fn integrate_daily_rows(rows: &[ReadingRow]) -> Option<DailyIntegration<'_>> {
     let mut hourly: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
     let mut buckets: BTreeMap<i64, Bucket> = BTreeMap::new();
     let mut peak_home_w = 0.0_f64;
+    let mut peak_car_w = 0.0_f64;
     let mut peak_grid_import_w = 0.0_f64;
+    totals.car_enabled = valid.iter().any(|r| r.car_power.is_some());
 
     // Peaks describe observed accepted readings, not just readings that also
     // happen to be the left endpoint of an integrable interval. In
     // particular, include the final reading in the day's peak values.
     for row in &valid {
         peak_home_w = peak_home_w.max(positive_part(row.home_power));
+        peak_car_w = peak_car_w.max(row.car_power.filter(|v| v.is_finite()).unwrap_or(0.0));
         peak_grid_import_w = peak_grid_import_w.max(negative_magnitude(row.grid_power));
     }
 
@@ -205,7 +252,8 @@ fn integrate_daily_rows(rows: &[ReadingRow]) -> Option<DailyIntegration<'_>> {
         }
 
         totals.solar_kwh += integrate_pair(a.solar_power, b.solar_power, hours, positive_part);
-        totals.home_kwh += integrate_pair(a.home_power, b.home_power, hours, positive_part);
+        let home_pair = integrate_pair(a.home_power, b.home_power, hours, positive_part);
+        totals.home_kwh += home_pair;
         // App-wide grid convention: negative = importing, positive = exporting.
         totals.import_kwh += integrate_pair(a.grid_power, b.grid_power, hours, negative_magnitude);
         totals.export_kwh += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
@@ -222,6 +270,22 @@ fn integrate_daily_rows(rows: &[ReadingRow]) -> Option<DailyIntegration<'_>> {
             end_grid_power: b.grid_power,
         });
 
+        // The car's share of this interval: never more than the load, and its
+        // grid-sourced part never more than what was imported (issue #454).
+        let car_pair = if totals.car_enabled {
+            integrate_car(a.car_power, b.car_power, hours).min(home_pair)
+        } else {
+            0.0
+        };
+        let car_grid_pair = car_pair.min(import_kwh);
+        totals.car_kwh += car_pair;
+        totals.car_grid_kwh += car_grid_pair;
+        if car_grid_pair > 0.0 {
+            totals
+                .car_grid_intervals
+                .push((a.timestamp, b.timestamp, car_grid_pair));
+        }
+
         let hour_start = (a.timestamp / 3600) * 3600;
         let e = hourly.entry(hour_start).or_insert((0.0, 0.0));
         e.0 += import_kwh;
@@ -237,7 +301,8 @@ fn integrate_daily_rows(rows: &[ReadingRow]) -> Option<DailyIntegration<'_>> {
             ..Default::default()
         });
         bucket.solar_kwh += integrate_pair(a.solar_power, b.solar_power, hours, positive_part);
-        bucket.home_kwh += integrate_pair(a.home_power, b.home_power, hours, positive_part);
+        bucket.home_kwh += home_pair;
+        bucket.car_kwh += car_pair;
         bucket.import_kwh += import_kwh;
         bucket.export_kwh += integrate_pair(a.grid_power, b.grid_power, hours, positive_part);
         bucket.battery_charge_kwh +=
@@ -280,6 +345,7 @@ fn integrate_daily_rows(rows: &[ReadingRow]) -> Option<DailyIntegration<'_>> {
         totals,
         buckets,
         peak_home_w,
+        peak_car_w,
         peak_grid_import_w,
     })
 }
@@ -447,6 +513,35 @@ pub fn generate_daily_summary_text(
         }
     }
     let export_income = t.export_kwh * export_rate;
+    // The car's grid-sourced energy priced at the import rate of its time
+    // (issue #454), split at tariff boundaries like the import above.
+    let car_cost = if t.car_enabled {
+        t.car_grid_intervals
+            .iter()
+            .map(|&(start_ts, end_ts, kwh)| {
+                if use_flat_import {
+                    return kwh * flat_import;
+                }
+                let span = (end_ts - start_ts) as f64;
+                let mut cost = 0.0;
+                let mut segment_start = start_ts;
+                while segment_start < end_ts {
+                    let segment_end = next_minute_boundary(segment_start).min(end_ts);
+                    if segment_end <= segment_start {
+                        break;
+                    }
+                    let rate = imp_cfg
+                        .rate_for_minutes(timestamp_to_local_minutes(segment_start))
+                        .unwrap_or(flat_import);
+                    cost += kwh * (segment_end - segment_start) as f64 / span * rate;
+                    segment_start = segment_end;
+                }
+                cost
+            })
+            .fold(0.0, |total, cost| total + cost)
+    } else {
+        0.0
+    };
     // Issue #131: the daily import cost above is the per-kWh component only.
     // UK-style tariffs also charge a flat daily standing fee (pence/day)
     // that doesn't scale with usage — add it to the import total so the
@@ -469,7 +564,22 @@ pub fn generate_daily_summary_text(
     let mut msg = format!("📊 <b>Daily Summary</b> — {date_str}\n");
     msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
     msg.push_str(&format!("☀️ Solar: <b>{:.1} kWh</b>\n", t.solar_kwh));
-    msg.push_str(&format!("🏠 Home: <b>{:.1} kWh</b>\n", t.home_kwh));
+    // With a car-charging threshold set the car is listed on its own line and
+    // Home is the load without it (issue #454).
+    msg.push_str(&format!(
+        "🏠 Home: <b>{:.1} kWh</b>\n",
+        if t.car_enabled {
+            t.house_kwh()
+        } else {
+            t.home_kwh
+        }
+    ));
+    if t.car_enabled {
+        msg.push_str(&format!(
+            "🚗 Car: <b>{:.1} kWh</b> — £{:.2} from import\n",
+            t.car_kwh, car_cost
+        ));
+    }
     msg.push_str(&format!(
         "🔋 Battery: +{:.1} / -{:.1} kWh  (SOC {})",
         t.battery_charge_kwh, t.battery_discharge_kwh, soc_range
@@ -549,7 +659,9 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
     );
 
     let peak_home_w = integrated.peak_home_w;
+    let peak_car_w = integrated.peak_car_w;
     let peak_grid_import_w = integrated.peak_grid_import_w;
+    let car_enabled = t.car_enabled;
 
     // ---- Generate HTML ----
     let mut html = format!(
@@ -601,7 +713,7 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
 
   <section class="grid-cards">
     <div class="card"><span>Solar generated</span><strong style="color:#d97706">{skwh}</strong></div>
-    <div class="card"><span>Home consumed</span><strong style="color:#0f766e">{hkwh}</strong></div>
+    <div class="card"><span>Home consumed</span><strong style="color:#0f766e">{hkwh}</strong></div>{car_card}
     <div class="card"><span>Grid import</span><strong style="color:#dc2626">{ikwh}</strong></div>
     <div class="card"><span>Grid export</span><strong style="color:#0284c7">{ekwh}</strong></div>
     <div class="card"><span>Net grid</span><strong>{nkwh}</strong></div>
@@ -610,7 +722,7 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
     <div class="card"><span>SOC range</span><strong>{socr}</strong></div>
     <div class="card"><span>Solar coverage</span><strong>{scov}</strong></div>
     <div class="card"><span>Grid dependency</span><strong>{gdep}</strong></div>
-    <div class="card"><span>Peak home load</span><strong>{phw}</strong></div>
+    <div class="card"><span>Peak home load</span><strong>{phw}</strong></div>{car_peak_card}
     <div class="card"><span>Peak import</span><strong>{piw}</strong></div>
   </section>
 "#,
@@ -636,6 +748,25 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
         },
         phw = format_watts(peak_home_w),
         piw = format_watts(peak_grid_import_w),
+        // Issue #454: only with a car-charging threshold set.
+        car_card = if car_enabled {
+            format!(
+                r#"
+    <div class="card"><span>Of Which Car Charging</span><strong style="color:#9333ea">{}</strong></div>"#,
+                format_kwh(t.car_kwh)
+            )
+        } else {
+            String::new()
+        },
+        car_peak_card = if car_enabled {
+            format!(
+                r#"
+    <div class="card"><span>Peak car charging</span><strong>{}</strong></div>"#,
+                format_watts(peak_car_w)
+            )
+        } else {
+            String::new()
+        },
     );
 
     // Combined power chart
@@ -645,10 +776,18 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
         html.push_str(&render_bar_chart(
             "Solar generation vs home load",
             &bucket_list,
-            &[
-                ("solar_kwh", "Solar", "#F59E0B"),
-                ("home_kwh", "Home/load", "#14B8A6"),
-            ],
+            &if car_enabled {
+                vec![
+                    ("solar_kwh", "Solar", "#F59E0B"),
+                    ("home_kwh", "Home/load", "#14B8A6"),
+                    ("car_kwh", "Of Which Car", "#C084FC"),
+                ]
+            } else {
+                vec![
+                    ("solar_kwh", "Solar", "#F59E0B"),
+                    ("home_kwh", "Home/load", "#14B8A6"),
+                ]
+            },
         ));
         html.push_str(&render_bar_chart(
             "Grid import vs export",
@@ -710,8 +849,12 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
 
     // Bucket breakdown table
     html.push_str("<section class=\"table-card\"><h2>Bucket breakdown</h2><table><thead><tr>");
+    html.push_str("<th>Hour</th><th>Solar</th><th>Home</th>");
+    if car_enabled {
+        html.push_str("<th>Car</th>");
+    }
     html.push_str(
-        "<th>Hour</th><th>Solar</th><th>Home</th><th>Import</th><th>Export</th><th>Charge</th><th>Discharge</th><th>Avg SOC</th>",
+        "<th>Import</th><th>Export</th><th>Charge</th><th>Discharge</th><th>Avg SOC</th>",
     );
     html.push_str("</tr></thead><tbody>");
     for bucket in &bucket_list {
@@ -720,11 +863,17 @@ pub fn generate_daily_report_html(rows: &[ReadingRow], date_str: &str) -> Option
         } else {
             "—".to_string()
         };
+        let car_cell = if car_enabled {
+            format!("<td>{:.2}</td>", bucket.car_kwh)
+        } else {
+            String::new()
+        };
         html.push_str(&format!(
-            "<tr><td>{}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{:.2}</td><td>{:.2}</td>{}<td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{}</td></tr>",
             escape_html(&bucket.hour_label),
             bucket.solar_kwh,
             bucket.home_kwh,
+            car_cell,
             bucket.import_kwh,
             bucket.export_kwh,
             bucket.battery_charge_kwh,
@@ -937,6 +1086,7 @@ fn render_bar_chart(title: &str, buckets: &[&Bucket], series: &[(&str, &str, &st
                 let v = match *key {
                     "solar_kwh" => b.solar_kwh,
                     "home_kwh" => b.home_kwh,
+                    "car_kwh" => b.car_kwh,
                     "import_kwh" => b.import_kwh,
                     "export_kwh" => b.export_kwh,
                     "battery_charge_kwh" => b.battery_charge_kwh,
@@ -962,6 +1112,7 @@ fn render_bar_chart(title: &str, buckets: &[&Bucket], series: &[(&str, &str, &st
             let v = match key {
                 "solar_kwh" => bucket.solar_kwh,
                 "home_kwh" => bucket.home_kwh,
+                "car_kwh" => bucket.car_kwh,
                 "import_kwh" => bucket.import_kwh,
                 "export_kwh" => bucket.export_kwh,
                 "battery_charge_kwh" => bucket.battery_charge_kwh,
@@ -1093,6 +1244,7 @@ mod tests {
             grid_power: Some(grid),
             home_power: Some(home),
             soc: Some(soc),
+            car_power: None,
         }
     }
 
@@ -1526,5 +1678,211 @@ mod tests {
             summary.contains("Import: <b>1.0 kWh</b> — £0.20"),
             "the hour must use both half-hour rates; got: {summary}"
         );
+    }
+
+    /// The summary as it was before the car split (issue #454): with no car
+    /// figures on the rows it must not change by a byte.
+    #[test]
+    fn daily_summary_without_car_data_is_unchanged() {
+        let s = settings_with_flat_import(0.25);
+        let msg = generate_daily_summary_text(&import_rows(), "2026-06-27", &s).unwrap();
+        let expected = "📊 <b>Daily Summary</b> — 2026-06-27\n\
+━━━━━━━━━━━━━━━━━━━━━━━━\n\
+☀️ Solar: <b>0.0 kWh</b>\n\
+🏠 Home: <b>1.0 kWh</b>\n\
+🔋 Battery: +0.0 / -0.0 kWh  (SOC 50%–60%)\n\
+━━━━━━━━━━━━━━━━━━━━━━━━\n\
+📥 Import: <b>1.0 kWh</b> — £0.25\n\
+📤 Export: <b>0.0 kWh</b> — £0.00\n\
+💵 Net cost: <b>£0.25</b>\n\
+🌱 Self-sufficiency: <b>0%</b>";
+        assert_eq!(msg, expected);
+    }
+
+    // ---- car charging (issue #454) ----
+
+    /// A reading with the car's share of the load set (the estimate or a
+    /// polled charger's figure, worked out by the history query).
+    fn car_reading(ts: i64, grid: i32, home: i32, car: f64, soc: f32) -> ReadingRow {
+        ReadingRow {
+            car_power: Some(car),
+            ..dummy_reading(ts, 0, 0, grid, home, soc)
+        }
+    }
+
+    /// Two hours of a 9 kW load with a 7.36 kW car, all imported.
+    fn car_rows() -> Vec<ReadingRow> {
+        vec![
+            car_reading(0, -9000, 9000, 7360.0, 50.0),
+            car_reading(3600, -9000, 9000, 7360.0, 50.0),
+            car_reading(7200, -9000, 9000, 7360.0, 50.0),
+        ]
+    }
+
+    #[test]
+    fn daily_totals_split_the_car_out_of_the_home_load() {
+        let t = compute_daily_totals(&car_rows()).unwrap();
+        assert!(t.car_enabled);
+        assert!((t.home_kwh - 18.0).abs() < 1e-9);
+        assert!((t.car_kwh - 14.72).abs() < 1e-9);
+        assert!((t.house_kwh() - 3.28).abs() < 1e-9);
+        assert!((t.car_grid_kwh - 14.72).abs() < 1e-9);
+    }
+
+    #[test]
+    fn daily_totals_are_off_without_car_figures() {
+        let t = compute_daily_totals(&import_rows()).unwrap();
+        assert!(!t.car_enabled);
+        assert_eq!(t.car_kwh, 0.0);
+        assert_eq!(t.car_grid_kwh, 0.0);
+        assert_eq!(t.house_kwh(), t.home_kwh);
+    }
+
+    #[test]
+    fn the_car_is_never_more_than_the_load() {
+        let rows = vec![
+            car_reading(0, -2000, 2000, 7360.0, 50.0),
+            car_reading(3600, -2000, 2000, 7360.0, 50.0),
+        ];
+        let t = compute_daily_totals(&rows).unwrap();
+        assert!((t.car_kwh - 2.0).abs() < 1e-9);
+        assert_eq!(t.house_kwh(), 0.0);
+    }
+
+    #[test]
+    fn only_the_grid_share_of_the_car_is_the_import() {
+        // 3 kW import against a 7.36 kW car: 3 kWh of the car came off the grid.
+        let rows = vec![
+            car_reading(0, -3000, 9000, 7360.0, 50.0),
+            car_reading(3600, -3000, 9000, 7360.0, 50.0),
+        ];
+        let t = compute_daily_totals(&rows).unwrap();
+        assert!((t.car_grid_kwh - 3.0).abs() < 1e-9);
+        // Exporting is never import.
+        let rows = vec![
+            car_reading(0, 1000, 9000, 7360.0, 50.0),
+            car_reading(3600, 1000, 9000, 7360.0, 50.0),
+        ];
+        assert_eq!(compute_daily_totals(&rows).unwrap().car_grid_kwh, 0.0);
+    }
+
+    #[test]
+    fn a_long_gap_is_not_bridged_for_the_car_either() {
+        // Median interval 60 s, so a gap over 3.5x is skipped, like every other total.
+        let mut rows = Vec::new();
+        for m in 0..10 {
+            rows.push(car_reading(m * 60, -9000, 9000, 7360.0, 50.0));
+        }
+        rows.push(car_reading(9 * 60 + 7200, -9000, 9000, 7360.0, 50.0));
+        let t = compute_daily_totals(&rows).unwrap();
+        assert!(
+            (t.car_kwh - 7.36 * 9.0 / 60.0).abs() < 1e-9,
+            "{}",
+            t.car_kwh
+        );
+    }
+
+    #[test]
+    fn a_missing_car_figure_takes_its_neighbours_like_every_other_series() {
+        let rows = vec![
+            car_reading(0, -9000, 9000, 7360.0, 50.0),
+            ReadingRow {
+                car_power: None,
+                ..dummy_reading(3600, 0, 0, -9000, 9000, 50.0)
+            },
+        ];
+        let t = compute_daily_totals(&rows).unwrap();
+        assert!(t.car_enabled);
+        assert!((t.car_kwh - 7.36).abs() < 1e-9, "{}", t.car_kwh);
+    }
+
+    #[test]
+    fn the_summary_lists_home_without_the_car_and_the_car_with_its_cost() {
+        let s = settings_with_flat_import(0.25);
+        let msg = generate_daily_summary_text(&car_rows(), "2026-06-27", &s).unwrap();
+        assert!(msg.contains("🏠 Home: <b>3.3 kWh</b>"), "{msg}");
+        assert!(
+            msg.contains("🚗 Car: <b>14.7 kWh</b> — £3.68 from import"),
+            "{msg}"
+        );
+        // Import and self-sufficiency still describe the whole load.
+        assert!(msg.contains("Import: <b>18.0 kWh</b>"), "{msg}");
+    }
+
+    #[test]
+    fn the_car_is_priced_at_the_tariff_of_its_time() {
+        // On a minute boundary, so the two halves are exactly half an hour each.
+        let mut start = 1_700_000_000_i64 - 1_700_000_000_i64 % 60;
+        for _ in 0..24 {
+            let local_minutes = timestamp_to_local_minutes(start);
+            if local_minutes.is_multiple_of(60) && local_minutes < 22 * 60 {
+                break;
+            }
+            start += 60;
+        }
+        let boundary = minutes_to_hhmm(timestamp_to_local_minutes(start) + 30);
+        let rows = vec![
+            car_reading(start, -9000, 9000, 7360.0, 50.0),
+            car_reading(start + 3600, -9000, 9000, 7360.0, 50.0),
+        ];
+        let settings = crate::settings::Settings {
+            import_tariff: 0.10,
+            import_tariff_config: Some(crate::settings::TariffConfig {
+                slots: vec![
+                    crate::settings::TariffSlot {
+                        start: "00:00".into(),
+                        end: boundary.clone(),
+                        rate: 0.10,
+                    },
+                    crate::settings::TariffSlot {
+                        start: boundary,
+                        end: "23:59".into(),
+                        rate: 0.30,
+                    },
+                ],
+            }),
+            ..crate::settings::Settings::default()
+        };
+        let msg = generate_daily_summary_text(&rows, "2026-06-27", &settings).unwrap();
+        // 3.68 kWh at 10p + 3.68 kWh at 30p.
+        assert!(msg.contains("— £1.47 from import"), "{msg}");
+    }
+
+    #[test]
+    fn a_day_with_no_car_minutes_says_so_rather_than_hiding_the_line() {
+        // The feature is on but the car didn't charge: a Car line of zero.
+        let rows = vec![
+            car_reading(0, -1000, 1000, 0.0, 50.0),
+            car_reading(3600, -1000, 1000, 0.0, 60.0),
+        ];
+        let s = settings_with_flat_import(0.25);
+        let msg = generate_daily_summary_text(&rows, "2026-06-27", &s).unwrap();
+        assert!(
+            msg.contains("🚗 Car: <b>0.0 kWh</b> — £0.00 from import"),
+            "{msg}"
+        );
+        assert!(msg.contains("🏠 Home: <b>1.0 kWh</b>"), "{msg}");
+    }
+
+    #[test]
+    fn the_html_report_adds_the_car_only_when_there_is_one() {
+        let html = generate_daily_report_html(&car_rows(), "2026-06-27").unwrap();
+        assert!(html.contains("<span>Home consumed</span>"));
+        assert!(html.contains("<span>Of Which Car Charging</span>"));
+        assert!(html.contains("<th>Car</th>"));
+        assert!(html.contains("Peak car charging"));
+        let plain = generate_daily_report_html(&import_rows(), "2026-06-27").unwrap();
+        assert!(!plain.contains("Car"), "no car text without car data");
+    }
+
+    #[test]
+    fn car_and_house_add_up_to_the_load_in_every_hour_bucket() {
+        let rows = car_rows();
+        let integrated = integrate_daily_rows(&rows).unwrap();
+        for b in integrated.buckets.values() {
+            assert!(b.car_kwh <= b.home_kwh + 1e-12);
+            assert!((b.car_kwh + b.house_kwh() - b.home_kwh).abs() < 1e-12);
+        }
+        assert!((integrated.peak_car_w - 7360.0).abs() < 1e-9);
     }
 }

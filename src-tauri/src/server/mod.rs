@@ -215,6 +215,7 @@ fn create_router_at(
         )
         .route("/api/history", get(api::get_history))
         .route("/api/history/summary", get(api::get_history_summary))
+        .route("/api/history/car-today", get(api::get_car_today))
         // Daily per-module battery health summary (issue #393).
         .route("/api/battery-health", get(api::get_battery_health))
         .route(

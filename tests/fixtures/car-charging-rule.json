@@ -1,0 +1,22 @@
+{
+  "about": "Inputs and expected car power for the car-charging rule (issue #454). Read by history/car_charging.rs (Rust) and tests/lib/carCharging.test.ts (TypeScript) so the two implementations cannot drift. grid_v null means the minute had no usable voltage.",
+  "cases": [
+    { "name": "below threshold", "home_w": 2999, "grid_v": 230, "threshold_w": 3000, "amps": 32, "expected_w": 0 },
+    { "name": "exactly at threshold is not the car", "home_w": 3000, "grid_v": 230, "threshold_w": 3000, "amps": 32, "expected_w": 0 },
+    { "name": "just above threshold is capped at home power", "home_w": 3001, "grid_v": 230, "threshold_w": 3000, "amps": 32, "expected_w": 3001 },
+    { "name": "full block at the measured voltage", "home_w": 9000, "grid_v": 231, "threshold_w": 3000, "amps": 32, "expected_w": 7392 },
+    { "name": "no voltage falls back to 230 V", "home_w": 9000, "grid_v": null, "threshold_w": 3000, "amps": 32, "expected_w": 7360 },
+    { "name": "zero voltage falls back", "home_w": 9000, "grid_v": 0, "threshold_w": 3000, "amps": 32, "expected_w": 7360 },
+    { "name": "voltage under range falls back", "home_w": 9000, "grid_v": 179.9, "threshold_w": 3000, "amps": 32, "expected_w": 7360 },
+    { "name": "voltage over range falls back", "home_w": 9000, "grid_v": 280.1, "threshold_w": 3000, "amps": 32, "expected_w": 7360 },
+    { "name": "voltage at the top of the range is used", "home_w": 9000, "grid_v": 280, "threshold_w": 3000, "amps": 32, "expected_w": 8960 },
+    { "name": "voltage at the bottom of the range is used", "home_w": 9000, "grid_v": 180, "threshold_w": 3000, "amps": 32, "expected_w": 5760 },
+    { "name": "block larger than the load is capped", "home_w": 5000, "grid_v": 240, "threshold_w": 3000, "amps": 32, "expected_w": 5000 },
+    { "name": "16 A charger", "home_w": 9000, "grid_v": 230, "threshold_w": 3000, "amps": 16, "expected_w": 3680 },
+    { "name": "zero load", "home_w": 0, "grid_v": 230, "threshold_w": 3000, "amps": 32, "expected_w": 0 },
+    { "name": "negative load", "home_w": -5, "grid_v": 230, "threshold_w": 3000, "amps": 32, "expected_w": 0 },
+    { "name": "7.4 kW threshold, at it", "home_w": 7400, "grid_v": 240, "threshold_w": 7400, "amps": 32, "expected_w": 0 },
+    { "name": "7.4 kW threshold, just over", "home_w": 7401, "grid_v": 240, "threshold_w": 7400, "amps": 32, "expected_w": 7401 },
+    { "name": "7.4 kW threshold, house on top of the car", "home_w": 10700, "grid_v": 240, "threshold_w": 7400, "amps": 32, "expected_w": 7680 }
+  ]
+}

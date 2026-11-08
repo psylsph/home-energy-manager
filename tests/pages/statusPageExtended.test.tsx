@@ -83,6 +83,7 @@ function resetStore() {
     evcStale: false,
     evcLastSuccessAtEpochMs: null,
     evcAgeSeconds: null,
+    carCharging: {},
   });
 }
 
@@ -235,6 +236,77 @@ describe('StatusPage — EVC prop forwarding', () => {
     render(<StatusPage />);
     const props = orbitProps.mock.calls[0][0] as Record<string, unknown>;
     expect(props.showEvc).toBe(false);
+  });
+});
+
+describe('StatusPage — estimated car charging post (issue #454)', () => {
+  const props = () => orbitProps.mock.calls[0][0] as Record<string, unknown>;
+
+  it('shows the post from the estimate when a threshold is set and no charger is configured', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ home_power: 9000, grid_voltage: 240 }),
+      connectionState: 'connected',
+      evcHost: '',
+      carCharging: { forecast_exclude_load_above_kw: 3 },
+    });
+    render(<StatusPage />);
+    expect(props()).toMatchObject({ showEvc: true, evcEstimated: true, evcPower: 7680, evcCharging: true });
+  });
+
+  it('uses the saved charger current', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ home_power: 9000, grid_voltage: 240 }),
+      connectionState: 'connected',
+      carCharging: { forecast_exclude_load_above_kw: 3, car_charger_current_a: 16 },
+    });
+    render(<StatusPage />);
+    expect(props()).toMatchObject({ evcPower: 3840 });
+  });
+
+  it('shows the post idle while the load is under the threshold', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ home_power: 800 }),
+      connectionState: 'connected',
+      carCharging: { forecast_exclude_load_above_kw: 3 },
+    });
+    render(<StatusPage />);
+    expect(props()).toMatchObject({ showEvc: true, evcEstimated: true, evcPower: 0, evcCharging: false });
+  });
+
+  it('shows no post without a threshold, as before', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ home_power: 9000 }),
+      connectionState: 'connected',
+      carCharging: {},
+    });
+    render(<StatusPage />);
+    expect(props().showEvc).toBe(false);
+    expect(props().evcEstimated).toBeFalsy();
+  });
+
+  it('shows no post for a threshold of 0', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ home_power: 9000 }),
+      connectionState: 'connected',
+      carCharging: { forecast_exclude_load_above_kw: 0 },
+    });
+    render(<StatusPage />);
+    expect(props().showEvc).toBe(false);
+  });
+
+  it('leaves a configured charger to report its own measured power', () => {
+    useInverterStore.setState({
+      snapshot: makeSnapshot({ home_power: 9000 }),
+      connectionState: 'connected',
+      evcHost: '10.0.0.99',
+      evcPower: 6500,
+      evcCharging: true,
+      evcConnected: true,
+      carCharging: { forecast_exclude_load_above_kw: 3 },
+    });
+    render(<StatusPage />);
+    expect(props()).toMatchObject({ showEvc: true, evcPower: 6500 });
+    expect(props().evcEstimated).toBeFalsy();
   });
 });
 

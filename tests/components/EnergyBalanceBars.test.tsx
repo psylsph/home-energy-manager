@@ -1,6 +1,12 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import EnergyBalanceBars from '../../src/components/EnergyBalanceBars';
+
+// The car split comes from the backend; each test sets what it returns.
+let carToday: number | null = null;
+vi.mock('../../src/hooks/useCarToday', () => ({
+  useCarToday: () => carToday,
+}));
 import type { InverterSnapshot } from '../../src/lib/types';
 
 /**
@@ -25,6 +31,9 @@ function snapshot(over: Partial<InverterSnapshot> = {}): InverterSnapshot {
 const tid = (id: string) => screen.getByTestId(id);
 
 describe('<EnergyBalanceBars/>', () => {
+  beforeEach(() => {
+    carToday = null;
+  });
   afterEach(() => {
     cleanup();
   });
@@ -352,5 +361,53 @@ describe('<EnergyBalanceBars/>', () => {
     renderBalance(snapshot({ device_type_code: code }));
     const t = screen.getByRole('button', { name: "More about Today's Energy Balance" });
     expect(document.getElementById(t.getAttribute('aria-describedby')!)!.textContent).not.toContain("isn't measured");
+  });
+
+  describe('car charging split (issue #454)', () => {
+    const labels = (container: HTMLElement) => fillPairs(container).map((p) => p[0]);
+
+    it('is unchanged when the backend reports no car', () => {
+      const { container } = renderBalance(snapshot({ home_energy_today_kwh: 16 }));
+      expect(labels(container)).not.toContain('Car Charging');
+    });
+
+    it('splits Car Charging out of Home Use in the Out bar', () => {
+      carToday = 10.4;
+      const { container } = renderBalance(snapshot({ home_energy_today_kwh: 16 }));
+      const pairs = fillPairs(container);
+      expect(pairs.find((p) => p[0] === 'Home Use')![1]).toBe('5.6kWh');
+      expect(pairs.find((p) => p[0] === 'Car Charging')![1]).toBe('10.4kWh');
+    });
+
+    it('fills the car segment from its own theme variables', () => {
+      carToday = 10.4;
+      const { container } = renderBalance(snapshot({ home_energy_today_kwh: 16 }));
+      const fill = [...container.querySelectorAll<HTMLElement>('[data-testid="balance-fill"]')]
+        .find((f) => f.textContent?.includes('Car Charging'))!;
+      expect(fill.style.backgroundColor).toBe('var(--app-fill-car)');
+      expect(fill.style.color).toBe('var(--app-on-car)');
+    });
+
+    it('draws no car fill for a day with no car', () => {
+      carToday = 0;
+      const { container } = renderBalance(snapshot({ home_energy_today_kwh: 16 }));
+      expect(labels(container)).not.toContain('Car Charging');
+      expect(fillPairs(container).find((p) => p[0] === 'Home Use')![1]).toBe('16.0kWh');
+    });
+
+    it('says in the ⓘ that the car is an estimate', () => {
+      carToday = 10.4;
+      renderBalance(snapshot({ home_energy_today_kwh: 16 }));
+      const tip = screen.getByRole('button', { name: "More about Today's Energy Balance" });
+      const text = document.getElementById(tip.getAttribute('aria-describedby')!)!.textContent;
+      expect(text).toMatch(/Car Charging is an estimate/);
+    });
+
+    it('does not mention the car in the ⓘ without one', () => {
+      renderBalance(snapshot({ home_energy_today_kwh: 16 }));
+      const tip = screen.getByRole('button', { name: "More about Today's Energy Balance" });
+      const text = document.getElementById(tip.getAttribute('aria-describedby')!)!.textContent;
+      expect(text).not.toMatch(/Car Charging/);
+    });
   });
 });

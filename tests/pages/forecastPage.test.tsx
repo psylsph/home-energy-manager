@@ -1266,51 +1266,6 @@ describe('ForecastPage min SOC input', () => {
     });
   });
 
-  it('shows the saved load threshold and saves a new one without remounting the field', async () => {
-    // The settings read returns whatever was saved last, as the backend does.
-    let saved: number | null = 3.5;
-    apiGetMock.mockImplementation(async (path: string) => {
-      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
-      if (path === '/api/forecast/plan') return planPayload('no_plan');
-      if (path === '/api/settings') {
-        return { ok: true, data: { forecast_exclude_load_above_kw: saved } };
-      }
-      return { ok: true, data: {} };
-    });
-    apiPostMocked.mockImplementation(async (_path: string, body?: unknown) => {
-      const b = body as { forecast_exclude_load_above_kw?: number | null };
-      if (b && 'forecast_exclude_load_above_kw' in b) saved = b.forecast_exclude_load_above_kw ?? null;
-      return { ok: true };
-    });
-    render(<ForecastPage />);
-    await waitFor(() => {
-      expect(
-        (screen.getByTestId('forecast-load-above-input') as HTMLInputElement).value,
-      ).toBe('3.5');
-    });
-    const input = screen.getByTestId('forecast-load-above-input') as HTMLInputElement;
-    const settingsReads = () =>
-      apiGetMock.mock.calls.filter((c) => c[0] === '/api/settings').length;
-    const readsBefore = settingsReads();
-    input.focus();
-    fireEvent.change(input, { target: { value: '5' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
-    await waitFor(() => {
-      expect(apiPostMocked).toHaveBeenCalledWith('/api/settings', {
-        forecast_exclude_load_above_kw: 5,
-      });
-    });
-    // The save refetches settings carrying the new value; the field is not
-    // remounted, so it keeps its element, text and focus.
-    await waitFor(() => expect(settingsReads()).toBeGreaterThan(readsBefore));
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 20));
-    });
-    expect(screen.getByTestId('forecast-load-above-input')).toBe(input);
-    expect(input.value).toBe('5');
-    expect(document.activeElement).toBe(input);
-  });
-
   it('rejects a blank minimum SOC without posting or changing the floor', async () => {
     apiGetMock.mockImplementation(async (path: string) => {
       if (path === '/api/forecast') return { ok: true, data: fullPayload() };
@@ -1377,6 +1332,27 @@ describe('ForecastPage planner strategy (issue #359)', () => {
       return { ok: true, data: {} };
     });
   };
+
+  it('shows the car charging threshold read-only, pointing to Settings', async () => {
+    mockPage(planPayload('charge'), { forecast_min_soc_pct: 20, forecast_exclude_load_above_kw: 7.4 });
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-car-threshold');
+    await waitFor(() => expect(row.textContent).toMatch(/7\.4 kW/));
+    expect(row.textContent).toMatch(/Car Charging Threshold/);
+    expect(row.querySelector('input')).toBeNull();
+    const tip = within(row).getByRole('button', { name: 'More about Car Charging Threshold' });
+    const text = document.getElementById(tip.getAttribute('aria-describedby')!)!.textContent;
+    expect(text).toMatch(/Settings/);
+    expect(text).toMatch(/EV Charger/);
+  });
+
+  it('shows the car charging threshold as Off when none is set', async () => {
+    mockPage(planPayload('charge'), { forecast_min_soc_pct: 20 });
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-car-threshold');
+    await waitFor(() => expect(row.textContent).toMatch(/Off/));
+    expect(screen.queryByTestId('forecast-load-above-input')).toBeNull();
+  });
 
   it('defaults the strategy to keeping a minimum when none is saved', async () => {
     mockPage(planPayload('charge'));

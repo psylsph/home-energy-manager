@@ -1891,6 +1891,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // Home load above this is left out of the consumption profile
             // as EV charging (issue #400); null keeps all load.
             "forecast_exclude_load_above_kw": settings.forecast_exclude_load_above_kw,
+            // Charger current for the car-charging estimate (issue #454).
+            "car_charger_current_a": settings.car_charger_current_a,
             // Nightly auto-refresh of the Forecast plan's charge slot:
             // re-sizes slot 1 from the live SOC before each cheap period.
             "forecast_plan_auto_refresh": settings.forecast_plan_auto_refresh,
@@ -2255,15 +2257,32 @@ pub async fn update_settings(
             persist.forecast_exclude_load_above_kw = match value {
                 Value::Null => None,
                 v => match v.as_f64() {
-                    Some(kw) if (1.0..=25.0).contains(&kw) => Some(kw),
+                    Some(kw)
+                        if (crate::history::car_charging::MIN_THRESHOLD_KW
+                            ..=crate::history::car_charging::MAX_THRESHOLD_KW)
+                            .contains(&kw) =>
+                    {
+                        Some(kw)
+                    }
                     _ => {
                         return Err(
-                            "Leave out load above must be between 1 and 25 kW, or empty"
+                            "Car charging threshold must be between 1 and 25 kW, or empty"
                                 .to_string(),
                         )
                     }
                 },
             };
+        }
+        if let Some(value) = body.get("car_charger_current_a") {
+            persist.car_charger_current_a = value
+                .as_u64()
+                .filter(|a| {
+                    (u64::from(crate::history::car_charging::MIN_CHARGER_AMPS)
+                        ..=u64::from(crate::history::car_charging::MAX_CHARGER_AMPS))
+                        .contains(a)
+                })
+                .map(|a| a as u16)
+                .ok_or_else(|| "Charger current must be between 6 and 80 A".to_string())?;
         }
         if let Some(v) = body
             .get("forecast_plan_auto_refresh")
@@ -2678,6 +2697,12 @@ fn settings_log_fields(
             Some(kw) => format!("forecast_exclude_load_above={kw}kW"),
             None => "forecast_exclude_load_above=off".to_string(),
         });
+    }
+    if is_present("car_charger_current_a") {
+        out.push(format!(
+            "car_charger_current={}A",
+            persist.car_charger_current_a
+        ));
     }
     if is_present("forecast_plan_strategy") {
         let strategy = serde_json::to_value(persist.forecast_plan_strategy)
@@ -6687,6 +6712,37 @@ fn resolve_history_summary_window(
     Ok((window, bucket_secs))
 }
 
+/// GET /api/history/car-today — the car's estimated energy since local
+/// midnight, for the Status page's Today bars (issue #454).
+///
+/// `{ ok, data: { enabled, car_kwh } }`; `enabled` is false, and `car_kwh`
+/// null, when no car-charging threshold is set. Worked out from the minute
+/// rows (the counters can't be split), so a polled charger's measured power
+/// replaces the estimate for the minutes it covered.
+pub async fn get_car_today(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let settings = crate::settings::Settings::load_async().await;
+    let Some(cfg) = crate::history::car_charging::CarChargingConfig::from_settings(&settings)
+    else {
+        return (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "data": { "enabled": false, "car_kwh": null } })),
+        );
+    };
+    let history_db = state.history.lock().await.clone();
+    let Some(db) = history_db else {
+        return server_error("History database not available");
+    };
+    let now = chrono::Utc::now().timestamp();
+    match tokio::task::spawn_blocking(move || db.car_kwh_today(&cfg, now)).await {
+        Ok(Ok(kwh)) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "data": { "enabled": true, "car_kwh": kwh } })),
+        ),
+        Ok(Err(error)) => error_response(&error),
+        Err(error) => error_response(&format!("Car today query join error: {error}")),
+    }
+}
+
 /// GET /api/history — aggregated time-series data for charts.
 ///
 /// Query params: `range`, `fields`, `offset`, `rolling`, optional `start_ms`/`end_ms`.
@@ -6749,7 +6805,8 @@ pub async fn get_history(
     // to a flat single-slot config built from the legacy scalar rate.
     // Issue #131: also carry the import-side Standing Charge (pence/day)
     // so the cost series includes the daily fixed component.
-    let cost_cfgs = if want_any_import_cost || want_export_income {
+    let want_car_cost = fields.iter().any(|f| f == crate::history::CAR_COST_FIELD);
+    let cost_cfgs = if want_any_import_cost || want_export_income || want_car_cost {
         let s = crate::settings::Settings::load_async().await;
         let import_cfg = s
             .import_tariff_config
@@ -6766,6 +6823,21 @@ pub async fn get_history(
             s.export_tariff,
             s.import_standing_charge_p_per_day,
         ))
+    } else {
+        None
+    };
+
+    // The derived car-charging series need the threshold and charger current
+    // (issue #454). Read once per request so a half-saved pair can't mix; with
+    // no threshold set there is no config and those series are omitted.
+    let car_cfg = if want_car_cost
+        || fields.iter().any(|f| {
+            crate::history::car_charging::is_car_field(f)
+                || crate::history::car_charging::is_car_energy_field(f)
+        }) {
+        crate::history::car_charging::CarChargingConfig::from_settings(
+            &crate::settings::Settings::load_async().await,
+        )
     } else {
         None
     };
@@ -6790,12 +6862,13 @@ pub async fn get_history(
                     let mut data = if normal_fields.is_empty() {
                         serde_json::Map::new()
                     } else {
-                        db.query_history(
+                        db.query_history_with_car(
                             window.range_secs,
                             bucket_secs,
                             window.offset,
                             &normal_fields,
                             window.explicit_window,
+                            car_cfg.as_ref(),
                         )?
                     };
 
@@ -6859,6 +6932,23 @@ pub async fn get_history(
                                     .collect();
                                 data.insert(
                                     crate::history::IMPORT_STANDING_CHARGE_FIELD.to_string(),
+                                    serde_json::to_value(&series).unwrap_or(Value::Null),
+                                );
+                            }
+                        }
+                        // The car's running cost (issue #454): only with a
+                        // threshold set, priced like the import cost.
+                        if want_car_cost {
+                            if let Some(cfg) = &car_cfg {
+                                let series = db.query_car_cost_series(
+                                    &window,
+                                    bucket_secs,
+                                    cfg,
+                                    import_cfg,
+                                    *flat_import,
+                                )?;
+                                data.insert(
+                                    crate::history::CAR_COST_FIELD.to_string(),
                                     serde_json::to_value(&series).unwrap_or(Value::Null),
                                 );
                             }
@@ -6934,6 +7024,7 @@ pub async fn get_history_summary(
     let standing_charge_p_per_day = settings.import_standing_charge_p_per_day.max(0.0);
     let flat_import = settings.import_tariff;
     let flat_export = settings.export_tariff;
+    let car_cfg = crate::history::car_charging::CarChargingConfig::from_settings(&settings);
 
     let history_db = state.history.lock().await.clone();
     let Some(db) = history_db else {
@@ -6942,6 +7033,15 @@ pub async fn get_history_summary(
 
     let result = tokio::task::spawn_blocking(move || {
         let energy = db.query_energy_summary(&window)?;
+        // The car's share of the home figure (issue #454); null when the
+        // feature is off. `home_consumed_kwh` stays the total.
+        // One walk gives the energy and what it cost (part of the import cost
+        // below), the same as the Power page's report.
+        let car_cost = match &car_cfg {
+            Some(cfg) => Some(db.car_cost_in_window(&window, cfg, &import_tariff, flat_import)?),
+            None => None,
+        };
+        let car_kwh = car_cost.map(|c| c.kwh);
         let import_series = db.query_cost_series(
             &window,
             bucket_secs,
@@ -6981,6 +7081,9 @@ pub async fn get_history_summary(
                 "grid_imported_kwh": energy.grid_imported_kwh,
                 "grid_exported_kwh": energy.grid_exported_kwh,
                 "home_consumed_kwh": energy.home_consumed_kwh,
+                "car_kwh": car_kwh,
+                "car_cost_gbp": car_cost.map(|c| c.cost_gbp),
+                "car_grid_kwh": car_cost.map(|c| c.grid_kwh),
                 "import_cost_gbp": import_cost_gbp,
                 "export_income_gbp": export_income_gbp,
                 "net_cost_gbp": net_cost_gbp
@@ -7047,6 +7150,7 @@ pub async fn get_report(
     let standing_charge_p_per_day = s.import_standing_charge_p_per_day.max(0.0);
     let flat_import = s.import_tariff;
     let flat_export = s.export_tariff;
+    let car_cfg = crate::history::car_charging::CarChargingConfig::from_settings(&s);
 
     let history_db = state.history.lock().await.clone();
     let Some(db) = history_db else {
@@ -7091,11 +7195,21 @@ pub async fn get_report(
             .unwrap_or(standing_charge_p_per_day / 100.0);
         let export_income_gbp = export_series.last().map(|p| p.v).unwrap_or(0.0);
         let net_cost_gbp = import_cost_gbp - export_income_gbp;
+        // The car's cost (issue #454): its grid-sourced energy priced at the
+        // import rate of the moment, worked out per reading so a wide window
+        // can't blur a night-rate charge. Null when the feature is off. It is
+        // part of `import_cost_gbp`, not on top of it.
+        let car_cost = match &car_cfg {
+            Some(cfg) => Some(db.car_cost_in_window(&window, cfg, &import_tariff, flat_import)?),
+            None => None,
+        };
         Ok::<_, String>(serde_json::json!({
             "ok": true,
             "import_cost_gbp": import_cost_gbp,
             "export_income_gbp": export_income_gbp,
             "net_cost_gbp": net_cost_gbp,
+            "car_cost_gbp": car_cost.map(|c| c.cost_gbp),
+            "car_grid_kwh": car_cost.map(|c| c.grid_kwh),
             "standing_charge_gbp": standing_charge_gbp,
             "days_in_range": days_in_range,
             "standing_charge_p_per_day": standing_charge_p_per_day,
@@ -7321,6 +7435,12 @@ pub async fn set_alerts(
         .and_then(|v| v.as_bool())
     {
         candidate.soc_anomaly_alert_enabled = v;
+    }
+    if let Some(v) = body
+        .get("car_charging_alert_enabled")
+        .and_then(|v| v.as_bool())
+    {
+        candidate.car_charging_alert_enabled = v;
     }
     if let Some(v) = body
         .get("full_charge_alert_enabled")
@@ -20445,6 +20565,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn set_alerts_persists_the_car_charging_alert_which_is_off_by_default() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            assert!(!state.alert_config.lock().await.car_charging_alert_enabled);
+            assert!(
+                !crate::settings::Settings::load()
+                    .alerts_config
+                    .car_charging_alert_enabled
+            );
+
+            let body = serde_json::json!({ "car_charging_alert_enabled": true });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(state.alert_config.lock().await.car_charging_alert_enabled);
+            assert!(
+                crate::settings::Settings::load()
+                    .alerts_config
+                    .car_charging_alert_enabled
+            );
+
+            // Another field's save leaves it alone.
+            let body = serde_json::json!({ "full_charge_alert_enabled": false });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(state.alert_config.lock().await.car_charging_alert_enabled);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn set_alerts_persists_the_full_charge_reminder_and_checks_its_days() {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
@@ -21477,7 +21627,7 @@ pub(crate) mod tests {
                 assert!(body["error"]
                     .as_str()
                     .unwrap()
-                    .contains("Leave out load above"));
+                    .contains("Car charging threshold"));
                 assert_eq!(load(), None);
             }
 
@@ -21505,6 +21655,70 @@ pub(crate) mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(load(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_settings_validates_car_charger_current() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let amps = || crate::settings::Settings::load().car_charger_current_a;
+            assert_eq!(amps(), 32);
+
+            for bad in [
+                json!(0),
+                json!(5),
+                json!(81),
+                json!(-16),
+                json!(16.5),
+                json!("16"),
+                json!(null),
+            ] {
+                let (status, body) = update_settings(
+                    State(state.clone()),
+                    Json(json!({ "car_charger_current_a": bad })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+                assert!(body["error"].as_str().unwrap().contains("Charger current"));
+                assert_eq!(amps(), 32);
+            }
+
+            for ok in [6u16, 16, 32, 80] {
+                let (status, _) = update_settings(
+                    State(state.clone()),
+                    Json(json!({ "car_charger_current_a": ok })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(amps(), ok);
+            }
+
+            // Another field's save leaves it alone.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_min_soc_pct": 30.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(amps(), 80);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_settings_reports_car_charger_current() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "car_charger_current_a": 16 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (_, Json(body)) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["car_charger_current_a"], json!(16));
         })
         .await;
     }
@@ -22607,6 +22821,111 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn get_history_serves_car_series_only_when_a_threshold_is_set() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.0, 0.0, 0.0);
+            let start_ts = 1_700_000_040i64;
+            {
+                let guard = state.history.lock().await;
+                let db = guard.as_ref().unwrap();
+                for m in 0..3 {
+                    db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                        timestamp: start_ts + m * 60,
+                        home_power: 9000,
+                        grid_voltage: 230.0,
+                        ..Default::default()
+                    });
+                }
+            }
+            let fetch = || {
+                get_history(
+                    State(state.clone()),
+                    Query(HistoryQuery {
+                        range: Some("1h".to_string()),
+                        fields: Some("home_power,_car_power,_home_excl_car_power".to_string()),
+                        offset: Some(0),
+                        rolling: Some(true),
+                        start_ms: Some(start_ts * 1000),
+                        end_ms: Some((start_ts + 3600) * 1000),
+                    }),
+                )
+            };
+
+            // Off: the plain series is there, the car ones are not.
+            let (status, Json(json)) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(json["data"]["home_power"].is_array());
+            assert!(json["data"].get("_car_power").is_none());
+            assert!(json["data"].get("_home_excl_car_power").is_none());
+
+            let mut settings = crate::settings::Settings::load();
+            settings.forecast_exclude_load_above_kw = Some(3.0);
+            settings.car_charger_current_a = 16;
+            settings.save().unwrap();
+
+            let (status, Json(json)) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            let car = json["data"]["_car_power"].as_array().unwrap();
+            let house = json["data"]["_home_excl_car_power"].as_array().unwrap();
+            assert!(!car.is_empty());
+            let v = |p: &Value| p["v"].as_f64().unwrap();
+            assert!((v(&car[0]) - 16.0 * 230.0).abs() < 1e-6);
+            assert!((v(&car[0]) + v(&house[0]) - 9000.0).abs() < 1e-6);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_history_serves_the_car_cost_series_only_when_a_threshold_is_set() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+            let start_ts = 1_700_000_040i64;
+            {
+                let guard = state.history.lock().await;
+                let db = guard.as_ref().unwrap();
+                for m in 0..=30 {
+                    db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                        timestamp: start_ts + m * 60,
+                        home_power: 9000,
+                        grid_power: -9000,
+                        grid_voltage: 230.0,
+                        ..Default::default()
+                    });
+                }
+            }
+            let fetch = || {
+                get_history(
+                    State(state.clone()),
+                    Query(HistoryQuery {
+                        range: Some("1h".to_string()),
+                        fields: Some("_import_cost,_car_cost".to_string()),
+                        offset: Some(0),
+                        rolling: Some(true),
+                        start_ms: Some(start_ts * 1000),
+                        end_ms: Some((start_ts + 3600) * 1000),
+                    }),
+                )
+            };
+
+            let (status, Json(json)) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(json["data"]["_import_cost"].is_array());
+            assert!(json["data"].get("_car_cost").is_none());
+
+            let mut settings = crate::settings::Settings::load();
+            settings.forecast_exclude_load_above_kw = Some(3.0);
+            settings.save().unwrap();
+            let (status, Json(json)) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            let car = json["data"]["_car_cost"].as_array().unwrap();
+            assert!(!car.is_empty());
+            let last = car.last().unwrap()["v"].as_f64().unwrap();
+            assert!((last - 3.68 * 0.25).abs() < 1e-6, "{last}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn get_history_summary_returns_energy_for_the_explicit_window() {
         with_isolated_config_dir_async(|| async {
             let state = build_report_test_state(0.25, 0.15, 0.0);
@@ -22649,6 +22968,80 @@ pub(crate) mod tests {
             assert!((json["data"]["home_consumed_kwh"].as_f64().unwrap() - 0.25).abs() < 1e-6);
             assert!(json["data"]["import_cost_gbp"].is_number());
             assert!(json["data"]["net_cost_gbp"].is_number());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_history_summary_reports_car_kwh_only_when_a_threshold_is_set() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+            let start = 1_700_300_040i64;
+            {
+                let guard = state.history.lock().await;
+                let db = guard.as_ref().unwrap();
+                for m in 0..=30 {
+                    db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                        timestamp: start + m * 60,
+                        home_power: 9000,
+                        grid_power: -9000,
+                        grid_voltage: 230.0,
+                        ..Default::default()
+                    });
+                }
+            }
+            let fetch = || {
+                get_history_summary(
+                    State(state.clone()),
+                    Query(HistoryQuery {
+                        range: Some("1h".to_string()),
+                        fields: None,
+                        offset: Some(0),
+                        rolling: Some(true),
+                        start_ms: Some(start * 1000),
+                        end_ms: Some((start + 3600) * 1000),
+                    }),
+                )
+            };
+
+            let (status, Json(json)) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(json["data"]["car_kwh"].is_null());
+            assert!(json["data"]["car_cost_gbp"].is_null());
+            assert!(json["data"]["car_grid_kwh"].is_null());
+
+            let mut settings = crate::settings::Settings::load();
+            settings.forecast_exclude_load_above_kw = Some(3.0);
+            settings.save().unwrap();
+            let (status, Json(json)) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            // 30 minutes of a 32 A x 230 V block.
+            let kwh = json["data"]["car_kwh"].as_f64().unwrap();
+            assert!((kwh - 7.36 / 2.0).abs() < 1e-6, "{kwh}");
+            // All imported at the 25p the test state is priced at.
+            assert!((json["data"]["car_grid_kwh"].as_f64().unwrap() - 3.68).abs() < 1e-6);
+            assert!((json["data"]["car_cost_gbp"].as_f64().unwrap() - 3.68 * 0.25).abs() < 1e-6);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_car_today_is_off_without_a_threshold_and_zero_with_no_readings() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+
+            let (status, Json(json)) = get_car_today(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["data"]["enabled"], json!(false));
+            assert!(json["data"]["car_kwh"].is_null());
+
+            let mut settings = crate::settings::Settings::load();
+            settings.forecast_exclude_load_above_kw = Some(3.0);
+            settings.save().unwrap();
+            let (status, Json(json)) = get_car_today(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["data"]["enabled"], json!(true));
+            assert_eq!(json["data"]["car_kwh"].as_f64(), Some(0.0));
         })
         .await;
     }
@@ -22724,6 +23117,57 @@ pub(crate) mod tests {
                 json["error"].as_str().unwrap_or("").contains("timestamp"),
                 "got: {json}"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_prices_the_car_separately_only_when_a_threshold_is_set() {
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 0.0);
+            let start = 1_700_300_040i64;
+            {
+                let guard = state.history.lock().await;
+                let db = guard.as_ref().unwrap();
+                for m in 0..=30 {
+                    db.insert_reading(&crate::inverter::model::InverterSnapshot {
+                        timestamp: start + m * 60,
+                        home_power: 9000,
+                        grid_power: -9000,
+                        grid_voltage: 230.0,
+                        ..Default::default()
+                    });
+                }
+            }
+            let fetch = || {
+                get_report(
+                    State(state.clone()),
+                    Query(HistoryQuery {
+                        range: Some("1h".to_string()),
+                        fields: None,
+                        offset: Some(0),
+                        rolling: Some(true),
+                        start_ms: Some(start * 1000),
+                        end_ms: Some((start + 3600) * 1000),
+                    }),
+                )
+            };
+
+            let (status, json) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(json["car_cost_gbp"].is_null(), "{:?}", json.0);
+            assert!(json["car_grid_kwh"].is_null());
+
+            let mut settings = crate::settings::Settings::load();
+            settings.forecast_exclude_load_above_kw = Some(3.0);
+            settings.save().unwrap();
+            let (status, json) = fetch().await;
+            assert_eq!(status, StatusCode::OK);
+            // 30 minutes of a 7.36 kW block, all imported, at 25p.
+            let kwh = json["car_grid_kwh"].as_f64().unwrap();
+            assert!((kwh - 3.68).abs() < 1e-6, "{:?}", json.0);
+            let cost = json["car_cost_gbp"].as_f64().unwrap();
+            assert!((cost - 3.68 * 0.25).abs() < 1e-6, "{:?}", json.0);
         })
         .await;
     }

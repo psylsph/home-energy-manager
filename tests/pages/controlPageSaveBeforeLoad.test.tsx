@@ -139,7 +139,9 @@ const cases: SectionCase[] = [
   {
     name: 'Load Discharge Limiter',
     path: '/api/load-limiter',
-    save: () => within(heading('Load Discharge Limiter')).getByRole('button', { name: SAVE }),
+    // The title sits in a wrapper with its ⓘ, so the section is one level up.
+    save: () =>
+      within(heading('Load Discharge Limiter').parentElement as HTMLElement).getByRole('button', { name: SAVE }),
     posts: '/api/load-limiter',
     loaded: { enabled: true, threshold_w: 3500, trigger_delay_minutes: 7 },
   },

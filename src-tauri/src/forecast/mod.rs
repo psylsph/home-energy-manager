@@ -307,11 +307,19 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         })
         .unwrap_or_default();
     // EV charging is left out (issue #400): the charger's recorded power
-    // where HEM has it, else the Octopus dispatches that ran (issue #406),
-    // then load above the user's threshold.
+    // where HEM has it, else the car-charging threshold's estimate (issue
+    // #454), else the Octopus dispatches that ran (issue #406).
     let ev_minutes = inputs
         .db
         .map(|db| db.evc_power_minutes_since(since_ts).unwrap_or_default())
+        .unwrap_or_default();
+    // The user's car-charging threshold (issue #454) takes out the estimated
+    // car in the minutes the charger did not record: the same rule, and the
+    // same minutes, History and the reports use.
+    let block_minutes = inputs
+        .db
+        .zip(crate::history::car_charging::CarChargingConfig::from_settings(inputs.settings))
+        .map(|(db, cfg)| db.car_block_minutes_or_warn(&cfg, since_ts))
         .unwrap_or_default();
     let logged_dispatches = inputs
         .db
@@ -324,8 +332,8 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
         &rows,
         &ConsumptionExclusions {
             ev_minutes: &ev_minutes,
+            block_minutes: &block_minutes,
             dispatches: &logged_dispatches,
-            load_above_kw: inputs.settings.forecast_exclude_load_above_kw,
         },
     );
     let dispatch_log_since = inputs.db.and_then(|db| db.dispatch_log_since());
@@ -524,8 +532,8 @@ enum CarInProfile {
     /// dispatch log covers all of it, so the car was taken out: add its
     /// planned energy in full.
     Removed,
-    /// Only the "leave out load above" threshold trims it, which leaves up
-    /// to the threshold of the car in each heavy hour: add just the car
+    /// Only the car-charging threshold's estimate trims it. A taper under the
+    /// threshold, or a slow start, stays in the profile: add just the car
     /// energy above each hour's own load.
     Trimmed,
     /// Nothing takes it out: add none of it.
@@ -546,9 +554,10 @@ fn car_in_profile(
     dispatch_log_since: Option<i64>,
     logged: &[LoggedDispatch],
 ) -> CarInProfile {
-    let threshold = settings
-        .forecast_exclude_load_above_kw
-        .is_some_and(|kw| kw.is_finite() && kw > 0.0);
+    // The same test the profile uses to take the car out, so the two cannot
+    // disagree about a threshold the estimate ignores.
+    let threshold =
+        crate::history::car_charging::CarChargingConfig::from_settings(settings).is_some();
     let logged_throughout = match (dispatch_log_since, profile.history_start) {
         (Some(since), Some(start)) => {
             since <= start
@@ -1463,7 +1472,7 @@ mod tests {
     }
 
     /// Issue #400: the charger's recorded power comes out of the profile,
-    /// and the threshold clips load where there's no charger data.
+    /// and the estimated car (issue #454) where there's no charger data.
     #[test]
     fn ev_charging_is_left_out_of_the_consumption_prediction() {
         let db = test_db();
@@ -1498,15 +1507,45 @@ mod tests {
         assert!((payload.consumption_tomorrow_kwh - 11.7).abs() < 1e-6);
         assert!((payload.consumption_excluded_ev_kwh - 7.0 * 0.3).abs() < 1e-6);
 
-        // Load above 0.4 kW is clipped in every other hour; 18:00 has the
-        // charger's own figure, so it isn't clipped as well.
+        // The car-charging threshold takes out the estimated car (issue #454):
+        // every day the house load went over 3 kW for the hour from 12:00,
+        // at a 230 V single-phase block, but only where the charger did not
+        // record the minute. 18:00 has the charger's own figure, so it is not
+        // estimated as well.
+        let mut date = now.date_naive() - chrono::Duration::days(7);
+        while date < now.date_naive() {
+            let start = Local
+                .from_local_datetime(&date.and_hms_opt(12, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp();
+            for m in 0..60 {
+                // Only home_power is set, so these rows add no counter data;
+                // 30 s in, so they don't replace the seeded 12:00 counter row.
+                db.insert_reading(&InverterSnapshot {
+                    timestamp: start + 30 + m * 60,
+                    home_power: 9000,
+                    grid_voltage: 230.0,
+                    ..Default::default()
+                });
+            }
+            date = date.succ_opt().unwrap();
+        }
         let settings = Settings {
-            forecast_exclude_load_above_kw: Some(0.4),
+            forecast_exclude_load_above_kw: Some(3.0),
             ..five_kwp_settings()
         };
         let payload = build_forecast_payload(&full_forecast_inputs(&db, None, now, &settings));
-        assert!((payload.consumption_tomorrow_kwh - (0.2 + 23.0 * 0.4)).abs() < 1e-6);
-        assert!(payload.consumption_excluded_above_kwh > 0.0);
+        // The 12:00 hour's 0.5 kWh is all car (the block is far larger).
+        assert!((payload.consumption_tomorrow_kwh - (11.7 - 0.5)).abs() < 1e-6);
+        assert!((payload.consumption_excluded_above_kwh - 7.0 * 0.5).abs() < 1e-6);
+        assert!((payload.consumption_excluded_ev_kwh - 7.0 * 0.3).abs() < 1e-6);
+
+        // Without the threshold the same rows change nothing.
+        let off = five_kwp_settings();
+        let payload = build_forecast_payload(&full_forecast_inputs(&db, None, now, &off));
+        assert!((payload.consumption_tomorrow_kwh - 11.7).abs() < 1e-6);
+        assert_eq!(payload.consumption_excluded_above_kwh, 0.0);
     }
 
     /// Issue #359: the plan the API serves and the automation applies
@@ -2148,8 +2187,8 @@ mod tests {
         }
     }
 
-    /// Settings with the "leave out load above" threshold set, which trims
-    /// the car out of the history only above the threshold.
+    /// Settings with the car-charging threshold set, which trims the car out
+    /// of the history only in the minutes over the threshold.
     fn threshold_settings() -> Settings {
         Settings {
             forecast_exclude_load_above_kw: Some(3.0),
@@ -2478,6 +2517,38 @@ mod tests {
         );
         // The chart still shows what Octopus plans for the car.
         assert_eq!(with.ev_dispatch_hours.first().map(|h| h.ev_kwh), Some(3.0));
+    }
+
+    #[test]
+    fn a_threshold_the_estimate_ignores_does_not_count_as_trimming_the_car() {
+        // A hand-edited threshold outside 1-25 kW turns the estimate off, so
+        // nothing takes the car out of the profile: its planned energy must
+        // not be treated as already partly out of it.
+        let db = test_db();
+        seed_dark_forecast_state(&db, car_now());
+        let boost = fresh(vec![car_dispatch(
+            local_ts(15, 19),
+            local_ts(15, 20),
+            "BOOST",
+            Some(3.0),
+        )]);
+        for bad in [0.5, 26.0, f64::NAN] {
+            let settings = Settings {
+                forecast_exclude_load_above_kw: Some(bad),
+                ..five_kwp_settings()
+            };
+            let payload = car_payload(&db, &settings, &boost);
+            assert!(
+                !payload.ev_dispatch_net_of_profile,
+                "{bad}: the threshold does nothing, so the car is not 'trimmed'"
+            );
+            assert!(
+                payload
+                    .status
+                    .contains(&"dispatch_load_not_added".to_string()),
+                "{bad}: and with nothing taking the car out, none of it is added"
+            );
+        }
     }
 
     #[test]

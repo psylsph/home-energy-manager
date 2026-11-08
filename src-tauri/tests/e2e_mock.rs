@@ -942,6 +942,16 @@ async fn history_summary_route_is_wired() {
 }
 
 #[tokio::test]
+async fn car_today_route_is_wired_and_off_without_a_threshold() {
+    let router = fresh_router();
+    let (status, body) = get_json(&router, "/api/history/car-today").await;
+    // No threshold is set, so the handler answers before it needs a database.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["enabled"], false);
+    assert!(body["data"]["car_kwh"].is_null());
+}
+
+#[tokio::test]
 async fn history_routes_validate_bounds_over_http_before_opening_database() {
     let router = fresh_router();
     let routes = ["/api/history", "/api/history/summary", "/api/report"];

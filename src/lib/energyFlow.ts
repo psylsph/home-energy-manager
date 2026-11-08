@@ -335,6 +335,9 @@ export function buildEnergyFlows(
     ev: FLOW_COLORS.ev,
   };
   const spokeColor = (from: FlowNodeId, to: FlowNodeId): string => {
+    // The spoke to the car is the EV's own colour, like the node it ends at
+    // and the charge post in the house view, not the home blue it starts from.
+    if (to === 'ev') return COLOUR_BY_IDENTITY.ev;
     if (from === 'solar' || to === 'solar') return COLOUR_BY_IDENTITY.solar;
     if (from === 'grid') return COLOUR_BY_IDENTITY.grid;
     if (from === 'battery' || to === 'battery') return COLOUR_BY_IDENTITY.battery;

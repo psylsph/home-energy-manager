@@ -26,6 +26,7 @@ export type BalanceSegmentKey =
   | 'grid_import'
   | 'battery_out'
   | 'home_use'
+  | 'car'
   | 'export'
   | 'battery_in';
 
@@ -61,14 +62,23 @@ function withFractions(
   return segments.map((s) => ({ ...s, fraction: s.kwh / scale }));
 }
 
-export function todayBalance(snapshot: InverterSnapshot): TodayBalance {
+/**
+ * `carKwh` is the car's estimated share of today's Home Use (issue #454),
+ * from the minute rows; `null`/`undefined` when the feature is off. It is
+ * carved out of Home Use, never more than Home Use, so the Out total (and the
+ * shared scale) stay exactly as they were.
+ */
+export function todayBalance(snapshot: InverterSnapshot, carKwh?: number | null): TodayBalance {
   const inSeed = [
     { key: 'solar' as const, label: 'Solar', kwh: counter(snapshot.today_solar_kwh) },
     { key: 'grid_import' as const, label: 'Grid Import', kwh: counter(snapshot.today_import_kwh) },
     { key: 'battery_out' as const, label: 'Battery Out', kwh: counter(snapshot.today_discharge_kwh) },
   ];
+  const homeKwh = counter(snapshot.home_energy_today_kwh);
+  const car = carKwh == null ? null : Math.min(counter(carKwh), homeKwh);
   const outSeed = [
-    { key: 'home_use' as const, label: 'Home Use', kwh: counter(snapshot.home_energy_today_kwh) },
+    { key: 'home_use' as const, label: 'Home Use', kwh: car == null ? homeKwh : homeKwh - car },
+    ...(car == null ? [] : [{ key: 'car' as const, label: 'Car Charging', kwh: car }]),
     { key: 'export' as const, label: 'Grid Export', kwh: counter(snapshot.today_export_kwh) },
     { key: 'battery_in' as const, label: 'Battery In', kwh: counter(snapshot.today_charge_kwh) },
   ];

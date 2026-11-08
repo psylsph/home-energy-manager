@@ -1,4 +1,5 @@
 import Toggle from '../../Toggle';
+import { useInverterStore } from '../../../store/useInverterStore';
 import { SettingsGroup, SettingsRow } from '../SettingsSection';
 import {
   FIELD_LABEL,
@@ -46,6 +47,12 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string; help?: string
     help: 'Checked once a day. The cells balance and the SOC reading re-anchors at full charge, so a battery held below 100% (by the charge cap, or by short winter days) slowly drifts.',
   },
   {
+    key: 'car_charging_alert_enabled',
+    label: 'Car Charging Started or Finished',
+    hint: 'Notify when the car starts and stops charging, with the energy and time',
+    help: "Needs a Car Charging Threshold: the car is the home load above it, or a GivEnergy charger's own power where HEM reads one. A session starts after three minutes of charging and ends after ten without, so a pause between slots doesn't send a second message.",
+  },
+  {
     key: 'connection_lost_enabled',
     label: 'Connection Lost',
     hint: 'Notify when contact with the inverter is dropped and restored',
@@ -54,6 +61,8 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string; help?: string
 
 /** Which conditions alert, plus the cooldown between alerts. */
 export default function AlertTriggers({ config, update }: AlertsFormProps) {
+  // The car alert has nothing to go on without a threshold (issue #454).
+  const carThreshold = useInverterStore((s) => s.carCharging.forecast_exclude_load_above_kw);
   return (
     <SettingsGroup title="Alert Triggers & Cooldown">
       {TRIGGERS.map(({ key, label, hint, help }) => (
@@ -72,6 +81,11 @@ export default function AlertTriggers({ config, update }: AlertsFormProps) {
                 className={`${TEXT_INPUT} w-28 text-left`}
               />
             </label>
+          )}
+          {key === 'car_charging_alert_enabled' && carThreshold == null && (
+            <p className="text-amber-300 text-xs font-sans -mt-1">
+              Needs a Car Charging Threshold: set one in Settings → EV Charger.
+            </p>
           )}
           {key === 'solar_clipping_enabled' && config.solar_clipping_enabled && (
             <label className="flex items-center justify-between gap-3">

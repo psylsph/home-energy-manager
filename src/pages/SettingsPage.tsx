@@ -106,6 +106,7 @@ export default function SettingsPage() {
           flash={flash}
           initialHost={initial.evc_host ?? ''}
           initialPort={initial.evc_port ?? 502}
+          initial={initial}
         />
         <RemoteAccessSection id={S.remoteAccess} flash={flash} initial={initial} />
 

@@ -63,6 +63,12 @@ to your phone.
   long string with letters, numbers, and a colon in the middle.
 - **No notification for a specific alert** — Check that the relevant toggle
   is enabled under **Alert Triggers** (e.g. Grid Offline, Solar Clipping).
+- **No "Car Charging Started or Finished" message** — It is off by default
+  and needs a **Car Charging Threshold** (Settings → EV Charger); a
+  GivEnergy EV charger HEM reads then supplies the figure instead of the
+  estimate. A session starts after three minutes of
+  charging and ends after ten without, and at most one "started" message is
+  sent every half hour.
 
 ### Talking to your bot
 
@@ -73,7 +79,7 @@ dashboard.
 | Command | What you get back |
 |---|---|
 | `/status` | A live snapshot: solar, home, battery (power + SOC), grid, temperatures, and today's generation / import / export totals. |
-| `/today` | Today's energy totals with a peak / off-peak cost split derived from your configured tariffs and a net cost. |
+| `/today` | Today's energy totals with a peak / off-peak cost split derived from your configured tariffs and a net cost. With a Car Charging Threshold set, Home leaves out the car and a Car line shows its energy and cost. |
 | `/report` | Yesterday's full consumption report as an HTML attachment, with the same numbers as a short caption underneath. Needs at least a few hours of history to be useful. |
 | `/battery` | Overall battery state plus a per-module BMS breakdown (SOC, voltage, temperature, remaining capacity, cycle count) when the inverter reports it. |
 | `/mode` | The current battery mode, reserve and target SOC, charge / discharge rate limits, and any active automation (Cosy, Agile, auto-winter, load limiter). |

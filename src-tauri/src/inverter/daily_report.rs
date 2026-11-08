@@ -75,7 +75,8 @@ pub(crate) fn build_daily_report(
     report_date: NaiveDate,
     settings: &Settings,
 ) -> Result<Option<DailyReport>, String> {
-    let rows = db.get_readings_for_date(report_date)?;
+    let car = crate::history::car_charging::CarChargingConfig::from_settings(settings);
+    let rows = db.get_readings_for_date_with_car(report_date, car.as_ref())?;
     let date_str = report_date.format("%A %d %B %Y").to_string();
     let Some(body) = crate::alerts::report::generate_daily_report_html(&rows, &date_str) else {
         return Ok(None);
@@ -346,6 +347,45 @@ mod tests {
             &report.body[..200.min(report.body.len())]
         );
         assert!(!report.caption.is_empty());
+    }
+
+    #[test]
+    fn the_report_lists_the_car_only_with_a_threshold_set() {
+        let db = open_history();
+        let day = date(2026, 8, 30);
+        let start = Local
+            .from_local_datetime(&day.and_hms_opt(6, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp();
+        for n in 0..=60 {
+            db.insert_reading(&InverterSnapshot {
+                timestamp: start + n * 60,
+                home_power: 9000,
+                grid_power: -9000,
+                grid_voltage: 230.0,
+                soc: 50,
+                ..Default::default()
+            });
+        }
+        let off = build_daily_report(&db, day, &Settings::default())
+            .unwrap()
+            .unwrap();
+        assert!(!off.caption.contains("🚗"), "{}", off.caption);
+        assert!(!off.body.contains("Car charging"));
+
+        let on = Settings {
+            forecast_exclude_load_above_kw: Some(3.0),
+            ..Settings::default()
+        };
+        let report = build_daily_report(&db, day, &on).unwrap().unwrap();
+        // An hour of the 7.36 kW block.
+        assert!(
+            report.caption.contains("🚗 Car: <b>7.4 kWh</b>"),
+            "{}",
+            report.caption
+        );
+        assert!(report.body.contains("Of Which Car Charging"));
     }
 
     #[test]

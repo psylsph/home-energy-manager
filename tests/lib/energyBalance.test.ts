@@ -196,3 +196,68 @@ describe('balanceSummary', () => {
     expect(balanceSummary(todayBalance(snap({ device_type_code: '3001' })))).toBeNull();
   });
 });
+
+describe('todayBalance — car charging split (issue #454)', () => {
+  const base = {
+    today_solar_kwh: 12,
+    today_import_kwh: 14,
+    today_discharge_kwh: 1,
+    home_energy_today_kwh: 16,
+    today_export_kwh: 4,
+    today_charge_kwh: 7,
+  };
+  const out = (b: ReturnType<typeof todayBalance>) =>
+    Object.fromEntries(b.outSegments.map((s) => [s.key, s.kwh]));
+
+  it('is identical without a car figure', () => {
+    expect(todayBalance(snap(base), null)).toEqual(todayBalance(snap(base)));
+    expect(todayBalance(snap(base), undefined)).toEqual(todayBalance(snap(base)));
+  });
+
+  it('carves the car out of Home Use and leaves the totals alone', () => {
+    const plain = todayBalance(snap(base));
+    const split = todayBalance(snap(base), 10.4);
+    expect(split.outSegments.map((s) => [s.key, s.label])).toEqual([
+      ['home_use', 'Home Use'],
+      ['car', 'Car Charging'],
+      ['export', 'Grid Export'],
+      ['battery_in', 'Battery In'],
+    ]);
+    expect(out(split).home_use).toBeCloseTo(5.6, 9);
+    expect(out(split).car).toBeCloseTo(10.4, 9);
+    expect(split.outTotal).toBeCloseTo(plain.outTotal, 9);
+    expect(split.inTotal).toBe(plain.inTotal);
+    expect(split.scaleKwh).toBe(plain.scaleKwh);
+  });
+
+  it('keeps the segment fractions summing to the same share of the scale', () => {
+    const plain = todayBalance(snap(base));
+    const split = todayBalance(snap(base), 10.4);
+    const sum = (b: ReturnType<typeof todayBalance>) => b.outSegments.reduce((t, s) => t + s.fraction, 0);
+    expect(sum(split)).toBeCloseTo(sum(plain), 9);
+  });
+
+  it('never takes more than Home Use for the car, so nothing goes negative', () => {
+    const split = todayBalance(snap(base), 40);
+    expect(out(split).home_use).toBe(0);
+    expect(out(split).car).toBe(16);
+    expect(split.outTotal).toBeCloseTo(todayBalance(snap(base)).outTotal, 9);
+  });
+
+  it('lists a zero car as a segment that is not drawn, and keeps Home Use whole', () => {
+    const split = todayBalance(snap(base), 0);
+    expect(out(split).car).toBe(0);
+    expect(out(split).home_use).toBe(16);
+    expect(split.outSegments.find((s) => s.key === 'car')!.fraction).toBe(0);
+  });
+
+  it.each([NaN, -3, Infinity])('treats %s as no car', (bad) => {
+    const split = todayBalance(snap(base), bad);
+    expect(out(split).home_use).toBe(16);
+    expect(out(split).car).toBe(0);
+  });
+
+  it('leaves the summary line alone', () => {
+    expect(balanceSummary(todayBalance(snap(base), 10.4))).toBe(balanceSummary(todayBalance(snap(base))));
+  });
+});

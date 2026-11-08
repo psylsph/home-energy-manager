@@ -4,6 +4,7 @@ import type { BalanceSegment, BalanceSegmentKey } from '../lib/energyBalance';
 import { balanceSummary, todayBalance } from '../lib/energyBalance';
 import { formatEnergy } from '../lib/format';
 import HelpTip from './HelpTip';
+import { useCarToday } from '../hooks/useCarToday';
 
 /**
  * Today statistics as two stacked balance bars (issue #429, decision D2:
@@ -24,6 +25,7 @@ const SEGMENT_COLOR: Record<BalanceSegmentKey, string> = {
   grid_import: 'var(--app-fill-grid)',
   battery_out: 'var(--app-fill-battery)',
   home_use: 'var(--app-fill-home)',
+  car: 'var(--app-fill-car)',
   export: 'var(--app-fill-export)',
   battery_in: 'var(--app-fill-battery)',
 };
@@ -34,6 +36,7 @@ const SEGMENT_TEXT_COLOR: Record<BalanceSegmentKey, string> = {
   grid_import: 'var(--app-on-grid)',
   battery_out: 'var(--app-on-battery)',
   home_use: 'var(--app-on-home)',
+  car: 'var(--app-on-car)',
   export: 'var(--app-on-export)',
   battery_in: 'var(--app-on-battery)',
 };
@@ -86,7 +89,8 @@ function BalanceBar({ title, segments, total }: {
 }
 
 function EnergyBalanceBarsInner({ snapshot }: Props) {
-  const balance = todayBalance(snapshot);
+  const carKwh = useCarToday();
+  const balance = todayBalance(snapshot, carKwh);
   const summary = balanceSummary(balance);
   const empty = balance.inTotal === 0 && balance.outTotal === 0;
 
@@ -119,6 +123,14 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
           runs a few percent above Out from conversion and battery losses.
           Export can't be split into solar and battery, so on days the battery
           discharges the solar share is a minimum.
+          {carKwh != null && (
+            <>
+              {' '}Car Charging is an estimate taken out of Home Use: the home
+              load above your car charging threshold, as a block of the charger
+              current at the grid voltage, or a polled GivEnergy charger's own
+              power. The Out total is unchanged.
+            </>
+          )}
           {balance.acCoupledSolarUnmeasured && (
             <>
               {' '}Solar from a separate PV system isn't measured by the

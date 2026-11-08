@@ -299,6 +299,10 @@ export interface PollSettings {
    * didn't carry the field. Issue #131.
    */
   import_standing_charge_p_per_day?: number;
+  /** Home load above this (kW) is treated as the car charging (issue #454); null = off. */
+  forecast_exclude_load_above_kw?: number | null;
+  /** Charger current in amps for the car-charging estimate (issue #454). */
+  car_charger_current_a?: number;
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
   /** Authenticated Octopus customer-consumption integration (issue #212). */
@@ -445,6 +449,18 @@ export interface HistorySummary {
   grid_imported_kwh: number;
   grid_exported_kwh: number;
   home_consumed_kwh: number;
+  /**
+   * The car's share of `home_consumed_kwh`, estimated from home power above
+   * the car-charging threshold (issue #454). `null` when no threshold is set.
+   */
+  car_kwh?: number | null;
+  /**
+   * What the car's charging cost over the window, already part of
+   * `import_cost_gbp` (issue #454); `null` when no threshold is set.
+   */
+  car_cost_gbp?: number | null;
+  /** The part of the car's energy that came from the grid, which is what was priced. */
+  car_grid_kwh?: number | null;
   import_cost_gbp: number;
   export_income_gbp: number;
   net_cost_gbp: number;

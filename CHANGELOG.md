@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.0] - 2026-11-08
+
+### Added
+
+- **Car charging is split out of your home use.** Set a Car Charging Threshold and charger current under Settings → EV Charger and HEM estimates the car from the load it already records. History, the Power page, the Today bars, the daily report and Telegram `/today` show Car Charging separately from Home, and the Planner leaves it out of the consumption forecast by the same rule. A GivEnergy EV charger that HEM reads still takes priority. It's off until you set a threshold, and changing it re-works your past history.
+- **What the car cost.** The Consumption Report, History's Cost tab and the daily summary show the car's charging cost on its own, priced at the import rate when it drew from the grid and already included in Import Cost.
+- **The Status diagram shows a charge post** whenever a Car Charging Threshold is set, lighting up while the car charges, even without a GivEnergy charger.
+- **Car charging started and finished notifications.** An optional alert under Settings → Notifications sends the energy and duration when a charge ends. It starts after three minutes of charging and ends after ten without, so a pause between slots stays one charge.
+
+### Changed
+
+- **The threshold moved to Settings, and now means the car.** The "Leave Out Load Above" field on the Planner page is now Car Charging Threshold under Settings → EV Charger, and the Planner shows it read-only with a note on where to change it. If you had set it, the same value now also splits the car out of History, the Power page and the reports, and the forecast takes out the car's whole charge in any minute above it (the charger current at your grid voltage), not just the part above the threshold. Check the value suits your charger, and set the charger current if it isn't 32 A.
+- **The Load Discharge Limiter's "runs in this app" note is now an ⓘ on its title.**
+- **The line to the charge post is the EV colour** on both Status diagrams, not the home blue.
+
 ## [1.8.8] - 2026-11-07
 
 ### Fixed

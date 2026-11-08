@@ -63,7 +63,8 @@ pub struct ConsumptionProfile {
     pub weekend_days_observed: u32,
     /// Energy left out because the EV charger drew it (issue #400), kWh.
     pub excluded_ev_kwh: f64,
-    /// Energy left out above the "leave out load above" threshold, kWh.
+    /// Energy left out as the estimated car (issue #454): the minutes over the
+    /// car-charging threshold, as the charger-amps block, kWh.
     pub excluded_above_kwh: f64,
     /// Share of the history's time the EV charger was recording (0 to 1),
     /// so its charging was taken out (issue #406). 0 with no history.
@@ -84,16 +85,20 @@ pub struct EvPowerMinute {
 }
 
 /// What to leave out of the profile (issue #400). Where the charger's power
-/// was recorded, its energy is taken away; elsewhere, the logged Octopus
-/// dispatches' energy (issue #406), then load above `load_above_kw` (when
-/// set) is clipped off as car charging.
+/// was recorded, its energy is taken away; where the user's car-charging
+/// threshold says the car was charging (issue #454), the estimated block's
+/// energy; elsewhere, the logged Octopus dispatches' energy (issue #406).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConsumptionExclusions<'a> {
     /// Charger minutes, sorted by timestamp.
     pub ev_minutes: &'a [EvPowerMinute],
+    /// Estimated car minutes (`history::car_charging`): the charger-amps block
+    /// for each minute whose home power was over the threshold, sorted by
+    /// timestamp. Never overlaps `ev_minutes`: a minute the charger recorded
+    /// uses its own figure.
+    pub block_minutes: &'a [EvPowerMinute],
     /// Dispatches that ran, cut to the time they ran, sorted by start.
     pub dispatches: &'a [LoggedDispatch],
-    pub load_above_kw: Option<f64>,
 }
 
 impl ConsumptionProfile {
@@ -219,6 +224,10 @@ struct HourSum {
     ev_kwh: f64,
     /// Seconds of them a charger minute covers.
     ev_secs: i64,
+    /// Estimated car energy over the same intervals, kWh.
+    block_kwh: f64,
+    /// Seconds of them an estimated car minute covers.
+    block_secs: i64,
     /// Logged dispatch energy over the parts the charger didn't cover, kWh.
     dispatch_kwh: f64,
 }
@@ -227,6 +236,8 @@ struct HourSum {
 struct Excluded {
     ev_kwh: f64,
     dispatch_kwh: f64,
+    /// Energy taken out as the estimated car (issue #454), reported as
+    /// `excluded_above_kwh`.
     above_kwh: f64,
 }
 
@@ -234,34 +245,21 @@ struct Excluded {
 /// home counter moves in 0.1 kWh steps, so a minute's delta is 0, 0.1 or
 /// 0.2 kWh and only an hour's sum is close to what was drawn.
 ///
-/// The charger's energy comes off first, then the logged dispatches', each
-/// floored at zero. Load above the threshold is clipped only in hours the
-/// charger didn't cover end to end, so a polled, idle charger keeps a heavy
-/// evening as the house's.
-fn household_kwh(
-    sum: &HourSum,
-    exclusions: &ConsumptionExclusions,
-    excluded: &mut Excluded,
-) -> f64 {
+/// The charger's energy comes off first, then the estimated car's (the
+/// threshold's block, issue #454), then the logged dispatches' for the time
+/// neither covered, each floored at zero. A minute under the threshold has no
+/// block, so a taper or a heavy evening with the charger idle stays the
+/// house's.
+fn household_kwh(sum: &HourSum, excluded: &mut Excluded) -> f64 {
     let removed = sum.ev_kwh.clamp(0.0, sum.home_kwh);
     excluded.ev_kwh += removed;
     let mut kwh = sum.home_kwh - removed;
+    let removed = sum.block_kwh.clamp(0.0, kwh);
+    excluded.above_kwh += removed;
+    kwh -= removed;
     let removed = sum.dispatch_kwh.clamp(0.0, kwh);
     excluded.dispatch_kwh += removed;
-    kwh -= removed;
-    let limit_kw = exclusions
-        .load_above_kw
-        .filter(|kw| kw.is_finite() && *kw > 0.0);
-    if let Some(limit_kw) = limit_kw {
-        if sum.ev_secs < sum.secs {
-            let cap = limit_kw * sum.secs as f64 / 3600.0;
-            if kwh > cap {
-                excluded.above_kwh += kwh - cap;
-                kwh = cap;
-            }
-        }
-    }
-    kwh
+    kwh - removed
 }
 
 fn add_delta_at_midpoint(
@@ -281,14 +279,18 @@ fn add_delta_at_midpoint(
     let key = (local.date_naive(), local.hour() as u8);
     let secs = end_ts - start_ts;
     let (ev_kwh, ev_secs) = ev_energy_kwh(exclusions.ev_minutes, start_ts, end_ts);
-    // Where the charger recorded the car, its own figure is used instead.
-    let uncovered = 1.0 - ev_secs.min(secs) as f64 / secs as f64;
+    let (block_kwh, block_secs) = ev_energy_kwh(exclusions.block_minutes, start_ts, end_ts);
+    // Where the charger or the user's threshold accounts for the car, that
+    // figure is used instead of the dispatch log's.
+    let uncovered = 1.0 - (ev_secs + block_secs).min(secs) as f64 / secs as f64;
     let dispatch_kwh = dispatch_energy_kwh(exclusions.dispatches, start_ts, end_ts) * uncovered;
     let sum = hour_sums.entry(key).or_default();
     sum.home_kwh += delta;
     sum.secs += secs;
     sum.ev_kwh += ev_kwh;
     sum.ev_secs += ev_secs;
+    sum.block_kwh += block_kwh;
+    sum.block_secs += block_secs;
     sum.dispatch_kwh += dispatch_kwh;
     days.insert(key.0);
     let earliest = history_start.get_or_insert(start_ts);
@@ -409,7 +411,7 @@ pub fn build_consumption_profile_excluding(
         (all + sum.secs, charger + sum.ev_secs.min(sum.secs))
     });
     for ((day, hour), sum) in hour_sums {
-        let sum = household_kwh(&sum, exclusions, &mut excluded);
+        let sum = household_kwh(&sum, &mut excluded);
         all_buckets[hour as usize].push(sum);
         if day.weekday().number_from_monday() >= 6 {
             weekend_buckets[hour as usize].push(sum);
@@ -720,8 +722,8 @@ mod tests {
             &rows,
             &ConsumptionExclusions {
                 ev_minutes: &ev,
+                block_minutes: &[],
                 dispatches: &[],
-                load_above_kw: None,
             },
         );
         assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
@@ -741,43 +743,52 @@ mod tests {
             &rows,
             &ConsumptionExclusions {
                 ev_minutes: &ev,
+                block_minutes: &[],
                 dispatches: &[],
-                load_above_kw: None,
             },
         );
         assert!(hour_median(&profile, 18).abs() < 1e-9);
         assert!((profile.excluded_ev_kwh - 2.0).abs() < 1e-6);
     }
 
+    /// Car-block minutes (issue #454): `power_w` for `minutes` from `start`.
+    fn block_minutes(start: i64, minutes: i64, power_w: f64) -> Vec<EvPowerMinute> {
+        ev_minutes(start, minutes, power_w)
+    }
+
+    fn with_blocks(
+        rows: &[ConsumptionCounterRow],
+        ev: &[EvPowerMinute],
+        block: &[EvPowerMinute],
+    ) -> ConsumptionProfile {
+        build_consumption_profile_excluding(
+            rows,
+            &ConsumptionExclusions {
+                ev_minutes: ev,
+                block_minutes: block,
+                dispatches: &[],
+            },
+        )
+    }
+
     #[test]
-    fn load_above_the_threshold_is_clipped_where_there_is_no_charger_data() {
+    fn car_block_minutes_come_out_where_there_is_no_charger_data() {
         let start = local_ts(2026, 10, 14, 18, 0);
         let rows = minute_rows(start, 60, 8.0);
-        let profile = build_consumption_profile_excluding(
-            &rows,
-            &ConsumptionExclusions {
-                ev_minutes: &[],
-                dispatches: &[],
-                load_above_kw: Some(3.0),
-            },
-        );
-        assert!((hour_median(&profile, 18) - 3.0).abs() < 1e-6);
-        assert!((profile.excluded_above_kwh - 5.0).abs() < 1e-6);
+        let block = block_minutes(start, 60, 7_360.0);
+        let profile = with_blocks(&rows, &[], &block);
+        assert!((hour_median(&profile, 18) - 0.64).abs() < 1e-6);
+        // What the estimate took out is reported where the clip used to be.
+        assert!((profile.excluded_above_kwh - 7.36).abs() < 1e-6);
         assert_eq!(profile.excluded_ev_kwh, 0.0);
     }
 
     #[test]
-    fn load_below_the_threshold_is_kept() {
+    fn load_with_no_block_minutes_is_kept() {
+        // Under the threshold there is no block, so nothing comes out.
         let start = local_ts(2026, 10, 14, 18, 0);
         let rows = minute_rows(start, 60, 2.5);
-        let profile = build_consumption_profile_excluding(
-            &rows,
-            &ConsumptionExclusions {
-                ev_minutes: &[],
-                dispatches: &[],
-                load_above_kw: Some(3.0),
-            },
-        );
+        let profile = with_blocks(&rows, &[], &[]);
         assert!((hour_median(&profile, 18) - 2.5).abs() < 1e-6);
         assert_eq!(profile.excluded_above_kwh, 0.0);
     }
@@ -795,8 +806,8 @@ mod tests {
             &rows,
             &ConsumptionExclusions {
                 ev_minutes: &ev,
+                block_minutes: &[],
                 dispatches: &[],
-                load_above_kw: None,
             },
         );
         assert!((half.charger_covered_fraction - 0.5).abs() < 1e-9);
@@ -807,8 +818,8 @@ mod tests {
             &rows,
             &ConsumptionExclusions {
                 ev_minutes: &ev,
+                block_minutes: &[],
                 dispatches: &[],
-                load_above_kw: None,
             },
         );
         assert!((all.charger_covered_fraction - 1.0).abs() < 1e-9);
@@ -827,8 +838,8 @@ mod tests {
             &rows,
             &ConsumptionExclusions {
                 ev_minutes: &ev,
+                block_minutes: &[],
                 dispatches: &[],
-                load_above_kw: None,
             },
         );
         assert!((profile.charger_covered_fraction - 1.0).abs() < 1e-9);
@@ -840,44 +851,73 @@ mod tests {
     }
 
     #[test]
-    fn charger_data_overrides_the_threshold() {
+    fn an_idle_polled_charger_keeps_a_heavy_evening_as_the_houses() {
         // The charger was polled and idle, so an 8 kW evening is the house
-        // (an oven, a shower), not the car.
+        // (an oven, a shower), not the car: the caller gives no block minutes
+        // for minutes the charger recorded.
         let start = local_ts(2026, 10, 14, 18, 0);
         let rows = minute_rows(start, 60, 8.0);
         let ev = ev_minutes(start, 60, 0.0);
-        let profile = build_consumption_profile_excluding(
-            &rows,
-            &ConsumptionExclusions {
-                ev_minutes: &ev,
-                dispatches: &[],
-                load_above_kw: Some(3.0),
-            },
-        );
+        let profile = with_blocks(&rows, &ev, &[]);
         assert!((hour_median(&profile, 18) - 8.0).abs() < 1e-6);
         assert_eq!(profile.excluded_above_kwh, 0.0);
         assert_eq!(profile.excluded_ev_kwh, 0.0);
     }
 
     #[test]
-    fn the_threshold_still_applies_in_an_hour_the_charger_only_partly_covered() {
+    fn the_estimate_fills_in_where_the_charger_only_partly_covered_the_hour() {
         // Charger data for the first half hour only (it went offline while
-        // the car kept charging): its energy comes off, then the hour is
-        // clipped at the threshold as well.
+        // the car kept charging): its energy comes off, then the block for the
+        // other half hour does.
         let start = local_ts(2026, 10, 14, 18, 0);
         let rows = minute_rows(start, 60, 8.0);
         let ev = ev_minutes(start, 30, 7_000.0);
-        let profile = build_consumption_profile_excluding(
-            &rows,
-            &ConsumptionExclusions {
-                ev_minutes: &ev,
-                dispatches: &[],
-                load_above_kw: Some(3.0),
-            },
-        );
-        assert!((hour_median(&profile, 18) - 3.0).abs() < 1e-6);
+        let block = block_minutes(start + 1800, 30, 7_360.0);
+        let profile = with_blocks(&rows, &ev, &block);
+        assert!((hour_median(&profile, 18) - (8.0 - 3.5 - 3.68)).abs() < 1e-6);
         assert!((profile.excluded_ev_kwh - 3.5).abs() < 1e-6);
-        assert!((profile.excluded_above_kwh - 1.5).abs() < 1e-6);
+        assert!((profile.excluded_above_kwh - 3.68).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_taper_below_the_threshold_stays_in_the_profile() {
+        // 50 minutes of block, then ten minutes at 3 kW with no block (under
+        // the threshold): the tail is not taken out.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let mut rows = minute_rows(start, 50, 8.0);
+        let tail_base = rows.last().unwrap().kwh.unwrap();
+        for i in 1..=10 {
+            rows.push(row(
+                start + (50 + i) * 60,
+                tail_base + 3.0 * i as f64 / 60.0,
+            ));
+        }
+        let block = block_minutes(start, 50, 7_360.0);
+        let profile = with_blocks(&rows, &[], &block);
+        let home = 8.0 * 50.0 / 60.0 + 3.0 * 10.0 / 60.0;
+        let car = 7.36 * 50.0 / 60.0;
+        assert!((hour_median(&profile, 18) - (home - car)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn block_minutes_are_not_the_chargers_coverage() {
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 8.0);
+        let block = block_minutes(start, 60, 7_360.0);
+        assert_eq!(
+            with_blocks(&rows, &[], &block).charger_covered_fraction,
+            0.0
+        );
+    }
+
+    #[test]
+    fn the_block_never_takes_an_hour_below_zero() {
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 2.0);
+        let block = block_minutes(start, 60, 7_360.0);
+        let profile = with_blocks(&rows, &[], &block);
+        assert!(hour_median(&profile, 18).abs() < 1e-9);
+        assert!((profile.excluded_above_kwh - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -905,24 +945,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stepped_counter_below_the_threshold_is_not_clipped() {
-        // 2.5 kW against a 3 kW threshold: each 0.1 kWh step lands in one
-        // minute, which looks like 6 kW on its own. The hour is what counts.
-        let start = local_ts(2026, 10, 14, 18, 0);
-        let rows = stepped_minute_rows(start, 60, 2.5);
-        let profile = build_consumption_profile_excluding(
-            &rows,
-            &ConsumptionExclusions {
-                ev_minutes: &[],
-                dispatches: &[],
-                load_above_kw: Some(3.0),
-            },
-        );
-        assert!((hour_median(&profile, 18) - 2.5).abs() < 1e-6);
-        assert_eq!(profile.excluded_above_kwh, 0.0);
-    }
-
-    #[test]
     fn a_stepped_counter_keeps_the_true_house_share_while_the_car_charges() {
         // 7 kW car + 1 kW house: minute deltas are 0.1 or 0.2 kWh, but the
         // hour still comes out at the house's 1 kWh.
@@ -933,28 +955,22 @@ mod tests {
             &rows,
             &ConsumptionExclusions {
                 ev_minutes: &ev,
+                block_minutes: &[],
                 dispatches: &[],
-                load_above_kw: None,
             },
         );
         assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn a_threshold_of_zero_or_less_from_a_hand_edited_file_is_ignored() {
+    fn a_stepped_counter_keeps_the_house_share_with_the_estimate_too() {
+        // The counter moves in 0.1 kWh steps, but the block is per minute and
+        // the hour is what counts: 8 kW less a 7.36 kW block is 0.64 kWh.
         let start = local_ts(2026, 10, 14, 18, 0);
-        let rows = minute_rows(start, 60, 2.0);
-        for bad in [0.0, -1.0, f64::NAN] {
-            let profile = build_consumption_profile_excluding(
-                &rows,
-                &ConsumptionExclusions {
-                    ev_minutes: &[],
-                    dispatches: &[],
-                    load_above_kw: Some(bad),
-                },
-            );
-            assert!((hour_median(&profile, 18) - 2.0).abs() < 1e-6, "{bad}");
-        }
+        let rows = stepped_minute_rows(start, 60, 8.0);
+        let block = block_minutes(start, 60, 7_360.0);
+        let profile = with_blocks(&rows, &[], &block);
+        assert!((hour_median(&profile, 18) - 0.64).abs() < 1e-6);
     }
 
     #[test]
@@ -968,8 +984,8 @@ mod tests {
             &rows,
             &ConsumptionExclusions {
                 ev_minutes: &ev,
+                block_minutes: &[],
                 dispatches: &[],
-                load_above_kw: None,
             },
         );
         assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
@@ -989,14 +1005,14 @@ mod tests {
         rows: &[ConsumptionCounterRow],
         ev: &[EvPowerMinute],
         dispatches: &[LoggedDispatch],
-        load_above_kw: Option<f64>,
+        block: &[EvPowerMinute],
     ) -> ConsumptionProfile {
         build_consumption_profile_excluding(
             rows,
             &ConsumptionExclusions {
                 ev_minutes: ev,
+                block_minutes: block,
                 dispatches,
-                load_above_kw,
             },
         )
     }
@@ -1008,7 +1024,7 @@ mod tests {
         let start = local_ts(2026, 10, 14, 18, 0);
         let rows = minute_rows(start, 120, 4.0);
         let dispatch = [logged(start + 1800, start + 5400, Some(3.0))];
-        let profile = with_dispatches(&rows, &[], &dispatch, None);
+        let profile = with_dispatches(&rows, &[], &dispatch, &[]);
         assert!((hour_median(&profile, 18) - 2.5).abs() < 1e-6);
         assert!((hour_median(&profile, 19) - 2.5).abs() < 1e-6);
         assert!((profile.excluded_dispatch_kwh - 3.0).abs() < 1e-6);
@@ -1020,7 +1036,7 @@ mod tests {
         let start = local_ts(2026, 10, 14, 18, 0);
         let rows = minute_rows(start, 60, 4.0);
         let dispatch = [logged(start, start + 3600, Some(10.0))];
-        let profile = with_dispatches(&rows, &[], &dispatch, None);
+        let profile = with_dispatches(&rows, &[], &dispatch, &[]);
         assert!(hour_median(&profile, 18).abs() < 1e-9);
         assert!((profile.excluded_dispatch_kwh - 4.0).abs() < 1e-6);
     }
@@ -1033,28 +1049,46 @@ mod tests {
         let rows = minute_rows(start, 60, 4.0);
         let dispatch = [logged(start, start + 3600, Some(3.0))];
         let ev = ev_minutes(start, 60, 2_000.0);
-        let profile = with_dispatches(&rows, &ev, &dispatch, None);
+        let profile = with_dispatches(&rows, &ev, &dispatch, &[]);
         assert!((hour_median(&profile, 18) - 2.0).abs() < 1e-6);
         assert!((profile.excluded_ev_kwh - 2.0).abs() < 1e-6);
         assert_eq!(profile.excluded_dispatch_kwh, 0.0);
 
         // Recorded for the first half hour only: the log covers the rest.
         let ev = ev_minutes(start, 30, 2_000.0);
-        let profile = with_dispatches(&rows, &ev, &dispatch, None);
+        let profile = with_dispatches(&rows, &ev, &dispatch, &[]);
         assert!((hour_median(&profile, 18) - 1.5).abs() < 1e-6);
         assert!((profile.excluded_ev_kwh - 1.0).abs() < 1e-6);
         assert!((profile.excluded_dispatch_kwh - 1.5).abs() < 1e-6);
     }
 
     #[test]
-    fn the_threshold_still_clips_an_hour_after_the_log_comes_out() {
+    fn the_estimate_wins_over_the_log_for_the_minutes_it_covers() {
+        // Decision 3: the user's own threshold is the stronger statement, so a
+        // covered stretch takes the block and not the dispatch log's figure
+        // as well (that would remove the same charge twice).
         let start = local_ts(2026, 10, 14, 18, 0);
         let rows = minute_rows(start, 60, 4.0);
         let dispatch = [logged(start, start + 3600, Some(1.0))];
-        let profile = with_dispatches(&rows, &[], &dispatch, Some(2.0));
-        assert!((hour_median(&profile, 18) - 2.0).abs() < 1e-6);
+        let block = block_minutes(start, 60, 3_000.0);
+        let profile = with_dispatches(&rows, &[], &dispatch, &block);
+        assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
+        assert!((profile.excluded_above_kwh - 3.0).abs() < 1e-6);
+        assert_eq!(profile.excluded_dispatch_kwh, 0.0);
+    }
+
+    #[test]
+    fn the_log_still_covers_the_minutes_the_estimate_does_not() {
+        // A dispatch over the whole hour, the block for its first half only:
+        // the log's share for the other half still comes out.
+        let start = local_ts(2026, 10, 14, 18, 0);
+        let rows = minute_rows(start, 60, 4.0);
+        let dispatch = [logged(start, start + 3600, Some(2.0))];
+        let block = block_minutes(start, 30, 3_000.0);
+        let profile = with_dispatches(&rows, &[], &dispatch, &block);
+        assert!((profile.excluded_above_kwh - 1.5).abs() < 1e-6);
         assert!((profile.excluded_dispatch_kwh - 1.0).abs() < 1e-6);
-        assert!((profile.excluded_above_kwh - 1.0).abs() < 1e-6);
+        assert!((hour_median(&profile, 18) - (4.0 - 1.5 - 1.0)).abs() < 1e-6);
     }
 
     #[test]
@@ -1071,13 +1105,13 @@ mod tests {
             Some(400.0),
         ] {
             let dispatch = [logged(start, start + 3600, kwh)];
-            let profile = with_dispatches(&rows, &[], &dispatch, None);
+            let profile = with_dispatches(&rows, &[], &dispatch, &[]);
             assert!((hour_median(&profile, 18) - 4.0).abs() < 1e-6, "{kwh:?}");
             assert_eq!(profile.excluded_dispatch_kwh, 0.0, "{kwh:?}");
         }
         // Nor does one that ends before it starts.
         let dispatch = [logged(start + 3600, start, Some(3.0))];
-        let profile = with_dispatches(&rows, &[], &dispatch, None);
+        let profile = with_dispatches(&rows, &[], &dispatch, &[]);
         assert_eq!(profile.excluded_dispatch_kwh, 0.0);
     }
 
@@ -1092,7 +1126,7 @@ mod tests {
                 ..logged(start, start + 3600, Some(2.0))
             },
         ];
-        let profile = with_dispatches(&rows, &[], &dispatches, None);
+        let profile = with_dispatches(&rows, &[], &dispatches, &[]);
         assert!((hour_median(&profile, 18) - 1.0).abs() < 1e-6);
         assert!((profile.excluded_dispatch_kwh - 3.0).abs() < 1e-6);
     }

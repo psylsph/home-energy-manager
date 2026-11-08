@@ -928,11 +928,11 @@ describe('buildEnergyFlows — spoke colour = solar > grid-source > battery prio
       ],
     },
     {
-      name: 'home → EV is blue — home identity, neither battery / grid / solar',
+      name: 'home → EV is the EV purple, matching the charge post, not the home blue',
       snap: { home_power: 7500 },
       showEvc: true,
       evcPowerW: 7000,
-      expected: [{ flowId: 'ev', color: FLOW_COLORS.home, rationale: 'home source' }],
+      expected: [{ flowId: 'ev', color: FLOW_COLORS.ev, rationale: 'EV identity' }],
     },
     {
       name: 'solar_charge (solar covers all of charge) is yellow',

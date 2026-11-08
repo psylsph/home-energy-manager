@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -619,6 +619,20 @@ describe('<App/> navigation follows the energy flow display (issue #422)', () =>
     expect(drawerLabels).toContain('Octopus');
     expect(drawerLabels[drawerLabels.length - 1]).toBe('Logs');
     expect(drawerLabels).not.toContain('Meters');
+  });
+
+  it('seeds the car-charging threshold and charger current into the store from the settings', async () => {
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { forecast_exclude_load_above_kw: 7.4, car_charger_current_a: 16 } }
+      : { ok: true, data: {} });
+    useInverterStore.setState({ carCharging: {} });
+    render(<App />);
+    await waitFor(() =>
+      expect(useInverterStore.getState().carCharging).toEqual({
+        forecast_exclude_load_above_kw: 7.4,
+        car_charger_current_a: 16,
+      }),
+    );
   });
 
   it('hides Control and Settings from the drawer in read-only mode', async () => {

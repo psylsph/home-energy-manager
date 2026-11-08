@@ -451,6 +451,59 @@ Two things it needs:
 
 ---
 
+### How do I see my car's charging separately from my home use?
+
+If you don't have a GivEnergy EV charger that HEM reads, the car's charging is
+mixed into **Home** everywhere: History, the Power page, the Today bars, the
+daily report and the Planner's forecast. HEM can estimate it from the load it
+already records, in a house where nothing but the car pushes the home load past
+a known level.
+
+Go to **Settings → EV Charger → Car Charging Estimate** and set:
+
+- **Car Charging Threshold**: a load above your ordinary house load but below
+  what the house and the car draw together, for example `3.0 kW` for a 7 kW
+  charger. Any minute above it is treated as the car charging. Leave it empty
+  to turn the estimate off.
+- **Charger Current**: your charger's current in amps (`32` for a 7 kW
+  single-phase unit). The car is taken to draw that many amps at your grid
+  voltage, about 7.4 kW at 32 A, and never more than the home load. This
+  assumes a single-phase charger.
+
+Then **Save Car Charging**. You'll see:
+
+- **History**: the Home tab splits **Home (Excl. Car)** from **Car Charging**,
+  and the Cost tab has a **Car Charging Cost** line.
+- **Power**: the live tile becomes **Home** and **Car Charging**, and the
+  Consumption Report (with its CSV and HTML export) lists the car and what it
+  cost.
+- **Status**: the charge post on the diagram lights up while the car charges,
+  and the Today **Energy Out** bar splits **Car Charging** from **Home Use**.
+- **Daily report and Telegram `/today`**: a **Car** line with its energy and
+  its cost "from import".
+- **Planner**: the car is left out of the consumption forecast with the same
+  rule, so a night the car charged doesn't make it plan a bigger charge every
+  night. The threshold shows there read-only; change it in Settings.
+
+It is an estimate, worked out when the data is read, so changing the threshold
+or the current re-works your past history too and nothing extra is stored. If
+HEM reads a GivEnergy EV charger, that charger's own measured power is used
+instead for the minutes it recorded. The car's **cost** counts only the part of
+its energy that came off the grid, priced at the import rate of the moment;
+energy that solar or the battery supplied is free. It is part of your Import
+Cost, not an extra.
+
+It only works if the car is the one thing that takes the load past the
+threshold. A heat pump, an electric shower or an oven that does the same will
+be counted as the car, so leave the estimate off in that case.
+
+To hear when the car starts and stops charging, switch on **Car Charging
+Started or Finished** under **Settings → Notifications**. It needs the
+threshold; a GivEnergy charger that HEM reads then supplies the figure instead
+of the estimate.
+
+---
+
 ### I added a battery and my old battery's health history now shows under the new one
 
 Older releases recorded the **Battery Health** panel's history by each battery's

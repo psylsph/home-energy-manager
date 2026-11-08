@@ -34,6 +34,7 @@ import {
   hasMeaningfulAverage,
   removeSpikes,
 } from '../lib/chartSeries';
+import HelpTip, { HeadingWithHelp } from '../components/HelpTip';
 import { SeriesLegend } from '../components/SeriesLegend';
 import { useInverterStore } from '../store/useInverterStore';
 import type { SeriesLegendItem } from '../components/SeriesLegend';
@@ -41,6 +42,7 @@ import type { HistoryRange, HistorySummary, PollSettings } from '../lib/types';
 import { computeTempDifferential, computeBatteryExternalDifferential } from '../lib/temperatureChart';
 import { computeTightDomain } from '../lib/chartDomain';
 import { openExternal } from '../lib/openExternal';
+import { isCarThresholdKw } from '../lib/carCharging';
 import { formatEnergy } from '../lib/format';
 import { buildHistoryCsv } from '../lib/historyCsv';
 
@@ -72,6 +74,8 @@ interface ChartDef {
   }[];
   unit: string;
   description?: string;
+  /** Longer explanation, behind an ⓘ beside the title. */
+  help?: string;
   yDomain?: [number, number];
   /**
    * When set, the y-axis snaps to the recorded data range ± this padding
@@ -103,7 +107,7 @@ const TABS: { key: MetricTab; label: string }[] = [
   { key: 'cost', label: 'Cost' },
 ];
 
-function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
+function getCharts(tab: MetricTab, hasStandingCharge: boolean, carEnabled = false): ChartDef[] {
   switch (tab) {
     case 'battery':
       return [
@@ -209,6 +213,32 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
         },
       ];
     case 'home':
+      // With a car-charging threshold set (issue #454) the server splits the
+      // car out of the home load; the two series add up to the load.
+      if (carEnabled) {
+        return [
+          {
+            key: 'home-power',
+            title: 'Load Power (W)',
+            unit: 'W',
+            description: 'Car charging is estimated from your load.',
+            help: 'The car is estimated from the home power above your car charging threshold, as a block of charger current times grid voltage, and taken out of Home. A polled GivEnergy charger\'s measured power is used instead. Changing the threshold or charger current in Settings re-works the past history too.',
+            fields: [
+              { field: '_home_excl_car_power', color: '#14B8A6', label: 'Home (Excl. Car)' },
+              { field: '_car_power', color: '#A78BFA', label: 'Car Charging' },
+            ],
+          },
+          {
+            key: 'home-energy',
+            title: 'Load Energy (kWh)',
+            unit: 'kWh',
+            fields: [
+              { field: '_home_excl_car_energy_today', color: '#14B8A6', label: 'Home (Excl. Car)' },
+              { field: '_car_energy_today', color: '#A78BFA', label: 'Car Charging' },
+            ],
+          },
+        ];
+      }
       return [
         {
           key: 'home-power',
@@ -279,6 +309,10 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
           },
         );
       }
+      // The car's share of the import cost (issue #454), its own running total.
+      if (carEnabled) {
+        fields.push({ field: '_car_cost', color: '#A78BFA', label: 'Car Charging Cost' });
+      }
       fields.push({ field: '_export_income', color: '#22C55E', label: 'Export Income' });
       return [
         {
@@ -296,14 +330,16 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean): ChartDef[] {
 // a single CSV carries every series visible on the page (Battery, Solar,
 // Grid, Home, Temperature, Cost). Field collisions are deduplicated by the
 // existing Set logic in exportCSV.
-function getAllCharts(hasStandingCharge: boolean): ChartDef[] {
-  return TABS.flatMap((t) => getCharts(t.key, hasStandingCharge));
+function getAllCharts(hasStandingCharge: boolean, carEnabled: boolean): ChartDef[] {
+  return TABS.flatMap((t) => getCharts(t.key, hasStandingCharge, carEnabled));
 }
 
 interface PeriodTotalItem {
   label: string;
   value: string;
   color: string;
+  /** The full explanation, behind an ⓘ beside the label. */
+  help?: string;
 }
 
 function formatGbp(value: number): string {
@@ -317,6 +353,10 @@ function formatGbp(value: number): string {
 
 /** Additive values that are meaningful for each History tab. */
 function getPeriodTotalItems(tab: MetricTab, summary: HistorySummary): PeriodTotalItem[] {
+  const carItems: PeriodTotalItem[] =
+    summary.car_kwh == null
+      ? []
+      : [{ label: 'Car Charging', value: formatEnergy(summary.car_kwh), color: '#A78BFA' }];
   switch (tab) {
     case 'battery':
       return [
@@ -335,6 +375,7 @@ function getPeriodTotalItems(tab: MetricTab, summary: HistorySummary): PeriodTot
     case 'home':
       return [
         { label: 'Consumed', value: formatEnergy(summary.home_consumed_kwh), color: '#14B8A6' },
+        ...carItems,
       ];
     case 'cost':
       return [
@@ -345,6 +386,14 @@ function getPeriodTotalItems(tab: MetricTab, summary: HistorySummary): PeriodTot
           value: formatGbp(summary.net_cost_gbp),
           color: summary.net_cost_gbp >= 0 ? '#F59E0B' : '#22C55E',
         },
+        ...(summary.car_cost_gbp == null
+          ? []
+          : [{
+              label: 'Car Charging',
+              value: formatGbp(summary.car_cost_gbp),
+              color: '#A78BFA',
+              help: 'What the car\'s charging cost, included in Import Cost rather than added to it. Only the part of the car\'s energy that came from the grid is priced, at the import rate when it was drawn; energy from solar or the battery is free.',
+            }]),
       ];
     case 'temperature':
       // Temperatures are gauges, not additive quantities. A future min/max/
@@ -367,10 +416,13 @@ function PeriodTotals({ tab, summary, windowLabel }: {
         <h2 className="text-text-primary text-sm font-sans font-bold">Period Totals</h2>
         <span className="text-text-secondary/70 text-[11px] font-sans text-right">{windowLabel}</span>
       </div>
-      <div className={`grid gap-2 ${items.length === 1 ? 'grid-cols-1' : items.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+      <div className={`grid gap-2 ${items.length === 1 ? 'grid-cols-1' : items.length === 2 ? 'grid-cols-2' : items.length === 4 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'}`}>
         {items.map((item) => (
           <div key={item.label} className="bg-bg-elevated rounded-lg px-3 py-2 min-w-0">
-            <div className="text-text-secondary text-[11px] font-sans truncate">{item.label}</div>
+            <div className="text-text-secondary text-[11px] font-sans truncate">
+              {item.label}
+              {item.help && <>{' '}<HelpTip label={item.label}>{item.help}</HelpTip></>}
+            </div>
             <div className="text-lg font-mono font-bold truncate" style={{ color: item.color }}>
               {item.value}
             </div>
@@ -597,7 +649,12 @@ function ChartCard({ chart, data, range, domain, ticks, gridLineWeight, showAver
     <div className="bg-bg-elevated rounded-xl p-4 relative">
       <div className="flex items-center justify-between mb-3 gap-2">
         <div>
-          <h3 className="text-text-primary text-sm font-sans font-bold">{chart.title}</h3>
+          <HeadingWithHelp
+            as="h3"
+            className="text-text-primary text-sm font-sans font-bold"
+            title={chart.title}
+            help={chart.help}
+          />
           {chart.description && (
             <p className="mt-1 text-text-secondary/70 text-[11px] leading-snug font-sans">{chart.description}</p>
           )}
@@ -783,6 +840,9 @@ export default function HistoryPage() {
   // import-cost breakdown lines: with no standing charge there's nothing to
   // break out, so the chart stays as Import Cost + Export Income.
   const [hasStandingCharge, setHasStandingCharge] = useState(false);
+  // Whether a car-charging threshold is set (issue #454), which splits the car
+  // out of the Home tab. Off means the page is exactly as it always was.
+  const [carEnabled, setCarEnabled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -790,6 +850,7 @@ export default function HistoryPage() {
       .then((res) => {
         if (!cancelled) {
           setHasStandingCharge((res?.data?.import_standing_charge_p_per_day ?? 0) > 0);
+          setCarEnabled(isCarThresholdKw(res?.data?.forecast_exclude_load_above_kw));
         }
       })
       .catch(() => {
@@ -812,7 +873,7 @@ export default function HistoryPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const charts = getCharts(tab, hasStandingCharge);
+    const charts = getCharts(tab, hasStandingCharge, carEnabled);
     const allFields = [
       ...new Set([
         ...charts.flatMap((c) => c.fields.map((f) => f.field)),
@@ -837,7 +898,7 @@ export default function HistoryPage() {
         }
       })
     return () => { cancelled = true; };
-  }, [tab, range, offset, refreshKey, rolling, hasStandingCharge]);
+  }, [tab, range, offset, refreshKey, rolling, hasStandingCharge, carEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -867,7 +928,7 @@ export default function HistoryPage() {
     setOffset(0);
   };
 
-  const charts = getCharts(tab, hasStandingCharge);
+  const charts = getCharts(tab, hasStandingCharge, carEnabled);
   const hasData = Object.values(data).some((pts) => pts.length > 0);
   const summary = summaryState.key === summaryKey ? summaryState.data : null;
   const [csvToast, setCsvToast] = useState<string | null>(null);
@@ -891,7 +952,7 @@ export default function HistoryPage() {
     if (exportingAll) return;
     setExportingAll(true);
     try {
-      const allCharts = getAllCharts(hasStandingCharge);
+      const allCharts = getAllCharts(hasStandingCharge, carEnabled);
       const allFields = [
         ...new Set([
           ...allCharts.flatMap((c) => c.fields.map((f) => f.field)),

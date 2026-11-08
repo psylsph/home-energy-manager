@@ -33,6 +33,13 @@ export interface PowerRow {
   dischargePower: number | null;
   gridImportPower: number | null;
   gridExportPower: number | null;
+  /**
+   * Car charging split (issue #454), present only when the car-charging
+   * threshold is set. `homePower` stays the total load; `carPower` is the
+   * estimated (or measured) car share of it and `housePower` the rest.
+   */
+  carPower?: number | null;
+  housePower?: number | null;
 }
 
 export interface PowerBucket {
@@ -40,6 +47,10 @@ export interface PowerBucket {
   label: string;
   solarKwh: number;
   homeKwh: number;
+  /** The car's share of `homeKwh` (issue #454); 0 when the feature is off. */
+  carKwh: number;
+  /** `homeKwh` less the car, never negative. */
+  houseKwh: number;
   importKwh: number;
   exportKwh: number;
   batteryChargeKwh: number;
@@ -55,6 +66,11 @@ export interface PowerReportSummary {
   generatedAt: Date;
   solarKwh: number;
   homeKwh: number;
+  /** True when the rows carry a car-charging split (issue #454). */
+  carEnabled: boolean;
+  carKwh: number;
+  /** `homeKwh` less the car, never negative. */
+  houseKwh: number;
   importKwh: number;
   exportKwh: number;
   netGridKwh: number;
@@ -62,6 +78,7 @@ export interface PowerReportSummary {
   batteryDischargeKwh: number;
   peakSolarW: number;
   peakHomeW: number;
+  peakCarW: number;
   peakGridImportW: number;
   peakGridExportW: number;
   peakBatteryChargeW: number;
@@ -78,6 +95,14 @@ export interface PowerReportSummary {
   importCostGbp: number;
   exportIncomeGbp: number;
   netCostGbp: number;
+  /**
+   * What the car's charging cost (issue #454), already part of
+   * `importCostGbp`; null when the feature is off or the server sent no
+   * figure. `carGridKwh` is the part of the car's energy that came from the
+   * grid, which is what was priced.
+   */
+  carCostGbp?: number | null;
+  carGridKwh?: number | null;
   standingChargeGbp: number;
   standingChargePPerDay: number;
   daysInRange: number;
@@ -193,6 +218,8 @@ function emptyBucket(start: number, range: HistoryRange): PowerBucket {
     label: bucketLabel(start, range),
     solarKwh: 0,
     homeKwh: 0,
+    carKwh: 0,
+    houseKwh: 0,
     importKwh: 0,
     exportKwh: 0,
     batteryChargeKwh: 0,
@@ -346,10 +373,12 @@ export function calculatePowerReport(
 
   let solarKwh = 0;
   let homeKwh = 0;
+  let carKwh = 0;
   let importKwh = 0;
   let exportKwh = 0;
   let batteryChargeKwh = 0;
   let batteryDischargeKwh = 0;
+  const carEnabled = sortedRows.some((row) => row.carPower != null);
 
   for (let i = 0; i < sortedRows.length - 1; i++) {
     const a = sortedRows[i];
@@ -363,6 +392,10 @@ export function calculatePowerReport(
 
     const solar = integratePair(a.solarPower, b.solarPower, hours, positivePart);
     const home = integratePair(a.homePower, b.homePower, hours, positivePart);
+    // The car's share of the load (issue #454); never more than the load.
+    const car = carEnabled
+      ? Math.min(integratePair(a.carPower ?? null, b.carPower ?? null, hours, positivePart), home)
+      : 0;
     // Directional energy integrates the server-split magnitudes (already >= 0),
     // not the net grid/battery power. Integrating the net would let a bucket's
     // import and export (charge and discharge) cancel before integration - the
@@ -374,6 +407,7 @@ export function calculatePowerReport(
 
     solarKwh += solar;
     homeKwh += home;
+    carKwh += car;
     importKwh += gridImport;
     exportKwh += gridExport;
     batteryChargeKwh += batteryCharge;
@@ -383,6 +417,8 @@ export function calculatePowerReport(
     const bucket = getBucket(midpoint);
     bucket.solarKwh += solar;
     bucket.homeKwh += home;
+    bucket.carKwh += car;
+    bucket.houseKwh = Math.max(bucket.homeKwh - bucket.carKwh, 0);
     bucket.importKwh += gridImport;
     bucket.exportKwh += gridExport;
     bucket.batteryChargeKwh += batteryCharge;
@@ -403,6 +439,9 @@ export function calculatePowerReport(
     generatedAt: new Date(),
     solarKwh,
     homeKwh,
+    carEnabled,
+    carKwh,
+    houseKwh: Math.max(homeKwh - carKwh, 0),
     importKwh,
     exportKwh,
     netGridKwh: importKwh - exportKwh,
@@ -410,6 +449,7 @@ export function calculatePowerReport(
     batteryDischargeKwh,
     peakSolarW: Math.max(0, ...sortedRows.map((row) => positivePart(row.solarPower))),
     peakHomeW: Math.max(0, ...sortedRows.map((row) => positivePart(row.homePower))),
+    peakCarW: Math.max(0, ...sortedRows.map((row) => positivePart(row.carPower))),
     // Peaks come from the directional magnitudes too (no net cancellation).
     // These remain a max of per-bucket AVERAGES, so they understate the true
     // instantaneous peak at coarse buckets - same as peakSolarW / peakHomeW.

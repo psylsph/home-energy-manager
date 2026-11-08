@@ -323,7 +323,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setCarCharging, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
   const [octopusConfigured, setOctopusConfigured] = useState(false);
 
   // Load navigation-affecting settings on mount. The Octopus page is opt-in:
@@ -340,6 +340,12 @@ function Layout() {
         if (res.ok && res.data.evc_host) {
           setEvcHost(res.data.evc_host);
         }
+        if (res.ok) {
+          setCarCharging({
+            forecast_exclude_load_above_kw: res.data.forecast_exclude_load_above_kw,
+            car_charger_current_a: res.data.car_charger_current_a,
+          });
+        }
         setOctopusConfigured(Boolean(
           res.ok
           && res.data.octopus_account_number
@@ -350,7 +356,7 @@ function Layout() {
     void load();
     window.addEventListener('octopus-settings-changed', load);
     return () => window.removeEventListener('octopus-settings-changed', load);
-  }, [setHiddenPanels, setEvcHost]);
+  }, [setHiddenPanels, setEvcHost, setCarCharging]);
 
   // Seed the inverter-temperature alert thresholds from the backend so the
   // SystemAlertBanners render with the saved config. The store is the single

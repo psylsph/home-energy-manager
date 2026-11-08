@@ -9,6 +9,7 @@ import ColdBatteryWarning from '../components/ColdBatteryWarning';
 import TimedChargeOffHint from '../components/TimedChargeOffHint';
 import AwaitingConnection from '../components/AwaitingConnection';
 import { formatPercent, formatPower } from '../lib/format';
+import { estimateCarPower } from '../lib/carCharging';
 import { gridFaultAdvice, gridFaultReason, gridFaultTitle, hasGridFault } from '../lib/gridFault';
 
 /** Format a duration in seconds to a human-readable string. */
@@ -47,6 +48,7 @@ export default function StatusPage() {
     evcEverConnected,
     energyFlowDisplay,
     showTodayStats,
+    carCharging,
   } = useInverterStore();
   const house = energyFlowDisplay === 'house';
 
@@ -78,17 +80,31 @@ export default function StatusPage() {
     );
   }
 
-  const flowProps = {
-    snapshot,
-    evcPower,
-    evcChargingState,
-    evcCharging,
-    evcConnected,
-    evcCableConnected,
-    evcSessionEnergyKwh,
-    evcEverConnected,
-    showEvc: !!evcHost,
-  };
+  // With a car-charging threshold set and no charger configured, the post is
+  // drawn from the estimate (issue #454): the load above the threshold is the
+  // car. A configured charger reports its own measured power as before.
+  const carEstimate = evcHost
+    ? null
+    : estimateCarPower(snapshot.home_power, snapshot.grid_voltage, carCharging);
+  const flowProps = carEstimate != null
+    ? {
+        snapshot,
+        evcPower: carEstimate,
+        evcCharging: carEstimate > 0,
+        showEvc: true,
+        evcEstimated: true,
+      }
+    : {
+        snapshot,
+        evcPower,
+        evcChargingState,
+        evcCharging,
+        evcConnected,
+        evcCableConnected,
+        evcSessionEnergyKwh,
+        evcEverConnected,
+        showEvc: !!evcHost,
+      };
 
   return (
     <div className="flex flex-col gap-3 mx-auto w-full max-w-4xl lg:max-w-6xl">

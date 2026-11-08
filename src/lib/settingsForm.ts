@@ -1,6 +1,7 @@
 // Pure helpers behind the Settings page sections (src/components/settings).
 
 import type { PollSettings } from './types';
+import { MAX_CHARGER_AMPS, MIN_CHARGER_AMPS } from './carCharging';
 
 /** The poll intervals offered, in seconds. */
 export const VALID_INTERVALS = [5, 10, 15, 20, 30, 45, 60];
@@ -48,4 +49,24 @@ export function cleanCtArrays(rows: CtArrayRow[]) {
       rated_kw: positiveOrZero(a.rated_kw),
     }))
     .filter((a) => Number.isInteger(a.meter_address) && a.meter_address >= 1 && a.meter_address <= 8);
+}
+
+/** The charger current field (issue #454): a whole number of amps, 6–80. */
+export function parseChargerCurrentA(
+  text: string,
+): { ok: true; amps: number } | { ok: false; error: string } {
+  const trimmed = text.trim();
+  const amps = Number(trimmed);
+  if (
+    trimmed === '' ||
+    !Number.isInteger(amps) ||
+    amps < MIN_CHARGER_AMPS ||
+    amps > MAX_CHARGER_AMPS
+  ) {
+    return {
+      ok: false,
+      error: `Enter a whole number between ${MIN_CHARGER_AMPS} and ${MAX_CHARGER_AMPS} A`,
+    };
+  }
+  return { ok: true, amps };
 }

@@ -292,3 +292,22 @@ describe('formatHistoryValue (issue #345)', () => {
     expect(formatHistoryValue(240.4, 'V')).toBe('240 V');
   });
 });
+
+describe('car charging series (issue #454)', () => {
+  it('keeps a one-minute car charge instead of treating it as a spike', () => {
+    const pts = [0, 0, 7360, 0, 0].map((v, i) => ({ t: i * 60_000, v }));
+    expect(removeSpikes(pts, '_car_power')).toEqual(pts);
+  });
+
+  it('still repairs a lone spike in the house series', () => {
+    const pts = [500, 520, 9000, 510, 500].map((v, i) => ({ t: i * 60_000, v }));
+    expect(removeSpikes(pts, '_home_excl_car_power')[2].v).toBe(515);
+  });
+
+  it('gives the cumulative car energy series no average line', () => {
+    expect(hasMeaningfulAverage('_car_energy_today')).toBe(false);
+    expect(hasMeaningfulAverage('_home_excl_car_energy_today')).toBe(false);
+    expect(hasMeaningfulAverage('_car_cost')).toBe(false);
+    expect(hasMeaningfulAverage('_car_power')).toBe(true);
+  });
+});

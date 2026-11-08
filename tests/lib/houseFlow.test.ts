@@ -372,6 +372,8 @@ describe('buildHouseScene — readings', () => {
     expect(sc.idleTracks).toContain(pathD(EV_LEG.map(isoPoint)));
     // Same colour as the orbit's home → EV spoke.
     expect(cable(sc, 'ev')).toMatchObject({ color: vm.flows.find((f) => f.id === 'ev')!.color, watts: 7000, supplies: false });
+    // The cable to the charge post is the post's own colour, not the home blue.
+    expect(cable(sc, 'ev')!.color).toBe(FLOW_COLORS.ev);
     expect(near(end(cable(sc, 'ev')!.d), isoPoint(EV_LEG[EV_LEG.length - 1]))).toBe(true);
   });
 
