@@ -28,11 +28,14 @@ export function isCarThresholdKw(kw: number | null | undefined): kw is number {
   return kw != null && Number.isFinite(kw) && kw >= MIN_THRESHOLD_KW && kw <= MAX_THRESHOLD_KW;
 }
 
-/** The grid voltage to use: the reading when it is in range, else 230 V. */
+/** Whether a grid voltage reading is usable: present, finite and in the sanitizer's range. */
+export function isUsableVoltage(gridV: number | null | undefined): gridV is number {
+  return gridV != null && Number.isFinite(gridV) && gridV >= VOLTAGE_RANGE_V[0] && gridV <= VOLTAGE_RANGE_V[1];
+}
+
+/** The grid voltage to use: the reading when it is usable, else 230 V. */
 export function effectiveVoltage(gridV: number | null | undefined): number {
-  return gridV != null && Number.isFinite(gridV) && gridV >= VOLTAGE_RANGE_V[0] && gridV <= VOLTAGE_RANGE_V[1]
-    ? gridV
-    : FALLBACK_VOLTAGE_V;
+  return isUsableVoltage(gridV) ? gridV : FALLBACK_VOLTAGE_V;
 }
 
 /** The car's power in watts for a load of `homeW`; 0 at or below the threshold. */

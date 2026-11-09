@@ -256,6 +256,15 @@ export interface BuildEnergyFlowsOptions {
    * their external grid CT address (1-9) from the user's Settings choice.
    */
   gridMeterAddress?: number;
+  /**
+   * Issue #457: show the Home reading without the car's charging. With it
+   * on, the Home node's value is the house load alone — home power minus
+   * the EV charger's power (`evcPowerW`, the charger's own reading or the
+   * threshold estimate when none is polled) — floored at zero. Display
+   * only: the flows keep the gross home bus, and the option does nothing
+   * without an EV node because there is then nothing known to subtract.
+   */
+  homeExcludesCar?: boolean;
 }
 
 /**
@@ -282,7 +291,20 @@ export function buildEnergyFlows(
   // battery_state is the authoritative signal; sign is a cross-check.
   const isCharging = s.battery_state === 'charging' && absBattery > noise;
   const isDischarging = s.battery_state === 'discharging' && absBattery > noise;
-  // Home hub activeness follows the snapshot reading directly. The
+  const evcPower = opts.evcPowerW ?? 0;
+  const evcActive = !!opts.showEvc && evcPower > noise;
+  // Issue #457: the Home reading can exclude the car. The EV power the
+  // diagram already knows (`evcPower` — the charger's own reading, or the
+  // caller's threshold estimate when no charger is polled) is the car's
+  // draw; subtract it and floor at zero. Only the *reading* changes: the
+  // flows below still use the gross `s.home_power`, because the car's
+  // energy really does pass through the home bus and the spokes (and the
+  // house-view cables) must keep describing where it came from. Without an
+  // EV node there is nothing known to subtract, so the option does nothing.
+  const homeCarW = opts.homeExcludesCar && opts.showEvc ? evcPower : 0;
+  const homeReadingW = Math.max(0, s.home_power - homeCarW);
+  // Home hub activeness follows the displayed reading. With the option off
+  // (or no known car) that is the snapshot reading, exactly as before: the
   // home value is what the inverter reports for the busbar — even if
   // the spokes can't explain it (AC-coupled CT under-count, meter
   // inconsistency, etc.), the hub should surface the reading rather
@@ -290,10 +312,11 @@ export function buildEnergyFlows(
   // complaint on issue #275 is precisely a case where the snapshot
   // is the source of truth and the spokes are derived from it; we
   // do NOT refine `homeActive` to follow the spokes, because doing
-  // so would hide the very signal the user wants to see.
-  const homeActive = s.home_power > noise;
-  const evcPower = opts.evcPowerW ?? 0;
-  const evcActive = !!opts.showEvc && evcPower > noise;
+  // so would hide the very signal the user wants to see. With the
+  // option on the surfaced reading *is* the house load alone, so the hub
+  // follows it — a car pushing the whole bus doesn't show an active "0W"
+  // node, and the summary sentence (fed `homeReadingW` below) agrees.
+  const homeActive = homeReadingW > noise;
 
   // A Gateway's mode registers are its own copy, not the AIO's (issue #428),
   // so they say nothing about what the battery is doing: leave the mode out.
@@ -730,7 +753,11 @@ export function buildEnergyFlows(
     {
       id: 'home',
       label: 'Home',
-      value: formatVisualPower(s.home_power, noise),
+      // Issue #457: with the "Home Excludes Car Charging" option on this is
+      // the house load alone (home power minus the car, floored at zero);
+      // otherwise the gross busbar reading as before. The flows stay on
+      // the gross value either way.
+      value: formatVisualPower(homeReadingW, noise),
       unit: 'Consumption',
       color: FLOW_COLORS.home,
       active: homeActive,
@@ -801,7 +828,10 @@ export function buildEnergyFlows(
       isDischarging,
       dischargeWatts: absBattery,
       homeActive,
-      homeWatts: s.home_power,
+      // Issue #457: the summary's home figures follow the displayed reading
+      // (the house load alone when the option is on), so "Home is consuming
+      // X" never contradicts the node beside it.
+      homeWatts: homeReadingW,
       evcActive,
       evcWatts: evcPower,
       noise,

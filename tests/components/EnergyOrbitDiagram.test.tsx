@@ -62,6 +62,7 @@ function resetStore(threshold = 20) {
   useInverterStore.setState({
     showFlowStatusWords: false,
     visualNoiseThreshold: threshold,
+    homeExcludesCar: false,
   });
 }
 
@@ -866,6 +867,61 @@ describe('EnergyOrbitDiagram', () => {
       expect(labels).toContain('0W');
       expect(labels).not.toContain('0W(0.0kWh)');
       expect(container.querySelector('[data-testid="ev-sublabel"]')?.textContent).toBe('Cable In');
+    });
+  });
+
+  // --- issue #457: Home without the car's charging. The toggle lives in the
+  // store (Settings → Panel Controls) and is read by the shared view model,
+  // so a render through the real component pins the wiring end to end.
+  describe('Home without the car (issue #457)', () => {
+    it('shows the house alone on the Home node and keeps the car on the EV node', () => {
+      useInverterStore.setState({ showFlowStatusWords: true, homeExcludesCar: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 7500, grid_power: -7500 })}
+          showEvc
+          evcPower={7000}
+          evcCharging
+          evcConnected
+        />,
+      );
+      const home = container.querySelector('g[aria-label^="Home: "]')?.getAttribute('aria-label');
+      expect(home).toBe('Home: 500W Consumption');
+      const ev = container.querySelector('g[aria-label^="EV: "]')?.getAttribute('aria-label');
+      // The car keeps both its node and its draw.
+      expect(ev).toBe('EV: 7.0kW Charging');
+    });
+
+    it('keeps the gross Home reading while the toggle is off', () => {
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 7500, grid_power: -7500 })}
+          showEvc
+          evcPower={7000}
+          evcCharging
+          evcConnected
+        />,
+      );
+      const home = container.querySelector('g[aria-label^="Home: "]')?.getAttribute('aria-label');
+      expect(home).toBe('Home: 7.5kW Consumption');
+    });
+
+    it('runs the summary with the displayed reading when the car takes the whole bus', () => {
+      useInverterStore.setState({ showFlowStatusWords: true, homeExcludesCar: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 7000, grid_power: -7000 })}
+          showEvc
+          evcPower={7000}
+          evcCharging
+          evcConnected
+        />,
+      );
+      const home = container.querySelector('g[aria-label^="Home: "]')?.getAttribute('aria-label');
+      expect(home).toBe('Home: 0W Consumption');
+      const summary = container.querySelector('svg')?.getAttribute('aria-label') ?? '';
+      expect(summary).toContain('Importing 7.0kW from the grid and charging the EV at 7.0kW');
     });
   });
 

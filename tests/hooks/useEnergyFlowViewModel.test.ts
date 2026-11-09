@@ -117,4 +117,48 @@ describe('useEnergyFlowViewModel', () => {
       expect(ev(result)!.subLabel).toBeUndefined();
     });
   });
+
+  describe('Home without the car (issue #457, store toggle)', () => {
+    let saved: boolean;
+
+    beforeEach(() => {
+      saved = useInverterStore.getState().homeExcludesCar;
+    });
+
+    afterEach(() => {
+      useInverterStore.setState({ homeExcludesCar: saved });
+    });
+
+    it('keeps the gross Home reading while the toggle is off', () => {
+      const s = snap({ home_power: 9000, grid_power: -9000 });
+      const { result } = renderHook(() =>
+        useEnergyFlowViewModel({ snapshot: s, evcPower: 7360, showEvc: true }),
+      );
+      expect(result.current.nodes.find((n) => n.id === 'home')!.value).toBe('9.0kW');
+    });
+
+    it('drops the charger\'s power from Home when the toggle is on', () => {
+      useInverterStore.setState({ homeExcludesCar: true });
+      const s = snap({ home_power: 9000, grid_power: -9000 });
+      const { result } = renderHook(() =>
+        useEnergyFlowViewModel({ snapshot: s, evcPower: 7360, showEvc: true }),
+      );
+      expect(result.current.nodes.find((n) => n.id === 'home')!.value).toBe('1.6kW');
+      // The car's node still shows the draw.
+      expect(result.current.nodes.find((n) => n.id === 'ev')!.value).toBe('7.4kW');
+    });
+
+    it('drops the threshold estimate too — the estimate arrives as evcPower either way', () => {
+      // StatusPage passes the estimate as `evcPower` with `evcEstimated`
+      // (issue #454); the exclusion reads the same input, so a thresholded
+      // house with no charger polled gets the same Home (Excl. Car) split.
+      useInverterStore.setState({ homeExcludesCar: true });
+      const s = snap({ home_power: 9000, grid_power: -9000 });
+      const { result } = renderHook(() =>
+        useEnergyFlowViewModel({ snapshot: s, evcPower: 7680, showEvc: true, evcEstimated: true }),
+      );
+      expect(result.current.nodes.find((n) => n.id === 'home')!.value).toBe('1.3kW');
+      expect(result.current.nodes.find((n) => n.id === 'ev')!.value).toBe('7.7kW');
+    });
+  });
 });

@@ -237,6 +237,8 @@ function EnergyFlowGroup() {
   const setEnergyFlowDisplay = useInverterStore((s) => s.setEnergyFlowDisplay);
   const showTodayStats = useInverterStore((s) => s.showTodayStats);
   const setShowTodayStats = useInverterStore((s) => s.setShowTodayStats);
+  const homeExcludesCar = useInverterStore((s) => s.homeExcludesCar);
+  const setHomeExcludesCar = useInverterStore((s) => s.setHomeExcludesCar);
   // External CT clamps (address >= 0x01) — offered as the grid-CT source for
   // AC-coupled systems whose grid isn't the built-in 0x00 meter. The meter
   // list is replaced each snapshot, so only its addresses are taken (as a
@@ -293,6 +295,25 @@ function EnergyFlowGroup() {
           <span className={HINT}>Show today's energy totals under the diagram. Hidden by default with the house view.</span>
         </div>
         <Toggle checked={showTodayStats} ariaLabel="Show Today Statistics" onChange={setShowTodayStats} />
+      </div>
+
+      {/* Issue #457: show Home without the car's charging, off by default.
+          Applies to both the orbit and the house view — they share the one
+          view model, so they can't disagree. */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <span className={LABEL}>
+            Home Excludes Car Charging{' '}
+            <HelpTip label="Home Excludes Car Charging">
+              With it on, the Status diagram's Home reading is the house load alone: home power minus the car's
+              charging — from the charger when one is polled, otherwise the car-charging estimate — never below
+              zero, so a charging night no longer counts the car as house load too. The EV node, the flow lines and
+              the house cables keep the car's energy, and History's Home (Excl. Car) series shows the same split.
+            </HelpTip>
+          </span>
+          <span className={HINT}>Show the Status Home load without the car's charging.</span>
+        </div>
+        <Toggle checked={homeExcludesCar} ariaLabel="Home Excludes Car Charging" onChange={setHomeExcludesCar} />
       </div>
 
       {/* The house view always shows its status pills, so the toggle only

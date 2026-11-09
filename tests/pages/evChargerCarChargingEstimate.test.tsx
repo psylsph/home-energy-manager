@@ -26,6 +26,7 @@ describe('<CarChargingSection/> — Settings → EV Charger → Car Charging Est
     vi.mocked(apiPost).mockReset();
     vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
     flash.mockReset();
+    useInverterStore.setState({ snapshot: null });
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -45,6 +46,39 @@ describe('<CarChargingSection/> — Settings → EV Charger → Car Charging Est
     expect(threshold().value).toBe('');
     expect(threshold().placeholder).toBe('Off');
     expect(amps().value).toBe('32');
+  });
+
+  it('shows the live grid voltage and the power it gives at the entered current, without saving', () => {
+    useInverterStore.setState({ snapshot: { grid_voltage: 241.2 } as never });
+    render(<Section initial={{ car_charger_current_a: 32 }} />);
+    expect(screen.getByTestId('car-charging-live-voltage')).toHaveTextContent('241.2V');
+    expect(screen.getByTestId('car-charging-live-power')).toHaveTextContent('7.7kW');
+    expect(screen.getByTestId('car-charging-live-formula')).toHaveTextContent('32 A × 241.2V');
+    // The display follows the field as it is edited, but never saves it.
+    fireEvent.change(amps(), { target: { value: '16' } });
+    expect(screen.getByTestId('car-charging-live-power')).toHaveTextContent('3.9kW');
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it('shows 230 V (default) when the inverter has no usable voltage', () => {
+    render(<Section initial={{ car_charger_current_a: 10 }} />);
+    expect(screen.getByTestId('car-charging-live-voltage')).toHaveTextContent('230.0V (default)');
+    expect(screen.getByTestId('car-charging-live-power')).toHaveTextContent('2.3kW');
+  });
+
+  it('treats an out-of-range voltage as no reading', () => {
+    useInverterStore.setState({ snapshot: { grid_voltage: 300 } as never });
+    render(<Section initial={{ car_charger_current_a: 32 }} />);
+    expect(screen.getByTestId('car-charging-live-voltage')).toHaveTextContent('230.0V (default)');
+  });
+
+  it('shows no live power while the current is invalid', () => {
+    useInverterStore.setState({ snapshot: { grid_voltage: 240 } as never });
+    render(<Section />);
+    fireEvent.change(amps(), { target: { value: '16.5' } });
+    expect(screen.getByTestId('car-charging-live-power')).toHaveTextContent('—');
+    expect(screen.queryByTestId('car-charging-live-formula')).toBeNull();
+    expect(apiPost).not.toHaveBeenCalled();
   });
 
   it('keeps the explanation behind an ⓘ outside the labels and heading', () => {

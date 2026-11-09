@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   carPower,
+  effectiveVoltage,
   estimateCarPower,
   isCarThresholdKw,
+  isUsableVoltage,
   MIN_THRESHOLD_KW,
   MAX_THRESHOLD_KW,
 } from '../../src/lib/carCharging';
@@ -26,6 +28,19 @@ describe('carPower (mirror of history/car_charging.rs, issue #454)', () => {
         expect(car).toBeGreaterThanOrEqual(0);
         expect(car).toBeLessThanOrEqual(h);
       }
+    }
+  });
+});
+
+describe('isUsableVoltage / effectiveVoltage (the voltage the rule uses)', () => {
+  it('uses a reading inside the sanitizer range, and 230 V otherwise', () => {
+    for (const v of [180, 230, 240.5, 280]) {
+      expect(isUsableVoltage(v)).toBe(true);
+      expect(effectiveVoltage(v)).toBe(v);
+    }
+    for (const v of [null, undefined, NaN, Infinity, 179.9, 280.1]) {
+      expect(isUsableVoltage(v)).toBe(false);
+      expect(effectiveVoltage(v)).toBe(230);
     }
   });
 });

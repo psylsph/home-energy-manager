@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { apiPost } from '../../lib/api';
-import { DEFAULT_CHARGER_AMPS } from '../../lib/carCharging';
+import { DEFAULT_CHARGER_AMPS, effectiveVoltage, isUsableVoltage } from '../../lib/carCharging';
+import { formatPower, formatVoltage } from '../../lib/format';
 import { parseLoadAboveKw } from '../../lib/forecast';
 import { parseChargerCurrentA } from '../../lib/settingsForm';
 import type { PollSettings } from '../../lib/types';
@@ -34,6 +35,13 @@ export default function CarChargingEstimate({
   const [thresholdError, setThresholdError] = useState<string | null>(null);
   const [ampsError, setAmpsError] = useState<string | null>(null);
   const { busy: saving, run } = useSettingsSave(flash);
+  const snapshot = useInverterStore((s) => s.snapshot);
+  // Live read-only figures, never saved: the voltage the rule uses and the
+  // block of power it attributes to the car at the current field values.
+  const parsedAmps = parseChargerCurrentA(amps);
+  const voltage = effectiveVoltage(snapshot?.grid_voltage);
+  const voltageIsDefault = !isUsableVoltage(snapshot?.grid_voltage);
+  const livePower = parsedAmps.ok ? formatPower(parsedAmps.amps * voltage) : '—';
 
   const handleSave = () => {
     const kw = parseLoadAboveKw(threshold);
@@ -108,6 +116,27 @@ export default function CarChargingEstimate({
             </span>
           )}
           <span className="text-text-secondary text-xs font-sans">Single-phase chargers; 32 A is a 7 kW unit.</span>
+        </div>
+        <div
+          className="sm:col-span-2 flex flex-wrap items-baseline gap-x-5 gap-y-1 border-t border-white/10 pt-3"
+          data-testid="car-charging-live"
+        >
+          <span className="text-text-primary text-sm font-sans font-medium">Live Now</span>
+          <span className="text-text-secondary text-sm font-sans">
+            Grid Voltage{' '}
+            <span className="text-text-primary font-mono" data-testid="car-charging-live-voltage">
+              {formatVoltage(voltage)}{voltageIsDefault ? ' (default)' : ''}
+            </span>
+          </span>
+          <span className="text-text-secondary text-sm font-sans">
+            Estimated Charging Power{' '}
+            <span className="text-text-primary font-mono" data-testid="car-charging-live-power">{livePower}</span>
+          </span>
+          {parsedAmps.ok && (
+            <span className="text-text-secondary text-xs font-sans" data-testid="car-charging-live-formula">
+              {parsedAmps.amps} A × {formatVoltage(voltage)}
+            </span>
+          )}
         </div>
       </div>
 

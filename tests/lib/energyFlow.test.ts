@@ -1120,6 +1120,93 @@ describe('buildEnergyFlows — EV charger', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Home without the car (issue #457). The option shows the house load alone
+// on the Home node (home power minus the car, floored at zero). Display
+// only: the flows keep the gross home bus, so the EV spoke and the
+// house-view cables still carry the car's energy.
+// ---------------------------------------------------------------------------
+
+describe('buildEnergyFlows — Home without the car (issue #457)', () => {
+  const homeNode = (vm: ReturnType<typeof buildEnergyFlows>) =>
+    vm.nodes.find((n) => n.id === 'home')!;
+  const evNode = (vm: ReturnType<typeof buildEnergyFlows>) =>
+    vm.nodes.find((n) => n.id === 'ev')!;
+
+  it('keeps the gross Home reading with the option off', () => {
+    const vm = buildEnergyFlows(snap({ home_power: 7400, grid_power: -7400 }), {
+      evcPowerW: 7000,
+      showEvc: true,
+    });
+    expect(homeNode(vm).value).toBe('7.4kW');
+    expect(homeNode(vm).active).toBe(true);
+  });
+
+  it('does nothing without an EV node — nothing known to subtract', () => {
+    // No charger polled and no threshold estimate: the car's draw is 0 and
+    // the option must not touch the reading.
+    const vm = buildEnergyFlows(snap({ home_power: 7400 }), {
+      evcPowerW: 0,
+      showEvc: false,
+      homeExcludesCar: true,
+    });
+    expect(vm.nodes.find((n) => n.id === 'ev')).toBeUndefined();
+    expect(homeNode(vm).value).toBe('7.4kW');
+    expect(homeNode(vm).active).toBe(true);
+  });
+
+  it('shows the house alone while the car charges with the option on', () => {
+    const vm = buildEnergyFlows(snap({ home_power: 7400, grid_power: -7400 }), {
+      evcPowerW: 7000,
+      showEvc: true,
+      homeExcludesCar: true,
+    });
+    expect(homeNode(vm).value).toBe('400W');
+    // The car keeps its own node and draw.
+    expect(evNode(vm).value).toBe('7.0kW');
+    expect(evNode(vm).active).toBe(true);
+  });
+
+  it('floors the Home reading at zero when the car draws more than the house', () => {
+    const vm = buildEnergyFlows(snap({ home_power: 6000, grid_power: -6000 }), {
+      evcPowerW: 7000,
+      showEvc: true,
+      homeExcludesCar: true,
+    });
+    // Never a negative reading: the house is empty, the car is doing the rest.
+    expect(homeNode(vm).value).toBe('0W');
+    expect(homeNode(vm).active).toBe(false);
+    // ... and the EV node still carries the full draw.
+    expect(evNode(vm).value).toBe('7.0kW');
+  });
+
+  it('leaves the spoken flows on the gross home bus with the option on', () => {
+    const vm = buildEnergyFlows(snap({ home_power: 7400, grid_power: -7400 }), {
+      evcPowerW: 7000,
+      showEvc: true,
+      homeExcludesCar: true,
+    });
+    // The car's energy passes through the home bus: the import spoke stays
+    // gross and the home→ev spoke carries the car.
+    expect(flowById(vm, 'import')!.watts).toBe(7400);
+    expect(flowById(vm, 'ev')!.watts).toBe(7000);
+  });
+
+  it('reads the hub idle and narrates the sources when the car takes the whole bus', () => {
+    // 6kW gross, all of it the car: the hub reads 0W, so the summary stops
+    // claiming the grid is "powering the home" and names the import and
+    // the EV instead.
+    const vm = buildEnergyFlows(snap({ home_power: 6000, grid_power: -6000 }), {
+      evcPowerW: 7000,
+      showEvc: true,
+      homeExcludesCar: true,
+    });
+    expect(homeNode(vm).active).toBe(false);
+    expect(vm.summaryText)
+      .toBe('Importing 6.0kW from the grid and charging the EV at 7.0kW.');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Gateway device: null telemetry fields
 // ---------------------------------------------------------------------------
 //

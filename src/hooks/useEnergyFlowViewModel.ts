@@ -58,6 +58,10 @@ export function useEnergyFlowViewModel({
 }: EnergyFlowSourceProps): EnergyFlowViewModel {
   const noise = useInverterStore((st) => st.visualNoiseThreshold);
   const gridMeterAddress = useInverterStore((st) => st.gridMeterAddress);
+  // Issue #457: show Home without the car's charging. Its effect is built
+  // into the shared view model, so the two linked views can't disagree on
+  // the Home reading.
+  const homeExcludesCar = useInverterStore((st) => st.homeExcludesCar);
 
   const evcLabel = !showEvc
     ? undefined
@@ -80,5 +84,6 @@ export function useEnergyFlowViewModel({
     evcCableLabel,
     evcSessionEnergyKwh: evcEstimated ? 0 : evcSessionEnergyKwh,
     gridMeterAddress,
+    homeExcludesCar,
   });
 }

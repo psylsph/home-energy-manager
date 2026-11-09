@@ -456,7 +456,7 @@ function lineEnds(a: WorldPoint, b: WorldPoint) {
 
 function EvPost() {
   const c = FLOW_COLORS.ev;
-  const s = 0.18;
+  const s = EV_POST.half;
   const { x, y, height } = EV_POST;
   const fill = 'var(--app-house-device, #161B22)';
   return (
@@ -547,9 +547,10 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
           </g>
 
           <BatteryCabinet barsLit={scene.battery.barsLit} color={scene.battery.color} capSoc={capLineSoc(source.snapshot)} />
-          {source.showEvc && <EvPost />}
 
-          {/* Idle wiring, then one moving cable per part with power on it. */}
+          {/* Idle wiring, then one moving cable per part with power on it. The
+              EV post is drawn over its cable's end so the cable meets the
+              post's edge instead of running on underneath it. */}
           <g data-testid="house-idle-tracks">
             {scene.idleTracks.map((d, i) => (
               <path key={i} d={d} fill="none" stroke="var(--app-text-secondary, #8B949E)" strokeOpacity={0.28} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
@@ -558,6 +559,7 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
           {scene.routes.map((route) => (
             <Route key={route.id} route={route} reduced={reduced} />
           ))}
+          {source.showEvc && <EvPost />}
 
           {scene.readings.map((r) => (
             <Reading

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.12.0] - 2026-11-09
+
+### Added
+
+- **Home can leave the car out of its live reading.** A new switch in Settings → Panel Controls, Home Excludes Car Charging, shows the Status diagram's Home figure as the house alone: home power minus the car's charging, never below zero. It works from a charger HEM polls or from the car-charging estimate, applies to both the orbit and the house view, and stays off until you turn it on. The car keeps its own reading, and the flow lines and house cables are unchanged.
+- **The car charging estimate shows the live voltage and power.** Settings → EV Charger now shows the grid voltage the rule uses and the charging power it works out at the current you entered, updating as you edit, so it is clear what a 32 A charger means on your supply.
+- **The log shows what Octopus has planned.** HEM writes the planned smart charges on the first good check, then again whenever a charge moves or changes type, so a log shows straight away why the battery hold did or didn't start. The line stays quiet while the list is steady, and a finished charge dropping off is not a change.
+
+### Fixed
+
+- **The house view's cables meet their parts.** The EV cable now ends at the charge post instead of running underneath it, and the grid cable no longer crosses the Battery reading when the battery charges from the grid.
+
 ## [1.11.1] - 2026-11-09
 
 ### Changed

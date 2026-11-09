@@ -86,8 +86,8 @@ export const PATH = { x0: 2.6, x1: 3.8 } as const;
 export const BATTERY_BOX = { y0: 1.0, y1: 2.6, z0: 0, z1: 3.8, depth: 0.6 } as const;
 /** Inverter on the gable wall, nearer the front corner than the battery. */
 export const INVERTER_BOX = { y0: 3.6, y1: 4.8, z0: 1.8, z1: 2.9, depth: 0.35 } as const;
-/** EV charge post on the front-left lawn, clear of the hedge. */
-export const EV_POST = { x: -1.8, y: 7.6, height: 1.6 } as const;
+/** EV charge post on the front-left lawn, clear of the hedge. `half` is its half-width in x and y. */
+export const EV_POST = { x: -1.8, y: 7.6, height: 1.6, half: 0.18 } as const;
 /** Front hedges either side of the path, along the front of the plot. */
 export const HEDGES = [
   { x0: -2.6, x1: 2.2, y0: 9.3, y1: 9.9, z: 0.8 },
@@ -95,6 +95,12 @@ export const HEDGES = [
 ] as const;
 /** The grid cable runs this far in from the front of the plot, behind the hedge. */
 const GRID_RUN_Y = 8.8;
+/**
+ * The grid cable's run up the right side of the plot. Inset far enough that
+ * the cable stays left of the Battery reading's leader (the straight drop
+ * below the cabinet), so a grid-to-battery charge never crosses it.
+ */
+const GRID_RUN_X = PLOT.x1 - 1.7;
 /** Chimney stack (with its cap) on the back roof slope; leader lines must stay clear of it. */
 export const CHIMNEY = { x0: 0.75, x1: 1.85, y0: 2.45, y1: 3.55, z0: 6.8, z1: 9.75 } as const;
 /**
@@ -205,19 +211,19 @@ export const LEGS: Record<HousePart, WorldPoint[]> = {
   grid: [
     HOUSE_ANCHORS.grid,
     w(GATE_X, GRID_RUN_Y, 0),
-    w(PLOT.x1 - 1.2, GRID_RUN_Y, 0),
-    w(PLOT.x1 - 1.2, INV_MID_Y, 0),
+    w(GRID_RUN_X, GRID_RUN_Y, 0),
+    w(GRID_RUN_X, INV_MID_Y, 0),
     w(SIDE + INVERTER_BOX.depth, INV_MID_Y, 0),
     w(SIDE + INVERTER_BOX.depth, INV_MID_Y, INVERTER_BOX.z0),
   ],
 };
 
-/** House → EV post: out of the front-left corner and across the lawn. */
+/** House → EV post: out of the front-left corner and across the lawn, meeting the post's near edge (not running under it). */
 export const EV_LEG: WorldPoint[] = [
   w(HOUSE.x0 + 0.3, HOUSE.y1 + 0.05, 0.6),
   w(HOUSE.x0 + 0.3, HOUSE.y1 + 0.8, 0),
   w(EV_POST.x, HOUSE.y1 + 0.8, 0),
-  w(EV_POST.x, EV_POST.y, 0),
+  w(EV_POST.x, EV_POST.y - EV_POST.half, 0),
 ];
 
 // ---------------------------------------------------------------------------

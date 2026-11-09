@@ -186,6 +186,15 @@ interface InverterState {
    */
   showTodayStats: boolean;
   /**
+   * Issue #457: show the Home reading of the Status diagrams without the
+   * car's charging — home power minus the car's draw (the charger's own
+   * reading when one is polled, otherwise the threshold estimate), floored
+   * at zero — so a charging night reads as the house alone. The EV node
+   * keeps the car's draw and the flow lines are unchanged. Off by default;
+   * persisted to localStorage so the choice survives reloads.
+   */
+  homeExcludesCar: boolean;
+  /**
    * Noise floor in watts for the energy flow diagram. Flows below this
    * value are treated as zero — no animated line, no arrow, displayed
    * value rounds to "0W". Default: 20W.
@@ -269,6 +278,7 @@ interface InverterState {
   setShowFlowStatusWords: (enabled: boolean) => void;
   setEnergyFlowDisplay: (display: EnergyFlowDisplay) => void;
   setShowTodayStats: (show: boolean) => void;
+  setHomeExcludesCar: (enabled: boolean) => void;
   setVisualNoiseThreshold: (threshold: number) => void;
   setGridMeterAddress: (address: number) => void;
   /**
@@ -425,6 +435,16 @@ function loadShowTodayStats(): boolean {
   return savedTodayStats() ?? loadEnergyFlowDisplay() !== 'house';
 }
 
+function loadHomeExcludesCar(): boolean {
+  try {
+    // Only the literal "true" enables the exclusion (issue #457); any other
+    // stored value — or no entry — stays off, matching the opt-in default so
+    // nothing changes for existing users until they turn it on.
+    return localStorage.getItem('homeExcludesCar') === 'true';
+  } catch { /* ignore */ }
+  return false;
+}
+
 function loadVisualNoiseThreshold(): number {
   try {
     const stored = localStorage.getItem('visualNoiseThreshold');
@@ -527,6 +547,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   showFlowStatusWords: loadShowFlowStatusWords(),
   energyFlowDisplay: loadEnergyFlowDisplay(),
   showTodayStats: loadShowTodayStats(),
+  homeExcludesCar: loadHomeExcludesCar(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
@@ -632,6 +653,12 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('showTodayStats', String(show));
     } catch { /* ignore */ }
     set({ showTodayStats: show });
+  },
+  setHomeExcludesCar: (enabled) => {
+    try {
+      localStorage.setItem('homeExcludesCar', String(enabled));
+    } catch { /* ignore */ }
+    set({ homeExcludesCar: enabled });
   },
   setVisualNoiseThreshold: (threshold) => {
     try {

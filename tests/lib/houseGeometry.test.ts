@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   CONSUMER_UNIT,
   EV_LEG,
+  EV_POST,
   HOUSE,
   HOUSE_ANCHORS,
   HOUSE_VIEWBOX,
@@ -135,10 +136,19 @@ describe('cables', () => {
     expect(LEGS.grid[0]).toEqual(HOUSE_ANCHORS.grid);
   });
 
-  it('ends the EV leg at the foot of the charge post', () => {
+  it("keeps the grid cable clear of the Battery reading's drop line", () => {
+    // The Battery reading hangs straight below its anchor. A cable charging
+    // from the grid used to cross that drop; every grid vertex stays left of
+    // it, with room for the cable's glow at full flow.
+    const dropX = isoPoint(HOUSE_ANCHORS.battery).x;
+    for (const p of LEGS.grid) expect(isoPoint(p).x).toBeLessThan(dropX - 5);
+  });
+
+  it("ends the EV leg at the charge post's near edge, not under it", () => {
     const end = EV_LEG[EV_LEG.length - 1];
-    expect(end.x).toBe(HOUSE_ANCHORS.ev.x);
-    expect(end.y).toBe(HOUSE_ANCHORS.ev.y);
+    expect(end.x).toBe(EV_POST.x);
+    expect(end.y).toBe(EV_POST.y - EV_POST.half);
+    expect(end.y).toBeLessThan(EV_POST.y);
     expect(end.z).toBe(0);
   });
 });

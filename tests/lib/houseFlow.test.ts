@@ -473,3 +473,24 @@ describe('electricalDetail', () => {
     expect(reading(sc, 'home').detail).toBeUndefined();
   });
 });
+
+describe('buildHouseScene — home without the car (issue #457)', () => {
+  it('reads the house alone on the Home leader while the EV reading keeps the car', () => {
+    const { vm, sc } = scene(
+      snap({ home_power: 7400, grid_power: -7400 }),
+      { evcPowerW: 7000, showEvc: true, homeExcludesCar: true },
+    );
+    // The shared view model feeds the leaders and the cables, so the house
+    // view agrees with the orbit without any logic of its own.
+    expect(reading(sc, 'home').number).toBe('400');
+    expect(reading(sc, 'home').unit).toBe('W');
+    // 400W of house load is still consuming — only a reading floored to 0
+    // goes idle (see the pure view-model tests).
+    expect(reading(sc, 'home').active).toBe(true);
+    expect(reading(sc, 'ev').number).toBe('7.0');
+    // The car's energy still rides the home bus: the cable keeps the gross
+    // flow the spokes describe.
+    expect(cable(sc, 'home')).toMatchObject({ watts: 7400, supplies: false });
+    expectCablesMatchFlows(vm, sc);
+  });
+});

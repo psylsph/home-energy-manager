@@ -400,6 +400,72 @@ pub async fn planning_dispatches(
         .for_planning(now, wanted(settings), calibrating)
 }
 
+/// The log line for a freshly read dispatch list (issue #431), so a log
+/// shows what Octopus had planned whenever the hold did or didn't start.
+/// `previous` is the last good list, or none on the first good check, which
+/// always logs a baseline. Charges that have already ended by `now` count on
+/// neither side: Octopus dropping a finished one (or listing it one check
+/// longer) is not a change, so a steady list stays quiet. After that it logs
+/// only when a charge's start, end or type changes: the order and the energy
+/// figure (which Octopus updates as the car charges) don't count.
+fn planned_change<Tz: chrono::TimeZone>(
+    previous: Option<&[Dispatch]>,
+    fresh: &[Dispatch],
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let key = |list: &[Dispatch]| {
+        let mut key: Vec<_> = list
+            .iter()
+            .filter(|d| d.end > now)
+            .map(|d| (d.start, d.end, d.kind.clone()))
+            .collect();
+        key.sort();
+        key
+    };
+    let heading = match previous {
+        None => "Intelligent Octopus planned charges",
+        Some(previous) if key(previous) == key(fresh) => return None,
+        Some(_) => "Intelligent Octopus planned charges changed",
+    };
+    let mut sorted: Vec<&Dispatch> = fresh.iter().filter(|d| d.end > now).collect();
+    sorted.sort_by_key(|d| (d.start, d.end));
+    let described: Vec<String> = sorted
+        .into_iter()
+        .map(|d| {
+            let kind = match d.kind.as_deref() {
+                None => "smart (unlabelled)".to_string(),
+                Some(kind) => kind.to_ascii_lowercase(),
+            };
+            let start = d.start.with_timezone(tz);
+            let end = d.end.with_timezone(tz);
+            let end_format = if end.date_naive() == start.date_naive() {
+                "%H:%M"
+            } else {
+                "%-d %b %H:%M"
+            };
+            let energy = d
+                .energy_added_kwh
+                .map(|kwh| format!(" ({kwh:.1} kWh)"))
+                .unwrap_or_default();
+            format!(
+                "{kind} {}\u{2013}{}{energy}",
+                start.format("%-d %b %H:%M"),
+                end.format(end_format)
+            )
+        })
+        .collect();
+    let body = if described.is_empty() {
+        "none".to_string()
+    } else {
+        described.join("; ")
+    };
+    Some(format!("{heading}: {body}"))
+}
+
 /// One pass: read the dispatches and publish them.
 pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
     // Read the generation before the settings: a switch after this point
@@ -474,11 +540,19 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
                 current.devices = devices;
                 current.devices_checked_at = Some(now);
             }
-            current.dispatches = fetched
+            let fresh: Vec<Dispatch> = fetched
                 .dispatches
                 .into_iter()
                 .map(|(_, dispatch)| dispatch)
                 .collect();
+            // A baseline on the first good check since start-up or since the
+            // hold was switched on (both leave `checked_at` empty), then only
+            // the changes.
+            let previous = current.checked_at.map(|_| current.dispatches.as_slice());
+            if let Some(line) = planned_change(previous, &fresh, now, &chrono::Local) {
+                tracing::info!("{line}");
+            }
+            current.dispatches = fresh;
             current.checked_at = Some(now);
             current.error = None;
         }
@@ -1778,6 +1852,263 @@ mod tests {
                 .await
                 .holding_for_restart(utc(NOW)));
             assert_eq!(mock.seen().len(), 0, "and no request is made");
+        })
+        .await;
+    }
+
+    // ---- logging what Octopus planned (issue #431) ----
+
+    fn planned(start: &str, end: &str, kind: Option<&str>, energy: Option<f64>) -> Dispatch {
+        Dispatch {
+            start: utc(start),
+            end: utc(end),
+            kind: kind.map(str::to_string),
+            energy_added_kwh: energy,
+        }
+    }
+
+    /// A time before every dispatch in these tests.
+    fn early() -> DateTime<Utc> {
+        utc("2026-01-01T00:00:00Z")
+    }
+
+    #[test]
+    fn a_charge_that_finishes_and_leaves_the_list_is_not_a_change() {
+        let done = planned(
+            "2026-11-09T23:30:00Z",
+            "2026-11-10T05:30:00Z",
+            Some("SMART"),
+            None,
+        );
+        let next = planned(
+            "2026-11-10T23:30:00Z",
+            "2026-11-11T05:30:00Z",
+            Some("SMART"),
+            None,
+        );
+        let after = utc("2026-11-10T05:33:00Z");
+        // Octopus drops it once it's over, or lists it one check longer.
+        assert_eq!(
+            planned_change(Some(&[done.clone()]), &[], after, &Utc),
+            None
+        );
+        assert_eq!(
+            planned_change(
+                Some(&[done.clone(), next.clone()]),
+                &[next.clone()],
+                after,
+                &Utc
+            ),
+            None
+        );
+        assert_eq!(
+            planned_change(Some(&[done.clone()]), &[done.clone()], after, &Utc),
+            None
+        );
+        // A charge still running counts, and the baseline leaves out what's over.
+        let running = utc("2026-11-10T01:00:00Z");
+        assert!(planned_change(Some(&[done.clone()]), &[], running, &Utc).is_some());
+        assert_eq!(
+            planned_change(None, &[done, next], after, &Utc).as_deref(),
+            Some("Intelligent Octopus planned charges: smart 10 Nov 23:30\u{2013}11 Nov 05:30")
+        );
+    }
+
+    #[test]
+    fn the_first_good_check_always_logs_what_is_planned() {
+        assert_eq!(
+            planned_change(None, &[], early(), &Utc).as_deref(),
+            Some("Intelligent Octopus planned charges: none")
+        );
+        let list = [
+            planned(
+                "2026-11-09T23:30:00Z",
+                "2026-11-10T05:30:00Z",
+                Some("SMART"),
+                Some(31.5),
+            ),
+            planned(
+                "2026-11-09T18:00:00Z",
+                "2026-11-09T18:30:00Z",
+                Some("BOOST"),
+                None,
+            ),
+        ];
+        assert_eq!(
+            planned_change(None, &list, early(), &Utc).as_deref(),
+            Some(
+                "Intelligent Octopus planned charges: boost 9 Nov 18:00\u{2013}18:30; \
+                 smart 9 Nov 23:30\u{2013}10 Nov 05:30 (31.5 kWh)"
+            ),
+            "in start order, with the end's date when it falls on a later day"
+        );
+    }
+
+    #[test]
+    fn an_unlabelled_dispatch_is_logged_as_smart_like_the_hold_treats_it() {
+        let list = [planned(
+            "2026-11-09T01:00:00Z",
+            "2026-11-09T02:00:00Z",
+            None,
+            None,
+        )];
+        assert_eq!(
+            planned_change(None, &list, early(), &Utc).as_deref(),
+            Some(
+                "Intelligent Octopus planned charges: smart (unlabelled) 9 Nov 01:00\u{2013}02:00"
+            )
+        );
+    }
+
+    #[test]
+    fn an_unchanged_list_logs_nothing_even_reordered_or_with_new_energy() {
+        let a = planned(
+            "2026-11-09T23:30:00Z",
+            "2026-11-10T01:00:00Z",
+            Some("SMART"),
+            Some(5.0),
+        );
+        let b = planned(
+            "2026-11-10T02:00:00Z",
+            "2026-11-10T03:00:00Z",
+            Some("SMART"),
+            None,
+        );
+        let before = [a.clone(), b.clone()];
+        let after = [
+            b,
+            Dispatch {
+                energy_added_kwh: Some(7.5),
+                ..a
+            },
+        ];
+        assert_eq!(planned_change(Some(&before), &after, early(), &Utc), None);
+        assert_eq!(planned_change(Some(&[]), &[], early(), &Utc), None);
+    }
+
+    #[test]
+    fn a_moved_added_dropped_or_relabelled_dispatch_is_logged_as_a_change() {
+        let base = planned(
+            "2026-11-09T23:30:00Z",
+            "2026-11-10T01:00:00Z",
+            Some("SMART"),
+            None,
+        );
+        let moved = Dispatch {
+            end: utc("2026-11-10T01:30:00Z"),
+            ..base.clone()
+        };
+        let relabelled = Dispatch {
+            kind: Some("BOOST".to_string()),
+            ..base.clone()
+        };
+        let extra = planned(
+            "2026-11-10T03:00:00Z",
+            "2026-11-10T04:00:00Z",
+            Some("SMART"),
+            None,
+        );
+        for fresh in [
+            vec![moved],
+            vec![relabelled],
+            vec![base.clone(), extra],
+            vec![],
+        ] {
+            let line = planned_change(Some(std::slice::from_ref(&base)), &fresh, early(), &Utc)
+                .unwrap_or_else(|| panic!("{fresh:?} must be logged"));
+            assert!(
+                line.starts_with("Intelligent Octopus planned charges changed: "),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            planned_change(Some(std::slice::from_ref(&base)), &[], early(), &Utc).as_deref(),
+            Some("Intelligent Octopus planned charges changed: none")
+        );
+    }
+
+    #[test]
+    fn times_are_logged_in_the_given_time_zone() {
+        let bst = chrono::FixedOffset::east_opt(3600).unwrap();
+        let list = [planned(
+            "2026-06-09T23:30:00Z",
+            "2026-06-10T00:30:00Z",
+            Some("SMART"),
+            None,
+        )];
+        assert_eq!(
+            planned_change(None, &list, early(), &bst).as_deref(),
+            Some("Intelligent Octopus planned charges: smart 10 Jun 00:30\u{2013}01:30")
+        );
+    }
+
+    fn capture_logs() -> (
+        std::sync::Arc<crate::server::logs::LogRing>,
+        tracing::dispatcher::DefaultGuard,
+    ) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = std::sync::Arc::new(crate::server::logs::LogRing::new(200));
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(crate::server::logs::LogCaptureLayer::new(ring.clone()));
+        let guard =
+            tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(subscriber));
+        (ring, guard)
+    }
+
+    fn planned_lines(ring: &crate::server::logs::LogRing) -> Vec<String> {
+        ring.read_all()
+            .into_iter()
+            .filter(|line| line.contains("Intelligent Octopus planned charges"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn checks_log_the_plan_once_then_only_its_changes_and_a_failure_adds_none() {
+        with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+
+            check_once(&state, utc(NOW)).await;
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            assert_eq!(planned_lines(&ring).len(), 1, "{:?}", planned_lines(&ring));
+            assert!(!planned_lines(&ring)[0].contains("changed"));
+
+            // A failed check keeps the last list and logs no plan.
+            mock.set_dispatches(json!({ "errors": [{ "message": "boom" }] }));
+            check_once(&state, utc("2026-10-17T12:06:00+00:00")).await;
+            assert_eq!(planned_lines(&ring).len(), 1);
+            // Recovering with the same list is not a change either.
+            mock.set_dispatches(one_dispatch());
+            check_once(&state, utc("2026-10-17T12:09:00+00:00")).await;
+            assert_eq!(planned_lines(&ring).len(), 1);
+
+            mock.set_dispatches(dispatches_response(json!([])));
+            check_once(&state, utc("2026-10-17T12:12:00+00:00")).await;
+            let lines = planned_lines(&ring);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert!(lines[1].contains("changed: none"), "{lines:?}");
+            assert!(!lines
+                .iter()
+                .any(|l| l.contains(KEY) || l.contains("jwt-abc")));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn switching_the_hold_back_on_logs_a_fresh_baseline() {
+        with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            check_once(&state, utc(NOW)).await;
+            Settings::update(|s| s.octopus_dispatch_hold = false).unwrap();
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            Settings::update(|s| s.octopus_dispatch_hold = true).unwrap();
+            check_once(&state, utc("2026-10-17T12:06:00+00:00")).await;
+            let lines = planned_lines(&ring);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert!(lines.iter().all(|l| !l.contains("changed")), "{lines:?}");
         })
         .await;
     }
