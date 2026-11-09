@@ -294,6 +294,15 @@ fn create_router_at(
         // Authenticated Octopus customer consumption (issue #212)
         .route("/api/octopus/status", get(crate::octopus::get_status))
         .route("/api/octopus/sync", post(crate::octopus::start_sync))
+        // Energy Tariffs following Octopus (issue #455)
+        .route(
+            "/api/octopus/tariff-preview",
+            get(crate::octopus_tariff_follow::get_preview),
+        )
+        .route(
+            "/api/octopus/tariff-source",
+            post(crate::octopus_tariff_follow::post_source),
+        )
         .route(
             "/api/octopus/sessions",
             get(crate::octopus_sessions::get_sessions),
@@ -350,6 +359,15 @@ fn create_router_at(
             get(crate::backup::get_backup).post(crate::backup::set_backup),
         )
         .route("/api/backup/run", post(crate::backup::post_backup_run))
+        // Re-price History and backfill Octopus rates (issue #455)
+        .route(
+            "/api/history/reprice",
+            get(crate::rates_job::get_reprice).post(crate::rates_job::post_reprice),
+        )
+        .route(
+            "/api/octopus/backfill-rates",
+            post(crate::rates_job::post_backfill),
+        )
         // Email alerts
         .route("/api/alerts", get(api::get_alerts).post(api::set_alerts))
         .route("/api/alerts/test", post(api::test_alerts))
@@ -1280,6 +1298,137 @@ mod tests {
             );
             assert_eq!(body["data"]["running"], false);
             assert_eq!(body["data"]["last"]["ok"], true, "{body}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rates_job_routes_are_served() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let db_path = crate::settings::Settings::settings_dir().join("history.db");
+            *state.history.lock().await =
+                Some(Arc::new(crate::history::HistoryDb::open(&db_path).unwrap()));
+            let finished = state.rates_job.lock().await.finished.clone();
+            let app = create_router(state);
+            let call = |method: &str, uri: &str, body: &str| {
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap()
+            };
+            let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).unwrap();
+
+            let response = app
+                .clone()
+                .oneshot(call("GET", "/api/history/reprice", ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(body["data"]["running"], false);
+
+            let response = app
+                .clone()
+                .oneshot(call(
+                    "POST",
+                    "/api/history/reprice",
+                    r#"{"from": "nonsense"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            let response = app
+                .clone()
+                .oneshot(call(
+                    "POST",
+                    "/api/history/reprice",
+                    r#"{"from": "2026-10-01"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            tokio::time::timeout(std::time::Duration::from_secs(60), finished.notified())
+                .await
+                .expect("re-price finished");
+
+            let response = app
+                .clone()
+                .oneshot(call("POST", "/api/octopus/backfill-rates", ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            tokio::time::timeout(std::time::Duration::from_secs(60), finished.notified())
+                .await
+                .expect("backfill finished");
+
+            let response = app
+                .oneshot(call("GET", "/api/history/reprice", ""))
+                .await
+                .unwrap();
+            let body = json(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(body["data"]["running"], false);
+            assert_eq!(body["data"]["last"]["kind"], "backfill");
+            assert_eq!(body["data"]["last"]["ok"], true, "{body}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn octopus_tariff_routes_are_served() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let db_path = crate::settings::Settings::settings_dir().join("history.db");
+            *state.history.lock().await =
+                Some(Arc::new(crate::history::HistoryDb::open(&db_path).unwrap()));
+            let app = create_router(state);
+            let call = |method: &str, uri: &str, body: &str| {
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap()
+            };
+            let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).unwrap();
+
+            let response = app
+                .clone()
+                .oneshot(call("GET", "/api/octopus/tariff-preview", ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(body["data"]["source"], "manual");
+            assert_eq!(body["data"]["import"]["ok"], false);
+
+            for (payload, expected) in [
+                (r#"{"source": "agile"}"#, StatusCode::BAD_REQUEST),
+                (r#"{"source": "octopus"}"#, StatusCode::BAD_REQUEST),
+                (r#"{"source": "manual"}"#, StatusCode::OK),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(call("POST", "/api/octopus/tariff-source", payload))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected, "{payload}");
+            }
         })
         .await;
     }

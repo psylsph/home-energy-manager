@@ -26,6 +26,7 @@
 
 use std::collections::VecDeque;
 
+use super::rate_stamp::RateStamp;
 use crate::inverter::model::InverterSnapshot;
 
 /// Seconds per history bucket.
@@ -71,10 +72,13 @@ struct Bucket {
     percent_sums: [(f64, u32); AVERAGED_PERCENT.len()],
     /// The minute's row as of its latest poll, until it is written.
     pending: Option<InverterSnapshot>,
+    /// The rates in force at the minute's first poll, kept for every rewrite
+    /// of the row so a tariff edit mid-minute can't mix two prices (#455).
+    stamp: RateStamp,
 }
 
 impl Bucket {
-    fn new(start: i64) -> Self {
+    fn new(start: i64, stamp: RateStamp) -> Self {
         Self {
             start,
             polls: 0,
@@ -82,6 +86,7 @@ impl Bucket {
             reading_sums: [0.0; AVERAGED_READINGS.len()],
             percent_sums: [(0.0, 0); AVERAGED_PERCENT.len()],
             pending: None,
+            stamp,
         }
     }
 
@@ -117,6 +122,7 @@ impl Bucket {
         Some(MinuteRow {
             start: self.start,
             row,
+            stamp: self.stamp,
         })
     }
 }
@@ -129,6 +135,8 @@ pub struct MinuteRow {
     pub start: i64,
     /// The row, stamped with the latest poll's time.
     pub row: InverterSnapshot,
+    /// The rates in force when the minute's first poll arrived (#455).
+    pub stamp: RateStamp,
 }
 
 /// Folds polls into one row per wall-clock minute. Polls must be pushed in
@@ -154,7 +162,11 @@ impl MinuteAccumulator {
     /// clock correction) continues it; any other minute starts afresh, so
     /// after a large backwards step the minute is rebuilt from the correctly
     /// stamped polls.
-    pub fn push(&mut self, mut snap: InverterSnapshot) -> Vec<MinuteRow> {
+    ///
+    /// `stamp` is the tariff in force now. It is kept only when `snap` starts
+    /// a minute; later polls of the minute (and polls continuing a minute
+    /// still open) keep the minute's first stamp.
+    pub fn push(&mut self, mut snap: InverterSnapshot, stamp: RateStamp) -> Vec<MinuteRow> {
         let mut ready = Vec::new();
         let start = snap.timestamp.div_euclid(BUCKET_SECS) * BUCKET_SECS;
         let mut first_poll = false;
@@ -167,7 +179,7 @@ impl MinuteAccumulator {
                         ready.push(row);
                     }
                 }
-                self.buckets.push_back(Bucket::new(start));
+                self.buckets.push_back(Bucket::new(start, stamp));
                 self.buckets.len() - 1
             }
         };
@@ -204,8 +216,8 @@ impl PollRows {
     }
 
     /// Fold `snap` in; returns whether any rows became ready to write.
-    pub fn push(&mut self, snap: InverterSnapshot) -> bool {
-        let ready = self.accumulator.push(snap);
+    pub fn push(&mut self, snap: InverterSnapshot, stamp: RateStamp) -> bool {
+        let ready = self.accumulator.push(snap, stamp);
         let any = !ready.is_empty();
         self.queued.extend(ready);
         any
@@ -248,7 +260,7 @@ mod tests {
     fn final_rows(polls: &[InverterSnapshot]) -> Vec<InverterSnapshot> {
         let mut rows = PollRows::new();
         for poll in polls {
-            rows.push(poll.clone());
+            rows.push(poll.clone(), RateStamp::default());
         }
         rows.close_open();
         let mut stored: Vec<MinuteRow> = Vec::new();
@@ -529,7 +541,7 @@ mod tests {
         polls.push(snap_at(NOON + 68, 900, 1.3));
         let mut rows = PollRows::new();
         for poll in polls {
-            rows.push(poll);
+            rows.push(poll, RateStamp::default());
         }
         rows.close_open();
         // Last queued row per minute, as the writer leaves the database.
@@ -549,7 +561,7 @@ mod tests {
     fn a_minute_is_written_at_its_first_poll_and_when_it_ends() {
         let mut rows = PollRows::new();
         for i in 0..15 {
-            rows.push(snap_at(NOON + i * 10, 100, i as f32));
+            rows.push(snap_at(NOON + i * 10, 100, i as f32), RateStamp::default());
         }
         // (minute, row timestamp) in write order: each minute's first poll
         // at once, its aggregate when it ends; 12:02 still open.
@@ -587,18 +599,24 @@ mod tests {
     fn push_reports_whether_rows_became_ready() {
         let mut rows = PollRows::new();
         assert!(
-            rows.push(snap_at(NOON + 5, 0, 0.0)),
+            rows.push(snap_at(NOON + 5, 0, 0.0), RateStamp::default()),
             "a minute's first poll"
         );
-        assert!(!rows.push(snap_at(NOON + 15, 0, 0.0)), "mid-minute");
-        assert!(rows.push(snap_at(NOON + 65, 0, 0.0)), "the minute ended");
+        assert!(
+            !rows.push(snap_at(NOON + 15, 0, 0.0), RateStamp::default()),
+            "mid-minute"
+        );
+        assert!(
+            rows.push(snap_at(NOON + 65, 0, 0.0), RateStamp::default()),
+            "the minute ended"
+        );
     }
 
     #[test]
     fn polls_a_minute_apart_are_written_once_each() {
         let mut rows = PollRows::new();
         for i in 0..3 {
-            rows.push(snap_at(NOON + 7 + i * 60, 0, 0.0));
+            rows.push(snap_at(NOON + 7 + i * 60, 0, 0.0), RateStamp::default());
         }
         rows.close_open();
         let written: Vec<i64> = rows.take().iter().map(|r| r.row.timestamp).collect();
@@ -608,14 +626,20 @@ mod tests {
     #[test]
     fn a_minute_reopened_by_a_clock_correction_is_written_again() {
         let mut acc = MinuteAccumulator::new();
-        assert_eq!(acc.push(snap_at(NOON + 5, 0, 0.0)).len(), 1);
-        let next_first = acc.push(snap_at(NOON + 65, 0, 0.0));
+        assert_eq!(
+            acc.push(snap_at(NOON + 5, 0, 0.0), RateStamp::default())
+                .len(),
+            1
+        );
+        let next_first = acc.push(snap_at(NOON + 65, 0, 0.0), RateStamp::default());
         assert_eq!(next_first.len(), 1);
         assert_eq!(next_first[0].start, NOON + 60);
         // Clock steps back into 12:00: nothing pending elsewhere to write.
-        assert!(acc.push(snap_at(NOON + 58, 0, 0.0)).is_empty());
+        assert!(acc
+            .push(snap_at(NOON + 58, 0, 0.0), RateStamp::default())
+            .is_empty());
         // Back to 12:01: 12:00 is written again, with both its polls.
-        let rewritten = acc.push(snap_at(NOON + 70, 0, 0.0));
+        let rewritten = acc.push(snap_at(NOON + 70, 0, 0.0), RateStamp::default());
         assert_eq!(rewritten.len(), 1);
         assert_eq!(rewritten[0].start, NOON);
         assert_eq!(rewritten[0].row.timestamp, NOON + 58);
@@ -625,12 +649,15 @@ mod tests {
     fn an_open_minute_pushed_out_by_newer_ones_is_still_written() {
         let mut acc = MinuteAccumulator::new();
         for minute in 0..3 {
-            acc.push(snap_at(NOON + minute * 60 + 5, 100, 0.0));
+            acc.push(
+                snap_at(NOON + minute * 60 + 5, 100, 0.0),
+                RateStamp::default(),
+            );
         }
         // Clock back into 12:00 (still open, now pending again)...
-        acc.push(snap_at(NOON + 30, 300, 0.0));
+        acc.push(snap_at(NOON + 30, 300, 0.0), RateStamp::default());
         // ...then a jump far ahead pushes 12:00 out of the open minutes.
-        let ready = acc.push(snap_at(NOON + 600, 0, 0.0));
+        let ready = acc.push(snap_at(NOON + 600, 0, 0.0), RateStamp::default());
         let noon = ready
             .iter()
             .find(|r| r.start == NOON)
@@ -643,7 +670,7 @@ mod tests {
     fn open_minutes_are_bounded() {
         let mut acc = MinuteAccumulator::new();
         for i in 0..100 {
-            acc.push(snap_at(NOON + i * 60, 0, 0.0));
+            acc.push(snap_at(NOON + i * 60, 0, 0.0), RateStamp::default());
         }
         assert_eq!(acc.buckets.len(), OPEN_BUCKETS);
     }
@@ -664,5 +691,83 @@ mod tests {
         assert_eq!(row.charge_rate, 50);
         assert_eq!(row.battery_reserve, 20);
         assert_eq!(row.discharge_rate, 25);
+    }
+
+    fn stamp(rate: f64) -> RateStamp {
+        RateStamp {
+            import_rate: Some(rate),
+            export_rate: Some(rate / 2.0),
+            standing_charge_p_per_day: Some(50.0),
+        }
+    }
+
+    /// Every row the accumulator hands over for `polls`, then at shutdown.
+    fn all_rows(polls: &[(InverterSnapshot, RateStamp)]) -> Vec<MinuteRow> {
+        let mut acc = MinuteAccumulator::new();
+        let mut rows = Vec::new();
+        for (snap, stamp) in polls {
+            rows.extend(acc.push(snap.clone(), *stamp));
+        }
+        rows.extend(acc.close_open());
+        rows
+    }
+
+    #[test]
+    fn a_minute_keeps_the_rates_of_its_first_poll_for_every_rewrite() {
+        // The tariff is edited after the first poll: the first row and the
+        // minute's final aggregate both carry the rates it started with.
+        let rows = all_rows(&[
+            (snap_at(NOON + 5, 100, 1.0), stamp(0.30)),
+            (snap_at(NOON + 25, 200, 1.1), stamp(0.99)),
+            (snap_at(NOON + 45, 300, 1.2), stamp(0.99)),
+        ]);
+        assert_eq!(rows.len(), 2, "the first poll, then the aggregate");
+        assert!(rows.iter().all(|r| r.stamp == stamp(0.30)));
+    }
+
+    #[test]
+    fn the_next_minute_takes_the_rates_in_force_when_it_starts() {
+        let rows = all_rows(&[
+            (snap_at(NOON + 5, 100, 1.0), stamp(0.30)),
+            (snap_at(NOON + 65, 100, 1.1), stamp(0.07)),
+            (snap_at(NOON + 95, 100, 1.2), stamp(0.99)),
+        ]);
+        let rates: Vec<(i64, Option<f64>)> = rows
+            .iter()
+            .map(|r| (r.start, r.stamp.import_rate))
+            .collect();
+        assert_eq!(
+            rates,
+            vec![
+                (NOON, Some(0.30)),
+                (NOON + 60, Some(0.07)),
+                (NOON + 60, Some(0.07)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_poll_continuing_a_minute_still_open_keeps_that_minutes_rates() {
+        // A small backwards clock correction returns to the open minute; it
+        // continues that minute rather than starting it again.
+        let rows = all_rows(&[
+            (snap_at(NOON + 5, 100, 1.0), stamp(0.30)),
+            (snap_at(NOON + 65, 100, 1.1), stamp(0.07)),
+            (snap_at(NOON + 58, 100, 1.2), stamp(0.99)),
+        ]);
+        let first_minute: Vec<_> = rows.iter().filter(|r| r.start == NOON).collect();
+        assert!(!first_minute.is_empty());
+        assert!(first_minute.iter().all(|r| r.stamp == stamp(0.30)));
+    }
+
+    #[test]
+    fn a_missing_stamp_stays_missing_for_the_whole_minute() {
+        // A first poll with no resolvable rates must not pick them up from a
+        // later poll: the row is left unrecorded rather than half-priced.
+        let rows = all_rows(&[
+            (snap_at(NOON + 5, 100, 1.0), RateStamp::default()),
+            (snap_at(NOON + 25, 100, 1.1), stamp(0.30)),
+        ]);
+        assert!(rows.iter().all(|r| r.stamp == RateStamp::default()));
     }
 }

@@ -11,6 +11,10 @@ pub mod car_charging;
 pub mod dispatch_log;
 pub mod evc_power;
 pub mod minute;
+pub mod rate_stamp;
+pub mod reprice;
+
+pub use rate_stamp::RateStamp;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -155,6 +159,18 @@ pub struct CostComponentPoint {
     pub energy_gbp: f64,
     /// Cumulative standing-charge (fixed daily fee) at this bucket, in £.
     pub standing_gbp: f64,
+}
+
+/// One reading the cost walk prices: the counter and the rates recorded with
+/// it (issue #455). `None` is "not recorded" and prices at the current tariff.
+#[derive(Debug, Clone, Copy)]
+struct CostRow {
+    ts: i64,
+    raw: f64,
+    /// £/kWh recorded for this direction.
+    rate: Option<f64>,
+    /// Import standing charge recorded, pence/day.
+    standing_p: Option<f64>,
 }
 
 /// Additive energy totals for an exact History window (issue #237).
@@ -1281,7 +1297,7 @@ fn replace_minute_row(conn: &Connection, owned: &mut OwnedRows, row: &minute::Mi
                 rusqlite::params_from_iter(&stale),
             )?;
         }
-        let inserted = insert_reading_into(&tx, &row.row, mine.contains(&timestamp))?;
+        let inserted = insert_reading_into(&tx, &row.row, &row.stamp, mine.contains(&timestamp))?;
         tx.commit()?;
         Ok(inserted)
     });
@@ -1312,6 +1328,7 @@ fn replace_minute_row(conn: &Connection, owned: &mut OwnedRows, row: &minute::Mi
 fn insert_reading_into(
     conn: &Connection,
     snap: &InverterSnapshot,
+    stamp: &RateStamp,
     replace: bool,
 ) -> SqlResult<bool> {
     let (verb, on_conflict) = if replace {
@@ -1332,8 +1349,9 @@ fn insert_reading_into(
             today_charge_kwh, today_discharge_kwh, today_consumption_kwh,
             today_ac_charge_kwh, home_energy_today_kwh,
             charge_rate, discharge_rate, battery_reserve, target_soc,
-            pv1_pct, pv2_pct
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35){on_conflict}"),
+            pv1_pct, pv2_pct,
+            import_rate, export_rate, standing_charge_p_per_day
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38){on_conflict}"),
         params![
             snap.timestamp,
             snap.solar_power,
@@ -1370,6 +1388,9 @@ fn insert_reading_into(
             snap.target_soc,
             snap.pv1_pct,
             snap.pv2_pct,
+            stamp.import_rate,
+            stamp.export_rate,
+            stamp.standing_charge_p_per_day,
         ],
     )?;
     Ok(changed > 0)
@@ -1456,6 +1477,14 @@ impl HistoryDb {
         // PV output as % of rated peak, stored for history charting).
         add_readings_column_if_missing(&conn, "pv1_pct", "REAL")?;
         add_readings_column_if_missing(&conn, "pv2_pct", "REAL")?;
+
+        // The rates in force when each row was recorded (issue #455), so the
+        // cost readers price a row with what applied then, not today's
+        // tariff. NULL is "not recorded" (every earlier row); 0 is a real
+        // rate. No index: nothing filters on them.
+        add_readings_column_if_missing(&conn, "import_rate", "REAL")?;
+        add_readings_column_if_missing(&conn, "export_rate", "REAL")?;
+        add_readings_column_if_missing(&conn, "standing_charge_p_per_day", "REAL")?;
 
         // The newest reading at 100% (issue #426's full-charge reminder)
         // without scanning every reading when there isn't one. Built after
@@ -1960,15 +1989,40 @@ impl HistoryDb {
     /// [`Self::flush_poll_rows`] on the blocking pool has anything to write;
     /// call [`Self::close_open_minutes`] on shutdown.
     ///
+    /// `stamp` is the tariff in force now, resolved by the caller from the
+    /// settings it already holds. It is captured here, at queue time, because
+    /// a row may be flushed later than it was polled; the minute keeps the
+    /// stamp of its first poll (see [`minute::MinuteAccumulator::push`]).
+    ///
     /// A restart within a minute leaves the pre-restart row in place beside
     /// the new process's row for that minute: a new process can't tell it
     /// from real history, and every query buckets or takes MAX anyway.
-    pub fn queue_poll_reading(&self, snap: InverterSnapshot) -> bool {
+    pub fn queue_poll_reading(&self, snap: InverterSnapshot, stamp: RateStamp) -> bool {
         // The queue holds no state that matters for correctness, so a
         // poisoned lock (a panic mid-fold) is recovered rather than stopping
         // history for good.
         let mut rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
-        rows.push(snap)
+        rows.push(snap, stamp)
+    }
+
+    /// Every row's recorded import rate, oldest first (tests of the rates jobs).
+    #[cfg(test)]
+    pub(crate) fn import_rates_for_test(&self) -> Vec<Option<f64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT import_rate FROM readings ORDER BY timestamp")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Panic while holding the connection lock, poisoning it.
+    #[cfg(test)]
+    pub(crate) fn poison_connection_for_test(&self) {
+        let _conn = self.conn.lock().unwrap();
+        panic!("poison the history connection");
     }
 
     /// Hold the connection lock while `f` runs (tests of lock contention).
@@ -2032,7 +2086,7 @@ impl HistoryDb {
                 return;
             }
         };
-        if let Err(e) = insert_reading_into(&conn, snap, true) {
+        if let Err(e) = insert_reading_into(&conn, snap, &RateStamp::default(), true) {
             tracing::warn!("Failed to insert history reading: {e}");
         }
     }
@@ -2484,15 +2538,27 @@ impl HistoryDb {
         // daily fee under UK billing, but it's debited at the next
         // local midnight rather than at window open, so the graph shows
         // a single visible step per local day crossed.)
-        let midnight_steps = if standing_charge_gbp_per_day > 0.0 {
+        // Only the import counter carries a standing charge, and its rows may
+        // carry the charge recorded that day (issue #455) even when today's
+        // setting is zero.
+        let stamped_standing = counter_field == "today_import_kwh";
+        let midnight_steps = if standing_charge_gbp_per_day > 0.0 || stamped_standing {
             local_midnight_steps_after(start_ts, end_ts, &chrono::Local)
         } else {
             Vec::new()
         };
         let total_days_in_window = days_in_local_window(start_ts, end_ts, &chrono::Local);
 
+        // The rate recorded with each row (issue #455): the import rate for
+        // the import counter, the export rate for the export one. NULL (a row
+        // from before rates were stamped) prices at the current tariff.
+        let rate_column = if stamped_standing {
+            "import_rate"
+        } else {
+            "export_rate"
+        };
         let sql = format!(
-            "SELECT timestamp, \"{counter_field}\" \
+            "SELECT timestamp, \"{counter_field}\", {rate_column}, standing_charge_p_per_day \
              FROM readings \
              WHERE timestamp >= ?1 AND timestamp < ?2 AND \"{counter_field}\" IS NOT NULL \
              ORDER BY timestamp",
@@ -2500,9 +2566,19 @@ impl HistoryDb {
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| format!("Failed to prepare cost query: {e}"))?;
-        let rows: Vec<(i64, f64)> = stmt
+        let rows: Vec<CostRow> = stmt
             .query_map(params![start_ts, end_ts], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+                Ok(CostRow {
+                    ts: row.get::<_, i64>(0)?,
+                    raw: row.get::<_, f64>(1)?,
+                    rate: row
+                        .get::<_, Option<f64>>(2)?
+                        .filter(|r| r.is_finite() && *r >= 0.0),
+                    standing_p: row
+                        .get::<_, Option<f64>>(3)?
+                        .filter(|p| p.is_finite())
+                        .map(|p| p.max(0.0)),
+                })
             })
             .map_err(|e| format!("Cost query failed: {e}"))?
             .filter_map(SqlResult::ok)
@@ -2533,12 +2609,43 @@ impl HistoryDb {
         // first bucket. Each subsequent local midnight shows another
         // visible step in the cumulative cost graph.
         let mut standing_charge_days_credited: u32 = if total_days_in_window > 0 { 1 } else { 0 };
+        // Issue #455: a day's standing charge is the one recorded on its rows
+        // when there is one. Kept as the difference from the current setting
+        // so rows with no recorded charge add exactly zero and total exactly
+        // `days × today's charge`, as before.
+        let mut standing_adjust_gbp = 0.0_f64;
+        let standing_adjust = |recorded_p: Option<f64>| -> f64 {
+            match (stamped_standing, recorded_p) {
+                (true, Some(p)) => p / 100.0 - standing_charge_gbp_per_day,
+                _ => 0.0,
+            }
+        };
         // Parse the tariff's HH:MM bounds once, not per reading (the walk can
         // cover hundreds of thousands of rows on a 1y range).
         let parsed_slots = tariff.parsed_slots();
+        // A reading's rate: the one recorded with it (issue #455), else the
+        // current tariff's for its minute.
+        let rate_at = |ts: i64, recorded: Option<f64>| -> f64 {
+            recorded.unwrap_or_else(|| {
+                crate::settings::rate_for_parsed_minutes(
+                    &parsed_slots,
+                    local_minutes_of_day(ts, &chrono::Local),
+                )
+                .unwrap_or(flat_fallback)
+            })
+        };
 
-        for (idx, &(ts, raw)) in rows.iter().enumerate() {
-            let next_raw = rows.get(idx + 1).map(|&(_, v)| v);
+        for (
+            idx,
+            &CostRow {
+                ts,
+                raw,
+                rate: stamped_rate,
+                standing_p: stamped_standing_p,
+            },
+        ) in rows.iter().enumerate()
+        {
+            let next_raw = rows.get(idx + 1).map(|r| r.raw);
             // Apply any standing-charge debits for local-midnight boundaries
             // that fall at or before this reading's timestamp and strictly
             // after the previous reading's timestamp (or start_ts for the
@@ -2547,10 +2654,25 @@ impl HistoryDb {
             // (matching UK billing: Standing Charge is due at local
             // midnight, not when the next reading happens to arrive).
             let prior_ts = last_ts.unwrap_or(start_ts);
+            let mut crossed = 0_u32;
             for &midnight in &midnight_steps {
                 if midnight > prior_ts && midnight <= ts {
                     standing_charge_days_credited = standing_charge_days_credited.saturating_add(1);
+                    crossed += 1;
                 }
+            }
+            // The reading is on the last day it crossed into, so its recorded
+            // charge is that day's; any earlier days it skipped over had no
+            // readings and keep today's setting.
+            if crossed > 0 {
+                standing_adjust_gbp += standing_adjust(stamped_standing_p);
+            }
+            // The window-open day is charged as recorded on the window's
+            // first reading.
+            // (Only when the reading is on that day: one that crossed midnights
+            // belongs to a later day, and the days before it had no readings.)
+            if idx == 0 && crossed == 0 && total_days_in_window > 0 {
+                standing_adjust_gbp += standing_adjust(stamped_standing_p);
             }
 
             match baseline {
@@ -2577,11 +2699,7 @@ impl HistoryDb {
                         let elapsed_h = (leading_gap_secs as f64) / 3600.0;
                         let ceiling = MAX_PLAUSIBLE_POWER_KW * elapsed_h.max(1.0 / 60.0);
                         if raw <= ceiling {
-                            let rate = crate::settings::rate_for_parsed_minutes(
-                                &parsed_slots,
-                                local_minutes_of_day(ts, &chrono::Local),
-                            )
-                            .unwrap_or(flat_fallback);
+                            let rate = rate_at(ts, stamped_rate);
                             acc += raw * rate;
                         }
                     }
@@ -2647,11 +2765,7 @@ impl HistoryDb {
                     let ceiling = MAX_PLAUSIBLE_POWER_KW * elapsed_h.max(1.0 / 60.0);
 
                     if delta > 0.0 && delta <= ceiling {
-                        let rate = crate::settings::rate_for_parsed_minutes(
-                            &parsed_slots,
-                            local_minutes_of_day(ts, &chrono::Local),
-                        )
-                        .unwrap_or(flat_fallback);
+                        let rate = rate_at(ts, stamped_rate);
                         acc += delta * rate;
                         baseline = Some(new_baseline);
                     } else if delta <= ceiling {
@@ -2670,8 +2784,9 @@ impl HistoryDb {
             // Issue #131: per-day Standing Charge layered on top of the
             // per-kWh component. The cost graph line steps up by exactly the
             // per-day amount at every local midnight within the window.
-            let standing_charge_total =
-                standing_charge_days_credited as f64 * standing_charge_gbp_per_day;
+            let standing_charge_total = standing_charge_days_credited as f64
+                * standing_charge_gbp_per_day
+                + standing_adjust_gbp;
             buckets.insert(bucket_ms, (acc, standing_charge_total));
             last_ts = Some(ts);
         }
@@ -2693,13 +2808,14 @@ impl HistoryDb {
             // standing-charge step we just credited, plus the per-kWh
             // component (which doesn't change after the last reading).
             let end_bucket_ms = ((end_ts / bucket_secs) * bucket_secs) * 1000;
-            let standing_charge_total =
-                standing_charge_days_credited as f64 * standing_charge_gbp_per_day;
-            // Only insert if this bucket is later than what we already have
-            // (avoid clobbering an existing bucket from the readings walk).
-            buckets
-                .entry(end_bucket_ms)
-                .or_insert((acc, standing_charge_total));
+            let standing_charge_total = standing_charge_days_credited as f64
+                * standing_charge_gbp_per_day
+                + standing_adjust_gbp;
+            // The energy cost can't have moved since the last reading, but a
+            // local midnight after it may have added a day's standing charge,
+            // so the end bucket takes the final totals even when the last
+            // reading already made it (a wide bucket holds both).
+            buckets.insert(end_bucket_ms, (acc, standing_charge_total));
         }
 
         // Always emit at least the window-open bucket with the standing
@@ -3280,7 +3396,12 @@ impl HistoryDb {
                      WHERE p.meter_kind=c.meter_kind AND p.meter_point=c.meter_point
                        AND p.rate_type='night' AND p.valid_from <= c.interval_start
                        AND (p.valid_to IS NULL OR p.valid_to > c.interval_start)
-                     ORDER BY p.valid_from DESC LIMIT 1) AS night_rate
+                     ORDER BY p.valid_from DESC LIMIT 1) AS night_rate,
+                    (SELECT p.tariff_code FROM octopus_tariff_prices p
+                     WHERE p.meter_kind=c.meter_kind AND p.meter_point=c.meter_point
+                       AND p.rate_type IN ('day', 'night') AND p.valid_from <= c.interval_start
+                       AND (p.valid_to IS NULL OR p.valid_to > c.interval_start)
+                     ORDER BY p.valid_from DESC LIMIT 1) AS night_tariff_code
              FROM octopus_consumption c
              WHERE c.interval_start >= ?1 AND c.interval_start < ?2
              ORDER BY c.interval_start",
@@ -3295,22 +3416,26 @@ impl HistoryDb {
                     row.get::<_, Option<f64>>(3)?,
                     row.get::<_, Option<f64>>(4)?,
                     row.get::<_, Option<f64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
 
         for row in rows {
-            let (kind, ts, usage, standard_rate, day_rate, night_rate) =
+            let (kind, ts, usage, standard_rate, day_rate, night_rate, night_tariff_code) =
                 row.map_err(|e| e.to_string())?;
+            // The night hours belong to the tariff: Intelligent Octopus Go's
+            // are fixed, everything else uses the Economy 7 window.
+            let (night_start, night_end) = crate::octopus_tariff::night_window_for(
+                night_tariff_code.as_deref().unwrap_or(""),
+                (economy7_start_minutes, economy7_end_minutes),
+            );
             let utc = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
                 .ok_or_else(|| "invalid Octopus interval timestamp".to_string())?;
             let local = utc.with_timezone(&London);
             let minute = (local.hour() * 60 + local.minute()) as u16;
-            let in_night_window = if economy7_start_minutes < economy7_end_minutes {
-                minute >= economy7_start_minutes && minute < economy7_end_minutes
-            } else {
-                minute >= economy7_start_minutes || minute < economy7_end_minutes
-            };
+            let in_night_window =
+                crate::octopus_tariff::in_night_window(minute, (night_start, night_end));
             let rate = standard_rate.or(if in_night_window {
                 night_rate
             } else {
@@ -4041,7 +4166,7 @@ mod tests {
 
     impl HistoryDb {
         fn record_poll(&self, snap: InverterSnapshot) {
-            self.queue_poll_reading(snap);
+            self.queue_poll_reading(snap, RateStamp::default());
             self.flush_poll_rows();
         }
     }
@@ -4165,15 +4290,15 @@ mod tests {
     fn queueing_reports_whether_rows_are_ready_to_write() {
         let db = test_db();
         assert!(
-            db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0)),
+            db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0), RateStamp::default()),
             "first poll"
         );
         assert!(
-            !db.queue_poll_reading(poll_snap(POLL_NOON + 15, 0, 0.0)),
+            !db.queue_poll_reading(poll_snap(POLL_NOON + 15, 0, 0.0), RateStamp::default()),
             "mid-minute"
         );
         assert!(
-            db.queue_poll_reading(poll_snap(POLL_NOON + 65, 0, 0.0)),
+            db.queue_poll_reading(poll_snap(POLL_NOON + 65, 0, 0.0), RateStamp::default()),
             "minute ended"
         );
     }
@@ -4239,7 +4364,10 @@ mod tests {
         })
         .join();
         for i in 0..3 {
-            db.queue_poll_reading(poll_snap(POLL_NOON + i * 60, 100, 0.0));
+            db.queue_poll_reading(
+                poll_snap(POLL_NOON + i * 60, 100, 0.0),
+                RateStamp::default(),
+            );
             db.flush_poll_rows();
         }
         assert!(db.poll_rows.lock().unwrap().take().is_empty());
@@ -4254,11 +4382,10 @@ mod tests {
             let db = std::sync::Arc::new(test_db());
             let mut flushers = Vec::new();
             for i in 0..18 {
-                db.queue_poll_reading(poll_snap(
-                    POLL_NOON + i * 10,
-                    100 * (i as i32 % 6 + 1),
-                    i as f32,
-                ));
+                db.queue_poll_reading(
+                    poll_snap(POLL_NOON + i * 10, 100 * (i as i32 % 6 + 1), i as f32),
+                    RateStamp::default(),
+                );
                 let db = db.clone();
                 flushers.push(std::thread::spawn(move || db.flush_poll_rows()));
             }
@@ -4310,6 +4437,170 @@ mod tests {
             stored(&db),
             vec![(POLL_NOON + 25, 200), (POLL_NOON + 75, 500)]
         );
+    }
+
+    /// A stamp with distinguishable values, for the row tests.
+    fn rates(import: f64) -> RateStamp {
+        RateStamp {
+            import_rate: Some(import),
+            export_rate: Some(import / 2.0),
+            standing_charge_p_per_day: Some(50.0),
+        }
+    }
+
+    type StampRow = (i64, Option<f64>, Option<f64>, Option<f64>);
+
+    fn stamp_rows(db: &HistoryDb) -> Vec<StampRow> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, import_rate, export_rate, standing_charge_p_per_day \
+                 FROM readings ORDER BY timestamp",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn a_polled_row_stores_the_rates_in_force_when_it_was_recorded() {
+        let db = test_db();
+        db.queue_poll_reading(poll_snap(POLL_NOON + 5, 100, 1.0), rates(0.30));
+        db.flush_poll_rows();
+        assert_eq!(
+            stamp_rows(&db),
+            vec![(POLL_NOON + 5, Some(0.30), Some(0.15), Some(50.0))]
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_rate_is_null_and_a_zero_rate_stays_zero() {
+        let db = test_db();
+        db.queue_poll_reading(poll_snap(POLL_NOON + 5, 100, 1.0), RateStamp::default());
+        db.queue_poll_reading(
+            poll_snap(POLL_NOON + 65, 100, 1.0),
+            RateStamp {
+                import_rate: Some(0.30),
+                export_rate: Some(0.0),
+                standing_charge_p_per_day: Some(0.0),
+            },
+        );
+        db.flush_poll_rows();
+        assert_eq!(
+            stamp_rows(&db),
+            vec![
+                (POLL_NOON + 5, None, None, None),
+                (POLL_NOON + 65, Some(0.30), Some(0.0), Some(0.0)),
+            ],
+            "NULL means not recorded; 0 is a real rate"
+        );
+    }
+
+    #[test]
+    fn seeded_and_imported_rows_carry_no_rates() {
+        let db = test_db();
+        db.insert_reading(&poll_snap(POLL_NOON + 5, 100, 1.0));
+        assert_eq!(stamp_rows(&db), vec![(POLL_NOON + 5, None, None, None)]);
+    }
+
+    #[test]
+    fn a_tariff_edit_between_polls_leaves_the_minutes_rows_at_its_first_rates() {
+        // The rate changes after the minute's first poll but before it is
+        // rewritten as the full aggregate: both writes carry the old rates.
+        let db = test_db();
+        db.queue_poll_reading(poll_snap(POLL_NOON + 5, 100, 1.0), rates(0.30));
+        db.flush_poll_rows();
+        db.queue_poll_reading(poll_snap(POLL_NOON + 25, 100, 1.1), rates(0.99));
+        db.queue_poll_reading(poll_snap(POLL_NOON + 65, 100, 1.2), rates(0.99));
+        db.flush_poll_rows();
+        db.close_open_minutes();
+        assert_eq!(
+            stamp_rows(&db),
+            vec![
+                (POLL_NOON + 25, Some(0.30), Some(0.15), Some(50.0)),
+                (POLL_NOON + 65, Some(0.99), Some(0.495), Some(50.0)),
+            ],
+            "the first minute keeps 0.30; the next takes the edited rate"
+        );
+    }
+
+    #[test]
+    fn rates_captured_at_queue_time_survive_concurrent_flushes_and_later_edits() {
+        // Polls are queued with the tariff changing every minute while other
+        // threads flush as fast as they can: whichever flush writes a row,
+        // each minute must end up with the rate it was queued under.
+        for _round in 0..20 {
+            let db = std::sync::Arc::new(test_db());
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flushers: Vec<_> = (0..3)
+                .map(|_| {
+                    let db = db.clone();
+                    let stop = stop.clone();
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            db.flush_poll_rows();
+                        }
+                    })
+                })
+                .collect();
+            for minute in 0..6_i64 {
+                for poll in 0..3_i64 {
+                    // The first poll of a minute is queued under that
+                    // minute's rate; later polls under a "newer" tariff.
+                    let rate = if poll == 0 {
+                        minute as f64 + 1.0
+                    } else {
+                        100.0 + minute as f64
+                    };
+                    db.queue_poll_reading(
+                        poll_snap(POLL_NOON + minute * 60 + poll * 15 + 5, 100, 1.0),
+                        rates(rate),
+                    );
+                }
+            }
+            db.close_open_minutes();
+            stop.store(true, Ordering::Relaxed);
+            for flusher in flushers {
+                flusher.join().unwrap();
+            }
+            db.flush_poll_rows();
+            let imports: Vec<Option<f64>> = stamp_rows(&db).iter().map(|r| r.1).collect();
+            assert_eq!(
+                imports,
+                (1..=6).map(|m| Some(f64::from(m))).collect::<Vec<_>>(),
+                "each minute keeps the rate it was queued under"
+            );
+        }
+    }
+
+    #[test]
+    fn a_database_from_before_rates_were_stamped_gains_the_columns_and_keeps_its_rows() {
+        let dir = unique_test_dir("givenergy-history-stamp-migrate");
+        let path = dir.join("history.db");
+        {
+            let db = HistoryDb::open(&path).unwrap();
+            db.insert_reading(&poll_snap(POLL_NOON + 5, 100, 1.0));
+            let conn = db.conn.lock().unwrap();
+            for column in ["import_rate", "export_rate", "standing_charge_p_per_day"] {
+                conn.execute_batch(&format!("ALTER TABLE readings DROP COLUMN {column}"))
+                    .unwrap();
+            }
+        }
+        let db = HistoryDb::open(&path).unwrap();
+        assert_eq!(
+            stamp_rows(&db),
+            vec![(POLL_NOON + 5, None, None, None)],
+            "the old row is kept and reads as not recorded"
+        );
+        db.queue_poll_reading(poll_snap(POLL_NOON + 65, 100, 1.0), rates(0.30));
+        db.flush_poll_rows();
+        assert_eq!(stamp_rows(&db).len(), 2);
+        drop(db);
+        // Opening again changes nothing.
+        let db = HistoryDb::open(&path).unwrap();
+        assert_eq!(stamp_rows(&db).len(), 2);
     }
 
     #[test]
@@ -4893,6 +5184,226 @@ mod tests {
         assert_close(ee, 0.0, "export income");
     }
 
+    /// Stamp every row of local day `day_offset` between the two minutes of
+    /// the day (inclusive) with `stamp`, as the live writer would have.
+    fn stamp_day(db: &HistoryDb, day_offset: i64, from_min: i64, to_min: i64, stamp: RateStamp) {
+        let lo = local_day_secs(day_offset, from_min).unwrap();
+        let hi = local_day_secs(day_offset, to_min).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE readings SET import_rate = ?1, export_rate = ?2, \
+                 standing_charge_p_per_day = ?3 WHERE timestamp >= ?4 AND timestamp <= ?5",
+                params![
+                    stamp.import_rate,
+                    stamp.export_rate,
+                    stamp.standing_charge_p_per_day,
+                    lo,
+                    hi
+                ],
+            )
+            .unwrap();
+    }
+
+    fn all_day(import: Option<f64>, export: Option<f64>, standing: Option<f64>) -> RateStamp {
+        RateStamp {
+            import_rate: import,
+            export_rate: export,
+            standing_charge_p_per_day: standing,
+        }
+    }
+
+    #[test]
+    fn standing_charge_for_midnights_after_the_last_reading_is_not_lost_in_a_shared_bucket() {
+        // Readings stop on day 0; the window runs two days. With one bucket
+        // spanning the lot, the last reading and the window end share it, and
+        // the standing charge for day 1's midnight must still be counted.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 0.0);
+        let flat = crate::settings::TariffConfig::flat(0.30);
+        let points = db
+            .query_cost_breakdown(
+                &window(local_midnight_secs(0), local_midnight_secs(2)),
+                1_000_000_000,
+                "today_import_kwh",
+                &flat,
+                0.30,
+                60.0,
+            )
+            .unwrap();
+        assert_eq!(points.len(), 1, "one shared bucket");
+        assert_close(points[0].standing_gbp, 2.0 * 0.60, "day 0 and day 1");
+    }
+
+    #[test]
+    fn a_window_opening_on_a_day_without_readings_charges_that_day_at_the_setting() {
+        // Readings only on day 2 (recorded at 25p). Days 0 and 1 had none, so
+        // they use today's 60p; day 2 uses its recorded 25p.
+        let db = test_db();
+        insert_both_counters_day(&db, 2, 10.0, 0.0);
+        stamp_day(&db, 2, 0, 24 * 60 - 1, all_day(None, None, Some(25.0)));
+        let (_, standing, _) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(3));
+        assert_close(
+            standing,
+            0.60 + 0.60 + 0.25,
+            "two days at the setting, one recorded",
+        );
+    }
+
+    #[test]
+    fn a_rows_stamped_rates_beat_the_tariff_in_force_now() {
+        // The tariff is now 0.30 import / 0.15 export, but the day was
+        // recorded at 0.10 / 0.05: 10 kWh in costs £1.00, 20 kWh out earns £1.00.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 20.0);
+        stamp_day(
+            &db,
+            0,
+            0,
+            24 * 60 - 1,
+            all_day(Some(0.10), Some(0.05), None),
+        );
+        let (ie, _, ee) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(1));
+        assert_close(ie, 1.0, "import energy at the recorded rate");
+        assert_close(ee, 1.0, "export income at the recorded rate");
+    }
+
+    #[test]
+    fn a_rate_change_mid_window_prices_each_side_at_its_own_rate() {
+        // Rows to 12:00 were recorded at 0.10; later rows have no stamp and
+        // follow the current 0.30. 5 kWh arrive before noon and 5 after.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 0.0);
+        stamp_day(&db, 0, 0, 12 * 60, all_day(Some(0.10), None, None));
+        let (ie, _, _) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(1));
+        assert_close(ie, 5.0 * 0.10 + 5.0 * 0.30, "each side at its own rate");
+    }
+
+    #[test]
+    fn a_stamped_zero_rate_is_free_not_unrecorded() {
+        // Free export stamped as 0: the day earns nothing, however much the
+        // current tariff would pay. A NULL would fall back to 0.15 instead.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 0.0, 20.0);
+        stamp_day(&db, 0, 0, 24 * 60 - 1, all_day(None, Some(0.0), None));
+        let (_, _, ee) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(1));
+        assert_close(ee, 0.0, "a recorded zero rate is not replaced");
+    }
+
+    #[test]
+    fn rows_with_no_stamp_price_exactly_as_before() {
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 20.0);
+        let (ie, is_, ee) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(1));
+        assert_close(ie, 3.0, "import energy");
+        assert_close(is_, 0.60, "standing charge from the current setting");
+        assert_close(ee, 3.0, "export income");
+    }
+
+    #[test]
+    fn each_days_standing_charge_is_the_one_recorded_that_day() {
+        // The setting is 60p now, but day 0 was recorded at 25p and day 1 at
+        // 30p; both are charged as recorded.
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 0.0);
+        insert_both_counters_day(&db, 1, 10.0, 0.0);
+        stamp_day(&db, 0, 0, 24 * 60 - 1, all_day(None, None, Some(25.0)));
+        stamp_day(&db, 1, 0, 24 * 60 - 1, all_day(None, None, Some(30.0)));
+        let (_, is_, _) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(2));
+        assert_close(is_, 0.25 + 0.30, "standing as recorded on each day");
+    }
+
+    #[test]
+    fn a_day_with_no_recorded_standing_charge_uses_the_current_setting() {
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 0.0);
+        insert_both_counters_day(&db, 1, 10.0, 0.0);
+        stamp_day(&db, 1, 0, 24 * 60 - 1, all_day(None, None, Some(30.0)));
+        let (_, is_, _) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(2));
+        assert_close(is_, 0.60 + 0.30, "day 0 unrecorded, day 1 as recorded");
+    }
+
+    #[test]
+    fn a_recorded_zero_standing_charge_is_a_real_zero() {
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 0.0);
+        stamp_day(&db, 0, 0, 24 * 60 - 1, all_day(None, None, Some(0.0)));
+        let (_, is_, _) = cost_totals(&db, local_midnight_secs(0), local_midnight_secs(1));
+        assert_close(is_, 0.0, "no standing charge was in force");
+    }
+
+    #[test]
+    fn the_export_series_never_takes_the_import_standing_charge() {
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 0.0, 20.0);
+        stamp_day(
+            &db,
+            0,
+            0,
+            24 * 60 - 1,
+            all_day(None, Some(0.15), Some(50.0)),
+        );
+        let flat = crate::settings::TariffConfig::flat(0.15);
+        let start = local_midnight_secs(0);
+        let series = db
+            .query_cost_breakdown(
+                &window(start, local_midnight_secs(1)),
+                1800,
+                "today_export_kwh",
+                &flat,
+                0.15,
+                0.0,
+            )
+            .unwrap();
+        assert_close(
+            series.last().unwrap().standing_gbp,
+            0.0,
+            "export has no standing",
+        );
+    }
+
+    #[test]
+    fn stamped_totals_do_not_depend_on_the_bucket_size() {
+        let db = test_db();
+        insert_both_counters_day(&db, 0, 10.0, 20.0);
+        insert_both_counters_day(&db, 1, 10.0, 20.0);
+        stamp_day(
+            &db,
+            0,
+            0,
+            12 * 60,
+            all_day(Some(0.10), Some(0.05), Some(25.0)),
+        );
+        stamp_day(
+            &db,
+            1,
+            0,
+            24 * 60 - 1,
+            all_day(Some(0.20), Some(0.0), Some(30.0)),
+        );
+        let flat = crate::settings::TariffConfig::flat(0.30);
+        let total = |bucket: i64| {
+            let points = db
+                .query_cost_breakdown(
+                    &window(local_midnight_secs(0), local_midnight_secs(2)),
+                    bucket,
+                    "today_import_kwh",
+                    &flat,
+                    0.30,
+                    60.0,
+                )
+                .unwrap();
+            let last = points.last().unwrap();
+            (last.energy_gbp, last.standing_gbp)
+        };
+        let (e30, s30) = total(1800);
+        let (e_day, s_day) = total(86_400);
+        assert_close(e30, e_day, "energy");
+        assert_close(s30, s_day, "standing");
+        assert_close(s30, 0.25 + 0.30, "standing as recorded");
+    }
+
     #[test]
     fn walk_matrix_export_only_no_gap_single_day() {
         // 20 kWh exported 09:00–15:00 at flat £0.15 → £3.00 income,
@@ -5275,6 +5786,49 @@ mod tests {
             .unwrap();
         assert!((report.totals.electricity_energy_cost_gbp - 1.1).abs() < 1e-9);
         assert!(report.totals.pricing_complete);
+    }
+
+    #[test]
+    fn octopus_billing_uses_the_intelligent_go_hours_not_the_economy_7_ones() {
+        // Night is 23:30-05:30 on Intelligent Octopus Go. 23:45 is night and
+        // 06:00 is day, the opposite of the 00:30-07:30 Economy 7 default.
+        let db = test_db();
+        let start = chrono::DateTime::parse_from_rfc3339("2025-01-15T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let consumption = |offset: i64, value: f64| OctopusConsumptionRow {
+            meter_kind: "electricity_import".to_string(),
+            meter_point: "import".to_string(),
+            meter_serial: "serial".to_string(),
+            interval_start: start + offset,
+            interval_end: start + offset + 1800,
+            consumption: value,
+        };
+        db.upsert_octopus_consumption(
+            &[
+                consumption(23 * 3600 + 45 * 60, 2.0),
+                consumption(6 * 3600, 3.0),
+            ],
+            start + 86400,
+        )
+        .unwrap();
+        let price = |rate_type: &str, value: f64| OctopusTariffPriceRow {
+            meter_kind: "electricity_import".to_string(),
+            meter_point: "import".to_string(),
+            tariff_code: "E-1R-IOG-SMB-VAR-24-10-29-H".to_string(),
+            valid_from: start - 1,
+            valid_to: Some(start + 86400),
+            value_inc_vat: value,
+            rate_type: rate_type.to_string(),
+        };
+        db.upsert_octopus_tariff_prices(&[price("day", 30.0), price("night", 10.0)])
+            .unwrap();
+
+        let report = db
+            .query_octopus_billing(start, start + 86400, true, 30, 450)
+            .unwrap();
+        // 2.0 kWh at night (10p) + 3.0 kWh by day (30p) = 110p.
+        assert!((report.totals.electricity_energy_cost_gbp - 1.1).abs() < 1e-9);
     }
 
     #[test]

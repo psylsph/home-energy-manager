@@ -96,10 +96,19 @@ fn alerted_after(was_alerted: bool, ok: bool, delivered: bool) -> bool {
     !ok && (was_alerted || delivered)
 }
 
-/// Mark a backup as running, unless one already is.
+/// Mark a backup as running, unless one already is or History rates are being
+/// rewritten (a copy taken part-way through would be half done, issue #455).
+///
+/// Lock order is backup, then rates job, here and in
+/// `rates_job::claim`, which holds both while it decides: so a backup and a
+/// rates job can never both be let in.
 async fn try_claim(state: &Arc<AppState>) -> bool {
     let mut guard = state.backup.lock().await;
-    !std::mem::replace(&mut guard.running, true)
+    if guard.running || state.rates_job.lock().await.running {
+        return false;
+    }
+    guard.running = true;
+    true
 }
 
 /// A successful [`try_claim`]. Released (`running` cleared, `done` signalled)
@@ -574,7 +583,10 @@ pub async fn post_backup_run(State(state): State<Arc<AppState>>) -> (StatusCode,
     if !try_claim(&state).await {
         return (
             StatusCode::CONFLICT,
-            Json(json!({"ok": false, "error": "A backup is already running"})),
+            Json(json!({
+                "ok": false,
+                "error": "A backup is already running, or History rates are being updated"
+            })),
         );
     }
     tokio::spawn(async move {
@@ -657,6 +669,72 @@ mod tests {
                 .unwrap();
             assert!(next.ok);
             assert_eq!(backups_in(&dest).len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_backup_waits_while_history_rates_are_being_rewritten() {
+        // Issue #455: a re-price or backfill rewrites history in chunks, and a
+        // backup taken part-way would keep a half-rewritten copy and rotate a
+        // good one out. The schedule just tries again on its next check.
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let dest = Settings::settings_dir().join("backups");
+            state.rates_job.lock().await.running = true;
+
+            assert!(!try_claim(&state).await, "a manual backup is refused");
+            assert!(run_scheduled_backup_if_due(&state, local(NOON))
+                .await
+                .is_none());
+            assert!(backups_in(&dest).is_empty());
+            assert!(
+                !state.backup.lock().await.running,
+                "a refused backup must not hold the slot"
+            );
+
+            state.rates_job.lock().await.running = false;
+            let record = run_scheduled_backup_if_due(&state, local(NOON))
+                .await
+                .expect("due, and nothing is running now");
+            assert!(record.ok, "{record:?}");
+            assert_eq!(backups_in(&dest).len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_backup_and_a_rates_job_never_both_start() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            for _ in 0..200 {
+                let state = state_with_history().await;
+                let backup = tokio::spawn({
+                    let state = state.clone();
+                    async move { try_claim(&state).await }
+                });
+                let job = tokio::spawn({
+                    let state = state.clone();
+                    async move {
+                        crate::rates_job::start(
+                            &state,
+                            crate::rates_job::JobKind::Reprice,
+                            NOON,
+                            NOON + 3600,
+                        )
+                        .await
+                        .is_ok()
+                    }
+                });
+                let (backup, job) = (backup.await.unwrap(), job.await.unwrap());
+                assert!(!(backup && job), "both claimed the history database");
+                // Let a started job finish before the next round.
+                if job {
+                    let finished = state.rates_job.lock().await.finished.clone();
+                    tokio::time::timeout(std::time::Duration::from_secs(30), finished.notified())
+                        .await
+                        .expect("job finished");
+                }
+            }
         })
         .await;
     }

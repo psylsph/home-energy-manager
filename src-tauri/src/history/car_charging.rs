@@ -182,6 +182,9 @@ struct CarRow {
     grid_w: f64,
     /// The inverter's cumulative home counter, kWh.
     home_counter_kwh: Option<f64>,
+    /// The import rate recorded with the reading, £/kWh (issue #455); `None`
+    /// for a row from before rates were recorded.
+    import_rate: Option<f64>,
 }
 
 /// The seconds a reading earns over the previous one, or `None` when the
@@ -203,7 +206,7 @@ fn car_rows(
 ) -> Result<Vec<CarRow>, String> {
     let sql = format!(
         "SELECT r.timestamp, {CAR_POWER_SQL}, COALESCE(r.grid_power, 0), \
-                r.home_energy_today_kwh \
+                r.home_energy_today_kwh, r.import_rate \
          FROM readings r \
          LEFT JOIN evc_power_minutes e ON e.timestamp = r.timestamp - (r.timestamp % 60) \
          WHERE r.timestamp >= ?1 AND r.timestamp < ?2 AND r.home_power IS NOT NULL \
@@ -219,6 +222,9 @@ fn car_rows(
                 car_w: row.get(1)?,
                 grid_w: row.get(2)?,
                 home_counter_kwh: row.get(3)?,
+                import_rate: row
+                    .get::<_, Option<f64>>(4)?
+                    .filter(|r| r.is_finite() && *r >= 0.0),
             })
         })
         .map_err(|e| format!("Car energy query failed: {e}"))?;
@@ -374,6 +380,10 @@ impl super::HistoryDb {
     /// local time of that reading, so a night-rate charge is priced at the
     /// night rate whatever the bucket size. Gaps over five minutes and steps
     /// back in time add nothing. The standing charge is not part of it.
+    ///
+    /// An interval uses the import rate recorded with its earlier reading
+    /// (issue #455) when there is one, so editing the tariff later doesn't
+    /// reprice past charges; `tariff` prices readings with none recorded.
     pub fn car_cost_in_window(
         &self,
         window: &super::HistoryWindow,
@@ -418,19 +428,23 @@ impl super::HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
         let mut steps = Vec::new();
-        let mut prev: Option<(i64, f64, f64)> = None;
+        let mut prev: Option<(i64, f64, f64, Option<f64>)> = None;
         for row in car_rows(&conn, start_ts, end_ts, cfg)? {
             let (ts, car_w, grid_w) = (row.timestamp, row.car_w, row.grid_w);
-            if let Some((prev_ts, prev_car_w, prev_grid_w)) = prev {
+            if let Some((prev_ts, prev_car_w, prev_grid_w, prev_rate)) = prev {
                 if let Some(dt) = credited_secs(prev_ts, ts) {
                     let hours = dt as f64 / 3600.0;
                     let car_kwh = prev_car_w * hours / 1000.0;
                     // Grid power is positive when exporting; only import counts.
                     let import_kwh = (-prev_grid_w).max(0.0) * hours / 1000.0;
                     let grid_kwh = car_kwh.min(import_kwh);
-                    let rate = tariff
-                        .rate_for_minutes(super::local_minutes_of_day(prev_ts, tz))
-                        .unwrap_or(flat_fallback);
+                    // The rate recorded with the earlier reading, else the
+                    // current tariff's for its time.
+                    let rate = prev_rate.unwrap_or_else(|| {
+                        tariff
+                            .rate_for_minutes(super::local_minutes_of_day(prev_ts, tz))
+                            .unwrap_or(flat_fallback)
+                    });
                     steps.push(CostStep {
                         ends_at: ts,
                         car_kwh,
@@ -439,7 +453,7 @@ impl super::HistoryDb {
                     });
                 }
             }
-            prev = Some((ts, car_w, grid_w));
+            prev = Some((ts, car_w, grid_w, row.import_rate));
         }
         Ok(steps)
     }
@@ -1199,6 +1213,69 @@ mod tests {
         assert!((c.kwh - 7.36).abs() < 1e-6, "{c:?}");
         assert!((c.grid_kwh - 7.36).abs() < 1e-6);
         assert!((c.cost_gbp - 7.36 * 0.075).abs() < 1e-6);
+    }
+
+    fn stamp_import_rate(db: &HistoryDb, from_ts: i64, to_ts: i64, rate: f64) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE readings SET import_rate = ?1 WHERE timestamp >= ?2 AND timestamp <= ?3",
+                params![rate, from_ts, to_ts],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_charge_is_priced_at_the_rate_recorded_when_it_ran() {
+        // The tariff is 0.30 now, but the charge ran at the 0.075 recorded
+        // on its rows.
+        let db = db();
+        for m in 0..=60 {
+            put_grid(&db, MIDNIGHT + 3600 + m * 60, 9000, -9000);
+        }
+        stamp_import_rate(&db, MIDNIGHT, MIDNIGHT + 86_400, 0.075);
+        let c = cost(&db, &flat(0.30));
+        assert!((c.cost_gbp - 7.36 * 0.075).abs() < 1e-6, "{c:?}");
+    }
+
+    #[test]
+    fn rows_without_a_recorded_rate_follow_the_current_tariff() {
+        // The first half hour was recorded at 0.10; the rest has no stamp.
+        let db = db();
+        for m in 0..=60 {
+            put_grid(&db, MIDNIGHT + 3600 + m * 60, 9000, -9000);
+        }
+        stamp_import_rate(&db, MIDNIGHT, MIDNIGHT + 3600 + 29 * 60, 0.10);
+        let c = cost(&db, &flat(0.30));
+        let per_minute_kwh = 7.36 / 60.0;
+        let expected = 30.0 * per_minute_kwh * 0.10 + 30.0 * per_minute_kwh * 0.30;
+        assert!((c.cost_gbp - expected).abs() < 1e-6, "{c:?}");
+    }
+
+    #[test]
+    fn a_recorded_zero_rate_makes_the_charge_free() {
+        let db = db();
+        for m in 0..=60 {
+            put_grid(&db, MIDNIGHT + 3600 + m * 60, 9000, -9000);
+        }
+        stamp_import_rate(&db, MIDNIGHT, MIDNIGHT + 86_400, 0.0);
+        assert_eq!(cost(&db, &flat(0.30)).cost_gbp, 0.0);
+    }
+
+    #[test]
+    fn the_car_series_ends_at_the_window_total_with_recorded_rates() {
+        let db = db();
+        for m in 0..=60 {
+            put_grid(&db, MIDNIGHT + 3600 + m * 60, 9000, -9000);
+        }
+        stamp_import_rate(&db, MIDNIGHT, MIDNIGHT + 3600 + 29 * 60, 0.10);
+        let tariff = flat(0.30);
+        let total = cost(&db, &tariff).cost_gbp;
+        let series = db
+            .query_car_cost_series_in(&day(), 3600, &cfg(), &tariff, 0.30, &utc())
+            .unwrap();
+        assert!((series.last().unwrap().v - total).abs() < 1e-9);
     }
 
     #[test]

@@ -13,7 +13,10 @@ pub mod modbus;
 pub mod octopus;
 pub mod octopus_dispatches;
 pub mod octopus_sessions;
+pub mod octopus_tariff;
+pub mod octopus_tariff_follow;
 pub mod pi_render;
+pub mod rates_job;
 pub mod server;
 pub mod settings;
 #[cfg(test)]
@@ -1273,12 +1276,15 @@ mod tests {
             // 2026-10-21 12:00:05 and :15 UTC: the first is written at once,
             // the minute's aggregate only when it ends or on shutdown.
             for (offset, power) in [(5, 100), (15, 300)] {
-                db.queue_poll_reading(crate::inverter::model::InverterSnapshot {
-                    timestamp: 1_792_584_000 + offset,
-                    soc: 50,
-                    home_power: power,
-                    ..Default::default()
-                });
+                db.queue_poll_reading(
+                    crate::inverter::model::InverterSnapshot {
+                        timestamp: 1_792_584_000 + offset,
+                        soc: 50,
+                        home_power: power,
+                        ..Default::default()
+                    },
+                    crate::history::RateStamp::default(),
+                );
                 db.flush_poll_rows();
             }
             let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();

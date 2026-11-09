@@ -307,6 +307,18 @@ export interface PollSettings {
   car_charger_current_a?: number;
   import_tariff_config: TariffConfig | null;
   export_tariff_config: TariffConfig | null;
+  /** Whether Energy Tariffs are typed in or followed from Octopus (issue #455). */
+  tariff_source?: 'manual' | 'octopus';
+  /** The tariff code each part last followed; a part that is set is locked while following. */
+  octopus_tariff_applied?: {
+    import: string | null;
+    export: string | null;
+    gas: string | null;
+    at: number | null;
+  };
+  /** Gas unit rate and standing charge, in pence (issue #455). */
+  gas_tariff_p_per_kwh?: number;
+  gas_standing_charge_p_per_day?: number;
   /** Authenticated Octopus customer-consumption integration (issue #212). */
   octopus_account_number?: string;
   /** The secret itself is never returned by GET /api/settings. */

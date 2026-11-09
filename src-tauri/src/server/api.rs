@@ -1820,6 +1820,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
     // the macro's recursion limit.
     let api_bind_address = serde_json::to_value(&settings.api_bind_address).unwrap();
     let api_allowed_origins = serde_json::to_value(&settings.api_allowed_origins).unwrap();
+    let tariff_source = serde_json::to_value(settings.tariff_source).unwrap();
+    let octopus_tariff_applied = serde_json::to_value(&settings.octopus_tariff_applied).unwrap();
     (
         StatusCode::OK,
         Json(json!({
@@ -1837,6 +1839,12 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "import_standing_charge_p_per_day": settings.import_standing_charge_p_per_day,
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
+            // Issue #455: where Energy Tariffs come from, what the last
+            // Octopus fill wrote (those parts are locked), and the gas rates.
+            "tariff_source": tariff_source,
+            "octopus_tariff_applied": octopus_tariff_applied,
+            "gas_tariff_p_per_kwh": settings.gas_tariff_p_per_kwh,
+            "gas_standing_charge_p_per_day": settings.gas_standing_charge_p_per_day,
             "octopus_account_number": settings.octopus_account_number,
             "octopus_api_key_configured": !settings.octopus_api_key.is_empty(),
             "octopus_gas_unit": settings.octopus_gas_unit,
@@ -1981,6 +1989,59 @@ pub async fn update_settings(
             persist.poll_interval = incoming_for_update.interval_secs;
         }
         persist.auto_connect = true;
+        // Issue #455: a part that follows Octopus is the supplier's to set, and
+        // the next sync would undo a hand edit, so refuse it with the reason.
+        // A part Octopus could not fill (Agile, say) stays editable.
+        if persist.tariff_source == crate::settings::TariffSource::Octopus {
+            let applied = &persist.octopus_tariff_applied;
+            let sent = |keys: &[&str]| keys.iter().any(|k| body.get(*k).is_some());
+            for (locked, name, keys) in [
+                (
+                    applied.import.is_some(),
+                    "The import tariff",
+                    &[
+                        "import_tariff",
+                        "import_tariff_config",
+                        "import_standing_charge_p_per_day",
+                    ][..],
+                ),
+                (
+                    applied.export.is_some(),
+                    "The export tariff",
+                    &["export_tariff", "export_tariff_config"][..],
+                ),
+                (
+                    applied.gas.is_some(),
+                    "The gas standing charge",
+                    &["gas_standing_charge_p_per_day"][..],
+                ),
+                // Octopus only fills the gas unit rate when the readings are
+                // in kWh; otherwise nothing was written to it to lock.
+                (
+                    applied.gas.is_some() && crate::octopus_tariff::gas_unit_rate_usable(persist),
+                    "The gas unit rate",
+                    &["gas_tariff_p_per_kwh"][..],
+                ),
+            ] {
+                if locked && sent(keys) {
+                    return Err(format!(
+                        "{name} follows Octopus. Switch Energy Tariffs to Manual to edit it."
+                    ));
+                }
+            }
+        }
+        // Gas rates (issue #455): pence, never negative.
+        for (key, field) in [
+            ("gas_tariff_p_per_kwh", &mut persist.gas_tariff_p_per_kwh),
+            (
+                "gas_standing_charge_p_per_day",
+                &mut persist.gas_standing_charge_p_per_day,
+            ),
+        ] {
+            if let Some(v) = body.get(key).and_then(|v| v.as_f64()) {
+                *field = v.max(0.0);
+            }
+        }
         // Tariff fields: only write the field if it was actually present
         // in the request body. The old code merged `body.get(...).unwrap_or(disk_default)`
         // which unconditionally re-wrote the field with the disk-default
@@ -7043,7 +7104,10 @@ pub async fn get_history_summary(
             None => None,
         };
         let car_kwh = car_cost.map(|c| c.kwh);
-        let import_series = db.query_cost_series(
+        // One walk gives the energy cost and the standing charge together, so
+        // the standing charge reported is the one recorded on the rows
+        // (issue #455), not today's setting, and agrees with the total.
+        let import_series = db.query_cost_breakdown(
             &window,
             bucket_secs,
             "today_import_kwh",
@@ -7060,7 +7124,11 @@ pub async fn get_history_summary(
             0.0,
         )?;
         let days_in_range = crate::history::days_in_local_window(start_ts, end_ts, &chrono::Local);
-        let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        // No readings: the setting for each day in range.
+        let standing_charge_gbp = import_series
+            .last()
+            .map(|point| point.standing_gbp)
+            .unwrap_or(days_in_range as f64 * standing_charge_p_per_day / 100.0);
         // Both the box and the chart's _import_cost / _export_income
         // series trust the daily counter alone. The chart never applied a
         // grid-power trapezoid fallback, and neither does the box — when
@@ -7068,7 +7136,7 @@ pub async fn get_history_summary(
         // figure (issue #269 comment 5407621722). See api269_empty_counter_trusts_counter_no_fallback.
         let import_cost_gbp = import_series
             .last()
-            .map(|point| point.v)
+            .map(|point| point.energy_gbp + point.standing_gbp)
             .unwrap_or(standing_charge_gbp);
         let export_income_gbp = export_series.last().map(|point| point.v).unwrap_or(0.0);
         let net_cost_gbp = import_cost_gbp - export_income_gbp;
@@ -7163,7 +7231,10 @@ pub async fn get_report(
     // series; the Standing Charge is the same on both (UK bills charge
     // standing fees on the import side only, never on exports).
     let result = tokio::task::spawn_blocking(move || {
-        let import_series = db.query_cost_series(
+        // One walk gives the energy cost and the standing charge together, so
+        // the standing charge reported is the one recorded on the rows
+        // (issue #455), not today's setting, and agrees with the total.
+        let import_series = db.query_cost_breakdown(
             &window,
             bucket_secs,
             "today_import_kwh",
@@ -7182,7 +7253,11 @@ pub async fn get_report(
             0.0,
         )?;
         let days_in_range = crate::history::days_in_local_window(start_ts, end_ts, &chrono::Local);
-        let standing_charge_gbp = days_in_range as f64 * standing_charge_p_per_day / 100.0;
+        // No readings: the setting for each day in range.
+        let standing_charge_gbp = import_series
+            .last()
+            .map(|point| point.standing_gbp)
+            .unwrap_or(days_in_range as f64 * standing_charge_p_per_day / 100.0);
         // Both the report and the History chart's _import_cost / _export_income
         // series trust the daily counter alone — no grid-power trapezoid
         // fallback. When the counter is empty the report shows the
@@ -7192,7 +7267,7 @@ pub async fn get_report(
         // "kWh + standing charge = total" breakdown.
         let import_cost_gbp = import_series
             .last()
-            .map(|p| p.v)
+            .map(|p| p.energy_gbp + p.standing_gbp)
             .unwrap_or(standing_charge_p_per_day / 100.0);
         let export_income_gbp = export_series.last().map(|p| p.v).unwrap_or(0.0);
         let net_cost_gbp = import_cost_gbp - export_income_gbp;
@@ -21796,6 +21871,210 @@ pub(crate) mod tests {
         .await;
     }
 
+    // ---- Energy Tariffs following Octopus (issue #455) ----
+
+    fn follow_octopus(import: bool, export: bool, gas: bool) {
+        crate::settings::Settings::update(|s| {
+            s.tariff_source = crate::settings::TariffSource::Octopus;
+            let code = |on: bool| on.then(|| "E-1R-X".to_string());
+            s.octopus_tariff_applied = crate::settings::OctopusTariffApplied {
+                import: code(import),
+                export: code(export),
+                gas: code(gas),
+                at: Some(1),
+            };
+        })
+        .unwrap();
+    }
+
+    fn flat_config_body(key: &str) -> serde_json::Value {
+        serde_json::json!({
+            key: { "slots": [{ "start": "00:00", "end": "23:59", "rate": 0.22 }] },
+        })
+    }
+
+    #[tokio::test]
+    async fn a_followed_import_tariff_cannot_be_edited_by_hand() {
+        with_isolated_config_dir_async(|| async {
+            follow_octopus(true, false, false);
+            let state = Arc::new(AppState::new());
+            for body in [
+                flat_config_body("import_tariff_config"),
+                serde_json::json!({ "import_tariff": 0.22 }),
+                serde_json::json!({ "import_standing_charge_p_per_day": 40.0 }),
+            ] {
+                let (status, json) = update_settings(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(err.contains("follows Octopus"), "got: {err}");
+            }
+            let saved = crate::settings::Settings::load();
+            assert!(saved.import_tariff_config.is_none(), "nothing was written");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_part_octopus_could_not_fill_stays_editable_while_following() {
+        with_isolated_config_dir_async(|| async {
+            // Import is followed; export (say, Agile Outgoing) is not.
+            follow_octopus(true, false, false);
+            let state = Arc::new(AppState::new());
+            let (status, _) =
+                update_settings(State(state), Json(flat_config_body("export_tariff_config"))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(crate::settings::Settings::load()
+                .export_tariff_config
+                .is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_rejected_edit_writes_nothing_even_alongside_an_allowed_one() {
+        with_isolated_config_dir_async(|| async {
+            follow_octopus(true, false, false);
+            let state = Arc::new(AppState::new());
+            let mut body = flat_config_body("export_tariff_config");
+            body["import_tariff_config"] =
+                flat_config_body("import_tariff_config")["import_tariff_config"].clone();
+            let (status, _) = update_settings(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(
+                crate::settings::Settings::load()
+                    .export_tariff_config
+                    .is_none(),
+                "the request is all or nothing"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn switching_to_manual_unlocks_the_tariffs() {
+        with_isolated_config_dir_async(|| async {
+            follow_octopus(true, true, true);
+            crate::settings::Settings::update(|s| {
+                s.tariff_source = crate::settings::TariffSource::Manual;
+                s.octopus_tariff_applied = Default::default();
+            })
+            .unwrap();
+            let state = Arc::new(AppState::new());
+            let (status, _) =
+                update_settings(State(state), Json(flat_config_body("import_tariff_config"))).await;
+            assert_eq!(status, StatusCode::OK);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn manual_tariffs_with_a_stale_applied_record_are_not_locked() {
+        // Only the Octopus source locks; leftovers in `applied` do nothing.
+        with_isolated_config_dir_async(|| async {
+            crate::settings::Settings::update(|s| {
+                s.octopus_tariff_applied.import = Some("E-1R-X".into());
+            })
+            .unwrap();
+            let state = Arc::new(AppState::new());
+            let (status, _) =
+                update_settings(State(state), Json(flat_config_body("import_tariff_config"))).await;
+            assert_eq!(status, StatusCode::OK);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gas_rates_are_saved_and_never_negative() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let body = serde_json::json!({
+                "gas_tariff_p_per_kwh": 6.1,
+                "gas_standing_charge_p_per_day": -3.0,
+            });
+            let (status, _) = update_settings(State(state), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let saved = crate::settings::Settings::load();
+            assert_eq!(saved.gas_tariff_p_per_kwh, 6.1);
+            assert_eq!(saved.gas_standing_charge_p_per_day, 0.0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn followed_gas_rates_are_locked_but_electricity_is_not() {
+        with_isolated_config_dir_async(|| async {
+            follow_octopus(false, false, true);
+            // Gas in kWh: Octopus fills both the unit rate and the standing
+            // charge, so both are locked.
+            crate::settings::Settings::update(|s| {
+                s.octopus_gas_enabled = true;
+                s.octopus_gas_unit = "kwh".into();
+            })
+            .unwrap();
+            let state = Arc::new(AppState::new());
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(serde_json::json!({ "gas_tariff_p_per_kwh": 7.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, _) =
+                update_settings(State(state), Json(flat_config_body("import_tariff_config"))).await;
+            assert_eq!(status, StatusCode::OK);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn followed_gas_in_cubic_metres_locks_the_standing_charge_but_not_the_unit_rate() {
+        // Octopus only fills the gas unit rate when the readings are in kWh, so
+        // with m3 it can't be locked: nothing was written to it.
+        with_isolated_config_dir_async(|| async {
+            follow_octopus(false, false, true);
+            crate::settings::Settings::update(|s| {
+                s.octopus_gas_enabled = true;
+                s.octopus_gas_unit = "m3".into();
+            })
+            .unwrap();
+            let state = Arc::new(AppState::new());
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(serde_json::json!({ "gas_standing_charge_p_per_day": 30.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, _) = update_settings(
+                State(state),
+                Json(serde_json::json!({ "gas_tariff_p_per_kwh": 7.0 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(crate::settings::Settings::load().gas_tariff_p_per_kwh, 7.0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_settings_reports_the_source_what_was_filled_and_the_gas_rates() {
+        with_isolated_config_dir_async(|| async {
+            follow_octopus(true, false, true);
+            crate::settings::Settings::update(|s| {
+                s.gas_tariff_p_per_kwh = 6.1;
+                s.gas_standing_charge_p_per_day = 29.4;
+            })
+            .unwrap();
+            let (status, Json(body)) = get_settings(State(Arc::new(AppState::new()))).await;
+            assert_eq!(status, StatusCode::OK);
+            let data = &body["data"];
+            assert_eq!(data["tariff_source"], "octopus");
+            assert_eq!(data["octopus_tariff_applied"]["import"], "E-1R-X");
+            assert!(data["octopus_tariff_applied"]["export"].is_null());
+            assert_eq!(data["gas_tariff_p_per_kwh"], 6.1);
+            assert_eq!(data["gas_standing_charge_p_per_day"], 29.4);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn update_settings_rejects_overlapping_tariff_config() {
         with_isolated_config_dir_async(|| async {
@@ -23245,6 +23524,58 @@ pub(crate) mod tests {
                 "import cost must not be wildly inflated; got {import_cost}"
             );
 
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_report_standing_charge_is_the_one_recorded_not_todays_setting() {
+        // Issue #455. The rows were recorded under a 25p/day standing charge;
+        // the setting is now 60p/day. The report's standing charge must be
+        // the recorded one and agree with the import cost it is part of, or
+        // the Power page (energy = import cost - standing charge) is wrong.
+        with_isolated_config_dir_async(|| async {
+            let state = build_report_test_state(0.25, 0.15, 60.0);
+            {
+                let guard = state.history.lock().await;
+                let db = guard.as_ref().unwrap();
+                seed_today_import_kwh(db.as_ref(), 0, 5.0);
+                let recorded = crate::settings::Settings {
+                    import_tariff: 0.25,
+                    export_tariff: 0.15,
+                    import_standing_charge_p_per_day: 25.0,
+                    import_tariff_config: None,
+                    export_tariff_config: None,
+                    ..crate::settings::Settings::default()
+                };
+                db.reprice_chunk(&recorded, 0, i64::MAX, 100_000).unwrap();
+            }
+            let (status, json) = get_report(
+                State(state.clone()),
+                Query(HistoryQuery {
+                    range: Some("24h".to_string()),
+                    fields: None,
+                    offset: Some(0),
+                    rolling: Some(false),
+                    start_ms: None,
+                    end_ms: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let days = json["days_in_range"].as_f64().unwrap();
+            let standing = json["standing_charge_gbp"].as_f64().unwrap();
+            let import_cost = json["import_cost_gbp"].as_f64().unwrap();
+            assert!(
+                (standing - days * 0.25).abs() < 1e-9,
+                "standing charge should be {days} days at the recorded 25p, got {standing}"
+            );
+            // Energy (import cost less standing) can't be negative, and is the
+            // same 5 kWh at 25p whatever the standing charge was.
+            assert!(
+                import_cost - standing > 0.5,
+                "energy part of the import cost looks wrong: {import_cost} - {standing}"
+            );
         })
         .await;
     }

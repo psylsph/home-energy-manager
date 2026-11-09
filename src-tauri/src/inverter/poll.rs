@@ -682,6 +682,9 @@ pub struct AppState {
     /// History backup status, shared by [`crate::backup::run_backup_loop`]
     /// and the `/api/backup` handlers.
     pub backup: Arc<Mutex<crate::backup::BackupState>>,
+    /// The running (or latest) job that re-prices or backfills the rates
+    /// stamped on history rows (issue #455).
+    pub rates_job: Arc<Mutex<crate::rates_job::RatesJobState>>,
     /// The folder the HTTP server serves the web UI from, once it starts
     /// serving one; backups are never written inside it.
     pub served_dir: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
@@ -891,6 +894,7 @@ impl AppState {
             export_once_backoff: Arc::new(Mutex::new(std::collections::HashMap::new())),
             update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
             backup: Arc::new(Mutex::new(crate::backup::BackupState::default())),
+            rates_job: Arc::new(Mutex::new(crate::rates_job::RatesJobState::default())),
             served_dir: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -3416,7 +3420,11 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
             let health_due = db.observe_battery_health(&snap, chrono::Local::now());
             // Most polls only fold into the open minute; spawn a writer only
             // when a row is ready.
-            let rows_ready = db.queue_poll_reading(snap);
+            // The tariff in force now, from the settings already loaded for
+            // this publish, captured at queue time (a row may be flushed
+            // later than it was polled).
+            let stamp = crate::history::RateStamp::resolve(&fresh_settings, snap.timestamp);
+            let rows_ready = db.queue_poll_reading(snap, stamp);
             if rows_ready || health_due {
                 tokio::task::spawn_blocking(move || {
                     if rows_ready {

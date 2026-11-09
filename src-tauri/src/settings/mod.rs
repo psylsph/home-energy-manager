@@ -88,7 +88,7 @@ impl Drop for InjectUpdateFailures {
 /// slot — that slot is **inclusive** on both ends, so `23:59` covers minute
 /// 1439 (the last minute of the day). All earlier slots use the half-open
 /// convention `[start, end)`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TariffSlot {
     /// Start time in "HH:MM" format (24h).
     pub start: String,
@@ -115,7 +115,7 @@ pub struct TariffSlot {
 /// and the new shape (`slots`). Old files are migrated to slots that
 /// reproduce the exact previous behaviour, including midnight-crossing
 /// windows. After the first save, only the new `slots` shape is written.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TariffConfig {
     /// Time windows in ascending order by start, tiling `[00:00, 23:59]`.
     pub slots: Vec<TariffSlot>,
@@ -148,6 +148,33 @@ impl Default for TariffConfig {
             ],
         }
     }
+}
+
+/// Where Energy Tariffs come from (issue #455).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TariffSource {
+    /// Followed from the rates Octopus charges.
+    Octopus,
+    /// Typed in by hand. Also what any value this version doesn't know reads
+    /// as, so a settings file from a newer version still loads.
+    #[default]
+    #[serde(other)]
+    Manual,
+}
+
+/// The tariff code of each part the last Octopus fill wrote (issue #455).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OctopusTariffApplied {
+    #[serde(default)]
+    pub import: Option<String>,
+    #[serde(default)]
+    pub export: Option<String>,
+    #[serde(default)]
+    pub gas: Option<String>,
+    /// Unix seconds when a fill last changed a setting.
+    #[serde(default)]
+    pub at: Option<i64>,
 }
 
 /// Parse a `"HH:MM"` time string into minutes since midnight.
@@ -1475,6 +1502,21 @@ pub struct Settings {
     /// Falls back to legacy `export_tariff` if `None`.
     #[serde(default)]
     pub export_tariff_config: Option<TariffConfig>,
+    /// Whether Energy Tariffs are typed in or followed from the rates Octopus
+    /// charges (issue #455). Manual unless the user opts in.
+    #[serde(default)]
+    pub tariff_source: TariffSource,
+    /// Gas unit rate, pence per kWh. Entered by hand, or filled from Octopus
+    /// when gas is in kWh. 0 means none.
+    #[serde(default)]
+    pub gas_tariff_p_per_kwh: f64,
+    /// Gas standing charge, pence per day. 0 means none.
+    #[serde(default)]
+    pub gas_standing_charge_p_per_day: f64,
+    /// Which parts the last Octopus fill wrote, by tariff code; a part that is
+    /// `Some` is locked against hand edits while the source is Octopus.
+    #[serde(default)]
+    pub octopus_tariff_applied: OctopusTariffApplied,
 
     // -- Email alerts config --
     /// Alert thresholds and Brevo email integration.
@@ -2166,6 +2208,10 @@ impl Default for Settings {
             discharge_floor_saved_reserve: None,
             import_tariff_config: None,
             export_tariff_config: None,
+            tariff_source: TariffSource::default(),
+            gas_tariff_p_per_kwh: 0.0,
+            gas_standing_charge_p_per_day: 0.0,
+            octopus_tariff_applied: OctopusTariffApplied::default(),
             agile_enabled: false,
             agile_scope: AgileScope::default(),
             agile_region: default_agile_region(),
@@ -2884,6 +2930,10 @@ mod tests {
             evc_port: default_evc_port(),
             import_tariff_config: None,
             export_tariff_config: None,
+            tariff_source: TariffSource::default(),
+            gas_tariff_p_per_kwh: 0.0,
+            gas_standing_charge_p_per_day: 0.0,
+            octopus_tariff_applied: OctopusTariffApplied::default(),
             agile_enabled: true,
             agile_scope: AgileScope::Full,
             agile_region: "B".to_string(),
@@ -3673,6 +3723,10 @@ mod tests {
             evc_port: 502,
             import_tariff_config: None,
             export_tariff_config: None,
+            tariff_source: TariffSource::default(),
+            gas_tariff_p_per_kwh: 0.0,
+            gas_standing_charge_p_per_day: 0.0,
+            octopus_tariff_applied: OctopusTariffApplied::default(),
             agile_enabled: false,
             agile_scope: AgileScope::default(),
             agile_region: "A".to_string(),
@@ -5337,5 +5391,60 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "settings.json must be owner-only");
         });
+    }
+
+    // ---- Energy Tariffs source (issue #455) ----
+
+    /// The smallest settings file an older version wrote.
+    const OLD_FILE: &str = r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
+        "poll_interval": 60, "auto_connect": true}"#;
+
+    #[test]
+    fn a_settings_file_from_before_tariff_sources_loads_as_manual() {
+        let s: Settings = serde_json::from_str(OLD_FILE).unwrap();
+        assert_eq!(s.tariff_source, TariffSource::Manual);
+        assert_eq!(s.gas_tariff_p_per_kwh, 0.0);
+        assert_eq!(s.gas_standing_charge_p_per_day, 0.0);
+        assert_eq!(s.octopus_tariff_applied, OctopusTariffApplied::default());
+    }
+
+    #[test]
+    fn a_tariff_source_this_version_does_not_know_loads_as_manual() {
+        // A file from a newer version must not be quarantined as corrupt.
+        let s: Settings = serde_json::from_str(
+            r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
+                "poll_interval": 60, "auto_connect": true,
+                "tariff_source": "something_new"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.tariff_source, TariffSource::Manual);
+    }
+
+    #[test]
+    fn the_tariff_source_and_what_was_applied_round_trip() {
+        let s = Settings {
+            tariff_source: TariffSource::Octopus,
+            gas_tariff_p_per_kwh: 6.1,
+            gas_standing_charge_p_per_day: 29.4,
+            octopus_tariff_applied: OctopusTariffApplied {
+                import: Some("E-1R-GO".into()),
+                export: None,
+                gas: Some("G-1R-X".into()),
+                at: Some(1_800_000_000),
+            },
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""tariff_source":"octopus""#));
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tariff_source, TariffSource::Octopus);
+        assert_eq!(decoded.octopus_tariff_applied, s.octopus_tariff_applied);
+        assert_eq!(decoded.gas_tariff_p_per_kwh, 6.1);
+    }
+
+    #[test]
+    fn tariff_configs_compare_by_value() {
+        assert_eq!(TariffConfig::flat(0.3), TariffConfig::flat(0.3));
+        assert_ne!(TariffConfig::flat(0.3), TariffConfig::flat(0.31));
     }
 }

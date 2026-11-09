@@ -79,7 +79,7 @@ describe('<TariffsSection/> — Standing Charge input (issue #131)', () => {
         name: 'Export',
         level: 3,
       });
-      const standingLabel = await screen.findByText(/Standing Charge \(p\/day\)/);
+      const standingLabel = await screen.findByText(/^Standing Charge \(p\/day\)$/);
       const saveButton = await screen.findByRole('button', { name: /Save Tariffs/i });
 
       const section = exportHeading.closest('section');

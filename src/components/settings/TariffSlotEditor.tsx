@@ -19,10 +19,13 @@ export default function TariffSlotEditor({
   label,
   config,
   onChange,
+  readOnly = false,
 }: {
   label: string;
   config: TariffConfig;
   onChange: (cfg: TariffConfig) => void;
+  /** Show the windows without letting them be edited (rates followed from Octopus, issue #455). */
+  readOnly?: boolean;
 }) {
   const errors = validateTariffConfig(config);
   // Index validation errors by slot for inline display.
@@ -66,7 +69,7 @@ export default function TariffSlotEditor({
     <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <h3 className="text-text-primary text-sm font-sans font-medium">{label}</h3>
-        {config.slots.length < MAX_TARIFF_SLOTS && (
+        {!readOnly && config.slots.length < MAX_TARIFF_SLOTS && (
           <button
             onClick={() => onChange(addTariffSlot(config, 0.15))}
             className="text-accent text-xs font-sans hover:opacity-80 transition-opacity"
@@ -97,7 +100,7 @@ export default function TariffSlotEditor({
                   // directly — changing it cascades backward to update the
                   // previous slot's end, keeping the day tiled.
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'start', e.target.value))}
-                  disabled={isFirst}
+                  disabled={readOnly || isFirst}
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors disabled:opacity-40"
                 >
                   {isFirst
@@ -113,7 +116,7 @@ export default function TariffSlotEditor({
                 <select
                   value={slot.end}
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'end', e.target.value))}
-                  disabled={isLast}
+                  disabled={readOnly || isLast}
                   className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors disabled:opacity-40"
                 >
                   {endOptions.map((t) => (
@@ -125,12 +128,13 @@ export default function TariffSlotEditor({
                 <span className="text-text-secondary text-xs font-sans">Rate (p/kWh)</span>
                 <input
                   type="number" step="0.001" min="0"
+                  disabled={readOnly}
                   value={Math.round(slot.rate * 100000) / 1000}
                   onChange={(e) => onChange(updateTariffSlot(config, i, 'rate', Number(e.target.value) / 100))}
-                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors"
+                  className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-accent outline-none transition-colors disabled:opacity-60"
                 />
               </label>
-              {config.slots.length > 1 && (
+              {!readOnly && config.slots.length > 1 && (
                 <button
                   onClick={() => onChange(removeTariffSlot(config, i))}
                   className="text-text-secondary hover:text-red-400 text-sm font-sans pb-2 transition-colors"
@@ -151,12 +155,12 @@ export default function TariffSlotEditor({
         );
       })}
 
-      {config.slots.length === 1 && (
+      {!readOnly && config.slots.length === 1 && (
         <p className="text-text-secondary/60 text-xs font-sans">
           Flat rate for the whole day. Add windows for time-of-use tariffs (e.g. Octopus Flux, Cosy, Eco7).
         </p>
       )}
-      {!isTariffConfigValid(config) && (
+      {!readOnly && !isTariffConfigValid(config) && (
         <div className="flex items-center justify-between gap-3">
           <p className="text-red-400 text-xs font-sans">
             Tariff configuration is invalid — windows must cover the full 24 hours contiguously with no overlaps. Saving is disabled.

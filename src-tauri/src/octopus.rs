@@ -593,7 +593,17 @@ async fn sync_tariffs(
             if !seen.insert(key) {
                 continue;
             }
-            for rate_type in tariff_rate_types(&agreement.tariff_code) {
+            // Which rates to fetch can grow while going: a one-rate code whose
+            // standard rates turn out to be unpublished may publish day and
+            // night rates instead (Intelligent Octopus Go's newer product).
+            let mut rate_types = tariff_rate_types(&agreement.tariff_code).to_vec();
+            // From this index on, the types are probes: Octopus answers 404 for
+            // day and night rates on tariffs that don't have them, which says
+            // "none here", not "the sync failed".
+            let mut probes_from = usize::MAX;
+            let mut next = 0;
+            while let Some(&rate_type) = rate_types.get(next) {
+                next += 1;
                 let meter_kind = stream.kind.clone();
                 let meter_point = stream.meter_point.clone();
                 let tariff_code = agreement.tariff_code.clone();
@@ -627,6 +637,14 @@ async fn sync_tariffs(
                 .await
                 {
                     Ok(rows) => {
+                        if rate_type == "standard"
+                            && rows.is_empty()
+                            && !already_imported
+                            && stream.kind != "gas"
+                        {
+                            probes_from = rate_types.len();
+                            rate_types.extend(["day", "night"]);
+                        }
                         let result = history_db_blocking(db.clone(), move |db| {
                             db.upsert_octopus_tariff_prices(&rows)
                         })
@@ -635,6 +653,12 @@ async fn sync_tariffs(
                             Ok(Ok(count)) => stored += count,
                             Ok(Err(error)) | Err(error) => errors.push(error),
                         }
+                    }
+                    Err(error) if next > probes_from => {
+                        tracing::debug!(
+                            "No {rate_type} rates for {}: {error}",
+                            agreement.tariff_code
+                        );
                     }
                     Err(error) => errors.push(format!("{}: {error}", agreement.tariff_code)),
                 }
@@ -855,6 +879,19 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
             sync_tariffs(&settings, db.clone(), &streams, now).await;
         if let Some(error) = &tariff_error {
             sync_errors.push(format!("tariff sync: {error}"));
+        }
+        // Energy Tariffs that follow Octopus are brought up to date from the
+        // rates just downloaded. A part that can't be read as fixed windows
+        // is left as it was, and nothing changes after a sync that reported a
+        // tariff error; only a failure to write is reported.
+        if let Err(error) = crate::octopus_tariff_follow::follow_after_clean_sync(
+            db.clone(),
+            now,
+            tariff_error.as_deref(),
+        )
+        .await
+        {
+            sync_errors.push(format!("following Octopus tariffs: {error}"));
         }
         let mut all_complete = true;
         for stream in &streams {
@@ -1951,6 +1988,167 @@ mod tests {
             "E-1R-AGILE-24-10-01-A",
             "standing",
         ));
+    }
+
+    fn stream_with_code(code: &str) -> Stream {
+        electricity_stream(vec![Agreement {
+            tariff_code: code.to_string(),
+            valid_from: "2026-06-30T00:00:00Z".to_string(),
+            valid_to: None,
+        }])
+    }
+
+    const SMB: &str = "E-1R-IOG-SMB-VAR-24-10-29-H";
+    const EMPTY: &str = r#"{"count":0,"results":[],"next":null}"#;
+
+    #[tokio::test]
+    async fn a_one_rate_code_that_publishes_day_and_night_rates_gets_them_stored() {
+        // Intelligent Octopus Go's newer product: an E-1R code whose
+        // standard-unit-rates are empty but whose day and night rates are not.
+        let day = r#"{"results":[
+            {"value_inc_vat":36.3918,"valid_from":"2026-10-15T23:00:00Z","valid_to":null,"payment_method":null}
+        ],"next":null}"#
+        .to_string();
+        let night = r#"{"results":[
+            {"value_inc_vat":6.6,"valid_from":"2026-10-15T23:00:00Z","valid_to":null,"payment_method":null}
+        ],"next":null}"#
+        .to_string();
+        let standing = r#"{"results":[
+            {"value_inc_vat":47.4715,"valid_from":"2026-10-15T23:00:00Z","valid_to":null,"payment_method":null}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![
+            ("standard-unit-rates", EMPTY.to_string()),
+            ("day-unit-rates", day),
+            ("night-unit-rates", night),
+            ("standing-charges", standing),
+        ])
+        .await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let now = 1_792_000_000_i64; // 2026-10-20
+        let (_, error) = sync_tariffs(&settings, db.clone(), &[stream_with_code(SMB)], now).await;
+        assert!(error.is_none(), "unexpected tariff sync error: {error:?}");
+        for rate_type in ["day", "night", "standing"] {
+            assert!(
+                db.has_octopus_tariff_prices("electricity_import", "1200000012345", SMB, rate_type),
+                "{rate_type} rates should be stored"
+            );
+        }
+        assert!(!db.has_octopus_tariff_prices(
+            "electricity_import",
+            "1200000012345",
+            SMB,
+            "standard"
+        ));
+    }
+
+    #[tokio::test]
+    async fn day_and_night_rates_are_not_requested_when_standard_rates_exist() {
+        // The mock has no day or night route, so asking for them would 404
+        // and be reported as an error.
+        let standard = r#"{"results":[
+            {"value_inc_vat":24.5,"valid_from":"2026-06-30T00:00:00Z","valid_to":null,"payment_method":null}
+        ],"next":null}"#
+        .to_string();
+        let standing = r#"{"results":[
+            {"value_inc_vat":47.0,"valid_from":"2026-06-30T00:00:00Z","valid_to":null,"payment_method":null}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![
+            ("standard-unit-rates", standard),
+            ("standing-charges", standing),
+        ])
+        .await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let code = "E-1R-VAR-22-11-01-H";
+        let (_, error) = sync_tariffs(
+            &settings,
+            db.clone(),
+            &[stream_with_code(code)],
+            1_792_000_000,
+        )
+        .await;
+        assert!(error.is_none(), "{error:?}");
+        assert!(db.has_octopus_tariff_prices(
+            "electricity_import",
+            "1200000012345",
+            code,
+            "standard"
+        ));
+        assert!(!db.has_octopus_tariff_prices("electricity_import", "1200000012345", code, "day"));
+    }
+
+    #[tokio::test]
+    async fn day_and_night_rates_that_do_not_exist_are_not_an_error() {
+        // Octopus answers 404 for day and night rates on tariffs that don't
+        // have them, so trying them after an empty standard list is a probe,
+        // not a request that has to succeed. (The mock has no such routes.)
+        let standing = r#"{"results":[
+            {"value_inc_vat":47.0,"valid_from":"2026-06-30T00:00:00Z","valid_to":null,"payment_method":null}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![
+            ("standard-unit-rates", EMPTY.to_string()),
+            ("standing-charges", standing),
+        ])
+        .await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let (_, error) = sync_tariffs(
+            &settings,
+            db.clone(),
+            &[stream_with_code(SMB)],
+            1_792_000_000,
+        )
+        .await;
+        assert!(
+            error.is_none(),
+            "a probe that finds nothing is not an error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_standard_rates_request_is_still_an_error() {
+        // Only the day/night probe is forgiven. The standard request has to work.
+        let mock = MockOctopus::spawn(vec![]).await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let (_, error) = sync_tariffs(
+            &settings,
+            db.clone(),
+            &[stream_with_code(SMB)],
+            1_792_000_000,
+        )
+        .await;
+        assert!(error.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_one_rate_code_with_no_rates_at_all_is_not_an_error() {
+        // A brand-new agreement whose rates aren't published yet.
+        let standing = r#"{"results":[
+            {"value_inc_vat":47.0,"valid_from":"2026-06-30T00:00:00Z","valid_to":null,"payment_method":null}
+        ],"next":null}"#
+        .to_string();
+        let mock = MockOctopus::spawn(vec![
+            ("standard-unit-rates", EMPTY.to_string()),
+            ("day-unit-rates", EMPTY.to_string()),
+            ("night-unit-rates", EMPTY.to_string()),
+            ("standing-charges", standing),
+        ])
+        .await;
+        let settings = octopus_settings(&mock.base_url);
+        let db = open_temp_history();
+        let (_, error) = sync_tariffs(
+            &settings,
+            db.clone(),
+            &[stream_with_code(SMB)],
+            1_792_000_000,
+        )
+        .await;
+        assert!(error.is_none(), "{error:?}");
     }
 
     #[tokio::test]
