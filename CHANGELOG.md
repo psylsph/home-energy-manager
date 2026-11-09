@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.0] - 2026-11-09
+
+### Added
+
+- **History remembers the rate each minute was recorded at.** Every History row now keeps the import rate, export rate and standing charge in force when it was recorded, so changing a tariff only affects costs from then on instead of rewriting last month. History, the Consumption Report and the car's cost all price from it. Rows recorded before this update keep following your current tariff until you re-price them.
+- **Fix Past Costs.** Under Settings → Energy Tariffs you can re-price History from a date to apply the tariffs you last saved to everything since, for example to correct a typo in a rate. With an Octopus account, Fill Missing Rates from Octopus gives older rows the rates Octopus actually charged at the time.
+- **Energy Tariffs can follow Octopus.** With an Octopus account connected, choose From Octopus (or Use My Octopus Rates) to fill in your import and export windows, their rates and the standing charge from what Octopus charges, kept up to date after each sync. It works for tariffs that repeat the same windows every day, such as fixed, Tracker, Go, Intelligent Go, Cosy, Flux and Economy 7. Agile stays manual and says why. Nothing changes until you choose it, it asks before replacing rates you typed, and you can go back to Manual at any time.
+- **Gas rates in Energy Tariffs.** Enter a gas unit rate and standing charge, or let Octopus fill them in when your gas readings are in kWh. Nothing else uses them yet; the Octopus page still prices gas from the rates Octopus published.
+
+### Changed
+
+- **Saving a tariff changes costs from now on.** Energy Tariffs says so beside Save. Earlier costs keep the rates they were recorded with unless you re-price them.
+- **The standing charge shown is the one in force that day.** The Consumption Report and History's cost totals now use the standing charge recorded on each day, not today's setting.
+
+### Fixed
+
+- **Intelligent Octopus Go's newer tariff is priced.** That product publishes a day rate and a night rate that HEM never downloaded, so its costs on the Octopus page were incomplete. HEM now downloads them and uses the product's 23:30 to 05:30 cheap hours.
+
 ## [1.10.1] - 2026-11-08
 
 ### Changed
