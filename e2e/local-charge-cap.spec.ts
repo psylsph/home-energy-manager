@@ -343,6 +343,7 @@ for (const family of SUPPORTED) {
 
       await page.goto(`${rig.base}/#/control`);
       await expect(page.getByRole('heading', { name: 'Charge Cap' })).toBeVisible({ timeout: 20_000 });
+      await expect(page.getByTestId('charge-cap-state-label')).toHaveText('Current State');
       await expect(page.getByTestId('charge-cap-state')).toHaveText(
         `Charging paused at ${config.cap_soc}%. Charges again at ${config.resume_soc}%.`,
       );

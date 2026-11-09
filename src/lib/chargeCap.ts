@@ -80,7 +80,7 @@ export function describeChargeCapState(
 function describeState(state: ChargeCapStateName, cap: number, resume: number): string {
   switch (state) {
     case 'off':
-      return 'Off.';
+      return 'Off';
     case 'unsupported':
       return "This inverter can't pause charging, so the charge cap isn't available.";
     case 'waiting':

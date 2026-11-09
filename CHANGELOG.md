@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.1] - 2026-11-09
+
+### Changed
+
+- **The Charge Cap says which state it's in.** Its card now labels the line under the switch as Current State, so the reading reads as a status rather than as another explanation of the cap.
+
 ## [1.11.0] - 2026-11-09
 
 ### Added

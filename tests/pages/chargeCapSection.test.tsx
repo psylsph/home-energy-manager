@@ -100,6 +100,26 @@ describe('ChargeCapSection', () => {
     expect(save().disabled).toBe(true);
   });
 
+  it('labels the current state above the description', async () => {
+    apiGet.mockResolvedValue(status({ enabled: true, state: 'holding' }));
+    render(<ChargeCapSection />);
+    const label = await screen.findByTestId('charge-cap-state-label');
+    expect(label.textContent).toBe('Current State');
+    // The label sits directly above the state, in the same block.
+    expect(label.parentElement).toBe(screen.getByTestId('charge-cap-state').parentElement);
+    expect(label.parentElement?.firstElementChild).toBe(label);
+    expect(screen.getByTestId('charge-cap-state').textContent).toBe(
+      'Charging paused at 95%. Charges again at 92%.',
+    );
+  });
+
+  it('keeps the label while the cap is switched off', async () => {
+    apiGet.mockResolvedValue(status());
+    render(<ChargeCapSection />);
+    expect((await screen.findByTestId('charge-cap-state-label')).textContent).toBe('Current State');
+    expect(screen.getByTestId('charge-cap-state').textContent).toBe('Off');
+  });
+
   it('follows the live state from the snapshot', async () => {
     apiGet.mockResolvedValue(status({ enabled: true, state: 'waiting' }));
     useInverterStore.setState({ snapshot: makeSnapshot({ charge_cap_state: 'holding' }) });

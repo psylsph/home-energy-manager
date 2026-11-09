@@ -47,6 +47,8 @@ describe('describeChargeCapState', () => {
       expect(text[0], state).toBe(text[0].toUpperCase());
     }
     expect(describeChargeCapState('holding', 95, 92)).toBe('Charging paused at 95%. Charges again at 92%.');
+    // Switched off is a state on its own line under its label, so no full stop.
+    expect(describeChargeCapState('off', 95, 92)).toBe('Off');
     expect(describeChargeCapState('waiting', 90, 85)).toMatch(/reaches 90%/);
     expect(describeChargeCapState('unreadable', 95, 92)).toMatch(/can't read this inverter's pause/);
   });

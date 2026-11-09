@@ -128,9 +128,14 @@ export default function ChargeCapSection() {
           <Toggle checked={enabled} onChange={setEnabledDraft} ariaLabel="Enable Charge Cap" />
         </div>
 
-        <p className="text-text-secondary text-xs" data-testid="charge-cap-state">
-          {describeChargeCapState(liveState, status.cap_soc, status.resume_soc, snapshot?.battery_pause_read_failing === true)}
-        </p>
+        <div className="space-y-0.5">
+          <span className="text-text-primary text-xs font-medium" data-testid="charge-cap-state-label">
+            Current State
+          </span>
+          <p className="text-text-secondary text-xs" data-testid="charge-cap-state">
+            {describeChargeCapState(liveState, status.cap_soc, status.resume_soc, snapshot?.battery_pause_read_failing === true)}
+          </p>
+        </div>
 
         {enabled && (
           <div className="grid grid-cols-[max-content_auto] items-center gap-x-3 gap-y-2">
