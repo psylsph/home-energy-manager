@@ -35,6 +35,7 @@ use crate::forecast::refresh::{
 };
 use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::InverterSnapshot;
+use crate::inverter::plan_replan::{PlanCycle, QueuedSlot};
 use crate::inverter::poll::AppState;
 use crate::settings::Settings;
 
@@ -46,6 +47,9 @@ pub(crate) enum PlanTrigger {
     Refresh,
     /// The user-configured auto-apply. Also notifies.
     AutoApply,
+    /// A rewrite after Octopus moved a dispatch (issue #404). Notifies on
+    /// its own terms, through [`crate::inverter::plan_replan`].
+    Replan,
 }
 
 impl PlanTrigger {
@@ -53,6 +57,7 @@ impl PlanTrigger {
         match self {
             Self::Refresh => "Forecast plan refresh",
             Self::AutoApply => "Forecast plan auto-apply",
+            Self::Replan => "Forecast plan replan",
         }
     }
 }
@@ -306,16 +311,33 @@ pub(crate) fn first_report_today(last: &mut Option<NaiveDate>, today: NaiveDate)
 /// Queue the writes for a recommendation (through the shared write pump, so
 /// the ~1.5 s Modbus round-trips drain off the read path and the loop keeps
 /// broadcasting snapshots) and notify the user if the trigger calls for it.
+/// Returns what charge slot 1 was set to and its time writes, when writes
+/// were queued.
 pub(crate) async fn apply_plan_recommendation(
     state: &Arc<AppState>,
     snapshot: &InverterSnapshot,
     rec: &PlanRecommendation,
     trigger: PlanTrigger,
-) {
+) -> Option<QueuedSlot> {
     let planner_armed = Settings::load_async().await.forecast_plan_armed_target_pct;
     let plan = plan_slot_plan_for(rec, snapshot, planner_armed);
+    queue_slot_plan(state, &plan, trigger, planner_armed).await;
+    if let Some(text) = plan_notification(&plan, trigger) {
+        crate::alerts::send_plan_notification(state, &text).await;
+    }
+    QueuedSlot::of(&plan)
+}
+
+/// Log and queue a slot plan's writes, and record the planner's armed hold
+/// target after them.
+pub(crate) async fn queue_slot_plan(
+    state: &Arc<AppState>,
+    plan: &SlotPlan,
+    trigger: PlanTrigger,
+    planner_armed: Option<u8>,
+) {
     let label = trigger.label();
-    match &plan {
+    match plan {
         SlotPlan::Write {
             start_hhmm,
             end_hhmm,
@@ -335,6 +357,12 @@ pub(crate) async fn apply_plan_recommendation(
                     end = end_hhmm,
                     kwh = format!("{kwh:.2}"),
                     "{label}: writing charge slot 1 for the cheap tariff window"
+                ),
+                PlanTrigger::Replan => tracing::info!(
+                    start = start_hhmm,
+                    end = end_hhmm,
+                    kwh = format!("{kwh:.2}"),
+                    "{label}: rewriting charge slot 1 after Octopus moved a smart charge"
                 ),
             }
             crate::server::api::queue_writes(state, writes.clone()).await;
@@ -370,7 +398,7 @@ pub(crate) async fn apply_plan_recommendation(
             tracing::warn!("{label}: could not encode slot clear: {e}");
         }
         SlotPlan::NoPlan { reason } => match trigger {
-            PlanTrigger::Refresh => {
+            PlanTrigger::Refresh | PlanTrigger::Replan => {
                 tracing::debug!("{label}: no plan available this cycle");
             }
             PlanTrigger::AutoApply => {
@@ -381,7 +409,7 @@ pub(crate) async fn apply_plan_recommendation(
             }
         },
     }
-    if let Some(next) = armed_target_after(&plan) {
+    if let Some(next) = armed_target_after(plan) {
         if next != planner_armed {
             if let Err(error) = Settings::update_async(move |settings| {
                 settings.forecast_plan_armed_target_pct = next;
@@ -392,13 +420,17 @@ pub(crate) async fn apply_plan_recommendation(
             }
         }
     }
-    if let Some(text) = plan_notification(&plan, trigger) {
-        crate::alerts::send_plan_notification(state, &text).await;
-    }
 }
 
 /// Compute a fresh recommendation from the live snapshot. SQLite reads and a
 /// 72 h simulation run on a blocking thread, off the poll task.
+///
+/// `running_window_start` (Unix seconds) plans the rest of a cheap window
+/// already under way instead of the next one (issue #404). The forecast's
+/// hours then start at the current hour, because they otherwise start at
+/// the next one and the plan couldn't see the charge until then; the caller
+/// only asks near the top of an hour, so the minutes counted twice are few.
+/// No export advice comes with it.
 ///
 /// `settings` is a shallow clone: the planner only reads a read-only subset
 /// (import tariff, forecast_*, weather coordinates), so nested fields such as
@@ -409,6 +441,7 @@ async fn compute_plan(
     settings: &Settings,
     snapshot: &InverterSnapshot,
     now: DateTime<Local>,
+    running_window_start: Option<i64>,
 ) -> Result<ComputedPlan, tokio::task::JoinError> {
     let (weather_enabled, coords) = {
         let ws = state.weather.lock().await;
@@ -421,6 +454,17 @@ async fn compute_plan(
     let dispatches =
         crate::octopus_dispatches::planning_dispatches(state, settings, now.with_timezone(&Utc))
             .await;
+    // Only a fresh list says what Octopus plans; a plan made without one
+    // records none, so the first fresh list counts as a change.
+    let dispatch_revision =
+        (dispatches.checked_at.is_some() && !dispatches.stale).then_some(dispatches.revision);
+    // A window under way, or one starting later this hour, needs the
+    // current hour in the series or its first part isn't in the plan.
+    let include_current_hour = running_window_start.is_some()
+        || crate::forecast::planner::plan_needs_current_hour(
+            settings.import_tariff_config.as_ref(),
+            now,
+        );
     let live_snapshot = snapshot.clone();
     let settings = settings.clone();
     tokio::task::spawn_blocking(move || {
@@ -432,17 +476,31 @@ async fn compute_plan(
             weather_coords: coords,
             now,
             dispatches: &dispatches,
+            include_current_hour,
         });
-        let (rec, export) = crate::server::api::compute_full_plan(
-            &forecast,
-            &settings,
-            Some(&live_snapshot),
-            now.timestamp(),
-        );
+        let (rec, export) = match running_window_start {
+            Some(start) => (
+                crate::server::api::compute_running_window_plan(
+                    &forecast,
+                    &settings,
+                    Some(&live_snapshot),
+                    now.timestamp(),
+                    start,
+                ),
+                None,
+            ),
+            None => crate::server::api::compute_full_plan(
+                &forecast,
+                &settings,
+                Some(&live_snapshot),
+                now.timestamp(),
+            ),
+        };
         ComputedPlan {
             rec,
             export,
             forecast,
+            dispatch_revision,
         }
     })
     .await
@@ -453,6 +511,9 @@ struct ComputedPlan {
     rec: PlanRecommendation,
     export: Option<crate::forecast::planner::ExportAdvice>,
     forecast: crate::forecast::ForecastPayload,
+    /// The dispatch list revision the plan was made with (issue #404); none
+    /// when it had no fresh list.
+    dispatch_revision: Option<u64>,
 }
 
 /// Store a Planner decision and the forecast behind it in the plan history
@@ -526,14 +587,17 @@ pub(crate) async fn run_plan_refresh(
     let last = *state.forecast_plan_refresh_date.lock().await;
     let tariff = settings.import_tariff_config.as_ref();
     if plan_refresh_due_with_adaptive(now, last, tariff, adaptive_owns_rate) {
-        let planned = compute_plan(state, settings, snapshot, now).await;
+        let planned = compute_plan(state, settings, snapshot, now, None).await;
         // Mark today done regardless of the outcome shape so a persistent
         // failure can't turn into a per-poll write storm.
         *state.forecast_plan_refresh_date.lock().await = Some(now.date_naive());
         match planned {
             Ok(plan) => {
                 record_plan_snapshot(state, settings, "refresh", &plan, now).await;
-                apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::Refresh).await
+                let slot =
+                    apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::Refresh)
+                        .await;
+                start_cycle(state, settings, PlanTrigger::Refresh, slot, &plan, now).await;
             }
             Err(e) => tracing::warn!("Forecast plan refresh failed: {e}"),
         }
@@ -596,15 +660,21 @@ pub(crate) async fn run_plan_auto_apply(
             }
         }
         PlanApplyDecision::Due { .. } => {
-            let planned = compute_plan(state, settings, snapshot, now).await;
+            let planned = compute_plan(state, settings, snapshot, now, None).await;
             // Mark today done regardless of the outcome shape so a persistent
             // failure can't turn into a per-poll write/notification storm.
             *state.forecast_plan_apply_date.lock().await = Some(now.date_naive());
             match planned {
                 Ok(plan) => {
                     record_plan_snapshot(state, settings, "auto_apply", &plan, now).await;
-                    apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::AutoApply)
-                        .await
+                    let slot = apply_plan_recommendation(
+                        state,
+                        snapshot,
+                        &plan.rec,
+                        PlanTrigger::AutoApply,
+                    )
+                    .await;
+                    start_cycle(state, settings, PlanTrigger::AutoApply, slot, &plan, now).await;
                 }
                 Err(e) => {
                     tracing::warn!("Forecast plan auto-apply failed: {e}");
@@ -618,6 +688,213 @@ pub(crate) async fn run_plan_auto_apply(
                 }
             }
         }
+    }
+}
+
+/// Start the replan's cycle (issue #404) after a daily write: the slot it
+/// set, for the cheap-window occurrence it was for, with the dispatch list
+/// it was planned with. A write that queued nothing leaves no cycle.
+async fn start_cycle(
+    state: &Arc<AppState>,
+    settings: &Settings,
+    trigger: PlanTrigger,
+    queued: Option<QueuedSlot>,
+    plan: &ComputedPlan,
+    now: DateTime<Local>,
+) {
+    let window = settings
+        .import_tariff_config
+        .as_ref()
+        .and_then(|tariff| crate::inverter::plan_replan::cycle_window(tariff, now));
+    let cycle =
+        queued
+            .zip(window)
+            .map(
+                |(queued, (window_start, window_end, window_start_hhmm))| PlanCycle {
+                    trigger,
+                    written_at: now.timestamp(),
+                    window_start,
+                    window_end,
+                    window_start_hhmm,
+                    slot: queued.summary,
+                    dispatch_revision: plan.dispatch_revision,
+                    slot_writes: queued.slot_writes,
+                    mismatched_reads: 0,
+                },
+            );
+    *state.forecast_plan_cycle.lock().await = cycle;
+}
+
+/// Whether the cycle's owner still writes charge slot 1.
+fn cycle_owner_on(trigger: PlanTrigger, settings: &Settings) -> bool {
+    match trigger {
+        PlanTrigger::AutoApply => settings.forecast_plan_auto_apply_enabled,
+        PlanTrigger::Refresh => {
+            settings.forecast_plan_auto_refresh && !settings.forecast_plan_auto_apply_enabled
+        }
+        PlanTrigger::Replan => false,
+    }
+}
+
+/// Re-plan charge slot 1 when Octopus has moved a dispatch since the plan
+/// was written (issue #404). The decisions are in
+/// [`crate::inverter::plan_replan`]; this gathers the facts and acts.
+pub(crate) async fn run_plan_replan(
+    state: &Arc<AppState>,
+    settings: &Settings,
+    snapshot: &InverterSnapshot,
+    now: DateTime<Local>,
+    sit_out: bool,
+) {
+    run_plan_replan_with(state, settings, snapshot, now, sit_out, |running| {
+        compute_plan(state, settings, snapshot, now, running)
+    })
+    .await;
+}
+
+/// [`run_plan_replan`] with the plan computation passed in, so tests can
+/// choose what the fresh plan says.
+async fn run_plan_replan_with<F, Fut>(
+    state: &Arc<AppState>,
+    settings: &Settings,
+    snapshot: &InverterSnapshot,
+    now: DateTime<Local>,
+    sit_out: bool,
+    compute: F,
+) where
+    F: FnOnce(Option<i64>) -> Fut,
+    Fut: std::future::Future<Output = Result<ComputedPlan, tokio::task::JoinError>>,
+{
+    use crate::inverter::plan_replan::{
+        mismatch_count, replan_message, replan_outcome, replan_step, ReplanFacts, ReplanOutcome,
+        ReplanStep, TAKEN_OVER_READS,
+    };
+    let Some(mut cycle) = state.forecast_plan_cycle.lock().await.clone() else {
+        return;
+    };
+    let planning =
+        crate::octopus_dispatches::planning_dispatches(state, settings, now.with_timezone(&Utc))
+            .await;
+    // Only a read taken after the plan's writes drained can say whether the
+    // slot is still what the plan wrote, and not during a top-up, which has
+    // its own slot 1 on the inverter until it puts the plan's back.
+    let top_up_running = state.dispatch_charge.lock().await.run.is_some();
+    let writes_drained = state.pending_writes.lock().await.is_empty();
+    let matches = (writes_drained && !top_up_running && snapshot.timestamp > cycle.written_at)
+        .then(|| crate::server::api::snapshot_matches_writes(snapshot, &cycle.slot_writes));
+    let mismatched = mismatch_count(cycle.mismatched_reads, matches);
+    if mismatched != cycle.mismatched_reads
+        && update_cycle(state, &cycle, |c| c.mismatched_reads = mismatched).await
+    {
+        cycle.mismatched_reads = mismatched;
+    }
+    let taken_over = cycle.mismatched_reads >= TAKEN_OVER_READS;
+    let facts = ReplanFacts {
+        now: now.timestamp(),
+        minute_of_hour: now.minute(),
+        owner_on: cycle_owner_on(cycle.trigger, settings),
+        mismatched_reads: cycle.mismatched_reads,
+        reaches_battery: snapshot.device_type.battery_controls_reach_battery(),
+        adaptive_owns_rate: adaptive_owns_rate(settings),
+        sit_out,
+        top_up_running,
+        list_fresh: planning.checked_at.is_some() && !planning.stale,
+        revision: planning.revision,
+    };
+    let label = PlanTrigger::Replan.label();
+    let running = match replan_step(&cycle, &facts) {
+        ReplanStep::Idle => return,
+        ReplanStep::Wait(reason) => {
+            tracing::debug!(reason, "{label}: Octopus moved a smart charge; waiting");
+            return;
+        }
+        ReplanStep::EndCycle => {
+            if taken_over {
+                tracing::info!(
+                    "{label}: charge slot 1 no longer reads back as the plan set it; leaving it alone tonight"
+                );
+            }
+            end_cycle(state, &cycle).await;
+            return;
+        }
+        ReplanStep::Compute { running } => running,
+    };
+    let computed = match compute(running).await {
+        Ok(computed) => computed,
+        Err(error) => {
+            tracing::warn!("{label}: plan computation failed: {error}");
+            // Not retried until the list changes again.
+            update_cycle(state, &cycle, |c| {
+                c.dispatch_revision = Some(facts.revision);
+            })
+            .await;
+            return;
+        }
+    };
+    let planner_armed = Settings::load_async().await.forecast_plan_armed_target_pct;
+    let plan = plan_slot_plan_for(&computed.rec, snapshot, planner_armed);
+    match replan_outcome(&cycle, &plan, now.timestamp()) {
+        ReplanOutcome::Keep(reason) => {
+            tracing::info!(
+                reason,
+                "{label}: Octopus moved a smart charge; charge slot 1 stays"
+            );
+            update_cycle(state, &cycle, |c| {
+                c.dispatch_revision = computed.dispatch_revision;
+            })
+            .await;
+        }
+        ReplanOutcome::Rewrite(queued) => {
+            let new = queued.summary;
+            // Claim the cycle first: one a daily write has since replaced
+            // must not get this plan's writes.
+            let updated = update_cycle(state, &cycle, |c| {
+                c.slot = new;
+                c.slot_writes = queued.slot_writes;
+                c.dispatch_revision = computed.dispatch_revision;
+                c.written_at = now.timestamp();
+                c.mismatched_reads = 0;
+            })
+            .await;
+            if !updated {
+                return;
+            }
+            queue_slot_plan(state, &plan, PlanTrigger::Replan, planner_armed).await;
+            record_plan_snapshot(state, settings, "replan", &computed, now).await;
+            if cycle.trigger == PlanTrigger::AutoApply {
+                let text = replan_message(
+                    cycle.slot,
+                    new,
+                    cycle.kwh_from(new, rec_kwh(&computed.rec), now.timestamp()),
+                    cycle.stops_charging(new, now.timestamp()),
+                );
+                crate::alerts::send_plan_notification(state, &text).await;
+            }
+        }
+    }
+}
+
+/// Apply `change` to the stored cycle if it is still `cycle` (a daily write
+/// may have replaced it meanwhile). True when it was.
+async fn update_cycle(
+    state: &Arc<AppState>,
+    cycle: &PlanCycle,
+    change: impl FnOnce(&mut PlanCycle),
+) -> bool {
+    let mut stored = state.forecast_plan_cycle.lock().await;
+    match stored.as_mut() {
+        Some(current) if current == cycle => {
+            change(current);
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn end_cycle(state: &Arc<AppState>, cycle: &PlanCycle) {
+    let mut stored = state.forecast_plan_cycle.lock().await;
+    if stored.as_ref() == Some(cycle) {
+        *stored = None;
     }
 }
 
@@ -678,7 +955,7 @@ pub(crate) async fn run_plan_snapshot(
         // Mark first so a failing computation can't retry every poll.
         *recorded = Some(window_date);
     }
-    match compute_plan(state, settings, snapshot, now).await {
+    match compute_plan(state, settings, snapshot, now, None).await {
         Ok(plan) => record_plan_snapshot(state, settings, "before_window", &plan, now).await,
         Err(error) => tracing::warn!("Plan history: plan computation failed: {error}"),
     }
@@ -689,6 +966,7 @@ mod tests {
     use super::*;
     use crate::forecast::planner::ChargeWindow;
     use crate::inverter::model::DeviceType;
+    use crate::inverter::plan_replan::SlotSummary;
     use crate::settings::{TariffConfig, TariffSlot};
     use crate::test_util::with_isolated_config_dir_async;
     use chrono::TimeZone;
@@ -1957,6 +2235,634 @@ mod tests {
             assert_eq!(rows.len(), 1, "{rows:?}");
             assert_eq!(rows[0].kind, "auto_apply");
             assert_eq!(rows[0].strategy, "min_soc");
+        })
+        .await;
+    }
+
+    // ---- replan after Octopus moves a dispatch (issue #404) -----------------
+
+    /// Auto-apply on, with the Octopus dispatch hold wanted.
+    fn replan_settings() -> Settings {
+        Settings {
+            octopus_api_key: "sk_test".into(),
+            octopus_account_number: "A-TEST1".into(),
+            octopus_dispatch_hold: true,
+            ..auto_apply_settings()
+        }
+    }
+
+    /// A fresh dispatch list checked at `now`, as a new revision.
+    async fn fresh_list(state: &Arc<AppState>, now: DateTime<Local>) -> u64 {
+        let mut current = state.octopus_dispatches.lock().await;
+        current.reset();
+        current.checked_at = Some(now.with_timezone(&Utc));
+        drop(current);
+        crate::octopus_dispatches::planning_dispatches(
+            state,
+            &replan_settings(),
+            now.with_timezone(&Utc),
+        )
+        .await
+        .revision
+    }
+
+    /// The cycle auto-apply leaves after writing 02:00–04:00 at `written`,
+    /// planned with dispatch list `revision`.
+    async fn applied_cycle(state: &Arc<AppState>, written: DateTime<Local>, revision: u64) {
+        let queued = apply_plan_recommendation(
+            state,
+            &gen2(),
+            &charge(120, 240, false, 3.0),
+            PlanTrigger::Refresh,
+        )
+        .await;
+        let mut plan = computed(charge(120, 240, false, 3.0)).await;
+        plan.dispatch_revision = Some(revision);
+        start_cycle(
+            state,
+            &replan_settings(),
+            PlanTrigger::AutoApply,
+            queued,
+            &plan,
+            written,
+        )
+        .await;
+        state.pending_writes.lock().await.clear();
+    }
+
+    /// A computed plan saying `rec`, with whatever forecast an empty state
+    /// gives (only plan history stores it).
+    async fn computed(rec: PlanRecommendation) -> ComputedPlan {
+        let empty = Arc::new(AppState::new());
+        let mut plan = compute_plan(
+            &empty,
+            &Settings::default(),
+            &gen2(),
+            local_dt(2026, 8, 31, 1, 0),
+            None,
+        )
+        .await
+        .unwrap();
+        plan.rec = rec;
+        plan
+    }
+
+    /// A top-up during a smart charge, as #434 leaves one while it runs.
+    fn top_up_run() -> crate::inverter::dispatch_charge::DispatchChargeRun {
+        crate::inverter::dispatch_charge::DispatchChargeRun {
+            phase: crate::inverter::dispatch_charge::DispatchChargePhase::Charging,
+            revert: crate::server::api::force_charge_revert_from_snapshot(
+                &InverterSnapshot {
+                    inverter_serial: "SA1234".into(),
+                    ..gen2()
+                },
+                DeviceType::Gen2Hybrid,
+            )
+            .unwrap(),
+            target_soc: 100,
+            writes: Vec::new(),
+            dispatch_end: Utc::now(),
+            skew_minutes: 0,
+            last_sent: 0,
+            unconfirmed: 0,
+            restore_started: None,
+        }
+    }
+
+    async fn replan(state: &Arc<AppState>, now: DateTime<Local>, rec: PlanRecommendation) {
+        let revision = crate::octopus_dispatches::planning_dispatches(
+            state,
+            &replan_settings(),
+            now.with_timezone(&Utc),
+        )
+        .await
+        .revision;
+        let mut plan = computed(rec).await;
+        plan.dispatch_revision = Some(revision);
+        // Before the window it plans the next one; inside it, the rest of
+        // the one under way.
+        let expected = state
+            .forecast_plan_cycle
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|cycle| {
+                (now.timestamp() >= cycle.window_start).then_some(cycle.window_start)
+            });
+        run_plan_replan_with(
+            state,
+            &replan_settings(),
+            &gen2(),
+            now,
+            false,
+            |running| async move {
+                assert_eq!(running, expected, "which window the replan plans");
+                Ok(plan)
+            },
+        )
+        .await;
+    }
+
+    async fn replan_must_not_compute(state: &Arc<AppState>, now: DateTime<Local>, sit_out: bool) {
+        run_plan_replan_with(
+            state,
+            &replan_settings(),
+            &gen2(),
+            now,
+            sit_out,
+            |_| async {
+                panic!("the replan computed a plan it had no reason to");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn auto_apply_leaves_a_cycle_for_tonights_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let written = local_dt(2026, 8, 31, 1, 30);
+            applied_cycle(&state, written, 7).await;
+            let cycle = state.forecast_plan_cycle.lock().await.clone().unwrap();
+            assert_eq!(cycle.trigger, PlanTrigger::AutoApply);
+            assert_eq!(cycle.window_start_hhmm, 200);
+            assert_eq!(cycle.window_start, local_dt(2026, 8, 31, 2, 0).timestamp());
+            assert_eq!(cycle.window_end, local_dt(2026, 8, 31, 5, 0).timestamp());
+            assert_eq!(cycle.dispatch_revision, Some(7));
+            assert_eq!(
+                cycle.slot_writes,
+                vec![
+                    RegisterWrite {
+                        address: 94,
+                        value: 200
+                    },
+                    RegisterWrite {
+                        address: 95,
+                        value: 400
+                    },
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_moved_dispatch_rewrites_the_slot_and_records_it() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let now = local_dt(2026, 8, 31, 1, 40);
+            let first = fresh_list(&state, local_dt(2026, 8, 31, 1, 30)).await;
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), first).await;
+
+            let moved = fresh_list(&state, now).await;
+            replan(&state, now, charge(120, 310, false, 4.5)).await;
+
+            let batches = queued(&state).await;
+            assert_eq!(batches.len(), 1, "{batches:?}");
+            assert!(batches[0].contains(&(94, 200)) && batches[0].contains(&(95, 510)));
+            let cycle = state.forecast_plan_cycle.lock().await.clone().unwrap();
+            assert_eq!(cycle.dispatch_revision, Some(moved));
+            assert_eq!(
+                cycle.slot,
+                SlotSummary::Charge {
+                    start_hhmm: 200,
+                    end_hhmm: 510
+                }
+            );
+            let rows = recorded(&state).await;
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0].kind, "replan");
+
+            // The same list again: nothing more to do.
+            replan_must_not_compute(&state, local_dt(2026, 8, 31, 1, 43), false).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn inside_the_window_the_rest_of_it_is_replanned() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), 0).await;
+            // 03:05, an hour into the 02:00–05:00 window, the car's charge
+            // moved and the battery needs charging on to 04:30.
+            let now = local_dt(2026, 8, 31, 3, 5);
+            fresh_list(&state, now).await;
+            replan(&state, now, charge(120, 270, false, 6.0)).await;
+            let batches = queued(&state).await;
+            assert_eq!(batches.len(), 1, "{batches:?}");
+            assert!(batches[0].contains(&(94, 200)) && batches[0].contains(&(95, 430)));
+
+            // It moves again at 03:52: mid-hour, so the change waits...
+            fresh_list(&state, local_dt(2026, 8, 31, 3, 52)).await;
+            replan_must_not_compute(&state, local_dt(2026, 8, 31, 3, 52), false).await;
+            // ...for 04:02, when the battery has enough: the slot is
+            // cleared, stopping the charge.
+            let later = local_dt(2026, 8, 31, 4, 2);
+            replan(&state, later, no_charge()).await;
+            let batches = queued(&state).await;
+            assert_eq!(batches.len(), 2, "{batches:?}");
+            assert!(batches[1].contains(&(94, 0)) && batches[1].contains(&(96, 0)));
+
+            // At the window's end the cycle is over.
+            replan_must_not_compute(&state, local_dt(2026, 8, 31, 5, 0), false).await;
+            assert!(state.forecast_plan_cycle.lock().await.is_none());
+        })
+        .await;
+    }
+
+    /// Intelligent Octopus Go: 23:30–05:30, split across midnight.
+    fn iog_tariff() -> TariffConfig {
+        let slot = |s: &str, e: &str, r: f64| TariffSlot {
+            start: s.into(),
+            end: e.into(),
+            rate: r,
+        };
+        TariffConfig {
+            slots: vec![
+                slot("00:00", "05:30", 0.07),
+                slot("05:30", "23:30", 0.30),
+                slot("23:30", "23:59", 0.07),
+            ],
+        }
+    }
+
+    /// Run the real forecast and planner behind the replan: a week of
+    /// history, sun from 08:00 to 16:00 only and a battery at `soc`, inside a running
+    /// cheap window whose daily write was at `written`. Returns charge slot
+    /// 1's start and end as queued, and the unanchored plan (sized for the
+    /// next occurrence instead) for contrast.
+    async fn real_replan_inside(
+        tariff: TariffConfig,
+        written: DateTime<Local>,
+        now: DateTime<Local>,
+        soc: u8,
+    ) -> ((u16, u16), PlanRecommendation) {
+        let (state, settings, snapshot) = seeded_plan_state(tariff, now, soc).await;
+        let unanchored = compute_plan(&state, &settings, &snapshot, now, None)
+            .await
+            .unwrap()
+            .rec;
+        real_replan_continue(state, settings, snapshot, written, now, unanchored).await
+    }
+
+    /// A week of history, sun from 08:00 to 16:00 only (forecast fetched at
+    /// `fetched`) and a 10 kWh battery at `soc`, for the real planner.
+    async fn seeded_plan_state(
+        tariff: TariffConfig,
+        fetched: DateTime<Local>,
+        soc: u8,
+    ) -> (Arc<AppState>, Settings, InverterSnapshot) {
+        let now = fetched;
+        let state = state_with_history().await;
+        {
+            let db = state.history.lock().await.clone().unwrap();
+            crate::forecast::tests::seed_full_forecast_state(&db, now);
+            let now_ts = now.timestamp();
+            let hour_start = now_ts - now_ts.rem_euclid(3600);
+            for h in 0..72i64 {
+                let ts = hour_start + h * 3600;
+                let hour = chrono::DateTime::from_timestamp(ts, 0)
+                    .unwrap()
+                    .with_timezone(&Local)
+                    .hour();
+                db.insert_forecast_values(&[crate::history::ForecastValueRow {
+                    timestamp: ts,
+                    variable: "shortwave_radiation".to_string(),
+                    value: if (8..16).contains(&hour) { 500.0 } else { 0.0 },
+                    source: "open-meteo".to_string(),
+                    fetched_at: now_ts,
+                }])
+                .unwrap();
+            }
+        }
+        let settings = Settings {
+            pv1_rated_kw: 5.0,
+            import_tariff_config: Some(tariff),
+            ..replan_settings()
+        };
+        let snapshot = InverterSnapshot {
+            soc,
+            battery_capacity_kwh: 10.0,
+            max_battery_power_w: 3600,
+            charge_rate: 50,
+            discharge_rate: 50,
+            battery_reserve: 10,
+            ..gen2()
+        };
+        (state, settings, snapshot)
+    }
+
+    async fn real_replan_continue(
+        state: Arc<AppState>,
+        settings: Settings,
+        snapshot: InverterSnapshot,
+        written: DateTime<Local>,
+        now: DateTime<Local>,
+        unanchored: PlanRecommendation,
+    ) -> ((u16, u16), PlanRecommendation) {
+        // The daily write's cycle, for the window that is now running.
+        let queued_slot = apply_plan_recommendation(
+            &state,
+            &snapshot,
+            &charge(0, 30, false, 1.0),
+            PlanTrigger::Refresh,
+        )
+        .await;
+        let mut written_plan = computed(charge(0, 30, false, 1.0)).await;
+        written_plan.dispatch_revision = Some(0);
+        start_cycle(
+            &state,
+            &settings,
+            PlanTrigger::AutoApply,
+            queued_slot,
+            &written_plan,
+            written,
+        )
+        .await;
+        state.pending_writes.lock().await.clear();
+        fresh_list(&state, now).await;
+        run_plan_replan(&state, &settings, &snapshot, now, false).await;
+
+        let batches = queued(&state).await;
+        assert_eq!(batches.len(), 1, "{batches:?}");
+        let rows = recorded(&state).await;
+        assert_eq!(rows.last().map(|row| row.kind.as_str()), Some("replan"));
+        let register = |address: u16| {
+            batches[0]
+                .iter()
+                .find(|(a, _)| *a == address)
+                .map(|(_, value)| *value)
+                .unwrap()
+        };
+        ((register(94), register(95)), unanchored)
+    }
+
+    /// The daily write at 23:05 for Intelligent Octopus Go's 23:30 window:
+    /// the forecast's hours start at the next full hour, so without the
+    /// current one the plan couldn't see the charge from 23:30 to midnight
+    /// and sized the slot up to half an hour long. It must match the plan
+    /// made at 23:00 sharp, whose series starts at 23:00.
+    #[tokio::test]
+    async fn the_daily_plan_sees_a_window_starting_later_this_hour() {
+        with_isolated_config_dir_async(|| async {
+            let at_the_hour = local_dt(2026, 8, 30, 23, 0);
+            let (state, settings, snapshot) =
+                seeded_plan_state(iog_tariff(), at_the_hour, 30).await;
+            let end = |rec: &PlanRecommendation| match rec {
+                PlanRecommendation::Charge { window, .. } => {
+                    assert_eq!(window.start_min, 23 * 60 + 30, "{window:?}");
+                    window.end_min
+                }
+                other => panic!("expected a charge, got {other:?}"),
+            };
+            let sharp = compute_plan(&state, &settings, &snapshot, at_the_hour, None)
+                .await
+                .unwrap()
+                .rec;
+            let later = compute_plan(
+                &state,
+                &settings,
+                &snapshot,
+                local_dt(2026, 8, 30, 23, 5),
+                None,
+            )
+            .await
+            .unwrap()
+            .rec;
+            let (sharp_end, later_end) = (end(&sharp), end(&later));
+            assert!(
+                sharp_end.abs_diff(later_end) <= 5,
+                "23:00 plans to {sharp_end}, 23:05 to {later_end}"
+            );
+        })
+        .await;
+    }
+
+    /// Anchored at the window's start, the real planner sizes the rest of
+    /// tonight's charge; unanchored it would size tomorrow's.
+    #[tokio::test]
+    async fn the_real_planner_sizes_the_rest_of_a_running_window() {
+        with_isolated_config_dir_async(|| async {
+            let ((start, end), unanchored) = real_replan_inside(
+                flux_tariff(),
+                local_dt(2026, 8, 31, 1, 30),
+                local_dt(2026, 8, 31, 3, 5),
+                20,
+            )
+            .await;
+            assert!(
+                matches!(&unanchored, PlanRecommendation::Charge { window, .. } if window.tomorrow),
+                "unanchored, it sizes tomorrow's window: {unanchored:?}"
+            );
+            assert_eq!(start, 200, "keeps the start");
+            assert!(
+                (311..=500).contains(&end),
+                "charges on from 03:10 inside tonight's window: ends {end}"
+            );
+        })
+        .await;
+    }
+
+    /// The same across midnight: at 01:10 the running window began at
+    /// 23:30 the evening before.
+    #[tokio::test]
+    async fn the_real_planner_sizes_the_rest_of_a_window_that_crossed_midnight() {
+        with_isolated_config_dir_async(|| async {
+            let ((start, end), unanchored) = real_replan_inside(
+                iog_tariff(),
+                local_dt(2026, 8, 30, 23, 0),
+                local_dt(2026, 8, 31, 1, 5),
+                30,
+            )
+            .await;
+            assert_eq!(start, 2330, "keeps the start");
+            assert!(
+                (111..530).contains(&end),
+                "charges on from 01:10, short of the window's end: ends {end}"
+            );
+            // Unanchored, the planner sizes tomorrow night's 23:30 (the
+            // flag can't say so: 23:30 is later than 01:10 on the same
+            // day), after a day's drain: a longer charge.
+            let PlanRecommendation::Charge { window, .. } = &unanchored else {
+                panic!("{unanchored:?}");
+            };
+            let unanchored_end = (window.end_min / 60) * 100 + window.end_min % 60;
+            assert!(unanchored_end > end, "{unanchored:?} vs {end}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_small_move_writes_nothing_but_is_not_recomputed() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let now = local_dt(2026, 8, 31, 1, 40);
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), 0).await;
+            let moved = fresh_list(&state, now).await;
+            replan(&state, now, charge(120, 250, false, 3.3)).await;
+            assert!(queued(&state).await.is_empty());
+            let cycle = state.forecast_plan_cycle.lock().await.clone().unwrap();
+            assert_eq!(cycle.dispatch_revision, Some(moved));
+            assert!(matches!(
+                cycle.slot,
+                SlotSummary::Charge { end_hhmm: 400, .. }
+            ));
+            replan_must_not_compute(&state, local_dt(2026, 8, 31, 1, 43), false).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_gated_change_stays_pending_until_the_gate_lifts() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let now = local_dt(2026, 8, 31, 1, 40);
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), 0).await;
+            fresh_list(&state, now).await;
+
+            replan_must_not_compute(&state, now, true).await;
+
+            state.dispatch_charge.lock().await.run = Some(top_up_run());
+            // The top-up's own slot 1 reads back meanwhile: not counted.
+            let mut top_up_slot = gen2();
+            top_up_slot.timestamp = now.timestamp();
+            replan_must_not_compute_with(&state, &top_up_slot, now).await;
+            replan_must_not_compute_with(&state, &top_up_slot, now).await;
+            assert_eq!(
+                state
+                    .forecast_plan_cycle
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|c| c.mismatched_reads),
+                Some(0)
+            );
+            state.dispatch_charge.lock().await.run = None;
+
+            replan(&state, local_dt(2026, 8, 31, 1, 45), no_charge()).await;
+            let batches = queued(&state).await;
+            assert_eq!(batches.len(), 1, "the change still counted: {batches:?}");
+            assert!(batches[0].contains(&(94, 0)) && batches[0].contains(&(95, 0)));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_slot_someone_else_changed_is_left_alone() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), 0).await;
+            // Octopus has moved a charge, so a replan is pending...
+            fresh_list(&state, local_dt(2026, 8, 31, 1, 40)).await;
+            // ...but reads after the plan's writes drained show another slot.
+            let read = |minute: u32| {
+                let mut snapshot = gen2();
+                snapshot.timestamp = local_dt(2026, 8, 31, 1, minute).timestamp();
+                snapshot.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 1,
+                    start_minute: 0,
+                    end_hour: 6,
+                    end_minute: 0,
+                    target_soc: 100,
+                };
+                snapshot
+            };
+            for minute in [40, 41] {
+                run_plan_replan_with(
+                    &state,
+                    &replan_settings(),
+                    &read(minute),
+                    local_dt(2026, 8, 31, 1, minute),
+                    false,
+                    |_| async {
+                        panic!("must not plan over someone else's slot");
+                    },
+                )
+                .await;
+                // One stale read doesn't end the cycle; two in a row do.
+                let cycle = state.forecast_plan_cycle.lock().await.clone();
+                assert_eq!(
+                    cycle.is_some(),
+                    minute == 40,
+                    "after the read at 01:{minute}"
+                );
+            }
+            assert!(queued(&state).await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_read_that_shows_the_plans_slot_again_clears_a_stale_one() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), 0).await;
+            let mut stale = gen2();
+            stale.timestamp = local_dt(2026, 8, 31, 1, 40).timestamp();
+            replan_must_not_compute_with(&state, &stale, local_dt(2026, 8, 31, 1, 40)).await;
+            assert_eq!(
+                state
+                    .forecast_plan_cycle
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|c| c.mismatched_reads),
+                Some(1)
+            );
+            // The plan's own 02:00–04:00 reads back.
+            let mut good = gen2();
+            good.timestamp = local_dt(2026, 8, 31, 1, 41).timestamp();
+            good.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 2,
+                start_minute: 0,
+                end_hour: 4,
+                end_minute: 0,
+                target_soc: 100,
+            };
+            replan_must_not_compute_with(&state, &good, local_dt(2026, 8, 31, 1, 41)).await;
+            assert_eq!(
+                state
+                    .forecast_plan_cycle
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|c| c.mismatched_reads),
+                Some(0)
+            );
+        })
+        .await;
+    }
+
+    async fn replan_must_not_compute_with(
+        state: &Arc<AppState>,
+        snapshot: &InverterSnapshot,
+        now: DateTime<Local>,
+    ) {
+        run_plan_replan_with(state, &replan_settings(), snapshot, now, false, |_| async {
+            panic!("nothing changed to plan for");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_cycle_ends_when_auto_apply_is_switched_off() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let now = local_dt(2026, 8, 31, 1, 40);
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), 0).await;
+            fresh_list(&state, now).await;
+            let settings = Settings {
+                forecast_plan_auto_apply_enabled: false,
+                ..replan_settings()
+            };
+            run_plan_replan_with(&state, &settings, &gen2(), now, false, |_| async {
+                panic!("auto-apply is off");
+            })
+            .await;
+            assert!(state.forecast_plan_cycle.lock().await.is_none());
         })
         .await;
     }

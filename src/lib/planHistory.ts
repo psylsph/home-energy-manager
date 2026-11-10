@@ -25,7 +25,8 @@ export type PastViewForecast = {
  *  it. `plan` or `forecast` is null when the stored JSON could not be read. */
 export type PlanHistorySnapshot = {
   recorded_at: number;
-  /** What recorded it: `before_window`, `auto_apply` or `refresh`. */
+  /** What recorded it: `before_window`, `auto_apply`, `refresh`, or
+   *  `replan` (Octopus moved a smart charge, issue #404). */
   kind: string;
   strategy: string;
   plan: PlanResponse | null;
@@ -299,6 +300,7 @@ const KIND_LABELS: Record<string, string> = {
   before_window: 'Before the Cheap Window',
   auto_apply: 'Auto-Applied',
   refresh: 'Refreshed',
+  replan: 'Re-Planned for a Moved Car Charge',
 };
 
 export type DecisionRow = {

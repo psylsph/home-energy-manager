@@ -654,6 +654,10 @@ pub struct AppState {
     /// before the cheap window (issue #361). In-memory only: a restart in
     /// the lead window records one more snapshot, which is harmless.
     pub forecast_plan_snapshot_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// The charge slot the plan last wrote and the window it is for, so it
+    /// can be re-planned when Octopus moves a dispatch (issue #404).
+    /// In-memory only: after a restart the next daily write starts afresh.
+    pub(crate) forecast_plan_cycle: Arc<Mutex<Option<crate::inverter::plan_replan::PlanCycle>>>,
     /// Weather subsystem state — current config, last fetch result, backfill
     /// progress. Always present (not `Option<…>` like `history`) so the API
     /// layer doesn't have to special-case "weather not yet initialised".
@@ -871,6 +875,7 @@ impl AppState {
             forecast_plan_refresh_warned: Arc::new(Mutex::new(None)),
             forecast_plan_apply_date: Arc::new(Mutex::new(None)),
             forecast_plan_snapshot_date: Arc::new(Mutex::new(None)),
+            forecast_plan_cycle: Arc::new(Mutex::new(None)),
             forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
             evc_reachability: Arc::new(Mutex::new(crate::evc::EvcReachability::default())),
@@ -4796,6 +4801,17 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     )
                                     .await;
                                 }
+                                // Re-plan when Octopus moves a smart charge
+                                // after that write (issue #404). It sees
+                                // `sit_out` itself so a change stays pending.
+                                crate::inverter::forecast_plan::run_plan_replan(
+                                    &state,
+                                    &poll_settings,
+                                    &snapshot,
+                                    plan_now,
+                                    sit_out,
+                                )
+                                .await;
                                 // Record the Planner's decision shortly before the
                                 // cheap window for the plan history (issue #361),
                                 // unless an automation above already did today.

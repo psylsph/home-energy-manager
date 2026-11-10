@@ -95,6 +95,8 @@ pub struct PlanningDispatches {
     /// The SOC the battery is topped up to during a held dispatch (issue
     /// #434), when that is on and the hold applies.
     pub charge_to_soc: Option<f64>,
+    /// [`DispatchesState::revision`] when this was read (issue #404).
+    pub revision: u64,
 }
 
 /// An Octopus access token. Its `Debug` output is redacted so logging the
@@ -144,6 +146,11 @@ pub struct DispatchesState {
     /// drops a dispatch once it's over, but the rest of its half-hour is
     /// still billed off-peak (issue #434).
     ran_smart: Vec<(i64, i64)>,
+    /// Moves whenever the planned charges change (issue #404): on the first
+    /// good list, when a charge's start, end or type changes, and when the
+    /// hold is switched. Never reused, so a plan that recorded one can tell
+    /// whether the list it was made with is still the list.
+    revision: u64,
 }
 
 impl DispatchesState {
@@ -228,11 +235,15 @@ impl DispatchesState {
         calibrating: bool,
     ) -> PlanningDispatches {
         if !wanted {
-            return PlanningDispatches::default();
+            return PlanningDispatches {
+                revision: self.revision,
+                ..PlanningDispatches::default()
+            };
         }
         if !self.fresh(now) {
             return PlanningDispatches {
                 stale: true,
+                revision: self.revision,
                 ..PlanningDispatches::default()
             };
         }
@@ -247,6 +258,7 @@ impl DispatchesState {
             checked_at: self.checked_at,
             stale: false,
             hold_applies: !calibrating,
+            revision: self.revision,
         }
     }
 
@@ -254,6 +266,7 @@ impl DispatchesState {
     pub(crate) fn reset(&mut self) {
         *self = Self {
             generation: self.generation.wrapping_add(1),
+            revision: self.revision.wrapping_add(1),
             ..Self::default()
         };
     }
@@ -378,6 +391,42 @@ fn query_url(settings: &Settings) -> String {
     endpoints(settings).0
 }
 
+/// Octopus's "Unable to fetch planned dispatches": seen failing about one
+/// read in six and working on the next (10 November 2026).
+const PASSING_DISPATCH_ERROR: &str = "KT-CT-4340";
+
+/// How long to wait before the one retry of [`PASSING_DISPATCH_ERROR`].
+#[cfg(not(test))]
+const DISPATCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const DISPATCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// One car or charger's planned dispatches, retried once after
+/// [`PASSING_DISPATCH_ERROR`]. Nothing else is retried: a rate limit or a
+/// refused token only gets worse with another request. Blocking.
+fn read_device_dispatches(
+    query_url: &str,
+    token: &str,
+    device: &str,
+) -> Result<Vec<Dispatch>, String> {
+    let read = || {
+        post_graphql(
+            query_url,
+            Some(token),
+            &json!({ "query": DISPATCHES_QUERY, "variables": { "device": device } }),
+        )
+        .and_then(|response| parse_dispatches(&response))
+    };
+    match read() {
+        Err(error) if error.contains(PASSING_DISPATCH_ERROR) => {
+            tracing::debug!("Intelligent Octopus dispatches: {error}; retrying once");
+            std::thread::sleep(DISPATCH_RETRY_DELAY);
+            read()
+        }
+        result => result,
+    }
+}
+
 fn fetch_blocking(settings: &Settings, known: Known) -> Result<Fetched, String> {
     let query_url = query_url(settings);
     let (token, new_token) = match known.token {
@@ -414,13 +463,8 @@ fn fetch_blocking(settings: &Settings, known: Known) -> Result<Fetched, String> 
     };
     let mut dispatches = Vec::new();
     for device in &devices {
-        let response = post_graphql(
-            &query_url,
-            Some(&token),
-            &json!({ "query": DISPATCHES_QUERY, "variables": { "device": device } }),
-        )?;
         dispatches.extend(
-            parse_dispatches(&response)?
+            read_device_dispatches(&query_url, &token, device)?
                 .into_iter()
                 .map(|dispatch| (device.clone(), dispatch)),
         );
@@ -540,6 +584,40 @@ where
     Some(format!("{heading}: {body}"))
 }
 
+/// A change in a charge's planned energy that the planner should see
+/// (issue #404): the car's load is sized from it. Smaller changes, as
+/// Octopus updates the figure while the car charges, aren't.
+const PLAN_ENERGY_CHANGE_KWH: f64 = 1.0;
+
+/// Whether the fresh list changes what the planner models: the first good
+/// list, a charge's start, end or type ([`planned_change`]'s key), or its
+/// planned energy by [`PLAN_ENERGY_CHANGE_KWH`]. Charges already over count
+/// on neither side.
+fn plan_changed(previous: Option<&[Dispatch]>, fresh: &[Dispatch], now: DateTime<Utc>) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    let key = |list: &[Dispatch]| {
+        let mut key: Vec<_> = list
+            .iter()
+            .filter(|d| d.end > now)
+            .map(|d| (d.start, d.end, d.kind.clone(), d.energy_added_kwh))
+            .collect();
+        key.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
+        key
+    };
+    let (before, after) = (key(previous), key(fresh));
+    before.len() != after.len()
+        || before.iter().zip(&after).any(|(old, new)| {
+            (old.0, old.1, &old.2) != (new.0, new.1, &new.2)
+                || match (old.3, new.3) {
+                    (Some(a), Some(b)) => (a - b).abs() >= PLAN_ENERGY_CHANGE_KWH,
+                    (None, None) => false,
+                    _ => true,
+                }
+        })
+}
+
 /// One pass: read the dispatches and publish them.
 pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
     // Read the generation before the settings: a switch after this point
@@ -625,6 +703,9 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
             let previous = current.checked_at.map(|_| current.dispatches.as_slice());
             if let Some(line) = planned_change(previous, &fresh, now, &chrono::Local) {
                 tracing::info!("{line}");
+            }
+            if plan_changed(previous, &fresh, now) {
+                current.revision = current.revision.wrapping_add(1);
             }
             current.replace_list(fresh, now);
             current.checked_at = Some(now);
@@ -1216,6 +1297,8 @@ mod tests {
         dispatches_body: Arc<std::sync::Mutex<String>>,
         /// Milliseconds the dispatch query waits before answering.
         dispatches_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+        /// One-off answers to the next dispatch queries, before the usual one.
+        dispatches_queued: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
         _shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
@@ -1227,14 +1310,19 @@ mod tests {
             let devices_body = Arc::new(std::sync::Mutex::new(devices_response().to_string()));
             let dispatches_body = Arc::new(std::sync::Mutex::new(dispatches.to_string()));
             let dispatches_delay_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let (s2, v2, b2, d2) = (
+            let dispatches_queued = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<
+                String,
+            >::new()));
+            let (s2, v2, b2, d2, q2) = (
                 seen.clone(),
                 devices_body.clone(),
                 dispatches_body.clone(),
                 dispatches_delay_ms.clone(),
+                dispatches_queued.clone(),
             );
             let app = axum::Router::new().fallback(move |req: Request| {
-                let (s2, v2, b2, d2) = (s2.clone(), v2.clone(), b2.clone(), d2.clone());
+                let (s2, v2, b2, d2, q2) =
+                    (s2.clone(), v2.clone(), b2.clone(), d2.clone(), q2.clone());
                 async move {
                     let auth = req
                         .headers()
@@ -1258,7 +1346,11 @@ mod tests {
                         if delay > 0 {
                             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         }
-                        (StatusCode::OK, b2.lock().unwrap().clone())
+                        let queued: Option<String> = q2.lock().unwrap().pop_front();
+                        (
+                            StatusCode::OK,
+                            queued.unwrap_or_else(|| b2.lock().unwrap().clone()),
+                        )
                     } else if body.contains("devices") {
                         (StatusCode::OK, v2.lock().unwrap().clone())
                     } else {
@@ -1280,6 +1372,7 @@ mod tests {
                 devices_body,
                 dispatches_body,
                 dispatches_delay_ms,
+                dispatches_queued,
                 _shutdown: Some(tx),
             }
         }
@@ -1297,6 +1390,14 @@ mod tests {
 
         fn set_dispatches(&self, body: Value) {
             *self.dispatches_body.lock().unwrap() = body.to_string();
+        }
+
+        /// Answer the next dispatch queries with these, in order.
+        fn queue_dispatches(&self, bodies: &[Value]) {
+            self.dispatches_queued
+                .lock()
+                .unwrap()
+                .extend(bodies.iter().map(Value::to_string));
         }
 
         fn set_devices(&self, body: Value) {
@@ -1377,6 +1478,146 @@ mod tests {
             assert_eq!(mock.count("devices("), 1);
             check_once(&state, utc("2026-10-17T18:00:00+00:00")).await;
             assert_eq!(mock.count("devices("), 2);
+        })
+        .await;
+    }
+
+    /// The list's revision (issue #404) moves exactly when what Octopus
+    /// plans changes, so the replan can tell "changed since the plan" from
+    /// one number, read with the list it describes.
+    #[tokio::test]
+    async fn the_revision_moves_only_when_the_planned_charges_change() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            let revision = |state: Arc<AppState>, at: &'static str| async move {
+                planning_dispatches(&state, &Settings::load(), utc(at))
+                    .await
+                    .revision
+            };
+            let before = revision(state.clone(), NOW).await;
+
+            // The first good list is a change: the plan had none.
+            check_once(&state, utc(NOW)).await;
+            let first = revision(state.clone(), NOW).await;
+            assert_ne!(first, before);
+
+            // The same charge, its energy updated a little as the car
+            // charges: no change.
+            mock.set_dispatches(dispatches_response(json!([dispatch(
+                "2026-10-17T12:00:00+00:00",
+                "2026-10-17T13:00:00+00:00",
+                json!("SMART"),
+                json!(4.9)
+            )])));
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            assert_eq!(
+                revision(state.clone(), "2026-10-17T12:03:00+00:00").await,
+                first
+            );
+
+            // Planned energy up by a kWh or more at the same times: the car's
+            // load the plan models changed.
+            mock.set_dispatches(dispatches_response(json!([dispatch(
+                "2026-10-17T12:00:00+00:00",
+                "2026-10-17T13:00:00+00:00",
+                json!("SMART"),
+                json!(9.0)
+            )])));
+            check_once(&state, utc("2026-10-17T12:04:00+00:00")).await;
+            let more_energy = revision(state.clone(), "2026-10-17T12:04:00+00:00").await;
+            assert_ne!(more_energy, first);
+            let first = more_energy;
+
+            // A failed check is not a change either.
+            mock.set_dispatches(json!({ "errors": [{ "message": "boom" }] }));
+            check_once(&state, utc("2026-10-17T12:06:00+00:00")).await;
+            assert!(state.octopus_dispatches.lock().await.error.is_some());
+            assert_eq!(
+                revision(state.clone(), "2026-10-17T12:06:00+00:00").await,
+                first
+            );
+
+            // Octopus moves the charge: a change.
+            mock.set_dispatches(dispatches_response(json!([dispatch(
+                "2026-10-17T14:00:00+00:00",
+                "2026-10-17T15:00:00+00:00",
+                json!("SMART"),
+                json!(4.2)
+            )])));
+            check_once(&state, utc("2026-10-17T12:09:00+00:00")).await;
+            let moved = revision(state.clone(), "2026-10-17T12:09:00+00:00").await;
+            assert_ne!(moved, first);
+
+            // Switching the hold off and on starts a new list, which must
+            // not reuse an old number a plan may have recorded.
+            state.octopus_dispatches.lock().await.reset();
+            let after_reset = revision(state.clone(), "2026-10-17T12:10:00+00:00").await;
+            assert_ne!(after_reset, moved);
+            check_once(&state, utc("2026-10-17T12:12:00+00:00")).await;
+            let relisted = revision(state.clone(), "2026-10-17T12:12:00+00:00").await;
+            assert!(relisted != moved && relisted != first && relisted != after_reset);
+        })
+        .await;
+    }
+
+    fn graphql_error(code: &str, message: &str) -> Value {
+        json!({
+            "errors": [{ "message": message, "extensions": { "errorCode": code } }],
+            "data": { "flexPlannedDispatches": null }
+        })
+    }
+
+    /// Seen live (10 November 2026): about one dispatch read in six fails
+    /// with KT-CT-4340 and the next works, so one quick retry saves the
+    /// check. On a fresh start that's the difference between a list and
+    /// three minutes of "out of date".
+    #[tokio::test]
+    async fn a_passing_dispatch_read_failure_is_retried_once() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            mock.queue_dispatches(&[graphql_error(
+                "KT-CT-4340",
+                "Unable to fetch planned dispatches.",
+            )]);
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.count("flexPlannedDispatches"), 2);
+            let current = state.octopus_dispatches.lock().await.clone();
+            assert_eq!(current.error, None);
+            assert_eq!(current.checked_at, Some(utc(NOW)));
+            assert_eq!(current.dispatches.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_read_failing_twice_is_reported_without_more_retries() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            let flake = graphql_error("KT-CT-4340", "Unable to fetch planned dispatches.");
+            mock.queue_dispatches(&[flake.clone(), flake]);
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.count("flexPlannedDispatches"), 2);
+            let error = state.octopus_dispatches.lock().await.error.clone();
+            assert!(error.is_some_and(|e| e.contains("KT-CT-4340")));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn other_dispatch_read_errors_are_not_retried() {
+        // A rate limit (seen live after a burst of reads) only gets worse
+        // with another request.
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure(&mock, true).await;
+            mock.queue_dispatches(&[graphql_error("KT-CT-1199", "Too many requests.")]);
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.count("flexPlannedDispatches"), 1);
+            let error = state.octopus_dispatches.lock().await.error.clone();
+            assert!(error.is_some_and(|e| e.contains("KT-CT-1199")));
         })
         .await;
     }

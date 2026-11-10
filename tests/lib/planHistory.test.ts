@@ -451,6 +451,12 @@ describe('decisionRows', () => {
     expect(rows[0].kindLabel).toBe('Refreshed');
   });
 
+  it('labels a replan after Octopus moved a car charge', () => {
+    expect(decisionRows([snap(T0, null, null, 'replan')])[0].kindLabel).toBe(
+      'Re-Planned for a Moved Car Charge',
+    );
+  });
+
   it('passes an unknown kind through untouched', () => {
     expect(decisionRows([snap(T0, null, null, 'future_kind')])[0].kindLabel).toBe('future_kind');
   });

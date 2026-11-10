@@ -155,6 +155,33 @@ pub struct PlanInputs<'a> {
     /// time rather than by its own first date. The minute-of-day used to
     /// pick the tariff window is derived from this.
     pub now_ts: i64,
+    /// Plan the cheap window that started at this instant and is still
+    /// under way, instead of the next one (issue #404): the slot keeps its
+    /// start and is sized from the series' first hour. `None` for every
+    /// normal plan. Only the window pick and the occurrence use it; the
+    /// Tomorrow figures still follow `now_ts`.
+    pub running_window_start: Option<i64>,
+}
+
+impl PlanInputs<'_> {
+    /// Which occurrence of the cheap window to plan.
+    pub(crate) fn occurrence_at(&self) -> OccurrenceAt {
+        match self.running_window_start {
+            Some(start) => OccurrenceAt::Running(start),
+            None => OccurrenceAt::NextFrom(self.now_ts),
+        }
+    }
+
+    /// The local minute of day the cheap window is picked from: the running
+    /// window's own start, so it is that window that's picked.
+    pub(crate) fn window_pick_minute(&self) -> u16 {
+        chrono::DateTime::from_timestamp(self.running_window_start.unwrap_or(self.now_ts), 0)
+            .map(|dt| {
+                let local = dt.with_timezone(&chrono::Local);
+                local.hour() as u16 * 60 + local.minute() as u16
+            })
+            .unwrap_or(0)
+    }
 }
 
 /// Every tariff slot occurrence in the forward 24 h cycle that is at
@@ -260,6 +287,25 @@ pub fn cheapest_import_window(
             .then(window_duration_minutes(b).cmp(&window_duration_minutes(a)))
     });
     candidates.into_iter().next()
+}
+
+/// Whether a plan made at `now` needs the forecast's current hour: the
+/// cheap window it picks starts later within this hour. The forecast's
+/// hours otherwise start at the next full hour, so the plan couldn't see
+/// the charge before it and sized the slot that much longer (Intelligent
+/// Octopus Go's 23:30 planned at 23:05 lost 23:30–00:00). Any other plan
+/// keeps the forward-only series: the current hour would add time already
+/// gone.
+pub fn plan_needs_current_hour(
+    tariff: Option<&TariffConfig>,
+    now: chrono::DateTime<chrono::Local>,
+) -> bool {
+    let now_min = now.hour() as u16 * 60 + now.minute() as u16;
+    tariff
+        .and_then(|tariff| cheapest_import_window(tariff, now_min, 30))
+        .is_some_and(|window| {
+            !window.tomorrow && window.start_min >= now_min && window.start_min / 60 == now_min / 60
+        })
 }
 
 /// The tariff's best contiguous window to SELL into — the highest-rate
@@ -519,25 +565,53 @@ fn window_occurrences(sim_hours: &[SimHourInput], window: &ChargeWindow) -> Vec<
         .collect()
 }
 
+/// Which occurrence of a window the planner sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OccurrenceAt {
+    /// The first one starting at or after this moment: the normal plan.
+    NextFrom(i64),
+    /// The one that started at this instant, still under way (issue #404).
+    Running(i64),
+}
+
+impl From<i64> for OccurrenceAt {
+    fn from(now_ts: i64) -> Self {
+        Self::NextFrom(now_ts)
+    }
+}
+
 /// The planner's one-cycle selection: the first occurrence that STARTS at
 /// or after `now_ts`, plus the hour index where the following occurrence
 /// begins (the one-cycle horizon boundary — `None` when no further
 /// occurrence exists in the series). An occurrence already in progress at
 /// `now_ts` is skipped: `cheapest_import_window` plans for the next full
 /// window, not for the tail of the current one.
+///
+/// With [`OccurrenceAt::Running`] it is instead the occurrence that started
+/// at that instant and is still under way (issue #404), or nothing when it
+/// has no hours left in the series: never the next day's, which would plan
+/// a charge that can't happen tonight.
 fn first_reachable_occurrence(
     sim_hours: &[SimHourInput],
     window: &ChargeWindow,
-    now_ts: i64,
+    at: impl Into<OccurrenceAt>,
 ) -> (Option<WindowOccurrence>, Option<usize>) {
     let occurrences = window_occurrences(sim_hours, window);
-    let position = occurrences
-        .iter()
-        .position(|occ| occ.start_ts >= now_ts)
-        // All occurrences started before `now` (possible only for callers
-        // whose series isn't forward-only): fall back to the last one so
-        // the plan still has a window to size against.
-        .unwrap_or(occurrences.len().saturating_sub(1));
+    let position = match at.into() {
+        OccurrenceAt::Running(start) => {
+            match occurrences.iter().position(|occ| occ.start_ts == start) {
+                Some(position) => position,
+                None => return (None, None),
+            }
+        }
+        OccurrenceAt::NextFrom(now_ts) => occurrences
+            .iter()
+            .position(|occ| occ.start_ts >= now_ts)
+            // All occurrences started before `now` (possible only for callers
+            // whose series isn't forward-only): fall back to the last one so
+            // the plan still has a window to size against.
+            .unwrap_or(occurrences.len().saturating_sub(1)),
+    };
     let selected = occurrences.get(position).cloned();
     let next_start = occurrences
         .get(position + 1)
@@ -710,9 +784,9 @@ fn simulate_with_max_rate(
     sim_hours: &[SimHourInput],
     params: &SimulationParams,
     window: &ChargeWindow,
-    now_ts: i64,
+    at: impl Into<OccurrenceAt>,
 ) -> ChargeOutcome {
-    let (selected, next_occurrence_start) = first_reachable_occurrence(sim_hours, window, now_ts);
+    let (selected, next_occurrence_start) = first_reachable_occurrence(sim_hours, window, at);
     let Some(first_run) = selected.map(|occ| occ.run) else {
         return ChargeOutcome {
             trough_pct: f64::NAN,
@@ -858,14 +932,10 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     };
     let floor = inputs.target_soc_pct;
 
-    // The planning moment drives both the window pick (minute-of-day)
-    // and the one-cycle occurrence anchoring below.
-    let now_min = chrono::DateTime::from_timestamp(inputs.now_ts, 0)
-        .map(|dt| {
-            let local = dt.with_timezone(&chrono::Local);
-            local.hour() as u16 * 60 + local.minute() as u16
-        })
-        .unwrap_or(0);
+    // The planning moment (or the start of the window under way) drives
+    // both the window pick (minute-of-day) and the one-cycle occurrence
+    // anchoring below.
+    let now_min = inputs.window_pick_minute();
     // A 30-minute floor: shorter windows can't meaningfully charge.
     let Some(base_window) = cheapest_import_window(tariff, now_min, 30) else {
         return PlanRecommendation::NoPlan {
@@ -885,7 +955,14 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
     // forecast). `observed_end` is that boundary.
     let sim_hours = inputs.sim_hours.unwrap_or(&[]);
     let (selected, next_occurrence_start) =
-        first_reachable_occurrence(sim_hours, &base_window, inputs.now_ts);
+        first_reachable_occurrence(sim_hours, &base_window, inputs.occurrence_at());
+    // A window under way with no hours left in the series can't be
+    // charged any further; the rough estimate below is no plan for it.
+    if inputs.running_window_start.is_some() && selected.is_none() {
+        return PlanRecommendation::NoPlan {
+            reason: "the cheap window under way has no time left to plan".to_string(),
+        };
+    }
     let observed_end = next_occurrence_start.unwrap_or(inputs.simulation.hours.len());
     // Where the SOC bottoms out before the next cheap period. The charge
     // asks for enough to lift this *trough* above the user's
@@ -979,16 +1056,24 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
         reaches_minimum,
     ) = if selected.is_some() {
         let max_duration_min = window_duration_minutes(&base_window);
-        let full_outcome =
-            simulate_with_max_rate(sim_hours, inputs.params, &base_window, inputs.now_ts);
+        let full_outcome = simulate_with_max_rate(
+            sim_hours,
+            inputs.params,
+            &base_window,
+            inputs.occurrence_at(),
+        );
         let duration_min = if full_outcome.holds(sim_hours, inputs.params, floor) {
             let mut lo = 0u16; // known-failing: the uncharged post-window hours miss the floor
             let mut hi = max_duration_min; // known-good
             while hi - lo > 1 {
                 let mid = lo + (hi - lo) / 2;
                 let probe_window = charge_window_for_duration(&base_window, mid);
-                let probe =
-                    simulate_with_max_rate(sim_hours, inputs.params, &probe_window, inputs.now_ts);
+                let probe = simulate_with_max_rate(
+                    sim_hours,
+                    inputs.params,
+                    &probe_window,
+                    inputs.occurrence_at(),
+                );
                 if probe.holds(sim_hours, inputs.params, floor) {
                     hi = mid;
                 } else {
@@ -1000,7 +1085,8 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
             max_duration_min
         };
         let window = charge_window_for_duration(&base_window, duration_min);
-        let outcome = simulate_with_max_rate(sim_hours, inputs.params, &window, inputs.now_ts);
+        let outcome =
+            simulate_with_max_rate(sim_hours, inputs.params, &window, inputs.occurrence_at());
         // Derive the ask from the window itself: the midnight clamp can
         // shave a minute off `duration_min`, and the reported kWh must
         // match the window that is actually simulated and written.
@@ -1770,6 +1856,7 @@ mod tests {
             // tomorrow" branch is exercised.
             now_ts: pinned_now_ts(sim_hours, -1, 22 * 60),
             current_soc_pct: 30.0,
+            running_window_start: None,
         }
     }
 
@@ -2322,6 +2409,7 @@ mod tests {
             consumption_sufficient: true,
             now_ts,
             current_soc_pct: 46.0,
+            running_window_start: None,
         };
         let rec = plan_overnight_charge(&inputs);
         let PlanRecommendation::Charge {
@@ -2412,6 +2500,7 @@ mod tests {
             consumption_sufficient: true,
             now_ts,
             current_soc_pct: 46.0,
+            running_window_start: None,
         };
         let rec = plan_overnight_charge(&inputs);
         let PlanRecommendation::Charge {
@@ -2497,6 +2586,7 @@ mod tests {
             consumption_sufficient: true,
             now_ts,
             current_soc_pct: 12.0,
+            running_window_start: None,
         };
         let rec = plan_overnight_charge(&inputs);
         let PlanRecommendation::Charge {
@@ -2978,6 +3068,7 @@ mod tests {
             // planning day itself, so "now" is 22:00 that same day.
             now_ts: pinned_now_ts(sim_hours, 0, 22 * 60),
             current_soc_pct: 30.0,
+            running_window_start: None,
         }
     }
 
@@ -5396,5 +5487,188 @@ mod tests {
             "only the held half's house load is imported: {}",
             got.series[0].import_kwh
         );
+    }
+
+    #[test]
+    fn only_a_window_starting_later_this_hour_needs_the_current_hour() {
+        let at = |h: u32, m: u32| {
+            chrono::Local
+                .from_local_datetime(&fixture_date(0).and_hms_opt(h, m, 30).unwrap())
+                .earliest()
+                .unwrap()
+        };
+        let iog = tariff(&[
+            ("00:00", "05:30", 0.07),
+            ("05:30", "23:30", 0.30),
+            ("23:30", "23:59", 0.07),
+        ]);
+        let flux = flux_tariff();
+        assert!(plan_needs_current_hour(Some(&iog), at(23, 0)));
+        assert!(plan_needs_current_hour(Some(&iog), at(23, 29)));
+        // An earlier hour: the window's hour is already in the series.
+        assert!(!plan_needs_current_hour(Some(&iog), at(22, 45)));
+        // Under way: tomorrow's is next, a plan for the replan instead.
+        assert!(!plan_needs_current_hour(Some(&iog), at(23, 45)));
+        // A window on the hour always starts at a series hour.
+        assert!(!plan_needs_current_hour(Some(&flux), at(1, 30)));
+        assert!(!plan_needs_current_hour(None, at(23, 0)));
+    }
+
+    // ---- the rest of a window already under way (issue #404) -------------
+
+    /// Planning at 03:05, an hour into the 02:00–05:00 flux window, at
+    /// `soc`, with the series starting at the current hour as the replan
+    /// asks the forecast for. The overnight load is 0.6 kWh an hour and
+    /// there's no solar until 09:00.
+    fn mid_window(soc: f64) -> (SimulationOutput, Vec<SimHourInput>, SimulationParams) {
+        mid_window_with_load(soc, 0.6)
+    }
+
+    fn mid_window_with_load(
+        soc: f64,
+        load_kwh: f64,
+    ) -> (SimulationOutput, Vec<SimHourInput>, SimulationParams) {
+        let mut p = params();
+        p.start_soc_pct = soc;
+        let solar: [f64; 24] =
+            std::array::from_fn(|h| if (9..=15).contains(&h) { 0.8 } else { 0.0 });
+        let cons = [load_kwh; 24];
+        let (_, full) = fixed_72h(soc, solar, cons, &p);
+        let hours: Vec<SimHourInput> = full[3..].to_vec();
+        let sim = simulate_battery(&hours, &p);
+        (sim, hours, p)
+    }
+
+    /// The planner's inputs at 03:05, planning the window that started at
+    /// 02:00 when `running`.
+    fn mid_window_inputs<'a>(
+        sim: &'a SimulationOutput,
+        hours: &'a [SimHourInput],
+        p: &'a SimulationParams,
+        tariff: &'a TariffConfig,
+        running: bool,
+    ) -> PlanInputs<'a> {
+        PlanInputs {
+            simulation: sim,
+            sim_hours: Some(hours),
+            params: p,
+            import_tariff: Some(tariff),
+            target_soc_pct: 20.0,
+            consumption_tomorrow_kwh: 14.0,
+            consumption_sufficient: true,
+            now_ts: pinned_now_ts(hours, 0, 3 * 60 + 5),
+            current_soc_pct: p.start_soc_pct,
+            running_window_start: running.then(|| pinned_now_ts(hours, 0, 2 * 60)),
+        }
+    }
+
+    #[test]
+    fn a_running_window_is_sized_from_the_current_hour() {
+        let (sim, hours, p) = mid_window(15.0);
+        let flux = flux_tariff();
+        let rec = plan_overnight_charge(&mid_window_inputs(&sim, &hours, &p, &flux, true));
+        let PlanRecommendation::Charge { window, kwh, .. } = rec else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert_eq!(
+            window.start_min, 120,
+            "the slot keeps the running window's start"
+        );
+        assert!(!window.tomorrow);
+        assert!(
+            window.end_min > 3 * 60 && window.end_min <= 5 * 60,
+            "it charges on from now inside tonight's window: {window:?}"
+        );
+        assert!(kwh > 0.0);
+    }
+
+    #[test]
+    fn without_a_running_window_the_next_one_is_planned_as_before() {
+        let (sim, hours, p) = mid_window(15.0);
+        let flux = flux_tariff();
+        let rec = plan_overnight_charge(&mid_window_inputs(&sim, &hours, &p, &flux, false));
+        let PlanRecommendation::Charge { window, .. } = rec else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert!(window.tomorrow, "it plans tomorrow's window: {window:?}");
+    }
+
+    #[test]
+    fn a_running_window_that_has_charged_enough_needs_no_more() {
+        // 95% covers a 0.25 kWh an hour house to tomorrow night's window.
+        let (sim, hours, p) = mid_window_with_load(95.0, 0.25);
+        let flux = flux_tariff();
+        let rec = plan_overnight_charge(&mid_window_inputs(&sim, &hours, &p, &flux, true));
+        assert!(
+            matches!(rec, PlanRecommendation::NoChargeNeeded { .. }),
+            "{rec:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_window_with_no_hours_left_is_no_plan_not_an_estimate() {
+        // The series starts at 05:00, after the window: nothing of it left.
+        let (_, hours, mut p) = mid_window(15.0);
+        let hours: Vec<SimHourInput> = hours[2..].to_vec();
+        p.start_soc_pct = 15.0;
+        let sim = simulate_battery(&hours, &p);
+        let flux = flux_tariff();
+        let mut inputs = mid_window_inputs(&sim, &hours, &p, &flux, true);
+        inputs.running_window_start = Some(pinned_now_ts(&hours, 0, 2 * 60));
+        let rec = plan_overnight_charge(&inputs);
+        assert!(matches!(rec, PlanRecommendation::NoPlan { .. }), "{rec:?}");
+    }
+
+    /// A trial slot that ended before the series starts (02:00–02:07 at
+    /// 03:05) has no hours left tonight. It must count as no charge, not
+    /// move to tomorrow's 02:00, or the search settles on a slot that
+    /// charges nothing tonight.
+    #[test]
+    fn a_trial_slot_already_over_is_not_judged_on_tomorrows_occurrence() {
+        let (sim, hours, p) = mid_window(15.0);
+        let flux = flux_tariff();
+        let start = pinned_now_ts(&hours, 0, 2 * 60);
+        let probe = ChargeWindow {
+            start_min: 120,
+            end_min: 127,
+            tomorrow: false,
+            rate: 0.09,
+        };
+        let running = OccurrenceAt::Running(start);
+        let (selected, _) = first_reachable_occurrence(&hours, &probe, running);
+        assert!(selected.is_none(), "{selected:?}");
+        let outcome = simulate_with_max_rate(&hours, &p, &probe, running);
+        assert!(!outcome.holds(&hours, &p, 20.0));
+        // Planned from the next moment instead, the same slot is tomorrow's.
+        let (next, _) = first_reachable_occurrence(&hours, &probe, start);
+        assert!(next.is_some());
+
+        // And the plan charges on past now.
+        let rec = plan_overnight_charge(&mid_window_inputs(&sim, &hours, &p, &flux, true));
+        let PlanRecommendation::Charge { window, .. } = rec else {
+            panic!("expected Charge, got {rec:?}")
+        };
+        assert!(window.end_min > 3 * 60 + 5, "{window:?}");
+    }
+
+    #[test]
+    fn every_strategy_keeps_the_running_window() {
+        let (sim, hours, p) = mid_window(15.0);
+        let flux = flux_tariff();
+        let inputs = mid_window_inputs(&sim, &hours, &p, &flux, true);
+        for strategy in [
+            crate::settings::PlanStrategy::MinSoc,
+            crate::settings::PlanStrategy::HoldWindow,
+            crate::settings::PlanStrategy::Cheapest,
+        ] {
+            let rec = plan_charge(&inputs, strategy, &CostInputs::default());
+            let window = match &rec {
+                PlanRecommendation::Charge { window, .. }
+                | PlanRecommendation::ChargeAndHold { window, .. } => window,
+                other => panic!("{strategy:?}: expected a charge, got {other:?}"),
+            };
+            assert_eq!(window.start_min, 120, "{strategy:?}: {window:?}");
+            assert!(!window.tomorrow, "{strategy:?}: {window:?}");
+        }
     }
 }

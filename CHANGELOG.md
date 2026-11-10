@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.14.0] - 2026-11-10
+
+### Added
+
+- **The overnight charge follows Octopus when it moves the car's smart charge.** With auto-apply or the nightly refresh on, HEM re-plans charge slot 1 whenever Octopus moves, adds or drops a smart charge after tonight's plan was written, before the cheap window starts or while it runs. It only rewrites the slot when the charge changes by 15 minutes or more, waits for a top-up during a smart charge to finish, leaves a slot you've changed yourself alone, and auto-apply tells you what it changed.
+
+### Fixed
+
+- **The overnight charge isn't oversized when the cheap window starts mid-hour.** Planned at 23:05 for Intelligent Octopus Go's 23:30 window, the plan couldn't see the charge between 23:30 and midnight and asked for up to half an hour more. Auto-apply, the nightly refresh and the Planner now see the whole window.
+- **Fewer "Couldn't check planned charges" errors.** Octopus fails about one planned-charge read in six for a moment; HEM now tries again once before giving up, so the Octopus page and the forecast stop reporting the car's charging as out of date for minutes at a time.
+
 ## [1.13.0] - 2026-11-10
 
 ### Added

@@ -186,6 +186,11 @@ pub struct ForecastInputs<'a> {
     /// The account's planned car charging, when the dispatch hold is on
     /// (no dispatches otherwise).
     pub dispatches: &'a PlanningDispatches,
+    /// Start the hourly series at the current hour rather than the next
+    /// one, for a plan of a cheap window already under way (issue #404):
+    /// without it the minutes to the next hour aren't in the plan at all.
+    /// Only the replan asks for it, near the top of an hour.
+    pub include_current_hour: bool,
 }
 
 fn current_local_hour_start_ts(now: DateTime<Local>) -> i64 {
@@ -278,7 +283,12 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                 d if d == tomorrow => solar_tomorrow_kwh += kwh,
                 _ => {}
             }
-            if p.timestamp >= now_ts {
+            let series_start = if inputs.include_current_hour {
+                forecast_start_ts
+            } else {
+                now_ts
+            };
+            if p.timestamp >= series_start {
                 solar.push(ForecastSolarHour {
                     timestamp: p.timestamp,
                     kwh,
@@ -789,7 +799,7 @@ async fn run_solar_forecast_fetch_at(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::forecast::solar::SolarForecastSample;
     use crate::inverter::model::InverterSnapshot;
@@ -1389,7 +1399,7 @@ mod tests {
     /// forward radiation (constant 500 W/m²), a calibrated PR of 0.8 in
     /// meta, seven days of hourly home-consumption counters, and a
     /// connected snapshot with battery detail.
-    fn seed_full_forecast_state(db: &HistoryDb, now: DateTime<Local>) {
+    pub(crate) fn seed_full_forecast_state(db: &HistoryDb, now: DateTime<Local>) {
         let now_ts = now.timestamp();
         // Align the forward window to the local hour so "today remaining"
         // counting is exact under test.
@@ -1445,6 +1455,7 @@ mod tests {
         checked_at: None,
         stale: false,
         hold_applies: false,
+        revision: 0,
     };
 
     fn full_forecast_inputs<'a>(
@@ -1461,6 +1472,7 @@ mod tests {
             weather_coords: Some((51.5, -0.13)),
             now,
             dispatches: &NO_DISPATCHES,
+            include_current_hour: false,
         }
     }
 
@@ -1558,6 +1570,38 @@ mod tests {
         let payload = build_forecast_payload(&full_forecast_inputs(&db, None, now, &off));
         assert!((payload.consumption_tomorrow_kwh - 11.7).abs() < 1e-6);
         assert_eq!(payload.consumption_excluded_above_kwh, 0.0);
+    }
+
+    /// Issue #404: a plan of a window under way asks for the current hour
+    /// too, or the minutes to the next hour aren't in it at all. Every
+    /// other caller keeps the forward-only series.
+    #[test]
+    fn the_series_can_start_at_the_current_hour() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 3, 5);
+        seed_full_forecast_state(&db, now);
+        let settings = five_kwp_settings();
+        let snap = battery_snapshot();
+        let hour_start = local_dt(2025, 6, 15, 3, 0).timestamp();
+        let mut inputs = full_forecast_inputs(&db, Some(&snap), now, &settings);
+        let forward = build_forecast_payload(&inputs);
+        assert_eq!(
+            forward.solar.first().map(|h| h.timestamp),
+            Some(hour_start + 3600)
+        );
+        inputs.include_current_hour = true;
+        let from_now = build_forecast_payload(&inputs);
+        assert_eq!(
+            from_now.solar.first().map(|h| h.timestamp),
+            Some(hour_start)
+        );
+        assert_eq!(from_now.solar.len(), forward.solar.len() + 1);
+        let battery = from_now.battery.expect("projection");
+        assert_eq!(battery.hours.len(), from_now.solar.len());
+        // Still now's forecast: not flagged as fetched in the future.
+        assert!(!from_now
+            .status
+            .contains(&"forecast_data_future".to_string()));
     }
 
     /// Issue #359: the plan the API serves and the automation applies
@@ -1964,6 +2008,7 @@ mod tests {
             weather_coords: None,
             now,
             dispatches: &PlanningDispatches::default(),
+            include_current_hour: false,
         };
         let payload = build_forecast_payload(&inputs);
         for code in [
@@ -2197,6 +2242,7 @@ mod tests {
             checked_at: Some(car_now().with_timezone(&chrono::Utc)),
             stale: false,
             hold_applies: true,
+            revision: 0,
         }
     }
 

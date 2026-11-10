@@ -19,6 +19,7 @@ pub(crate) mod forecast_plan;
 #[cfg(test)]
 mod givtcp_contract;
 pub mod model;
+pub(crate) mod plan_replan;
 pub mod poll;
 pub mod power_limit;
 pub mod reconnect;

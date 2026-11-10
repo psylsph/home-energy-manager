@@ -8945,6 +8945,7 @@ pub(crate) async fn get_forecast_at(
             weather_coords: coords,
             now,
             dispatches: &dispatches,
+            include_current_hour: false,
         })
     })
     .await
@@ -9163,6 +9164,11 @@ pub(crate) async fn get_forecast_plan_at(
             weather_coords: coords,
             now,
             dispatches: &dispatches,
+            // As the daily write plans it, so Apply and auto-apply agree.
+            include_current_hour: crate::forecast::planner::plan_needs_current_hour(
+                settings.import_tariff_config.as_ref(),
+                now,
+            ),
         });
         compute_full_plan(&forecast, &settings, snapshot.as_ref(), now.timestamp())
     })
@@ -9225,7 +9231,8 @@ pub(crate) fn compute_full_plan(
     Option<crate::forecast::planner::ExportAdvice>,
 ) {
     use crate::forecast::planner::{ExportAdvice, ExportPlanInputs, PlanRecommendation};
-    let (charge, export_ctx) = compute_charge_plan_inner(forecast, settings, snapshot, now_ts);
+    let (charge, export_ctx) =
+        compute_charge_plan_inner(forecast, settings, snapshot, now_ts, None);
     // NoPlan means one of the shared gates failed (projection, history,
     // import tariff) — the export advice stands down with them.
     if matches!(charge, PlanRecommendation::NoPlan { .. }) {
@@ -9302,6 +9309,20 @@ pub(crate) fn compute_plan_recommendation(
     compute_full_plan(forecast, settings, snapshot, now_ts).0
 }
 
+/// The charge plan for the cheap window that started at `window_start`
+/// and is still under way (issue #404): the slot keeps that start and is
+/// sized from the forecast's first hour. No export advice: selling into a
+/// window already under way isn't advice.
+pub(crate) fn compute_running_window_plan(
+    forecast: &crate::forecast::ForecastPayload,
+    settings: &crate::settings::Settings,
+    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
+    now_ts: i64,
+    window_start: i64,
+) -> crate::forecast::planner::PlanRecommendation {
+    compute_charge_plan_inner(forecast, settings, snapshot, now_ts, Some(window_start)).0
+}
+
 /// Which solar estimate [`forecast_sim_hours`] builds the series from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SolarBand {
@@ -9376,6 +9397,7 @@ fn compute_charge_plan_inner<'a>(
     settings: &'a crate::settings::Settings,
     snapshot: Option<&crate::inverter::model::InverterSnapshot>,
     now_ts: i64,
+    running_window_start: Option<i64>,
 ) -> (
     crate::forecast::planner::PlanRecommendation,
     Option<ExportContext<'a>>,
@@ -9508,6 +9530,7 @@ fn compute_charge_plan_inner<'a>(
         consumption_sufficient: forecast.consumption_sufficient,
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
+        running_window_start,
     };
     // A planned smart charge's half-hours are billed off-peak (issue #434).
     let smart_charges = crate::history::OffPeakHalfHours::from_spans(

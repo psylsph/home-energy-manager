@@ -24,7 +24,6 @@ use crate::forecast::simulate::{
 };
 use crate::forecast::time_windows::split_hour_segments;
 use crate::settings::PlanStrategy;
-use chrono::Timelike;
 
 /// Lowest target the slot is ever given. HR 116 decodes 4 as "unset" and
 /// the Control endpoints only treat 5–99 as an unambiguous target.
@@ -283,15 +282,9 @@ pub(super) fn prepare_hold<'a>(inputs: &PlanInputs<'a>) -> Option<HoldContext<'a
         .sim_hours
         .filter(|hours| hours.len() == inputs.simulation.hours.len())?;
     let tariff = inputs.import_tariff?;
-    let now_min = chrono::DateTime::from_timestamp(inputs.now_ts, 0)
-        .map(|dt| {
-            let local = dt.with_timezone(&chrono::Local);
-            local.hour() as u16 * 60 + local.minute() as u16
-        })
-        .unwrap_or(0);
-    let window = cheapest_import_window(tariff, now_min, 30)?;
+    let window = cheapest_import_window(tariff, inputs.window_pick_minute(), 30)?;
     let (selected, next_occurrence_start) =
-        first_reachable_occurrence(sim_hours, &window, inputs.now_ts);
+        first_reachable_occurrence(sim_hours, &window, inputs.occurrence_at());
     let occurrence = selected?;
     let first_index = occurrence.first_index();
     let run = occurrence.run;

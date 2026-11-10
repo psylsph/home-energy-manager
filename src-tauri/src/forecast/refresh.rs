@@ -820,6 +820,7 @@ mod tests {
             consumption_sufficient: true,
             now_ts: local_dt(2026, 8, 31, 22, 0).timestamp(),
             current_soc_pct: start_soc,
+            running_window_start: None,
         };
         plan_overnight_charge(&inputs)
     }
