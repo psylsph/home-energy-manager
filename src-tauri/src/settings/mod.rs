@@ -250,6 +250,17 @@ impl TariffConfig {
             .collect()
     }
 
+    /// The lowest usable rate in the day (finite, non-negative), or `None`
+    /// with no such slot. On Intelligent Octopus Go this is the off-peak
+    /// rate a smart charge's half-hours are billed at (issue #434).
+    pub fn cheapest_rate(&self) -> Option<f64> {
+        self.slots
+            .iter()
+            .map(|slot| slot.rate)
+            .filter(|rate| rate.is_finite() && *rate >= 0.0)
+            .min_by(f64::total_cmp)
+    }
+
     /// Look up the rate for a given minute of the day `[0, 1440)`.
     ///
     /// Lookup = first slot whose `[start, end)` contains the minute. The
@@ -1785,6 +1796,14 @@ pub struct Settings {
     /// saved before its first pause write.
     #[serde(default)]
     pub dispatch_hold_native: Option<crate::inverter::state_machines::DispatchHoldNative>,
+    /// Top the battery up while the hold covers a smart charge (issue #434).
+    /// Only acts while `octopus_dispatch_hold` is on.
+    #[serde(default)]
+    pub octopus_dispatch_charge: bool,
+    /// The running top-up, saved before its first write so a restart can
+    /// always put the charge settings back.
+    #[serde(default, deserialize_with = "deserialize_or_default")]
+    pub dispatch_charge_run: Option<crate::inverter::dispatch_charge::DispatchChargeRun>,
 
     // -- Guided battery calibration (issue #418) --
     /// The running calibration cycle, owned by the poll loop and persisted
@@ -2276,6 +2295,8 @@ impl Default for Settings {
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
             dispatch_hold_native: None,
+            octopus_dispatch_charge: false,
+            dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),
@@ -3024,6 +3045,8 @@ mod tests {
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
             dispatch_hold_native: None,
+            octopus_dispatch_charge: false,
+            dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),
@@ -3791,6 +3814,8 @@ mod tests {
             octopus_dispatch_hold: false,
             dispatch_hold_active_persisted: false,
             dispatch_hold_native: None,
+            octopus_dispatch_charge: false,
+            dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),

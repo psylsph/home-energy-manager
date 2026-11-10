@@ -3075,12 +3075,26 @@ mod tests {
 
             let alerts = mock.alerts_after(3).await;
             assert_eq!(alerts.len(), 3, "started, reserve, finished: {alerts:?}");
+            // Each alert goes out on its own task, so under load they can
+            // arrive in either order: match them by content, not position.
+            let reserve: Vec<_> = alerts
+                .iter()
+                .filter(|a| a.contains("Minimum SOC"))
+                .collect();
+            assert_eq!(reserve.len(), 1, "one reserve alert: {alerts:?}");
             assert!(
-                alerts[1].contains("Minimum SOC") && !alerts[1].contains("export finished"),
+                !reserve[0].contains("export finished"),
                 "the reserve alert is not another 'finished': {}",
-                alerts[1]
+                reserve[0]
             );
-            assert!(alerts[2].contains("export finished"), "{}", alerts[2]);
+            assert_eq!(
+                alerts
+                    .iter()
+                    .filter(|a| a.contains("export finished"))
+                    .count(),
+                1,
+                "{alerts:?}"
+            );
         })
         .await;
     }

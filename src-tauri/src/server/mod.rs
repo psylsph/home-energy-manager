@@ -323,6 +323,10 @@ fn create_router_at(
             "/api/octopus/dispatches/hold",
             post(crate::octopus_dispatches::set_hold),
         )
+        .route(
+            "/api/octopus/dispatches/charge",
+            post(crate::octopus_dispatches::set_charge),
+        )
         .route("/api/octopus/history", get(crate::octopus::get_history))
         .route("/api/octopus/summary", get(crate::octopus::get_summary))
         .route(

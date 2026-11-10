@@ -1710,6 +1710,42 @@ impl DispatchHoldState {
 const DISPATCH_HOLD_FAST_ATTEMPTS: u32 = 2;
 /// How long the hold waits between pause attempts once it has backed off.
 pub(crate) const DISPATCH_HOLD_RETRY_SECS: i64 = 5 * 60;
+/// How long a pause may go unconfirmed before the hold calls it failing. The
+/// sanitizer accepts a new battery mode only on its second read, and a
+/// sanitized re-poll can follow a write within seconds, so a pause that has
+/// landed can still read as unconfirmed after two attempts (9 Nov, 33 s).
+const DISPATCH_HOLD_CONFIRM_SECS: i64 = 90;
+/// Battery discharge (W) above which a failing hold alerts; below it the
+/// battery is idle or charging and can't be feeding the car.
+const DISPATCH_HOLD_ALERT_DISCHARGE_W: i32 = 100;
+
+/// Whether one of the inverter's charge slots is charging the battery now:
+/// charging enabled and the inverter's clock inside a slot.
+pub(crate) fn charge_slot_running(snap: &InverterSnapshot, inverter_minute: u16) -> bool {
+    snap.enable_charge && export_window_contains(&snap.charge_slots, inverter_minute)
+}
+
+/// Whether the dispatch hold can leave a starting smart charge alone because
+/// a charge slot is charging the battery, so it can't empty into the car. Not
+/// while HR 318 pauses charging (the charge cap, a remote pause): the slot
+/// then isn't keeping the battery from discharging.
+fn charge_slot_protects_battery(snap: &InverterSnapshot, inverter_minute: u16) -> bool {
+    charge_slot_running(snap, inverter_minute) && !matches!(snap.battery_pause_mode, 1 | 3)
+}
+
+/// Whether the dispatch hold stays out of a running smart charge this poll
+/// because a charge slot is charging the battery. Read by the hold itself and,
+/// after the poll's evaluation, for the Octopus page.
+pub(crate) fn dispatch_hold_left_to_charge_slot(
+    snap: &InverterSnapshot,
+    in_dispatch: bool,
+    state: &DispatchHoldState,
+    inverter_minute: u16,
+) -> bool {
+    in_dispatch
+        && *state == DispatchHoldState::Idle
+        && charge_slot_protects_battery(snap, inverter_minute)
+}
 /// How long the restore after a smart charge is retried before HEM alerts and
 /// stops, leaving the battery as it is. Retrying for good would keep the hold
 /// owning the battery, and refusing the user's own commands, indefinitely.
@@ -1728,6 +1764,8 @@ pub struct DispatchHoldRetry {
     pub(crate) unconfirmed: u32,
     /// Snapshot time (Unix seconds) of the last pause attempt.
     pub(crate) last_sent: Option<i64>,
+    /// Snapshot time of the first attempt read-back hasn't confirmed yet.
+    pub(crate) first_unconfirmed: Option<i64>,
     /// The pause hasn't read back after repeated attempts.
     pub(crate) failing: bool,
     /// The failure has been notified during this dispatch.
@@ -1788,6 +1826,14 @@ impl DispatchHoldRetry {
         due
     }
 
+    /// [`Self::take_notification`], but only while the battery is
+    /// discharging: charging or idle, it can't be feeding the car, so the
+    /// alert waits (and still goes out if it starts discharging later in the
+    /// same dispatch).
+    pub(crate) fn take_notification_while_discharging(&mut self, battery_power_w: i32) -> bool {
+        battery_power_w > DISPATCH_HOLD_ALERT_DISCHARGE_W && self.take_notification()
+    }
+
     /// Start a fresh set of attempts within the same dispatch, keeping the
     /// foreign-inverter count and whether this dispatch has been alerted, so
     /// one smart charge never alerts twice (fifth code review #5).
@@ -1829,8 +1875,35 @@ impl DispatchHoldRetry {
     }
 
     fn record_attempt(&mut self, at: i64) {
+        if self.unconfirmed == 0 {
+            self.first_unconfirmed = Some(at);
+        }
         self.unconfirmed = self.unconfirmed.saturating_add(1);
         self.last_sent = Some(at);
+    }
+
+    /// Read-back showed the pause.
+    fn confirmed(&mut self) {
+        self.unconfirmed = 0;
+        self.first_unconfirmed = None;
+        self.failing = false;
+    }
+
+    /// Whether the pause should now count as failing: two attempts and
+    /// [`DISPATCH_HOLD_CONFIRM_SECS`] without read-back showing it. A clock
+    /// that stepped back starts the wait again.
+    fn pause_overdue(&mut self, now: i64) -> bool {
+        if self.unconfirmed < DISPATCH_HOLD_FAST_ATTEMPTS {
+            return false;
+        }
+        let first = match self.first_unconfirmed {
+            Some(first) if first <= now => first,
+            _ => {
+                self.first_unconfirmed = Some(now);
+                now
+            }
+        };
+        now - first >= DISPATCH_HOLD_CONFIRM_SECS
     }
 
     /// Whether a pause attempt is due now. A clock that stepped back retries
@@ -1921,14 +1994,13 @@ pub(crate) fn check_dispatch_hold_with_retry(
             return Some(discharge_pause_writes(snap.device_type, 100));
         }
         if snap.battery_mode == BatteryMode::EcoPaused {
-            retry.unconfirmed = 0;
-            retry.failing = false;
+            retry.confirmed();
             if reassert_pause {
                 return Some(discharge_pause_writes(snap.device_type, 100));
             }
             return None;
         }
-        if retry.unconfirmed >= DISPATCH_HOLD_FAST_ATTEMPTS && !retry.failing {
+        if !retry.failing && retry.pause_overdue(snap.timestamp) {
             retry.failing = true;
             tracing::warn!(
                 mode = ?snap.battery_mode,
@@ -2231,11 +2303,10 @@ pub(crate) fn check_native_dispatch_hold(
         };
         retry.unread_since = None;
         if registers == capture.holding() {
-            retry.unconfirmed = 0;
-            retry.failing = false;
+            retry.confirmed();
             return reassert_pause.then(|| capture.pause_writes());
         }
-        if retry.unconfirmed >= DISPATCH_HOLD_FAST_ATTEMPTS && !retry.failing {
+        if !retry.failing && retry.pause_overdue(snap.timestamp) {
             retry.failing = true;
             tracing::warn!(
                 ?registers,
@@ -2351,6 +2422,17 @@ pub(crate) fn evaluate_pause_limiters(
         || (*dispatch_state == DispatchHoldState::Idle
             && uses_native_dispatch_pause(snap.device_type));
     let dispatch_was_active = dispatch_state.is_actively_pausing() && !native;
+    // A charge slot charging the battery already stops it emptying into the
+    // car, so the hold doesn't start; it pauses if the slot ends before the
+    // dispatch does. A hold already holding carries on: reserve 100 doesn't
+    // stop the slot charging.
+    let in_dispatch =
+        if dispatch_hold_left_to_charge_slot(snap, in_dispatch, dispatch_state, now_minutes) {
+            tracing::debug!("Dispatch hold: a charge slot is charging the battery; not pausing");
+            false
+        } else {
+            in_dispatch
+        };
 
     let temperature = check_temperature_limiter_after_automation(
         snap,
@@ -9666,8 +9748,43 @@ mod tests {
         )
     }
 
-    /// Starts a hold at t=1000 and lets the AIO refuse the pause twice
-    /// (t=1000, t=1030), so the hold is backing off from t=1060.
+    #[test]
+    fn dispatch_hold_waits_for_the_mode_debounce_before_calling_the_pause_failed() {
+        // 9 Nov 23:31 on a Gen3: the pause landed, but the sanitizer only
+        // accepts a new mode on its second read, and a sanitized re-poll 4 s
+        // after the second write still read Eco. The hold alerted 33 s after
+        // its first write, then read the pause back and wrote nothing more
+        // until the dispatch ended.
+        let mut state = DispatchHoldState::Idle;
+        let mut retry = DispatchHoldRetry::default();
+        let mut saved = None;
+        let eco = |t| dispatch_snap_at(BatteryMode::Eco, 4, t);
+
+        assert!(hold_poll(&eco(1000), true, &mut state, &mut retry, &mut saved, false).is_some());
+        assert!(hold_poll(&eco(1024), true, &mut state, &mut retry, &mut saved, false).is_some());
+        for t in [1033, 1041, 1045] {
+            assert!(hold_poll(&eco(t), true, &mut state, &mut retry, &mut saved, false).is_none());
+            assert!(!retry.failing(), "too soon after the first write at t={t}");
+        }
+        assert!(hold_poll(
+            &dispatch_snap_at(BatteryMode::EcoPaused, 100, 1050),
+            true,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false,
+        )
+        .is_none());
+        assert!(!retry.failing());
+        assert!(
+            !retry.take_notification(),
+            "a pause that landed never alerts"
+        );
+    }
+
+    /// Starts a hold at t=970 and lets the AIO refuse the pause twice
+    /// (t=970, t=1030), so the hold is failing and backing off from t=1060,
+    /// 90 s after its first attempt.
     fn refused_hold() -> (
         DispatchHoldState,
         DispatchHoldRetry,
@@ -9676,7 +9793,7 @@ mod tests {
         let mut state = DispatchHoldState::Idle;
         let mut retry = DispatchHoldRetry::default();
         let mut saved = None;
-        for t in [1000, 1030] {
+        for t in [970, 1030] {
             assert!(hold_poll(
                 &dispatch_snap_at(BatteryMode::Eco, 4, t),
                 true,
@@ -9742,6 +9859,11 @@ mod tests {
         assert!(hold_poll(&eco(1120), true, &mut state, &mut retry, &mut saved, false).is_some());
         assert!(hold_poll(&eco(1150), true, &mut state, &mut retry, &mut saved, false).is_some());
         assert!(hold_poll(&eco(1180), true, &mut state, &mut retry, &mut saved, false).is_none());
+        assert!(
+            !retry.failing(),
+            "only 60 s since the first unconfirmed attempt"
+        );
+        assert!(hold_poll(&eco(1210), true, &mut state, &mut retry, &mut saved, false).is_none());
         assert!(retry.failing());
     }
 
@@ -9815,7 +9937,7 @@ mod tests {
             &mut saved,
             false,
         );
-        for t in [1120, 1150, 1180] {
+        for t in [1120, 1150, 1180, 1210] {
             hold_poll(&eco(t), true, &mut state, &mut retry, &mut saved, false);
         }
         assert!(retry.failing());
@@ -9823,10 +9945,10 @@ mod tests {
 
         // The dispatch ends and the restore reads back; the next one starts
         // and fails too: that one is notified.
-        hold_poll(&eco(1210), false, &mut state, &mut retry, &mut saved, false);
         hold_poll(&eco(1240), false, &mut state, &mut retry, &mut saved, false);
+        hold_poll(&eco(1270), false, &mut state, &mut retry, &mut saved, false);
         assert_eq!(state, DispatchHoldState::Idle);
-        for t in [5000, 5030, 5060] {
+        for t in [5000, 5030, 5060, 5090] {
             hold_poll(&eco(t), true, &mut state, &mut retry, &mut saved, false);
         }
         assert!(retry.failing());
@@ -10385,6 +10507,8 @@ mod tests {
         assert!(!hold.retry.failing());
         hold.poll(&aio_snap(0, 0, 0, AIO_TS + 360), true);
         hold.poll(&aio_snap(0, 0, 0, AIO_TS + 390), true);
+        assert!(!hold.retry.failing(), "only 60 s since the first attempt");
+        hold.poll(&aio_snap(0, 0, 0, AIO_TS + 420), true);
         assert!(hold.retry.failing(), "failing again");
         assert!(
             !hold.retry.take_notification(),
@@ -10394,9 +10518,9 @@ mod tests {
         // The dispatch ends and the restore reads back; the next dispatch
         // alerts again.
         assert!(hold
-            .poll(&aio_snap(2, 0, 2359, AIO_TS + 420), false)
+            .poll(&aio_snap(2, 0, 2359, AIO_TS + 450), false)
             .is_some());
-        assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS + 450), false).is_none());
+        assert!(hold.poll(&aio_snap(0, 0, 0, AIO_TS + 480), false).is_none());
         assert_eq!(hold.state, DispatchHoldState::Idle);
         hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 3600)), true);
         hold.poll(&stale(aio_snap(0, 0, 0, AIO_TS + 3900)), true);
@@ -10475,6 +10599,8 @@ mod tests {
         assert!(hold.poll(&idle(0), true).is_some());
         assert!(hold.poll(&idle(30), true).is_some());
         assert!(hold.poll(&idle(60), true).is_none());
+        assert!(!hold.retry.failing(), "only 60 s since the first attempt");
+        assert!(hold.poll(&idle(90), true).is_none());
         assert!(hold.retry.failing());
         assert!(hold.poll(&idle(329), true).is_none());
         assert!(hold.poll(&idle(330), true).is_some());
@@ -10775,6 +10901,130 @@ mod tests {
         }
     }
 
+    /// A charge slot 11:00-13:00 around the [`Owners`] clock (12:00).
+    fn in_charge_slot(mut snap: InverterSnapshot) -> InverterSnapshot {
+        snap.enable_charge = true;
+        snap.charge_slots[0] = ScheduleSlot {
+            enabled: true,
+            start_hour: 11,
+            start_minute: 0,
+            end_hour: 13,
+            end_minute: 0,
+            target_soc: 100,
+        };
+        snap
+    }
+
+    #[test]
+    fn the_dispatch_hold_sits_out_a_running_charge_slot() {
+        // 9 Nov 23:30: the user's own charge slot was charging the battery
+        // when the car's smart charge began. A charging battery can't feed
+        // the car, so there is nothing to pause.
+        let mut owners = Owners::new();
+        let eco = |t| InverterSnapshot {
+            timestamp: t,
+            ..dispatch_snap(BatteryMode::Eco, 4)
+        };
+        assert!(owners.poll(&in_charge_slot(eco(1000)), true).is_empty());
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Idle);
+        assert_eq!(owners.saved, None);
+        assert!(!owners.dispatch_retry.failing());
+
+        // The slot ends before the car's charge does: the hold pauses then.
+        let writes = owners.poll(&eco(1030), true);
+        assert_eq!(writes.len(), 1);
+        assert!(has_write(&writes[0].1, HR_BATTERY_SOC_RESERVE, 100));
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Holding);
+    }
+
+    #[test]
+    fn the_page_is_told_only_when_the_hold_sits_out_for_a_charge_slot() {
+        let slot = in_charge_slot(dispatch_snap(BatteryMode::Eco, 4));
+        let idle = DispatchHoldState::Idle;
+        assert!(dispatch_hold_left_to_charge_slot(
+            &slot,
+            true,
+            &idle,
+            12 * 60
+        ));
+        assert!(
+            !dispatch_hold_left_to_charge_slot(&slot, false, &idle, 12 * 60),
+            "no smart charge running"
+        );
+        assert!(
+            !dispatch_hold_left_to_charge_slot(&slot, true, &DispatchHoldState::Holding, 12 * 60),
+            "already holding"
+        );
+        assert!(
+            !dispatch_hold_left_to_charge_slot(&slot, true, &idle, 14 * 60),
+            "outside the slot"
+        );
+    }
+
+    #[test]
+    fn the_dispatch_hold_keeps_holding_when_a_charge_slot_starts() {
+        // Reserve 100 doesn't stop the slot charging, so the hold doesn't let
+        // go and re-pause around it.
+        let mut owners = Owners::new();
+        owners.poll(&dispatch_snap_at(BatteryMode::Eco, 4, 1000), true);
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Holding);
+        let paused = in_charge_slot(dispatch_snap_at(BatteryMode::EcoPaused, 100, 1030));
+        assert!(owners.poll(&paused, true).is_empty());
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Holding);
+    }
+
+    #[test]
+    fn the_dispatch_hold_still_pauses_a_slot_that_is_not_charging() {
+        let mut owners = Owners::new();
+        // Charging switched off: the slot times alone charge nothing.
+        let mut disabled = in_charge_slot(dispatch_snap_at(BatteryMode::Eco, 4, 1000));
+        disabled.enable_charge = false;
+        assert_eq!(owners.poll(&disabled, true).len(), 1);
+
+        // Charging paused by HR 318 (the charge cap, a remote pause).
+        for mode in [1, 3] {
+            let mut owners = Owners::new();
+            let mut capped = in_charge_slot(dispatch_snap_at(BatteryMode::Eco, 4, 1000));
+            capped.battery_pause_mode = mode;
+            assert_eq!(owners.poll(&capped, true).len(), 1, "pause mode {mode}");
+        }
+    }
+
+    #[test]
+    fn an_aio_hold_sits_out_a_running_charge_slot_too() {
+        let mut owners = Owners::new();
+        let slot = in_charge_slot(aio_snap(0, 0, 0, AIO_TS));
+        assert!(owners.poll(&slot, true).is_empty());
+        assert_eq!(owners.dispatch_native, None);
+        assert_eq!(owners.dispatch_state, DispatchHoldState::Idle);
+        assert_eq!(owners.poll(&aio_snap(0, 0, 0, AIO_TS + 30), true).len(), 1);
+        assert!(owners.dispatch_native.is_some());
+    }
+
+    #[test]
+    fn a_failing_hold_alerts_only_once_the_battery_discharges() {
+        // "May be charging the car" is only true when the battery is
+        // discharging; charging or idle, the alert waits.
+        let (mut state, mut retry, mut saved) = refused_hold();
+        hold_poll(
+            &dispatch_snap_at(BatteryMode::Eco, 4, 1060),
+            true,
+            &mut state,
+            &mut retry,
+            &mut saved,
+            false,
+        );
+        assert!(retry.failing());
+        assert!(!retry.take_notification_while_discharging(-2893));
+        assert!(!retry.take_notification_while_discharging(0));
+        assert!(!retry.take_notification_while_discharging(40), "idle noise");
+        assert!(retry.take_notification_while_discharging(1500));
+        assert!(
+            !retry.take_notification_while_discharging(1500),
+            "still once per dispatch"
+        );
+    }
+
     #[test]
     fn an_aio_hold_does_not_share_the_reserve_pause_with_the_limiters() {
         // The load limiter pausing during an AIO dispatch must restore its
@@ -10817,7 +11067,7 @@ mod tests {
             timestamp,
             ..load_snap(BatteryMode::Eco, 4, 500)
         };
-        assert_eq!(owners.poll(&eco(1000), true).len(), 1);
+        assert_eq!(owners.poll(&eco(970), true).len(), 1);
         assert_eq!(owners.poll(&eco(1030), true).len(), 1);
         assert!(owners.poll(&eco(1060), true).is_empty());
         assert!(owners.dispatch_retry.failing());

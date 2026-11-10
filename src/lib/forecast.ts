@@ -79,6 +79,8 @@ export type ForecastDispatchWindow = {
   end: number;
   /** Whether the battery is held while it runs. */
   held: boolean;
+  /** A smart charge, billed at the off-peak rate (#434); a boost isn't. */
+  smart?: boolean;
   /** Octopus's planned energy, when believable, kWh. */
   kwh: number | null;
 };
@@ -90,6 +92,8 @@ export type ForecastDispatchHour = {
   ev_kwh: number;
   /** Share of the hour the battery is held for a smart charge, 0 to 1. */
   held_fraction: number;
+  /** The SOC the battery is topped up to while held (#434), when that's on. */
+  charge_to_soc?: number;
 };
 
 /**
@@ -318,6 +322,20 @@ export function withCarCharging(
   return points.map((point) => ({ ...point, car: byTimestamp.get(point.timestamp) ?? null }));
 }
 
+/** "battery held", or the top-up (issue #434) when the hours it covers
+ *  charge the battery. */
+function heldHow(data: ForecastData, window: ForecastDispatchWindow): string {
+  const target = (data.ev_dispatch_hours ?? []).find(
+    (hour) =>
+      hour.held_fraction > 0 &&
+      hour.timestamp < window.end &&
+      hour.timestamp + 3600 > window.start &&
+      hour.charge_to_soc != null &&
+      Number.isFinite(hour.charge_to_soc),
+  )?.charge_to_soc;
+  return target != null ? `battery topped up to ${Math.round(target)}%` : 'battery held';
+}
+
 /**
  * One line for the plan (issue #406): the next car charge as Octopus
  * planned it, in the Octopus page's format, and how many more there are.
@@ -335,7 +353,7 @@ export function carChargingNote(data: ForecastData): string | null {
     next.kwh != null && Number.isFinite(next.kwh) && next.kwh > 0
       ? `, ${next.kwh.toFixed(1)} kWh`
       : '';
-  const how = next.held ? 'battery held' : 'from the battery';
+  const how = next.held ? heldHow(data, next) : 'from the battery';
   const more = windows.length - 1;
   const tail = more > 0 ? ` ${more} more planned.` : '';
   return `Next car charge ${when}${energy}, ${how}.${tail}`;

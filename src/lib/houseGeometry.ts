@@ -93,14 +93,14 @@ export const HEDGES = [
   { x0: -2.6, x1: 2.2, y0: 9.3, y1: 9.9, z: 0.8 },
   { x0: 4.2, x1: 10.6, y0: 9.3, y1: 9.9, z: 0.8 },
 ] as const;
-/** The grid cable runs this far in from the front of the plot, behind the hedge. */
-const GRID_RUN_Y = 8.8;
 /**
- * The grid cable's run up the right side of the plot. Inset far enough that
- * the cable stays left of the Battery reading's leader (the straight drop
- * below the cabinet), so a grid-to-battery charge never crosses it.
+ * The grid cable's run along the base of the front wall, just clear of it
+ * (the lawn starts at `y1 + 0.6`). The supply comes up the path from the gate
+ * and follows the house round to the gable: the front hedge is only 0.8 high
+ * but the routes draw on top of the illustration, so a cable crossing the
+ * garden behind it shows through its foliage.
  */
-const GRID_RUN_X = PLOT.x1 - 1.7;
+const WALL_RUN_Y = HOUSE.y1 + 0.5;
 /** Chimney stack (with its cap) on the back roof slope; leader lines must stay clear of it. */
 export const CHIMNEY = { x0: 0.75, x1: 1.85, y0: 2.45, y1: 3.55, z0: 6.8, z1: 9.75 } as const;
 /**
@@ -144,7 +144,7 @@ export function panelCells(): WorldPoint[][] {
 const GABLE_X = HOUSE.x1;
 const INV_MID_Y = (INVERTER_BOX.y0 + INVERTER_BOX.y1) / 2;
 const INV_MID_Z = (INVERTER_BOX.z0 + INVERTER_BOX.z1) / 2;
-const GATE_X = (PATH.x0 + PATH.x1) / 2;
+const GATE_X = (PATH.x0 + PATH.x1) / 2 - 0.2;
 
 /** Named points in world space. */
 export const HOUSE_ANCHORS = {
@@ -157,7 +157,7 @@ export const HOUSE_ANCHORS = {
    * here. Far enough left that the reading straight below it still fits.
    */
   battery: w(GABLE_X + 0.15, BATTERY_BOX.y1, 0),
-  /** Front gate where the grid line comes in — the Grid leader line ends here. */
+  /** Front gate where the grid line comes in — the Grid leader line ends here. A little left of the path's centre, so the cable clears the right-hand hedge's top corner. */
   grid: w(GATE_X, PLOT.y1, 0),
   /** EV charge post at the front-left corner of the plot. */
   ev: w(EV_POST.x, EV_POST.y, EV_POST.height),
@@ -207,20 +207,20 @@ export const LEGS: Record<HousePart, WorldPoint[]> = {
     w(SIDE, CU_MID_Y, HOME_OUT_Z),
     w(SIDE, INVERTER_BOX.y1, HOME_OUT_Z),
   ],
-  // Gate → along the front of the plot → up the right-hand side → up into the inverter's underside.
+  // Gate → up the path → along the base of the front wall → back along the
+  // gable wall → up into the inverter's underside. Clear of the hedges.
   grid: [
     HOUSE_ANCHORS.grid,
-    w(GATE_X, GRID_RUN_Y, 0),
-    w(GRID_RUN_X, GRID_RUN_Y, 0),
-    w(GRID_RUN_X, INV_MID_Y, 0),
+    w(GATE_X, WALL_RUN_Y, 0),
+    w(SIDE + INVERTER_BOX.depth, WALL_RUN_Y, 0),
     w(SIDE + INVERTER_BOX.depth, INV_MID_Y, 0),
     w(SIDE + INVERTER_BOX.depth, INV_MID_Y, INVERTER_BOX.z0),
   ],
 };
 
-/** House → EV post: out of the front-left corner and across the lawn, meeting the post's near edge (not running under it). */
+/** House → EV post: out of the foot of the front wall and across the lawn, meeting the post's near edge (not running under it). */
 export const EV_LEG: WorldPoint[] = [
-  w(HOUSE.x0 + 0.3, HOUSE.y1 + 0.05, 0.6),
+  w(HOUSE.x0 + 0.3, HOUSE.y1 + 0.05, 0),
   w(HOUSE.x0 + 0.3, HOUSE.y1 + 0.8, 0),
   w(EV_POST.x, HOUSE.y1 + 0.8, 0),
   w(EV_POST.x, EV_POST.y - EV_POST.half, 0),

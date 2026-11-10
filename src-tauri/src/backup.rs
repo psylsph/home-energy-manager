@@ -708,6 +708,18 @@ mod tests {
         crate::test_util::with_isolated_config_dir_async(|| async {
             for _ in 0..200 {
                 let state = state_with_history().await;
+                // A job that got in can't finish (and free the slot) while
+                // the database is held, so a backup claimed after it really
+                // would be running alongside it.
+                let db = state.history.lock().await.clone().unwrap();
+                let (release, released) = std::sync::mpsc::channel::<()>();
+                let (locked, is_locked) = std::sync::mpsc::channel::<()>();
+                let holder = std::thread::spawn(move || {
+                    let _held = db.hold_connection_for_test();
+                    locked.send(()).unwrap();
+                    let _ = released.recv();
+                });
+                is_locked.recv().unwrap();
                 let backup = tokio::spawn({
                     let state = state.clone();
                     async move { try_claim(&state).await }
@@ -727,6 +739,8 @@ mod tests {
                 });
                 let (backup, job) = (backup.await.unwrap(), job.await.unwrap());
                 assert!(!(backup && job), "both claimed the history database");
+                release.send(()).unwrap();
+                holder.join().unwrap();
                 // Let a started job finish before the next round.
                 if job {
                     let finished = state.rates_job.lock().await.finished.clone();

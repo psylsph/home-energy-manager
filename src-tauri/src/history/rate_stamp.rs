@@ -61,6 +61,81 @@ impl RateStamp {
     }
 }
 
+/// The half-hours Octopus bills at the off-peak rate because a smart charge
+/// ran in them (issue #434). Intelligent Octopus Go bills the whole house at
+/// the off-peak rate for any half-hour a smart dispatch touches, even for ten
+/// minutes of it, so a 14:10–14:40 dispatch makes 14:00–15:00 off-peak.
+///
+/// Half-hours are on the UTC grid, which is the UK's local grid too (its
+/// offsets are whole hours). Boosts are not included by the callers: they
+/// are billed at the normal rate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OffPeakHalfHours(Vec<i64>);
+
+const HALF_HOUR_SECS: i64 = 30 * 60;
+
+/// No real dispatch runs longer than this; a longer span in a corrupt log
+/// row is cut to it rather than filling the set with months of half-hours.
+const MAX_SPAN_SECS: i64 = 24 * 3600;
+
+impl OffPeakHalfHours {
+    /// The half-hours that `[start, end)` spans (Unix seconds) touch. An
+    /// empty or backwards span touches none.
+    pub fn from_spans(spans: impl IntoIterator<Item = (i64, i64)>) -> Self {
+        let mut starts = Vec::new();
+        for (start, end) in spans {
+            if end <= start {
+                continue;
+            }
+            let end = end.min(start.saturating_add(MAX_SPAN_SECS));
+            let mut half = start.div_euclid(HALF_HOUR_SECS) * HALF_HOUR_SECS;
+            while half < end {
+                starts.push(half);
+                half += HALF_HOUR_SECS;
+            }
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        Self(starts)
+    }
+
+    /// Whether the half-hour holding `timestamp` is billed off-peak.
+    pub fn contains(&self, timestamp: i64) -> bool {
+        let half = timestamp.div_euclid(HALF_HOUR_SECS) * HALF_HOUR_SECS;
+        self.0.binary_search(&half).is_ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl RateStamp {
+    /// This stamp with the import rate lowered to the tariff's off-peak
+    /// (cheapest) rate when `timestamp` sits in a smart charge's half-hour.
+    /// It never raises a rate, never fills one that couldn't be resolved,
+    /// and leaves a flat legacy rate alone (it has no off-peak). Export and
+    /// the standing charge are billed as normal.
+    pub fn during_smart_charges(
+        mut self,
+        settings: &Settings,
+        smart: &OffPeakHalfHours,
+        timestamp: i64,
+    ) -> Self {
+        if !smart.contains(timestamp) {
+            return self;
+        }
+        let off_peak = settings
+            .import_tariff_config
+            .as_ref()
+            .and_then(TariffConfig::cheapest_rate);
+        if let (Some(rate), Some(off_peak)) = (self.import_rate, off_peak) {
+            self.import_rate = Some(rate.min(off_peak));
+        }
+        self
+    }
+}
+
 /// The £/kWh rate of `config` (or of a flat config built from `legacy_flat`
 /// when there is none) at `minute` of the day, or `None` when it isn't a usable
 /// rate: no slots, or a rate that is not a finite, non-negative number.
@@ -258,5 +333,91 @@ mod tests {
         assert_eq!(stamp.import_rate, Some(0.30));
         assert_eq!(stamp.export_rate, None);
         assert_eq!(stamp.standing_charge_p_per_day, Some(54.86));
+    }
+
+    /// 2026-10-21 14:00 UTC, a half-hour boundary.
+    const TWO_PM: i64 = NOON + 2 * 3600;
+
+    #[test]
+    fn a_smart_charge_makes_every_half_hour_it_touches_off_peak() {
+        // 14:10–14:40 touches 14:00–14:30 and 14:30–15:00, all of both.
+        let smart = OffPeakHalfHours::from_spans([(TWO_PM + 600, TWO_PM + 2400)]);
+        assert!(!smart.contains(TWO_PM - 1));
+        assert!(smart.contains(TWO_PM));
+        assert!(smart.contains(TWO_PM + 300));
+        assert!(smart.contains(TWO_PM + 3599));
+        assert!(!smart.contains(TWO_PM + 3600));
+    }
+
+    #[test]
+    fn a_span_ending_on_a_half_hour_does_not_take_the_next_one() {
+        let smart = OffPeakHalfHours::from_spans([(TWO_PM, TWO_PM + 1800)]);
+        assert!(smart.contains(TWO_PM + 1799));
+        assert!(!smart.contains(TWO_PM + 1800));
+    }
+
+    #[test]
+    fn empty_backwards_and_overlapping_spans_are_handled() {
+        assert!(OffPeakHalfHours::from_spans([(TWO_PM, TWO_PM)]).is_empty());
+        assert!(OffPeakHalfHours::from_spans([(TWO_PM, TWO_PM - 60)]).is_empty());
+        let both =
+            OffPeakHalfHours::from_spans([(TWO_PM, TWO_PM + 3600), (TWO_PM + 1800, TWO_PM + 3600)]);
+        assert_eq!(
+            both,
+            OffPeakHalfHours::from_spans([(TWO_PM, TWO_PM + 3600)])
+        );
+    }
+
+    #[test]
+    fn a_corrupt_endless_span_is_cut_to_a_day() {
+        let smart = OffPeakHalfHours::from_spans([(TWO_PM, i64::MAX)]);
+        assert!(smart.contains(TWO_PM + 86_399));
+        assert!(!smart.contains(TWO_PM + 86_400));
+    }
+
+    #[test]
+    fn a_minute_in_a_smart_charge_is_stamped_at_the_off_peak_rate() {
+        let s = settings();
+        let smart = OffPeakHalfHours::from_spans([(TWO_PM + 600, TWO_PM + 1200)]);
+        let stamp = RateStamp::resolve_in(&s, TWO_PM + 60, &utc()).during_smart_charges(
+            &s,
+            &smart,
+            TWO_PM + 60,
+        );
+        assert_eq!(stamp.import_rate, Some(0.07));
+        // Export and the standing charge are billed as normal.
+        assert_eq!(stamp.export_rate, Some(0.15));
+        assert_eq!(stamp.standing_charge_p_per_day, Some(54.86));
+        // Outside the dispatch's half-hours nothing changes.
+        let later = RateStamp::resolve_in(&s, TWO_PM + 1800, &utc()).during_smart_charges(
+            &s,
+            &smart,
+            TWO_PM + 1800,
+        );
+        assert_eq!(later.import_rate, Some(0.30));
+    }
+
+    #[test]
+    fn a_smart_charge_never_raises_fills_or_invents_a_rate() {
+        let smart = OffPeakHalfHours::from_spans([(TWO_PM, TWO_PM + 1800)]);
+        // A slot already cheaper than the "off-peak" one stays as it is.
+        let mut s = settings();
+        s.import_tariff_config = Some(TariffConfig {
+            slots: vec![slot("00:00", "14:00", 0.30), slot("14:00", "23:59", 0.0)],
+        });
+        let free =
+            RateStamp::resolve_in(&s, TWO_PM, &utc()).during_smart_charges(&s, &smart, TWO_PM);
+        assert_eq!(free.import_rate, Some(0.0));
+        // A flat legacy rate has no off-peak to drop to.
+        let flat = Settings {
+            import_tariff_config: None,
+            ..settings()
+        };
+        let stamp = RateStamp::resolve_in(&flat, TWO_PM, &utc())
+            .during_smart_charges(&flat, &smart, TWO_PM);
+        assert_eq!(stamp.import_rate, Some(0.30));
+        // An unresolved rate stays unrecorded.
+        let unresolved = RateStamp::default().during_smart_charges(&settings(), &smart, TWO_PM);
+        assert_eq!(unresolved, RateStamp::default());
     }
 }

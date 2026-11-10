@@ -275,6 +275,9 @@ async fn initialize_app_state(
     // An AIO's native pause is put back from the HR 318-320 saved before it
     // was written (issue #431).
     *state.dispatch_hold_native.lock().await = app_settings.dispatch_hold_native.clone();
+    // A battery top-up running at shutdown (issue #434) carries on or is put
+    // back by the first poll; its baseline is on disk.
+    state.dispatch_charge.lock().await.run = app_settings.dispatch_charge_run.clone();
     if app_settings.dispatch_hold_active_persisted {
         *state.dispatch_hold_state.lock().await =
             crate::inverter::poll::DispatchHoldState::Releasing;
@@ -809,6 +812,10 @@ pub fn run() {
                                 &state,
                                 crate::inverter::charge_cap::SHUTDOWN_RELEASE_LIMIT,
                             ),
+                            crate::inverter::dispatch_charge::restore_on_shutdown(
+                                &state,
+                                crate::inverter::dispatch_charge::SHUTDOWN_RESTORE_LIMIT,
+                            ),
                             flush_history_on_shutdown(&state),
                         );
                     });
@@ -1195,6 +1202,10 @@ pub fn run_headless(args: &[String]) {
             crate::inverter::charge_cap::release_on_shutdown(
                 &state,
                 crate::inverter::charge_cap::SHUTDOWN_RELEASE_LIMIT,
+            ),
+            crate::inverter::dispatch_charge::restore_on_shutdown(
+                &state,
+                crate::inverter::dispatch_charge::SHUTDOWN_RESTORE_LIMIT,
             ),
             flush_history_on_shutdown(&state),
         );

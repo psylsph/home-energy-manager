@@ -364,6 +364,16 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
             hour.held_fraction = 0.0;
         }
     }
+    // The top-up during a held dispatch (issue #434).
+    if let Some(target) = planning.charge_to_soc.filter(|_| planning.hold_applies) {
+        for hour in overlay
+            .hours
+            .iter_mut()
+            .filter(|hour| hour.held_fraction > 0.0)
+        {
+            hour.charge_to_soc = Some(target);
+        }
+    }
     let ev_dispatch_net_of_profile = car == CarInProfile::Trimmed;
     if overlay.energy_unknown {
         status.push("dispatch_energy_unknown".to_string());
@@ -398,6 +408,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
             start: d.start.timestamp(),
             end: d.end.timestamp(),
             held: d.is_smart() && planning.hold_applies,
+            smart: d.is_smart(),
             kwh: believable_energy(d),
         })
         .collect();
@@ -1429,6 +1440,7 @@ mod tests {
 
     /// No dispatches, borrowed for as long as the inputs need.
     static NO_DISPATCHES: PlanningDispatches = PlanningDispatches {
+        charge_to_soc: None,
         dispatches: Vec::new(),
         checked_at: None,
         stale: false,
@@ -2180,6 +2192,7 @@ mod tests {
 
     fn fresh(dispatches: Vec<Dispatch>) -> PlanningDispatches {
         PlanningDispatches {
+            charge_to_soc: None,
             dispatches,
             checked_at: Some(car_now().with_timezone(&chrono::Utc)),
             stale: false,
@@ -2284,11 +2297,13 @@ mod tests {
             with.ev_dispatch_hours,
             vec![
                 DispatchHour {
+                    charge_to_soc: None,
                     timestamp: local_ts(15, 19),
                     ev_kwh: 3.5,
                     held_fraction: 1.0
                 },
                 DispatchHour {
+                    charge_to_soc: None,
                     timestamp: local_ts(15, 20),
                     ev_kwh: 3.5,
                     held_fraction: 1.0
@@ -2325,12 +2340,14 @@ mod tests {
                     start: local_ts(15, 19) + half,
                     end: local_ts(15, 20),
                     held: true,
+                    smart: true,
                     kwh: None,
                 },
                 DispatchWindow {
                     start: local_ts(15, 20) + half,
                     end: local_ts(15, 21),
                     held: false,
+                    smart: false,
                     kwh: Some(3.5),
                 },
             ]
@@ -2343,6 +2360,8 @@ mod tests {
         };
         let payload = car_payload(&db, &settings, &unheld);
         assert!(payload.ev_dispatch_windows.iter().all(|w| !w.held));
+        // Octopus still bills the smart one off-peak (issue #434).
+        assert!(payload.ev_dispatch_windows[0].smart);
         assert!(car_payload(&db, &settings, &PlanningDispatches::default())
             .ev_dispatch_windows
             .is_empty());
@@ -2367,6 +2386,7 @@ mod tests {
                 start: local_ts(15, 19),
                 end: local_ts(15, 20),
                 held: true,
+                smart: true,
                 kwh: Some(7.0),
             }]
         );
@@ -2582,6 +2602,61 @@ mod tests {
             "with {} without {}",
             soc_after(&with, after),
             soc_after(&without, after)
+        );
+    }
+
+    #[test]
+    fn a_held_dispatch_with_the_top_up_on_charges_the_battery() {
+        // Issue #434: the held hour tops the battery up from the grid, so
+        // the projected SOC after it is higher than the hold alone gives.
+        let db = test_db();
+        let settings = seed_car_free_state(&db, car_now());
+        let dispatch = vec![car_dispatch(
+            local_ts(15, 19),
+            local_ts(15, 20),
+            "SMART",
+            Some(3.0),
+        )];
+        let held = car_payload(&db, &settings, &fresh(dispatch.clone()));
+        let topped = car_payload(
+            &db,
+            &settings,
+            &PlanningDispatches {
+                charge_to_soc: Some(100.0),
+                ..fresh(dispatch.clone())
+            },
+        );
+        assert_eq!(
+            topped
+                .ev_dispatch_hours
+                .first()
+                .and_then(|h| h.charge_to_soc),
+            Some(100.0)
+        );
+        let after = local_ts(15, 19);
+        assert!(
+            soc_after(&topped, after) > soc_after(&held, after),
+            "topped {} held {}",
+            soc_after(&topped, after),
+            soc_after(&held, after)
+        );
+
+        // Without the hold applying there is no top-up either.
+        let unheld = car_payload(
+            &db,
+            &settings,
+            &PlanningDispatches {
+                charge_to_soc: Some(100.0),
+                hold_applies: false,
+                ..fresh(dispatch)
+            },
+        );
+        assert_eq!(
+            unheld
+                .ev_dispatch_hours
+                .first()
+                .and_then(|h| h.charge_to_soc),
+            None
         );
     }
 

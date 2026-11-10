@@ -96,6 +96,11 @@ async fn blocker(
             "The Intelligent Octopus Go dispatch hold is pausing the battery; start the calibration once it releases",
         );
     }
+    if state.dispatch_charge.lock().await.run.is_some() {
+        return Some(
+            "The battery is being topped up during a smart charge; start the calibration once it ends",
+        );
+    }
     if *state.cosy_active.lock().await || snap.cosy_active {
         return Some("A Cosy charging slot is running; start the calibration after it ends");
     }

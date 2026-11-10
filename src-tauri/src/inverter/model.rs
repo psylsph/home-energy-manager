@@ -1418,6 +1418,14 @@ pub struct InverterSnapshot {
     /// charge (issue #394).
     #[serde(default)]
     pub dispatch_hold_active: bool,
+    /// True while a smart charge is running but the hold isn't pausing,
+    /// because a charge slot is charging the battery.
+    #[serde(default)]
+    pub dispatch_hold_charge_slot: bool,
+    /// True while HEM is topping the battery up during an Intelligent
+    /// Octopus Go smart charge (issue #434).
+    #[serde(default)]
+    pub dispatch_charge_active: bool,
     /// Whether this device supports manual battery calibration via HR(29).
     /// False for Gen3+ (auto-calibrates via BMS) and batteryless devices.
     #[serde(default)]
@@ -1675,6 +1683,8 @@ impl InverterSnapshot {
             load_limiter_active: false,
             temperature_limiter_active: false,
             dispatch_hold_active: false,
+            dispatch_hold_charge_slot: false,
+            dispatch_charge_active: false,
             supports_battery_calibration: false,
             inverter_serial: String::new(),
             firmware_version: String::new(),

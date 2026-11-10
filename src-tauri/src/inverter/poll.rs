@@ -215,7 +215,7 @@ fn next_poll_delay_secs(configured_interval_secs: u64, timed_export_boundary_pen
 /// writes are applied. Restoration writes these values back. A value of
 /// `None` in an `Option<_>` field means "no previous value known" and the
 /// corresponding write is skipped.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ForceChargeRevert {
     /// Observational metadata shared by UI and authenticated API actions.
     /// It does not introduce automatic charge restoration at expiry.
@@ -563,6 +563,9 @@ pub struct AppState {
     /// HR 318-320 an AIO dispatch hold has to put back (issue #431);
     /// mirrors `Settings::dispatch_hold_native`.
     pub dispatch_hold_native: Arc<Mutex<Option<DispatchHoldNative>>>,
+    /// The battery top-up during a smart charge (issue #434); its run
+    /// mirrors `Settings::dispatch_charge_run`.
+    pub dispatch_charge: Arc<Mutex<crate::inverter::dispatch_charge::DispatchChargeShared>>,
     /// Guided battery calibration cycle (issue #418); mirrors
     /// `Settings::battery_calibration_run`.
     pub calibration_run: Arc<Mutex<Option<crate::inverter::calibration::CalibrationRun>>>,
@@ -797,6 +800,7 @@ impl AppState {
             dispatch_hold_state: Arc::new(Mutex::new(DispatchHoldState::default())),
             dispatch_hold_retry: Arc::new(Mutex::new(DispatchHoldRetry::default())),
             dispatch_hold_native: Arc::new(Mutex::new(None)),
+            dispatch_charge: Arc::new(Mutex::new(Default::default())),
             calibration_run: Arc::new(Mutex::new(None)),
             charge_cap: Arc::new(Mutex::new(Default::default())),
             full_charge_check: Arc::new(Mutex::new(Default::default())),
@@ -2919,7 +2923,7 @@ async fn drain_write_batches(
     client: &mut ModbusClient,
     pending: Vec<PendingWriteBatch>,
     inter_write_gap: Duration,
-) {
+) -> Vec<RegisterWrite> {
     // Only batches extracted for this drain pass have crossed the dispatch
     // boundary. Lower-priority owner batches still in the queue must remain
     // `queued` in the external ledger.
@@ -2945,6 +2949,170 @@ fn pause_registers_written(snapshot: &mut InverterSnapshot) {
 fn pause_registers_written_by(snapshot: &mut InverterSnapshot, writes: &[RegisterWrite]) {
     if crate::modbus::registers::touches_pause_registers(writes) {
         pause_registers_written(snapshot);
+    }
+}
+
+/// What the poll loop already worked out that the top-up needs.
+#[derive(Debug, Clone, Copy)]
+struct DispatchChargeFacts {
+    sit_out: bool,
+    calibrating: bool,
+    host_minute: u16,
+    inverter_minute: u16,
+}
+
+/// Writes queued by the API or an automation during a top-up are taken into
+/// its baseline (issue #434), so the restore puts back the user's new
+/// settings rather than the ones from before it started. Only writes the
+/// inverter acknowledged count: one it refused never changed what to put
+/// back. The run is saved only when its baseline changed.
+async fn absorb_into_dispatch_charge(state: &Arc<AppState>, writes: &[RegisterWrite]) {
+    let mut guard = state.dispatch_charge.lock().await;
+    // After shutdown has queued the restore, its own writes come through
+    // here; saving the run again would undo the shutdown's clear.
+    if guard.stopped {
+        return;
+    }
+    let Some(run) = guard.run.as_mut() else {
+        return;
+    };
+    let mut changed = false;
+    for write in writes {
+        changed |= crate::inverter::dispatch_charge::absorb(run, write);
+    }
+    if !changed {
+        return;
+    }
+    let run = guard.run.clone();
+    if let Err(e) = crate::inverter::dispatch_charge::persist_run(run).await {
+        tracing::warn!("Dispatch charge: couldn't save the updated charge settings: {e}");
+    }
+}
+
+/// One poll of the battery top-up during a smart charge (issue #434).
+async fn run_dispatch_charge(
+    state: &Arc<AppState>,
+    client: &mut ModbusClient,
+    snapshot: &mut InverterSnapshot,
+    settings: &crate::settings::Settings,
+    facts: DispatchChargeFacts,
+    write_gap: Duration,
+) {
+    use crate::inverter::dispatch_charge::{self, DispatchWindow, Inputs, Reason};
+    use chrono::Timelike;
+
+    let now = chrono::Utc::now();
+    let (dispatch, waiting_for_list) = {
+        let dispatches = state.octopus_dispatches.lock().await;
+        let dispatch = if dispatches.fresh(now) && !facts.sit_out {
+            dispatch_charge::running_dispatch_end(&dispatches.dispatches, now).map(|end| {
+                let local = end.with_timezone(&chrono::Local);
+                DispatchWindow {
+                    end,
+                    end_host_minute: (local.hour() * 60 + local.minute()) as u16,
+                }
+            })
+        } else {
+            None
+        };
+        (dispatch, dispatches.holding_for_restart(now))
+    };
+    let hold_holding = *state.dispatch_hold_state.lock().await == DispatchHoldState::Holding;
+    let hold_failing = state.dispatch_hold_retry.lock().await.failing();
+    let manual_force = state.force_charge_revert.lock().await.is_some()
+        || state.force_charge_restoration.lock().await.is_some();
+    let safety = state.load_limiter_state.lock().await.is_actively_pausing()
+        || state
+            .temperature_limiter_state
+            .lock()
+            .await
+            .is_actively_pausing();
+    let adaptive = settings.adaptive_charge_enabled
+        && state
+            .adaptive_charge_state
+            .lock()
+            .await
+            .active_period()
+            .is_some();
+    let tariff_automation = dispatch_charge::tariff_automation_owns_slots(settings);
+    let blocker = if facts.calibrating {
+        Some(Reason::Calibration)
+    } else if manual_force {
+        Some(Reason::ManualForce)
+    } else if safety {
+        Some(Reason::Safety)
+    } else if adaptive {
+        Some(Reason::Adaptive)
+    } else if tariff_automation {
+        Some(Reason::TariffAutomation)
+    } else {
+        None
+    };
+    let cap = state.charge_cap.lock().await.config.clone();
+    let inputs = Inputs {
+        enabled: settings.octopus_dispatch_charge && crate::octopus_dispatches::wanted(settings),
+        dispatch,
+        waiting_for_list,
+        hold_holding,
+        hold_failing,
+        blocker,
+        charge_slot_running: crate::inverter::state_machines::charge_slot_running(
+            snapshot,
+            facts.inverter_minute,
+        ),
+        cap_soc: cap.enabled.then_some(cap.cap_soc),
+        host_minute: facts.host_minute,
+        inverter_minute: facts.inverter_minute,
+    };
+
+    let mut guard = state.dispatch_charge.lock().await;
+    let mut step = dispatch_charge::step(&mut guard, snapshot, inputs);
+    if step.persist {
+        // Saved before the lock goes and before any write: a restart must
+        // always find the baseline of a charge that may be on the inverter.
+        if let Err(e) = dispatch_charge::persist_run(guard.run.clone()).await {
+            if step.started {
+                tracing::warn!(
+                    "Dispatch charge: couldn't save the charge settings to put back, not charging: {e}"
+                );
+                guard.run = None;
+                guard.reason = Some(Reason::CaptureNotSaved);
+                step.writes.clear();
+            } else {
+                tracing::warn!("Dispatch charge: couldn't save its state: {e}");
+            }
+        }
+    }
+    snapshot.dispatch_charge_active = guard.charging();
+    let notify_failing = guard.take_notification();
+    let gave_up = guard.gave_up.take();
+    drop(guard);
+
+    if !step.writes.is_empty() {
+        write_registers_fail_fast_with_gap(client, &step.writes, "Dispatch charge", write_gap)
+            .await;
+    }
+    if notify_failing {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let text = crate::alerts::build_dispatch_charge_failing_message();
+            crate::alerts::deliver_hold_failing_alert(
+                || crate::alerts::send_text_notification(&state, &text, "dispatch-charge-failing"),
+                || async { state.dispatch_charge.lock().await.failing },
+            )
+            .await;
+        });
+    }
+    if let Some(detail) = gave_up {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let text = crate::alerts::build_dispatch_charge_gave_up_message(&detail);
+            crate::alerts::deliver_hold_failing_alert(
+                || crate::alerts::send_text_notification(&state, &text, "dispatch-charge-gave-up"),
+                || async { true },
+            )
+            .await;
+        });
     }
 }
 
@@ -3068,11 +3236,13 @@ pub(crate) async fn reset_timed_export_rearm_detector(state: &AppState) {
 /// a mock TCP server (issue #245) without the real ~1.5 s gaps slowing every
 /// test. The trailing gap after the final write of an awaited batch is always
 /// skipped regardless of this value.
+/// Returns the writes the inverter acknowledged, in order.
 async fn drain_write_batches_with_gap(
     client: &mut ModbusClient,
     pending: Vec<PendingWriteBatch>,
     inter_write_gap: Duration,
-) {
+) -> Vec<RegisterWrite> {
+    let mut landed = Vec::new();
     for batch in pending {
         let transactional = batch.policy == WriteBatchPolicy::FailFastTransactional;
         if transactional
@@ -3112,6 +3282,7 @@ async fn drain_write_batches_with_gap(
             match client.write_register(w.address, w.value).await {
                 Ok(()) => {
                     tracing::info!("Wrote register {} = {}", w.address, w.value);
+                    landed.push(w.clone());
                 }
                 Err(e) => {
                     refused = matches!(e, crate::modbus::client::ClientError::WriteRefused(_));
@@ -3159,6 +3330,7 @@ async fn drain_write_batches_with_gap(
             let _ = tx.send(outcome);
         }
     }
+    landed
 }
 
 /// Persist the pre-winter register values (or clear them when winter mode
@@ -3423,7 +3595,14 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
             // The tariff in force now, from the settings already loaded for
             // this publish, captured at queue time (a row may be flushed
             // later than it was polled).
-            let stamp = crate::history::RateStamp::resolve(&fresh_settings, snap.timestamp);
+            // A smart charge's half-hours are billed off-peak (issue #434).
+            let smart = state
+                .octopus_dispatches
+                .lock()
+                .await
+                .off_peak_half_hours(chrono::Utc::now());
+            let stamp = crate::history::RateStamp::resolve(&fresh_settings, snap.timestamp)
+                .during_smart_charges(&fresh_settings, &smart, snap.timestamp);
             let rows_ready = db.queue_poll_reading(snap, stamp);
             if rows_ready || health_due {
                 tokio::task::spawn_blocking(move || {
@@ -3921,7 +4100,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                         )
                     };
                     if !pending.is_empty() {
-                        drain_write_batches(&state, &mut client, pending, write_gap).await;
+                        let landed =
+                            drain_write_batches(&state, &mut client, pending, write_gap).await;
+                        absorb_into_dispatch_charge(&state, &landed).await;
                     }
 
                     // The consumer task handles stale frames - unmatched
@@ -5631,6 +5812,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         temperature_state.is_actively_pausing();
                                     snapshot.dispatch_hold_active =
                                         dispatch_state.is_actively_pausing();
+                                    snapshot.dispatch_hold_charge_slot =
+                                        crate::inverter::state_machines::dispatch_hold_left_to_charge_slot(
+                                            &snapshot,
+                                            in_dispatch,
+                                            &dispatch_state,
+                                            inverter_minute,
+                                        );
                                     let persist_saved = shared_saved.clone();
                                     let persist_native = dispatch_native.clone();
                                     let limiter_involved = load_state.is_actively_pausing()
@@ -5642,7 +5830,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         &mut dispatch_retry,
                                         &dispatch_retry_before,
                                     );
-                                    let notify_hold_failing = dispatch_retry.take_notification();
+                                    let notify_hold_failing = dispatch_retry
+                                        .take_notification_while_discharging(
+                                            snapshot.battery_power,
+                                        );
 
                                     if let Some(detail) = hold_gave_up {
                                         // The restore after a smart charge wasn't
@@ -5762,6 +5953,25 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         }
                                     }
                                 }
+
+                                // ---- Battery top-up during a smart charge (issue #434) ----
+                                // After the hold's pause has gone out this poll, so the
+                                // charge settings land on a battery that isn't
+                                // discharging into the car.
+                                run_dispatch_charge(
+                                    &state,
+                                    &mut client,
+                                    &mut snapshot,
+                                    &poll_settings,
+                                    DispatchChargeFacts {
+                                        sit_out,
+                                        calibrating,
+                                        host_minute,
+                                        inverter_minute,
+                                    },
+                                    write_gap,
+                                )
+                                .await;
 
                                 // ---- Discharge floor guard (developer mode) ----
                                 // Time-driven Minimum SOC floor: raise HR110 to
@@ -11286,6 +11496,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writes_drained_during_a_top_up_go_into_its_saved_baseline() {
+        // Issue #434: a charge slot the user saves mid top-up is what the
+        // restore puts back, and that survives a restart.
+        use crate::inverter::dispatch_charge::{DispatchChargePhase, DispatchChargeRun};
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let mut snap = InverterSnapshot {
+                inverter_serial: "SN1".to_string(),
+                ..Default::default()
+            };
+            snap.charge_slots[0].enabled = false;
+            let revert =
+                crate::server::api::force_charge_revert_from_snapshot(&snap, snap.device_type)
+                    .unwrap();
+            state.dispatch_charge.lock().await.run = Some(DispatchChargeRun {
+                phase: DispatchChargePhase::Charging,
+                revert,
+                target_soc: 100,
+                writes: Vec::new(),
+                dispatch_end: chrono::Utc::now(),
+                skew_minutes: 0,
+                last_sent: 0,
+                unconfirmed: 0,
+                restore_started: None,
+            });
+            super::absorb_into_dispatch_charge(
+                &state,
+                &[
+                    RegisterWrite {
+                        address: crate::modbus::registers::HR_CHARGE_SLOT_1_START,
+                        value: 2330,
+                    },
+                    RegisterWrite {
+                        address: crate::modbus::registers::HR_CHARGE_SLOT_1_END,
+                        value: 530,
+                    },
+                ],
+            )
+            .await;
+            let saved = crate::settings::Settings::load()
+                .dispatch_charge_run
+                .unwrap();
+            assert_eq!(saved.revert.charge_slot_1_start, Some((23, 30)));
+            assert_eq!(saved.revert.charge_slot_1_end, Some((5, 30)));
+
+            // Without a run, nothing is saved.
+            state.dispatch_charge.lock().await.run = None;
+            crate::settings::Settings::update(|s| s.dispatch_charge_run = None).unwrap();
+            super::absorb_into_dispatch_charge(
+                &state,
+                &[RegisterWrite {
+                    address: crate::modbus::registers::HR_CHARGE_SLOT_1_START,
+                    value: 100,
+                }],
+            )
+            .await;
+            assert!(crate::settings::Settings::load()
+                .dispatch_charge_run
+                .is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn a_dispatch_hold_alone_owns_as_the_dispatch_hold_not_as_safety() {
         use crate::inverter::state_machines::DischargeControlOwner;
         with_isolated_config_dir_async(|| async {
@@ -11336,6 +11610,7 @@ mod tests {
         let mut retry = DispatchHoldRetry {
             unconfirmed: 3,
             last_sent: Some(1_000),
+            first_unconfirmed: Some(1_000),
             failing: true,
             notified: false,
             foreign_readings: 0,
@@ -13103,9 +13378,11 @@ mod tests {
             policy: Default::default(),
             owner: None,
         };
-        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+        let landed =
+            drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
 
         assert_eq!(rx.await.unwrap(), WriteOutcome::Ok);
+        assert_eq!(landed.len(), 3);
     }
 
     #[tokio::test]
@@ -13298,7 +13575,17 @@ mod tests {
             policy: Default::default(),
             owner: None,
         };
-        drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+        let landed =
+            drain_write_batches_with_gap(&mut client, vec![batch], Duration::from_millis(1)).await;
+        // Only the acknowledged write is reported as landed (issue #434: a
+        // top-up's baseline takes in only what reached the inverter).
+        assert_eq!(
+            landed,
+            vec![RegisterWrite {
+                address: 27,
+                value: 1
+            }]
+        );
 
         match rx.await.unwrap() {
             WriteOutcome::Failed {

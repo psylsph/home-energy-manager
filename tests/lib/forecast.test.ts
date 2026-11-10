@@ -882,6 +882,29 @@ describe('carChargingNote', () => {
     ).toBe('Next car charge Mon 15 Jun, 19:30–20:00, 3.5 kWh, battery held. 1 more planned.');
   });
 
+  it('says the battery is topped up when the held hours charge it', () => {
+    const start = utc('2026-06-15T13:00:00Z');
+    const window = { start, end: start + 3600, held: true, kwh: null };
+    const withHours = (hours: unknown[]) =>
+      ({ status: [], ev_dispatch_windows: [window], ev_dispatch_hours: hours }) as unknown as ForecastData;
+    expect(
+      carChargingNote(
+        withHours([{ timestamp: start, ev_kwh: 0, held_fraction: 1, charge_to_soc: 85 }]),
+      ),
+    ).toBe('Next car charge Mon 15 Jun, 14:00–15:00, battery topped up to 85%.');
+    // Without the top-up, or for another hour, it's just held.
+    expect(
+      carChargingNote(withHours([{ timestamp: start, ev_kwh: 0, held_fraction: 1 }])),
+    ).toBe('Next car charge Mon 15 Jun, 14:00–15:00, battery held.');
+    expect(
+      carChargingNote(
+        withHours([
+          { timestamp: start + 7200, ev_kwh: 0, held_fraction: 1, charge_to_soc: 100 },
+        ]),
+      ),
+    ).toBe('Next car charge Mon 15 Jun, 14:00–15:00, battery held.');
+  });
+
   it('says a boost runs from the battery and leaves out an unknown energy', () => {
     const boost = (kwh: number | null) =>
       data([

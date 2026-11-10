@@ -24,6 +24,9 @@ pub struct DispatchHour {
     pub ev_kwh: f64,
     /// Share of the hour (0–1) a smart dispatch holds the battery for.
     pub held_fraction: f64,
+    /// The SOC HEM tops the battery up to while held (issue #434).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charge_to_soc: Option<f64>,
 }
 
 /// One planned car charge as Octopus gave it (issue #406), for the page to
@@ -35,6 +38,9 @@ pub struct DispatchWindow {
     pub end: i64,
     /// Whether the battery is held while it runs.
     pub held: bool,
+    /// Whether it's a smart charge, whose half-hours are billed at the
+    /// off-peak rate (issue #434); a boost is not.
+    pub smart: bool,
     /// The planned energy, when Octopus gave a believable figure, kWh.
     pub kwh: Option<f64>,
 }
@@ -96,6 +102,7 @@ pub fn dispatch_overlay(
             timestamp: hour_start,
             ev_kwh,
             held_fraction: merged_secs(&mut held) as f64 / HOUR_SECS as f64,
+            charge_to_soc: None,
         });
     }
     overlay
@@ -125,6 +132,7 @@ pub fn apply_dispatch_hours(
                 found.ev_kwh
             };
             hour.held_fraction = found.held_fraction;
+            hour.held_charge_to_soc = found.charge_to_soc;
         }
     }
 }
@@ -392,11 +400,13 @@ mod tests {
     fn hours_get_their_car_and_hold_whole_or_net_of_the_profile() {
         let dispatch_hours = [
             DispatchHour {
+                charge_to_soc: None,
                 timestamp: T0,
                 ev_kwh: 3.0,
                 held_fraction: 1.0,
             },
             DispatchHour {
+                charge_to_soc: None,
                 timestamp: T0 + H,
                 ev_kwh: 0.4,
                 held_fraction: 0.5,

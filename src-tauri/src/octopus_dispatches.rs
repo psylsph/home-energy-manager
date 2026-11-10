@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::history::dispatch_log::DispatchSighting;
+use crate::history::OffPeakHalfHours;
 use crate::inverter::poll::AppState;
 use crate::octopus_sessions::{endpoints, obtain_token, post_graphql};
 use crate::settings::Settings;
@@ -66,9 +67,7 @@ impl Dispatch {
     /// off-peak rate. An unlabelled dispatch counts as smart, as it does for
     /// Octopus; a boost or anything unrecognised does not.
     pub fn is_smart(&self) -> bool {
-        self.kind.as_deref().is_none_or(|kind| {
-            matches!(kind.to_ascii_lowercase().as_str(), "smart" | "smart-charge")
-        })
+        is_smart_kind(self.kind.as_deref())
     }
 
     /// Whether this dispatch holds the battery at `time`: a smart one that
@@ -93,6 +92,9 @@ pub struct PlanningDispatches {
     /// It doesn't during a calibration run, so the car runs from the
     /// battery then.
     pub hold_applies: bool,
+    /// The SOC the battery is topped up to during a held dispatch (issue
+    /// #434), when that is on and the hold applies.
+    pub charge_to_soc: Option<f64>,
 }
 
 /// An Octopus access token. Its `Debug` output is redacted so logging the
@@ -105,6 +107,15 @@ impl std::fmt::Debug for Token {
         f.write_str("Token(redacted)")
     }
 }
+
+/// [`Dispatch::is_smart`] for a bare type, as the dispatch log stores it.
+pub fn is_smart_kind(kind: Option<&str>) -> bool {
+    kind.is_none_or(|kind| matches!(kind.to_ascii_lowercase().as_str(), "smart" | "smart-charge"))
+}
+
+/// How long a smart charge that has left the list is remembered for live
+/// rate stamping: past the end of the half-hour it finished in.
+const RAN_SMART_KEEP_SECS: i64 = 2 * 3600;
 
 /// What the last check found.
 #[derive(Debug, Clone, Default)]
@@ -128,6 +139,11 @@ pub struct DispatchesState {
     restart_hold_until: Option<DateTime<Utc>>,
     /// Why the last dispatch log write failed, so it's reported once.
     pub log_error: Option<String>,
+    /// Smart charges that have run and since left the list, `(start, end)`
+    /// Unix seconds, cut to the check that stopped listing them. Octopus
+    /// drops a dispatch once it's over, but the rest of its half-hour is
+    /// still billed off-peak (issue #434).
+    ran_smart: Vec<(i64, i64)>,
 }
 
 impl DispatchesState {
@@ -139,6 +155,42 @@ impl DispatchesState {
                 .dispatches
                 .iter()
                 .any(|dispatch| dispatch.holds_at(now))
+    }
+
+    /// The half-hours billed off-peak by a smart charge, for stamping the
+    /// minute recorded at `now` (issue #434): the fresh list's smart
+    /// dispatches, and those that ran and have since left it. A stale list
+    /// counts for nothing, so an unknown means the normal rate.
+    pub fn off_peak_half_hours(&self, now: DateTime<Utc>) -> OffPeakHalfHours {
+        let listed = self
+            .dispatches
+            .iter()
+            .filter(|_| self.fresh(now))
+            .filter(|dispatch| dispatch.is_smart())
+            .map(|dispatch| (dispatch.start.timestamp(), dispatch.end.timestamp()));
+        OffPeakHalfHours::from_spans(listed.chain(self.ran_smart.iter().copied()))
+    }
+
+    /// Take a fresh list checked at `now`, remembering the smart charges
+    /// the old one had running that the new one no longer lists: each ran
+    /// until its planned end or `now`, whichever is first.
+    fn replace_list(&mut self, fresh: Vec<Dispatch>, now: DateTime<Utc>) {
+        let now_ts = now.timestamp();
+        for old in &self.dispatches {
+            let gone = !fresh
+                .iter()
+                .any(|new| new.start == old.start && new.is_smart() == old.is_smart());
+            if gone && old.is_smart() && old.start <= now {
+                let end = old.end.min(now).timestamp();
+                if end > old.start.timestamp() {
+                    self.ran_smart.push((old.start.timestamp(), end));
+                }
+            }
+        }
+        // Absolute age, so a clock stepped either way drops them.
+        self.ran_smart
+            .retain(|(_, end)| (now_ts - end).abs() <= RAN_SMART_KEEP_SECS);
+        self.dispatches = fresh;
     }
 
     /// Whether the list is recent enough to act on. Absolute age: a check
@@ -185,6 +237,7 @@ impl DispatchesState {
             };
         }
         PlanningDispatches {
+            charge_to_soc: None,
             dispatches: self
                 .dispatches
                 .iter()
@@ -393,11 +446,32 @@ pub async fn planning_dispatches(
 ) -> PlanningDispatches {
     // The poll loop's hold sits out a calibration run.
     let calibrating = state.calibration_run.lock().await.is_some();
-    state
-        .octopus_dispatches
-        .lock()
-        .await
-        .for_planning(now, wanted(settings), calibrating)
+    let mut planning =
+        state
+            .octopus_dispatches
+            .lock()
+            .await
+            .for_planning(now, wanted(settings), calibrating);
+    planning.charge_to_soc = planning_charge_to_soc(&planning, settings);
+    planning
+}
+
+/// The SOC the Planner should expect a held dispatch to top the battery up
+/// to (issue #434): only with the top-up on and the hold applying, and not
+/// while Cosy or Agile automation owns the charge slots, which keeps the
+/// top-up from ever starting. Owners that come and go (Adaptive Charge's
+/// period, a charge slot of the user's, Force Charge) aren't predicted: a
+/// slot running then charges the battery itself.
+pub fn planning_charge_to_soc(planning: &PlanningDispatches, settings: &Settings) -> Option<f64> {
+    (planning.hold_applies
+        && settings.octopus_dispatch_charge
+        && !crate::inverter::dispatch_charge::tariff_automation_owns_slots(settings))
+    .then(|| {
+        let cap = &settings.charge_cap;
+        f64::from(crate::inverter::dispatch_charge::target_soc(
+            cap.enabled.then_some(cap.cap_soc),
+        ))
+    })
 }
 
 /// The log line for a freshly read dispatch list (issue #431), so a log
@@ -552,7 +626,7 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
             if let Some(line) = planned_change(previous, &fresh, now, &chrono::Local) {
                 tracing::info!("{line}");
             }
-            current.dispatches = fresh;
+            current.replace_list(fresh, now);
             current.checked_at = Some(now);
             current.error = None;
         }
@@ -634,6 +708,24 @@ pub async fn get_dispatches(State(state): State<Arc<AppState>>) -> (StatusCode, 
             || (hold_state == crate::inverter::poll::DispatchHoldState::Idle
                 && retry.cannot_start())
     };
+    // A smart charge the hold leaves alone because a charge slot is charging
+    // the battery, as the last poll decided.
+    let hold_charge_slot = !holding
+        && state
+            .latest_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|snap| snap.dispatch_hold_charge_slot);
+    let charge = state.dispatch_charge.lock().await.clone();
+    // The run's own target while it runs; otherwise what one would use now.
+    let charge_target_soc = charge.run.as_ref().map_or_else(
+        || {
+            let cap = &settings.charge_cap;
+            crate::inverter::dispatch_charge::target_soc(cap.enabled.then_some(cap.cap_soc))
+        },
+        |run| run.target_soc,
+    );
     let now = Utc::now();
     let dispatches: Vec<Value> = current
         .dispatches
@@ -660,8 +752,15 @@ pub async fn get_dispatches(State(state): State<Arc<AppState>>) -> (StatusCode, 
             "devices": current.devices.len(),
             "holding": holding,
             "hold_failing": hold_failing,
+            "hold_charge_slot": hold_charge_slot,
             "stale_after_minutes": STALE_AFTER_MINUTES,
             "dispatches": dispatches,
+            "charge_enabled": settings.octopus_dispatch_charge,
+            "charging": charge.charging(),
+            "charge_state": charge.state_code(),
+            "charge_reason": charge.reason.map(|reason| reason.code()),
+            "charge_note": charge.reason.map(|reason| reason.message(charge_target_soc)),
+            "charge_target_soc": charge_target_soc,
         })),
     )
 }
@@ -698,6 +797,47 @@ pub async fn set_hold(
         // longer covers its window.
         write_log(&state, |db| db.forget_dispatch_log_since()).await;
     }
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "enabled": enabled })),
+    )
+}
+
+/// POST /api/octopus/dispatches/charge — body `{ "enabled": true }`. Tops
+/// the battery up during smart charging (issue #434); refused while the hold
+/// is off, since charging with discharge live would feed the car.
+pub async fn set_charge(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<HoldRequest>,
+) -> (StatusCode, Json<Value>) {
+    let enabled = body.enabled;
+    let saved = Settings::update_async(move |settings| {
+        if enabled && !settings.octopus_dispatch_hold {
+            return Err("Turn on the smart charging hold first");
+        }
+        settings.octopus_dispatch_charge = enabled;
+        Ok(())
+    })
+    .await;
+    match saved {
+        Ok(Ok(())) => {}
+        Ok(Err(refused)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "ok": false, "error": refused })),
+            )
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({ "ok": false, "error": format!("Could not save the setting: {error}") }),
+                ),
+            )
+        }
+    }
+    // Off is acted on by the next poll, which restores a running top-up.
+    state.write_notify.notify_one();
     (
         StatusCode::OK,
         Json(json!({ "ok": true, "enabled": enabled })),
@@ -1726,6 +1866,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_page_says_when_the_hold_leaves_it_to_a_charge_slot() {
+        use crate::inverter::poll::DispatchHoldState;
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+            assert_eq!(body["hold_charge_slot"], false, "no snapshot yet");
+
+            *state.latest_snapshot.lock().await = Some(crate::inverter::model::InverterSnapshot {
+                dispatch_hold_charge_slot: true,
+                ..Default::default()
+            });
+            let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+            assert_eq!(body["hold_charge_slot"], true);
+            assert_eq!(body["holding"], false);
+
+            // Holding wins: the page never says both.
+            *state.dispatch_hold_state.lock().await = DispatchHoldState::Holding;
+            let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+            assert_eq!(body["hold_charge_slot"], false);
+            assert_eq!(body["holding"], true);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn the_page_says_when_the_hold_cannot_pause_the_battery() {
         // #431: the AIO wouldn't take the pause, and nothing told the user.
         use crate::inverter::poll::{DispatchHoldRetry, DispatchHoldState};
@@ -1889,25 +2054,30 @@ mod tests {
         let after = utc("2026-11-10T05:33:00Z");
         // Octopus drops it once it's over, or lists it one check longer.
         assert_eq!(
-            planned_change(Some(&[done.clone()]), &[], after, &Utc),
+            planned_change(Some(std::slice::from_ref(&done)), &[], after, &Utc),
             None
         );
         assert_eq!(
             planned_change(
                 Some(&[done.clone(), next.clone()]),
-                &[next.clone()],
+                std::slice::from_ref(&next),
                 after,
                 &Utc
             ),
             None
         );
         assert_eq!(
-            planned_change(Some(&[done.clone()]), &[done.clone()], after, &Utc),
+            planned_change(
+                Some(std::slice::from_ref(&done)),
+                std::slice::from_ref(&done),
+                after,
+                &Utc
+            ),
             None
         );
         // A charge still running counts, and the baseline leaves out what's over.
         let running = utc("2026-11-10T01:00:00Z");
-        assert!(planned_change(Some(&[done.clone()]), &[], running, &Utc).is_some());
+        assert!(planned_change(Some(std::slice::from_ref(&done)), &[], running, &Utc).is_some());
         assert_eq!(
             planned_change(None, &[done, next], after, &Utc).as_deref(),
             Some("Intelligent Octopus planned charges: smart 10 Nov 23:30\u{2013}11 Nov 05:30")
@@ -2140,5 +2310,196 @@ mod tests {
     fn the_hold_request_refuses_unknown_fields() {
         assert!(serde_json::from_value::<HoldRequest>(json!({ "enabled": true })).is_ok());
         assert!(serde_json::from_value::<HoldRequest>(json!({ "enable": true })).is_err());
+    }
+}
+
+#[cfg(test)]
+mod charge_tests {
+    use super::*;
+    use crate::test_util::with_isolated_config_dir_async;
+
+    #[test]
+    fn the_planner_expects_a_top_up_only_when_it_is_on_and_the_hold_applies() {
+        let applies = PlanningDispatches {
+            hold_applies: true,
+            ..Default::default()
+        };
+        let mut settings = Settings {
+            octopus_dispatch_charge: true,
+            ..Default::default()
+        };
+        assert_eq!(planning_charge_to_soc(&applies, &settings), Some(100.0));
+        settings.charge_cap.enabled = true;
+        settings.charge_cap.cap_soc = 85;
+        assert_eq!(planning_charge_to_soc(&applies, &settings), Some(85.0));
+        assert_eq!(
+            planning_charge_to_soc(&PlanningDispatches::default(), &settings),
+            None,
+            "the hold doesn't apply (calibrating, or the list is stale)"
+        );
+        settings.octopus_dispatch_charge = false;
+        assert_eq!(planning_charge_to_soc(&applies, &settings), None);
+    }
+
+    #[test]
+    fn the_planner_expects_no_top_up_while_cosy_or_agile_owns_the_slots() {
+        let applies = PlanningDispatches {
+            hold_applies: true,
+            ..Default::default()
+        };
+        let cosy = Settings {
+            octopus_dispatch_charge: true,
+            cosy_enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(planning_charge_to_soc(&applies, &cosy), None);
+        let agile = Settings {
+            octopus_dispatch_charge: true,
+            agile_scope: crate::settings::AgileScope::ChargeOnly,
+            ..Default::default()
+        };
+        assert_eq!(planning_charge_to_soc(&applies, &agile), None);
+    }
+
+    fn at(hhmm: &str) -> DateTime<Utc> {
+        format!("2026-11-10T{hhmm}:00Z").parse().unwrap()
+    }
+
+    fn listed(start: &str, end: &str, kind: Option<&str>) -> Dispatch {
+        Dispatch {
+            start: at(start),
+            end: at(end),
+            kind: kind.map(str::to_string),
+            energy_added_kwh: None,
+        }
+    }
+
+    fn checked(list: Vec<Dispatch>, now: DateTime<Utc>) -> DispatchesState {
+        let mut state = DispatchesState::default();
+        state.replace_list(list, now);
+        state.checked_at = Some(now);
+        state
+    }
+
+    #[test]
+    fn a_listed_smart_charge_makes_its_half_hours_off_peak_but_a_boost_does_not() {
+        let state = checked(
+            vec![
+                listed("14:10", "14:40", Some("SMART")),
+                listed("16:00", "16:30", Some("BOOST")),
+            ],
+            at("14:05"),
+        );
+        let now = at("14:05");
+        let smart = state.off_peak_half_hours(now);
+        assert!(smart.contains(at("14:00").timestamp()));
+        assert!(smart.contains(at("14:59").timestamp()));
+        assert!(!smart.contains(at("16:10").timestamp()));
+    }
+
+    #[test]
+    fn a_stale_list_bills_nothing_off_peak() {
+        let state = checked(vec![listed("14:00", "15:00", None)], at("13:00"));
+        let later = at("14:30");
+        assert!(!state.fresh(later));
+        assert!(state.off_peak_half_hours(later).is_empty());
+    }
+
+    #[test]
+    fn a_smart_charge_that_left_the_list_still_covers_the_rest_of_its_half_hour() {
+        let mut state = checked(vec![listed("14:00", "14:10", Some("SMART"))], at("14:03"));
+        // Octopus drops it once it's over; the 14:00 half-hour stays off-peak.
+        state.replace_list(Vec::new(), at("14:12"));
+        state.checked_at = Some(at("14:12"));
+        let smart = state.off_peak_half_hours(at("14:20"));
+        assert!(smart.contains(at("14:20").timestamp()));
+        assert!(!smart.contains(at("14:30").timestamp()));
+    }
+
+    #[test]
+    fn a_cancelled_smart_charge_counts_only_until_the_check_that_dropped_it() {
+        let mut state = checked(vec![listed("14:00", "16:00", Some("SMART"))], at("14:05"));
+        state.replace_list(Vec::new(), at("14:35"));
+        state.checked_at = Some(at("14:35"));
+        let smart = state.off_peak_half_hours(at("14:40"));
+        assert!(smart.contains(at("14:40").timestamp()));
+        assert!(
+            !smart.contains(at("15:00").timestamp()),
+            "cancelled before 15:00"
+        );
+        // One that hadn't started yet when it was dropped never ran.
+        let mut state = checked(vec![listed("15:00", "16:00", None)], at("14:05"));
+        state.replace_list(Vec::new(), at("14:35"));
+        state.checked_at = Some(at("14:35"));
+        assert!(state.off_peak_half_hours(at("15:10")).is_empty());
+    }
+
+    #[test]
+    fn a_remembered_smart_charge_is_forgotten_after_two_hours() {
+        let mut state = checked(vec![listed("14:00", "14:10", None)], at("14:03"));
+        state.replace_list(Vec::new(), at("14:12"));
+        assert_eq!(state.ran_smart.len(), 1);
+        state.replace_list(Vec::new(), at("16:11"));
+        assert!(state.ran_smart.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_top_up_is_refused_while_the_hold_is_off() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (status, Json(body)) =
+                set_charge(State(state.clone()), Json(HoldRequest { enabled: true })).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(body["error"].as_str().unwrap().contains("hold"));
+            assert!(!Settings::load().octopus_dispatch_charge);
+
+            // Turning it off is always allowed.
+            let (status, _) =
+                set_charge(State(state.clone()), Json(HoldRequest { enabled: false })).await;
+            assert_eq!(status, StatusCode::OK);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_top_up_round_trips_with_the_hold_on() {
+        with_isolated_config_dir_async(|| async {
+            Settings::update(|s| s.octopus_dispatch_hold = true).unwrap();
+            let state = Arc::new(AppState::new());
+            let (status, _) =
+                set_charge(State(state.clone()), Json(HoldRequest { enabled: true })).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(Settings::load().octopus_dispatch_charge);
+
+            let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+            assert_eq!(body["charge_enabled"], true);
+            assert_eq!(body["charging"], false);
+            assert_eq!(body["charge_state"], "idle");
+            assert_eq!(body["charge_reason"], Value::Null);
+            assert_eq!(body["charge_target_soc"], 100);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_page_says_why_it_is_sitting_out_and_the_cap_sets_the_target() {
+        with_isolated_config_dir_async(|| async {
+            Settings::update(|s| {
+                s.octopus_dispatch_hold = true;
+                s.octopus_dispatch_charge = true;
+                s.charge_cap.enabled = true;
+                s.charge_cap.cap_soc = 90;
+            })
+            .unwrap();
+            let state = Arc::new(AppState::new());
+            state.dispatch_charge.lock().await.reason =
+                Some(crate::inverter::dispatch_charge::Reason::ManualForce);
+            let (_, Json(body)) = get_dispatches(State(state.clone())).await;
+            assert_eq!(body["charge_state"], "standing_aside");
+            assert_eq!(body["charge_reason"], "manual_force");
+            assert_eq!(body["charge_note"], "Force Charge is running");
+            assert_eq!(body["charge_target_soc"], 90);
+        })
+        .await;
     }
 }

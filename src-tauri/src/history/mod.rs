@@ -14,7 +14,7 @@ pub mod minute;
 pub mod rate_stamp;
 pub mod reprice;
 
-pub use rate_stamp::RateStamp;
+pub use rate_stamp::{OffPeakHalfHours, RateStamp};
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2003,6 +2003,13 @@ impl HistoryDb {
         // history for good.
         let mut rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
         rows.push(snap, stamp)
+    }
+
+    /// Hold the database connection, so a job that needs it waits until the
+    /// guard is dropped (tests racing a job against something else).
+    #[cfg(test)]
+    pub(crate) fn hold_connection_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
     }
 
     /// Every row's recorded import rate, oldest first (tests of the rates jobs).

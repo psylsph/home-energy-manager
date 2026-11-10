@@ -1167,6 +1167,23 @@ pub fn build_dispatch_hold_gave_up_message(detail: &str) -> String {
     )
 }
 
+/// Notification text for a battery top-up during a smart charge whose
+/// charge settings the inverter isn't taking (issue #434).
+pub fn build_dispatch_charge_failing_message() -> String {
+    "⚠️ Couldn't set the battery charging during your car's smart charge. HEM keeps trying \
+     until the charge ends."
+        .to_string()
+}
+
+/// Notification text for a top-up restore the inverter didn't take in 15
+/// minutes, which HEM has given up. `detail` is what to put back.
+pub fn build_dispatch_charge_gave_up_message(detail: &str) -> String {
+    format!(
+        "⚠️ Couldn't put the charge settings back after topping the battery up during your \
+         car's smart charge, and HEM has stopped trying. Set them back to: {detail}."
+    )
+}
+
 /// How often an undelivered dispatch-hold alert is resent, and for how long.
 pub(crate) const HOLD_ALERT_RESEND_SECS: u64 = 5 * 60;
 pub(crate) const HOLD_ALERT_RESEND_ATTEMPTS: u32 = 12;

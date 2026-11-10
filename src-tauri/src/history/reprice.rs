@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use chrono::Timelike;
 use rusqlite::params;
 
-use super::{HistoryDb, RateStamp};
+use super::{HistoryDb, OffPeakHalfHours, RateStamp};
 use crate::settings::Settings;
 
 /// Rows rewritten per transaction.
@@ -90,20 +90,24 @@ impl HistoryDb {
     }
 
     /// Overwrite the stamped rates of up to `limit` rows in `[cursor, end)`
-    /// with those `settings` give at each row's time, in the host's zone.
+    /// with those `settings` give at each row's time, in the host's zone. A
+    /// row in one of `smart`'s half-hours, which a smart charge ran in, is
+    /// stamped at the off-peak rate as the live writer does (issue #434).
     pub fn reprice_chunk(
         &self,
         settings: &Settings,
+        smart: &OffPeakHalfHours,
         cursor: i64,
         end: i64,
         limit: usize,
     ) -> Result<ChunkOutcome, String> {
-        self.reprice_chunk_in(settings, cursor, end, limit, &chrono::Local)
+        self.reprice_chunk_in(settings, smart, cursor, end, limit, &chrono::Local)
     }
 
     pub(crate) fn reprice_chunk_in<TZ: chrono::TimeZone>(
         &self,
         settings: &Settings,
+        smart: &OffPeakHalfHours,
         cursor: i64,
         end: i64,
         limit: usize,
@@ -125,7 +129,8 @@ impl HistoryDb {
                 )
                 .map_err(|e| format!("Failed to prepare re-price: {e}"))?;
             for &ts in &timestamps {
-                let stamp = RateStamp::resolve_in(settings, ts, tz);
+                let stamp = RateStamp::resolve_in(settings, ts, tz)
+                    .during_smart_charges(settings, smart, ts);
                 update
                     .execute(params![
                         stamp.import_rate,
@@ -636,6 +641,48 @@ mod tests {
     // ---- re-price ----
 
     #[test]
+    fn repricing_keeps_a_smart_charge_s_half_hours_at_the_off_peak_rate() {
+        // Without this a re-price would undo what the live writer stamped.
+        let db = test_db();
+        rows(&db, 4);
+        let settings = Settings {
+            import_tariff_config: Some(crate::settings::TariffConfig {
+                slots: vec![
+                    crate::settings::TariffSlot {
+                        start: "00:00".into(),
+                        end: "05:30".into(),
+                        rate: 0.07,
+                    },
+                    crate::settings::TariffSlot {
+                        start: "05:30".into(),
+                        end: "23:59".into(),
+                        rate: 0.30,
+                    },
+                ],
+            }),
+            ..flat_settings(0.30, 0.15, 54.86)
+        };
+        // A smart charge 11:50–12:02 makes the 12:00 half-hour off-peak.
+        let smart = OffPeakHalfHours::from_spans([(NOON - 600, NOON + 120)]);
+        db.reprice_chunk_in(&settings, &smart, NOON, NOON + 4 * 60, 100, &chrono::Utc)
+            .unwrap();
+        for (_, import, export, _) in stamps(&db) {
+            assert_eq!((import, export), (Some(0.07), Some(0.15)));
+        }
+        // With no smart charge the same rows go back to the day rate.
+        db.reprice_chunk_in(
+            &settings,
+            &OffPeakHalfHours::default(),
+            NOON,
+            NOON + 4 * 60,
+            100,
+            &chrono::Utc,
+        )
+        .unwrap();
+        assert!(stamps(&db).iter().all(|r| r.1 == Some(0.30)));
+    }
+
+    #[test]
     fn repricing_rewrites_every_row_in_the_range_from_the_settings_given() {
         let db = test_db();
         rows(&db, 4);
@@ -643,6 +690,7 @@ mod tests {
         let outcome = db
             .reprice_chunk_in(
                 &flat_settings(0.30, 0.15, 54.86),
+                &OffPeakHalfHours::default(),
                 NOON,
                 NOON + 4 * 60,
                 100,
@@ -673,6 +721,7 @@ mod tests {
         }
         db.reprice_chunk_in(
             &flat_settings(0.30, 0.15, 0.0),
+            &OffPeakHalfHours::default(),
             NOON + 2 * 60,
             NOON + 5 * 60,
             100,
@@ -700,14 +749,28 @@ mod tests {
         rows(&one, 10);
         rows(&chunked, 10);
         let settings = flat_settings(0.25, 0.10, 40.0);
-        one.reprice_chunk_in(&settings, NOON, NOON + 10 * 60, 100, &chrono::Utc)
-            .unwrap();
+        one.reprice_chunk_in(
+            &settings,
+            &OffPeakHalfHours::default(),
+            NOON,
+            NOON + 10 * 60,
+            100,
+            &chrono::Utc,
+        )
+        .unwrap();
 
         let mut cursor = NOON;
         let mut chunks = 0;
         loop {
             let outcome = chunked
-                .reprice_chunk_in(&settings, cursor, NOON + 10 * 60, 3, &chrono::Utc)
+                .reprice_chunk_in(
+                    &settings,
+                    &OffPeakHalfHours::default(),
+                    cursor,
+                    NOON + 10 * 60,
+                    3,
+                    &chrono::Utc,
+                )
                 .unwrap();
             chunks += 1;
             match outcome.next {
@@ -732,7 +795,14 @@ mod tests {
         let mut cursor = NOON;
         for _ in 0..2 {
             cursor = db
-                .reprice_chunk_in(&settings, cursor, NOON + 10 * 60, 3, &chrono::Utc)
+                .reprice_chunk_in(
+                    &settings,
+                    &OffPeakHalfHours::default(),
+                    cursor,
+                    NOON + 10 * 60,
+                    3,
+                    &chrono::Utc,
+                )
                 .unwrap()
                 .next
                 .unwrap();
@@ -748,8 +818,15 @@ mod tests {
         rows(&db, 5);
         let settings = flat_settings(0.30, 0.15, 10.0);
         let run = |db: &HistoryDb| {
-            db.reprice_chunk_in(&settings, NOON, NOON + 5 * 60, 100, &chrono::Utc)
-                .unwrap()
+            db.reprice_chunk_in(
+                &settings,
+                &OffPeakHalfHours::default(),
+                NOON,
+                NOON + 5 * 60,
+                100,
+                &chrono::Utc,
+            )
+            .unwrap()
         };
         run(&db);
         let first = stamps(&db);
@@ -778,8 +855,15 @@ mod tests {
             }),
             ..flat_settings(0.30, 0.15, 0.0)
         };
-        db.reprice_chunk_in(&settings, NOON, NOON + 3 * 60, 100, &chrono::Utc)
-            .unwrap();
+        db.reprice_chunk_in(
+            &settings,
+            &OffPeakHalfHours::default(),
+            NOON,
+            NOON + 3 * 60,
+            100,
+            &chrono::Utc,
+        )
+        .unwrap();
         let imports: Vec<Option<f64>> = stamps(&db).iter().map(|r| r.1).collect();
         assert_eq!(
             imports,
@@ -797,8 +881,15 @@ mod tests {
             export_tariff: f64::NAN,
             ..flat_settings(0.30, 0.15, 0.0)
         };
-        db.reprice_chunk_in(&settings, NOON, NOON + 60, 100, &chrono::Utc)
-            .unwrap();
+        db.reprice_chunk_in(
+            &settings,
+            &OffPeakHalfHours::default(),
+            NOON,
+            NOON + 60,
+            100,
+            &chrono::Utc,
+        )
+        .unwrap();
         let row = &stamps(&db)[0];
         assert_eq!((row.1, row.2), (Some(0.30), None));
     }

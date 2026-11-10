@@ -3,6 +3,7 @@ import {
   CONSUMER_UNIT,
   EV_LEG,
   EV_POST,
+  HEDGES,
   HOUSE,
   HOUSE_ANCHORS,
   HOUSE_VIEWBOX,
@@ -19,6 +20,7 @@ import {
   polygonPoints,
   polylineLength,
   type HousePart,
+  type ScreenPoint,
 } from '../../src/lib/houseGeometry';
 
 /** House view geometry (issue #422): projection, anchors, cables. */
@@ -144,12 +146,99 @@ describe('cables', () => {
     for (const p of LEGS.grid) expect(isoPoint(p).x).toBeLessThan(dropX - 5);
   });
 
+  it("leaves the house at the foot of the front wall", () => {
+    // The EV cable runs on the ground the whole way from the house to the
+    // post. It used to leave the front wall at 0.6 m and ramp diagonally down
+    // to the lawn, which read as a spur hanging in mid-air.
+    const start = EV_LEG[0];
+    expect(start.y).toBeGreaterThan(HOUSE.y1);
+    expect(start.x).toBeGreaterThan(HOUSE.x0);
+    expect(start.x).toBeLessThan(HOUSE.x1);
+    for (const p of EV_LEG) expect(p.z).toBe(0);
+  });
+
   it("ends the EV leg at the charge post's near edge, not under it", () => {
     const end = EV_LEG[EV_LEG.length - 1];
     expect(end.x).toBe(EV_POST.x);
     expect(end.y).toBe(EV_POST.y - EV_POST.half);
     expect(end.y).toBeLessThan(EV_POST.y);
     expect(end.z).toBe(0);
+  });
+});
+
+describe('cables stay clear of the scenery', () => {
+  /** Widest cable ink: the 3.5 px stroke plus its glow, at full flow, halved. */
+  const CABLE_HALF_WIDTH = 4;
+
+  /**
+   * The screen silhouette of a hedge, face by face, as `HouseIllustration`'s
+   * `Box` draws it: the front (+y), the right (+x) and the top.
+   */
+  function hedgeFaces(h: (typeof HEDGES)[number]): ScreenPoint[][] {
+    return [
+      [iso(h.x0, h.y1, 0), iso(h.x1, h.y1, 0), iso(h.x1, h.y1, h.z), iso(h.x0, h.y1, h.z)],
+      [iso(h.x1, h.y0, 0), iso(h.x1, h.y1, 0), iso(h.x1, h.y1, h.z), iso(h.x1, h.y0, h.z)],
+      [iso(h.x0, h.y0, h.z), iso(h.x1, h.y0, h.z), iso(h.x1, h.y1, h.z), iso(h.x0, h.y1, h.z)],
+    ];
+  }
+
+  const cross = (o: ScreenPoint, a: ScreenPoint, b: ScreenPoint) =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+  function insideConvex(p: ScreenPoint, poly: ScreenPoint[]): boolean {
+    const signs = poly.map((q, i) => Math.sign(cross(q, poly[(i + 1) % poly.length], p)));
+    return signs.every((s) => s >= 0) || signs.every((s) => s <= 0);
+  }
+
+  function pointSegmentDistance(p: ScreenPoint, a: ScreenPoint, b: ScreenPoint): number {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+  }
+
+  function segmentDistance(a: ScreenPoint, b: ScreenPoint, c: ScreenPoint, d: ScreenPoint): number {
+    // Zero when the segments cross; otherwise the nearest pair of points.
+    const d1 = cross(a, b, c);
+    const d2 = cross(a, b, d);
+    const d3 = cross(c, d, a);
+    const d4 = cross(c, d, b);
+    if (((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))) return 0;
+    return Math.min(
+      pointSegmentDistance(a, c, d),
+      pointSegmentDistance(b, c, d),
+      pointSegmentDistance(c, a, b),
+      pointSegmentDistance(d, a, b),
+    );
+  }
+
+  /** Distance from a screen segment to a convex screen polygon (0 when it enters it). */
+  function segmentPolygonDistance(a: ScreenPoint, b: ScreenPoint, poly: ScreenPoint[]): number {
+    if (insideConvex(a, poly) || insideConvex(b, poly)) return 0;
+    return Math.min(...poly.map((p, i) => segmentDistance(a, b, p, poly[(i + 1) % poly.length])));
+  }
+
+  it('keeps every cable clear of the front hedges', () => {
+    // The routes are drawn on top of the illustration, so a cable that runs
+    // behind a hedge in world space still shows through its foliage. Cables
+    // go around the hedges instead; the grid cable used to cut across the
+    // right-hand one on its way in from the gate.
+    const cables: [string, { x: number; y: number; z: number }[]][] = [
+      ...Object.entries(LEGS),
+      ['ev', EV_LEG],
+    ];
+    for (const [part, leg] of cables) {
+      const screen = leg.map(isoPoint);
+      for (let i = 1; i < screen.length; i++) {
+        for (const hedge of HEDGES) {
+          for (const face of hedgeFaces(hedge)) {
+            const gap = segmentPolygonDistance(screen[i - 1], screen[i], face);
+            expect(gap, `${part} cable runs through a hedge`).toBeGreaterThan(CABLE_HALF_WIDTH);
+          }
+        }
+      }
+    }
   });
 });
 

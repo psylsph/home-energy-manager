@@ -45,13 +45,13 @@ export default function SmartChargingPanel() {
 
   if (!data) return null;
 
-  async function setHold(enabled: boolean) {
+  async function save(path: string, enabled: boolean, field: 'enabled' | 'charge_enabled') {
     setSaving(true);
     setSaveError(null);
     try {
-      await apiPost('/api/octopus/dispatches/hold', { enabled });
+      await apiPost(path, { enabled });
       // Show the saved position even if the reload below fails.
-      setData((current) => current && { ...current, enabled });
+      setData((current) => current && { ...current, [field]: enabled });
       setReloadTick((tick) => tick + 1);
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause.message : 'Could not change the setting.');
@@ -59,12 +59,16 @@ export default function SmartChargingPanel() {
       setSaving(false);
     }
   }
+  const setHold = (enabled: boolean) => save('/api/octopus/dispatches/hold', enabled, 'enabled');
+  const setCharge = (enabled: boolean) =>
+    save('/api/octopus/dispatches/charge', enabled, 'charge_enabled');
 
   // A Gateway doesn't pass a discharge pause on to the AIO (issue #428): the
   // hold sits out there, so it isn't shown. It picks up again on the AIO.
   if (!batteryControls) return null;
 
   const watching = data.enabled && data.configured;
+  const targetSoc = data.charge_target_soc ?? 100;
   const noDevice = watching && data.checked_at !== null && data.devices === 0;
 
   return (
@@ -96,6 +100,67 @@ export default function SmartChargingPanel() {
           />
         </div>
       </div>
+
+      {/* The top-up rides the hold: charging with discharge live would feed the car (#434). */}
+      {data.enabled && data.configured && data.charge_enabled !== undefined && (
+        <div className="mt-3 flex items-start justify-between gap-3 text-sm text-text-primary">
+          <span>
+            Top Up the Battery During Smart Charges{' '}
+            <HelpTip label="topping the battery up during smart charges">
+              Octopus bills your whole home at the off-peak rate for each half-hour a smart charge
+              covers. With this on, HEM also charges the battery from the grid during those
+              charges, up to {targetSoc}% (your Charge Cap&apos;s level when the cap is on), and puts
+              your charge settings back when the charge ends. Boosts are left alone. It runs only
+              while the battery is held, and stands aside for Force Charge, a calibration, a
+              running charge slot, Adaptive Charge, Cosy or Agile, and the safety limiters. The
+              inverter&apos;s own charge limit sets the rate. HEM must be running; if it stops
+              mid-charge, the inverter still stops charging when the smart charge was due to end.
+            </HelpTip>
+            <span className="mt-1 block text-xs text-text-secondary">
+              Charges the battery from the cheap grid while the car smart-charges.
+            </span>
+          </span>
+          <div className="mt-0.5 shrink-0">
+            <Toggle
+              checked={data.charge_enabled}
+              disabled={saving}
+              onChange={(enabled) => void setCharge(enabled)}
+              ariaLabel="Top Up the Battery During Smart Charges"
+            />
+          </div>
+        </div>
+      )}
+
+      {watching && data.charge_state === 'charging' && (
+        <p role="status" className="mt-3 rounded-lg border border-green-500/30 bg-green-950/20 px-3 py-2 text-xs text-green-300">
+          Charging the battery now, up to {targetSoc}%.
+        </p>
+      )}
+
+      {watching && data.charge_state === 'failing' && (
+        <p role="status" className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-text-primary">
+          The inverter isn&apos;t taking the charge settings. HEM keeps trying every 5 minutes.
+        </p>
+      )}
+
+      {watching && data.charge_state === 'restoring' && (
+        <p role="status" className="mt-3 text-xs text-text-secondary">
+          Putting your charge settings back after the top-up.
+        </p>
+      )}
+
+      {watching && data.charge_enabled && data.charge_note && (
+        <p
+          role="status"
+          className={
+            data.charge_reason === 'full'
+              ? 'mt-3 text-xs text-text-secondary'
+              : 'mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-text-primary'
+          }
+        >
+          Not topping up the battery. {data.charge_note}.
+        </p>
+      )}
 
       {saveError && (
         <p role="status" className="mt-2 text-xs text-red-300">{saveError}</p>
@@ -154,6 +219,12 @@ export default function SmartChargingPanel() {
             <p className="mt-3 text-xs text-text-secondary">No smart charges planned.</p>
           )
         )
+      )}
+
+      {watching && data.hold_charge_slot && (
+        <p role="status" className="mt-3 text-xs text-text-secondary">
+          Not holding the battery: your charge slot is charging it.
+        </p>
       )}
 
       {watching && data.checked_at && (

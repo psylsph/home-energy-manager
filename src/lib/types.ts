@@ -114,6 +114,8 @@ export interface InverterSnapshot {
   temperature_limiter_active?: boolean;
   /** The battery is held for an Intelligent Octopus Go smart charge (#394). */
   dispatch_hold_active?: boolean;
+  /** HEM is topping the battery up during a smart charge (issue #434). */
+  dispatch_charge_active?: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
   /** Why Cosy is not running: 'pause', 'force', 'calibration', 'dispatch_hold' or 'safety'; empty or absent when nothing blocks it. */
@@ -610,9 +612,22 @@ export interface SmartChargingResponse {
   holding: boolean;
   /** The inverter isn't taking the hold's pause; HEM retries every 5 minutes (#431). */
   hold_failing: boolean;
+  /** A smart charge is running, but a charge slot is charging the battery, so the hold isn't pausing it. */
+  hold_charge_slot?: boolean;
   /** How old the dispatch list may be before HEM stops trusting it. */
   stale_after_minutes: number;
   dispatches: SmartChargeDispatch[];
+  /** The user has turned the battery top-up during smart charges on (#434). */
+  charge_enabled?: boolean;
+  /** The top-up is charging the battery now. */
+  charging?: boolean;
+  charge_state?: 'idle' | 'charging' | 'failing' | 'restoring' | 'standing_aside';
+  /** Why the top-up is sitting out the current smart charge. */
+  charge_reason?: string | null;
+  /** The same, as a sentence for the page. */
+  charge_note?: string | null;
+  /** 100, or the Charge Cap's level when the cap is on. */
+  charge_target_soc?: number;
 }
 
 /** One module's battery health summary for one local day (`GET /api/battery-health`, issue #393). */

@@ -260,7 +260,7 @@ fn power_limit_bank_label(bank: PowerLimitBank) -> &'static str {
     }
 }
 
-fn charge_slot_command_for_device(
+pub(crate) fn charge_slot_command_for_device(
     device_type: DeviceType,
     slot: u8,
     enabled: bool,
@@ -6053,6 +6053,8 @@ pub(crate) async fn force_charge_at_unlocked(
     // UI/external start must never replace the state that the first owner is
     // responsible for restoring.
     let existing_revert = state.force_charge_revert.lock().await.clone();
+    // Held while a top-up's baseline is being handed over; see below.
+    let mut top_up = None;
     let mut revert = if let Some(existing) = existing_revert {
         match force_baseline_identity(&state, existing.device_type, &existing.inverter_serial).await
         {
@@ -6069,7 +6071,36 @@ pub(crate) async fn force_charge_at_unlocked(
             }
         }
     } else {
-        capture_force_charge_revert(&state, device_type).await
+        // A battery top-up during a smart charge (issue #434) hands over the
+        // baseline it captured: the inverter is charging for it now, so a
+        // fresh capture would make Stop Charge restore the top-up instead of
+        // the user's own settings. Its lock is held until the handover is
+        // committed below, after every step that can still fail, so a
+        // refused Force Charge leaves the top-up owning its baseline.
+        let charge = state.dispatch_charge.lock().await;
+        match charge.run.as_ref().map(|run| run.revert.clone()) {
+            Some(baseline) => {
+                if !matches!(
+                    force_baseline_identity(
+                        &state,
+                        baseline.device_type,
+                        &baseline.inverter_serial,
+                    )
+                    .await,
+                    BaselineIdentity::Verified
+                ) {
+                    return error_response(
+                        "The smart-charge top-up's settings to put back aren't from this inverter; Force Charge refused for safety",
+                    );
+                }
+                top_up = Some(charge);
+                Some(baseline)
+            }
+            None => {
+                drop(charge);
+                capture_force_charge_revert(&state, device_type).await
+            }
+        }
     };
     if revert.is_none() {
         return error_response(
@@ -6122,6 +6153,15 @@ pub(crate) async fn force_charge_at_unlocked(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"ok": false, "error": error})),
                 );
+            }
+            if let Some(mut charge) = top_up.take() {
+                if let Err(error) = crate::inverter::dispatch_charge::persist_run(None).await {
+                    return error_response(&format!(
+                        "Couldn't take over the smart-charge top-up: {error}"
+                    ));
+                }
+                charge.run = None;
+                tracing::info!("Force Charge: taking over the smart-charge top-up's baseline");
             }
             *state.force_charge_revert.lock().await = revert;
             tracing::info!("ForceCharge encoded: {:?}", writes);
@@ -9469,12 +9509,21 @@ fn compute_charge_plan_inner<'a>(
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
+    // A planned smart charge's half-hours are billed off-peak (issue #434).
+    let smart_charges = crate::history::OffPeakHalfHours::from_spans(
+        forecast
+            .ev_dispatch_windows
+            .iter()
+            .filter(|window| window.smart)
+            .map(|window| (window.start, window.end)),
+    );
     let charge = crate::forecast::planner::plan_charge(
         &inputs,
         settings.forecast_plan_strategy,
         &crate::forecast::planner::CostInputs {
             export_tariff: settings.export_tariff_config.as_ref(),
             low_solar_hours: low_solar_hours.as_deref(),
+            smart_charges: Some(&smart_charges),
         },
     );
     // The export advice rides the same trajectory: hand over the hourly
@@ -18040,6 +18089,135 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn force_charge_takes_over_a_smart_charge_top_up_s_baseline() {
+        // Issue #434: the inverter is charging for the top-up, so capturing
+        // now would make Stop Charge put the top-up back, not the user's own
+        // settings.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_charging_pre_state(&state).await;
+            let snap = state.latest_snapshot.lock().await.clone().unwrap();
+            let mut baseline = force_charge_revert_from_snapshot(&snap, snap.device_type).unwrap();
+            baseline.target_soc = 77;
+            baseline.charge_slot_1_start = Some((23, 30));
+            let run = crate::inverter::dispatch_charge::DispatchChargeRun {
+                phase: crate::inverter::dispatch_charge::DispatchChargePhase::Charging,
+                revert: baseline,
+                target_soc: 100,
+                writes: Vec::new(),
+                dispatch_end: chrono::Utc::now(),
+                skew_minutes: 0,
+                last_sent: 0,
+                unconfirmed: 0,
+                restore_started: None,
+            };
+            crate::settings::Settings::update(|s| s.dispatch_charge_run = Some(run.clone()))
+                .unwrap();
+            state.dispatch_charge.lock().await.run = Some(run);
+
+            let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let _ = drain_pending_writes(&state).await;
+
+            let revert = state.force_charge_revert.lock().await.clone().unwrap();
+            assert_eq!(revert.target_soc, 77);
+            assert_eq!(revert.charge_slot_1_start, Some((23, 30)));
+            assert!(state.dispatch_charge.lock().await.run.is_none());
+            assert!(crate::settings::Settings::load()
+                .dispatch_charge_run
+                .is_none());
+        })
+        .await;
+    }
+
+    async fn seed_top_up(
+        state: &Arc<AppState>,
+        serial: &str,
+    ) -> crate::inverter::dispatch_charge::DispatchChargeRun {
+        let snap = state.latest_snapshot.lock().await.clone().unwrap();
+        let mut baseline = force_charge_revert_from_snapshot(&snap, snap.device_type).unwrap();
+        baseline.target_soc = 77;
+        baseline.charge_slot_1_start = Some((23, 30));
+        baseline.inverter_serial = serial.to_string();
+        let run = crate::inverter::dispatch_charge::DispatchChargeRun {
+            phase: crate::inverter::dispatch_charge::DispatchChargePhase::Charging,
+            revert: baseline,
+            target_soc: 100,
+            writes: Vec::new(),
+            dispatch_end: chrono::Utc::now(),
+            skew_minutes: 0,
+            last_sent: 0,
+            unconfirmed: 0,
+            restore_started: None,
+        };
+        crate::settings::Settings::update(|s| s.dispatch_charge_run = Some(run.clone())).unwrap();
+        state.dispatch_charge.lock().await.run = Some(run.clone());
+        run
+    }
+
+    /// The top-up still owns its baseline, in memory and on disk, and
+    /// nothing was queued.
+    async fn assert_top_up_kept(state: &Arc<AppState>) {
+        let kept = state.dispatch_charge.lock().await.run.clone();
+        assert_eq!(kept.map(|run| run.revert.target_soc), Some(77));
+        let saved = crate::settings::Settings::load().dispatch_charge_run;
+        assert_eq!(saved.map(|run| run.revert.target_soc), Some(77));
+        assert!(state.force_charge_revert.lock().await.is_none());
+        assert!(drain_pending_writes(state).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_force_charge_that_fails_after_the_handover_leaves_the_top_up_its_baseline() {
+        // Issue #434: the handover is committed only once nothing else can
+        // fail, or nobody would own the user's settings to put back.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_charging_pre_state(&state).await;
+            let serial = state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .inverter_serial
+                .clone();
+            seed_top_up(&state, &serial).await;
+            // A ledger that can't be opened: the recovery save fails.
+            let dir = crate::test_util::make_unique_test_dir("top-up-ledger");
+            let blocker = dir.join("not-a-dir");
+            std::fs::write(&blocker, b"").unwrap();
+            state
+                .command_ledger
+                .override_path(blocker.join("external_commands.db"));
+
+            let (status, _) = force_charge_at_unlocked(
+                state.clone(),
+                Some(Json(json!({ "minutes": 30 }))),
+                Local::now(),
+                Some("cmd-1"),
+            )
+            .await;
+            assert_ne!(status, StatusCode::OK);
+            assert_top_up_kept(&state).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_refuses_a_top_up_baseline_from_another_inverter() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_charging_pre_state(&state).await;
+            seed_top_up(&state, "SOMEONE-ELSE").await;
+
+            let (status, _) =
+                force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            assert_ne!(status, StatusCode::OK);
+            assert_top_up_kept(&state).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn force_charge_captures_none_slot_when_no_prior_slot() {
         with_isolated_config_dir_async(|| async {
             // Pre-state has enable_charge=true but no charge slot configured.
@@ -23548,7 +23726,14 @@ pub(crate) mod tests {
                     export_tariff_config: None,
                     ..crate::settings::Settings::default()
                 };
-                db.reprice_chunk(&recorded, 0, i64::MAX, 100_000).unwrap();
+                db.reprice_chunk(
+                    &recorded,
+                    &crate::history::OffPeakHalfHours::default(),
+                    0,
+                    i64::MAX,
+                    100_000,
+                )
+                .unwrap();
             }
             let (status, json) = get_report(
                 State(state.clone()),
@@ -26859,6 +27044,7 @@ pub(crate) mod tests {
         // the dispatch hold must come back with the hours they belong to.
         let mut forecast = forecast_with_bands(&[(0.0, 0.0, 0.0); 3]);
         forecast.ev_dispatch_hours = vec![crate::forecast::dispatch_load::DispatchHour {
+            charge_to_soc: None,
             timestamp: 1_800_000_000 + 3600,
             ev_kwh: 3.5,
             held_fraction: 0.5,

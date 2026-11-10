@@ -27,10 +27,6 @@ pub const DISPATCH_LOG_SINCE_KEY: &str = "octopus_dispatch_log_since";
 /// When the log was last written, Unix seconds.
 pub const DISPATCH_LOG_LAST_WRITE_KEY: &str = "octopus_dispatch_log_last_write";
 
-/// How long logged dispatches are kept: the 28-day profile window with a
-/// week's margin.
-pub const DISPATCH_LOG_KEEP_DAYS: i64 = 35;
-
 /// The longest time between two writes that still counts as unbroken.
 /// Octopus dispatches last at least half an hour, so none can start and end
 /// unseen inside a shorter gap.
@@ -93,14 +89,9 @@ impl HistoryDb {
                 params![previous, seen_at],
             )
             .map_err(fail)?;
-            // Pruned only on an unbroken run, so a clock that is wrong at
-            // start-up can't delete the log.
-            tx.execute(
-                "DELETE FROM octopus_dispatch_log WHERE end < ?1",
-                params![seen_at - DISPATCH_LOG_KEEP_DAYS * 86_400],
-            )
-            .map_err(fail)?;
         }
+        // Never pruned (issue #434): a re-price over any range needs every
+        // smart charge the live writer stamped off-peak. A few rows a day.
         {
             // A clock stepped back can't make a dispatch seen earlier than
             // it was, so `last_seen_at` only moves forward.
@@ -431,19 +422,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_older_than_the_keep_window_are_dropped_on_an_unbroken_run() {
+    fn logged_dispatches_are_kept_however_old() {
+        // A re-price over a year must still find the smart charges the live
+        // writer stamped off-peak (issue #434).
         let (db, _path) = test_db();
         db.log_dispatches(&[sighting("car", T, T + 3600, Some(7.0))], T + 3600)
             .unwrap();
-        let keep = DISPATCH_LOG_KEEP_DAYS * 86_400;
-        // A write after a jump (a clock wrong at start-up) keeps it.
-        db.log_dispatches(&[], T + 3600 + keep - GAP).unwrap();
+        let year = 366 * 86_400;
+        // A break, then an unbroken run: the old 35-day prune ran here.
+        db.log_dispatches(&[], T + year).unwrap();
+        db.log_dispatches(&[], T + year + GAP).unwrap();
+        db.log_dispatches(&[], T + year + 2 * GAP).unwrap();
         assert_eq!(db.logged_dispatches_since(0, GAP).unwrap().len(), 1);
-        // Unbroken from there: dropped once it ended more than the window ago.
-        db.log_dispatches(&[], T + 3600 + keep).unwrap();
-        assert_eq!(db.logged_dispatches_since(0, GAP).unwrap().len(), 1);
-        db.log_dispatches(&[], T + 3601 + keep).unwrap();
-        assert!(db.logged_dispatches_since(0, GAP).unwrap().is_empty());
     }
 
     #[test]

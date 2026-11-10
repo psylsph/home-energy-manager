@@ -25,6 +25,7 @@ use super::hold::{
 };
 use super::{hhmm, plan_overnight_charge, PlanInputs, PlanRecommendation};
 use crate::forecast::simulate::{SimHourInput, SimulationParams};
+use crate::history::OffPeakHalfHours;
 use crate::settings::{PlanStrategy, TariffConfig};
 use chrono::Timelike;
 
@@ -54,6 +55,9 @@ pub struct CostInputs<'a> {
     /// might not show up. `None`, or a series of another length, prices
     /// the median forecast alone.
     pub low_solar_hours: Option<&'a [SimHourInput]>,
+    /// The half-hours a planned smart charge makes off-peak (issue #434):
+    /// grid import in them is priced at the tariff's cheapest rate.
+    pub smart_charges: Option<&'a OffPeakHalfHours>,
 }
 
 /// The local minute of day an hour starting at `timestamp` begins at.
@@ -75,15 +79,27 @@ fn hourly_rate(tariff: &TariffConfig, timestamp: i64) -> f64 {
 /// The £/kWh for import outside the cheap window in the hour starting at
 /// `timestamp`: the rate of whichever half hour isn't the window's, so a
 /// window opening or closing on the half hour doesn't drag the rest of
-/// that hour towards the cheap rate.
-fn rate_outside_window(tariff: &TariffConfig, timestamp: i64, window_rate: f64) -> f64 {
+/// that hour towards the cheap rate. A half hour a smart charge makes
+/// off-peak is priced at `smart`'s rate, the tariff's cheapest (issue #434).
+fn rate_outside_window(
+    tariff: &TariffConfig,
+    timestamp: i64,
+    window_rate: f64,
+    smart: Option<(&OffPeakHalfHours, f64)>,
+) -> f64 {
     let Some(minute) = minute_of_day(timestamp) else {
         return window_rate;
     };
     let at = |m: u16| tariff.rate_for_minutes(m % 1440).unwrap_or(window_rate);
     let (first, second) = (at(minute), at(minute + 30));
     let is_window = |rate: f64| (rate - window_rate).abs() < 1e-9;
-    match (is_window(first), is_window(second)) {
+    let window_halves = (is_window(first), is_window(second));
+    let smart = |offset: i64, rate: f64| match smart {
+        Some((halves, off_peak)) if halves.contains(timestamp + offset) => rate.min(off_peak),
+        _ => rate,
+    };
+    let (first, second) = (smart(0, first), smart(30 * 60, second));
+    match window_halves {
         (true, false) => second,
         (false, true) => first,
         _ => (first + second) / 2.0,
@@ -100,6 +116,7 @@ pub(super) fn cycle_cost(
     params: &SimulationParams,
     import_tariff: &TariffConfig,
     export_tariff: Option<&TariffConfig>,
+    smart_charges: Option<&OffPeakHalfHours>,
 ) -> f64 {
     let end = ctx
         .next_occurrence_start
@@ -107,13 +124,17 @@ pub(super) fn cycle_cost(
         .min(outcome.series.len());
     let start = ctx.first_index.min(end);
     let window_rate = ctx.window.rate;
+    // Worked out once per cycle, and only when a smart charge is planned.
+    let smart = smart_charges
+        .filter(|halves| !halves.is_empty())
+        .and_then(|halves| Some((halves, import_tariff.cheapest_rate()?)));
     let import: f64 = (start..end)
         .map(|i| {
             let hour = &outcome.series[i];
             let in_window = outcome.window_grid.get(i).copied().unwrap_or(0.0);
             in_window * window_rate
                 + (hour.import_kwh - in_window).max(0.0)
-                    * rate_outside_window(import_tariff, hour.timestamp, window_rate)
+                    * rate_outside_window(import_tariff, hour.timestamp, window_rate, smart)
         })
         .sum();
     let export: f64 = export_tariff.map_or(0.0, |tariff| {
@@ -182,8 +203,16 @@ pub fn plan_cheapest_overall(inputs: &PlanInputs, extras: &CostInputs) -> PlanRe
     // priced candidate is on the same scale.
     let blended = |simulate: &dyn Fn(&[SimHourInput]) -> Option<HoldOutcome>| -> Option<f64> {
         let price = |hours: &[SimHourInput]| {
-            simulate(hours)
-                .map(|o| cycle_cost(&ctx, &o, params, import_tariff, extras.export_tariff))
+            simulate(hours).map(|o| {
+                cycle_cost(
+                    &ctx,
+                    &o,
+                    params,
+                    import_tariff,
+                    extras.export_tariff,
+                    extras.smart_charges,
+                )
+            })
         };
         let median = price(sim_hours)?;
         Some(match low_hours {

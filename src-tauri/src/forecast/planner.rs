@@ -5045,6 +5045,7 @@ mod tests {
             &CostInputs {
                 export_tariff: Some(&generous),
                 low_solar_hours: Some(&no_sun),
+                ..Default::default()
             },
         ));
         assert!(
@@ -5181,7 +5182,7 @@ mod tests {
         // The battery runs flat in the half hour before the window opens,
         // which is real day-rate import and must stay at the day rate.
         assert!(day_import > 0.0, "the fixture needs some day-rate import");
-        let cost = cost::cycle_cost(&ctx, &full, &bp, &go, None);
+        let cost = cost::cycle_cost(&ctx, &full, &bp, &go, None, None);
         let left_over = (full.series[end - 1].soc_pct - bp.reserve_soc_pct) / 100.0
             * bp.capacity_kwh
             * bp.discharge_efficiency;
@@ -5191,6 +5192,48 @@ mod tests {
             (cost - expected).abs() < 1e-6,
             "cost {cost} vs expected {expected}"
         );
+    }
+
+    #[test]
+    fn import_in_a_smart_charge_s_half_hours_is_priced_off_peak() {
+        // Issue #434: Intelligent Octopus Go bills a smart charge's
+        // half-hours at the off-peak rate, daytime ones included. With a
+        // smart charge over the whole cycle, every unit is billed at 7p.
+        let (sim, hours, _, bp) = uncertain_winter_case();
+        let go = tariff(&[
+            ("00:00", "00:30", 0.28),
+            ("00:30", "05:30", 0.07),
+            ("05:30", "23:59", 0.28),
+        ]);
+        let inputs = plan_inputs_with_min(&sim, &hours, &bp, Some(&go), 20.0);
+        let ctx = hold::prepare_hold(&inputs).expect("a window to plan");
+        let full = ctx.simulate(&bp, 100).expect("simulates");
+        let end = ctx.next_occurrence_start.unwrap_or(full.series.len());
+        let import: f64 = full.series[ctx.first_index..end]
+            .iter()
+            .map(|h| h.import_kwh)
+            .sum();
+        assert!(
+            import > full.grid_kwh,
+            "the fixture needs some day-rate import"
+        );
+        let smart = crate::history::OffPeakHalfHours::from_spans([(
+            full.series[ctx.first_index].timestamp,
+            full.series[end - 1].timestamp + 3600,
+        )]);
+        let cost = cost::cycle_cost(&ctx, &full, &bp, &go, None, Some(&smart));
+        let left_over = (full.series[end - 1].soc_pct - bp.reserve_soc_pct) / 100.0
+            * bp.capacity_kwh
+            * bp.discharge_efficiency;
+        let expected =
+            import * 0.07 - left_over * 0.07 / (bp.charge_efficiency * bp.discharge_efficiency);
+        assert!(
+            (cost - expected).abs() < 1e-6,
+            "cost {cost} vs expected {expected}"
+        );
+        // No smart charge: the day import is back at the day rate.
+        let unsmart = cost::cycle_cost(&ctx, &full, &bp, &go, None, None);
+        assert!(unsmart > cost + 0.01, "{unsmart} vs {cost}");
     }
 
     // ---- planned car charging (issue #406) ----

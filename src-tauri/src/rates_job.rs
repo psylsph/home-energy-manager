@@ -216,6 +216,21 @@ async fn run(
     let end = job_end(now_ts);
     let settings = Settings::load_async().await;
 
+    // The smart charges that ran in the range, from the dispatch log (issue
+    // #434): their half-hours stay at the off-peak rate the live writer
+    // stamped. The log is never pruned, so it holds every smart charge the
+    // live writer stamped.
+    let smart = match kind {
+        JobKind::Reprice => {
+            let db2 = db.clone();
+            tokio::task::spawn_blocking(move || logged_smart_half_hours(&db2, from_ts))
+                .await
+                .map_err(|e| format!("Rates job task failed: {e}"))??
+        }
+        JobKind::Backfill => crate::history::OffPeakHalfHours::default(),
+    };
+    let smart = Arc::new(smart);
+
     let (mut cursor, book) = match kind {
         JobKind::Reprice => (from_ts, None),
         JobKind::Backfill => {
@@ -253,10 +268,11 @@ async fn run(
             let db = db.clone();
             let settings = settings.clone();
             let book = book.clone();
+            let smart = smart.clone();
             let from = cursor;
             tokio::task::spawn_blocking(move || match book {
                 Some(book) => db.backfill_chunk(&book, from, end, CHUNK_ROWS),
-                None => db.reprice_chunk(&settings, from, end, CHUNK_ROWS),
+                None => db.reprice_chunk(&settings, &smart, from, end, CHUNK_ROWS),
             })
             .await
             .map_err(|e| format!("Rates job task failed: {e}"))??
@@ -282,6 +298,22 @@ async fn run(
         db.set_meta_value(BACKFILL_CURSOR_KEY, "")?;
     }
     Ok(looked_at)
+}
+
+/// The half-hours of the smart charges the dispatch log says ran after
+/// `from_ts`. Boosts are billed as normal and left out.
+fn logged_smart_half_hours(
+    db: &crate::history::HistoryDb,
+    from_ts: i64,
+) -> Result<crate::history::OffPeakHalfHours, String> {
+    let logged =
+        db.logged_dispatches_since(from_ts, crate::octopus_dispatches::LOG_SEEN_GAP_SECS)?;
+    Ok(crate::history::OffPeakHalfHours::from_spans(
+        logged
+            .iter()
+            .filter(|d| crate::octopus_dispatches::is_smart_kind(d.kind.as_deref()))
+            .map(|d| (d.start, d.end)),
+    ))
 }
 
 fn error_response(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
@@ -410,6 +442,52 @@ mod tests {
             assert_eq!(record.kind, JobKind::Reprice);
             assert_eq!(record.rows, 5);
             assert_eq!(import_rates(&state), vec![Some(0.42); 5]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_reprice_keeps_the_logged_smart_charges_at_the_off_peak_rate() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+                start: start.into(),
+                end: end.into(),
+                rate,
+            };
+            Settings::update(|s| {
+                s.import_tariff_config = Some(crate::settings::TariffConfig {
+                    slots: vec![slot("00:00", "05:30", 0.07), slot("05:30", "23:59", 0.30)],
+                });
+            })
+            .unwrap();
+            // Rows 12:00–12:39; a smart charge ran 12:05–12:20 and a boost
+            // 12:35–12:50. Only the smart one's half-hour is off-peak.
+            let state = state_with_rows(40).await;
+            let sighting =
+                |start: i64, end: i64, kind: &str| crate::history::dispatch_log::DispatchSighting {
+                    device: "car".into(),
+                    start,
+                    end,
+                    kind: Some(kind.into()),
+                    energy_kwh: None,
+                };
+            history_of(&state)
+                .log_dispatches(
+                    &[
+                        sighting(NOON + 300, NOON + 1200, "SMART"),
+                        sighting(NOON + 2100, NOON + 3000, "BOOST"),
+                    ],
+                    NOON + 2200,
+                )
+                .unwrap();
+            start(&state, JobKind::Reprice, NOON, NOON + 3600 * 2)
+                .await
+                .unwrap();
+            let record = finished(&state).await;
+            assert!(record.ok, "{record:?}");
+            let rates = import_rates(&state);
+            assert_eq!(rates[..30], vec![Some(0.07); 30]);
+            assert_eq!(rates[30..], vec![Some(0.30); 10]);
         })
         .await;
     }
@@ -579,8 +657,14 @@ mod tests {
                 export_tariff_config: None,
                 ..Settings::default()
             };
-            db.reprice_chunk(&recorded, NOON, NOON + 4 * 60, 100)
-                .unwrap();
+            db.reprice_chunk(
+                &recorded,
+                &crate::history::OffPeakHalfHours::default(),
+                NOON,
+                NOON + 4 * 60,
+                100,
+            )
+            .unwrap();
             drop(db);
             start(&state, JobKind::Backfill, 0, NOON + 3600)
                 .await

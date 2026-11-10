@@ -343,11 +343,8 @@ pub fn context_for(
     pause_mode_revert: bool,
     dispatch_native_pause: bool,
 ) -> ChargeCapContext {
-    let charge_slot_running = snapshot.enable_charge
-        && crate::inverter::state_machines::export_window_contains(
-            &snapshot.charge_slots,
-            inverter_minute,
-        );
+    let charge_slot_running =
+        crate::inverter::state_machines::charge_slot_running(snapshot, inverter_minute);
     ChargeCapContext {
         wants_charge: calibrating || force_charge || charge_slot_running,
         other_pause_owner: calibrating

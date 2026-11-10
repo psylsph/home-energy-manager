@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.13.0] - 2026-11-10
+
+### Added
+
+- **The battery can top up during a smart charge.** On Intelligent Octopus Go, Octopus bills your whole home at the off-peak rate for every half-hour a smart charge touches, so the battery may as well charge then too. With Top Up the Battery During Smart Charges on (Octopus page, under the battery hold), HEM charges the battery from the grid for the length of the smart charge, up to 100% or your Charge Cap's level, then puts your own charge settings back when it ends. It leaves boosts alone and stands aside for Force Charge, a calibration, a running charge slot, Adaptive Charge, Cosy, Agile and the safety limiters. It stays off until you turn it on, and the page says what it is doing or why it isn't.
+- **The Planner knows about the top-up.** The forecast plan counts the battery charging during smart charges when the top-up is on, so the projected state of charge matches what the inverter will do.
+
+### Changed
+
+- **Costs follow how Octopus bills smart charges.** Half-hours that a smart charge touches are priced at your tariff's off-peak import rate in History, the Consumption Report and the car's cost, including when you re-price past rows. The dispatch log is no longer trimmed after 35 days, so an old re-price still sees every smart charge.
+
 ## [1.12.0] - 2026-11-09
 
 ### Added

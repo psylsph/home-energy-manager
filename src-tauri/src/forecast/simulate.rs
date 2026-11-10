@@ -23,6 +23,9 @@ pub struct SimHourInput {
     /// Share of the hour (0–1) a smart dispatch holds battery discharge for
     /// (issue #394), spread evenly across the hour.
     pub held_fraction: f64,
+    /// While held, HEM tops the battery up from the grid towards this SOC
+    /// (%, issue #434). `None` when the top-up is off.
+    pub held_charge_to_soc: Option<f64>,
 }
 
 impl SimHourInput {
@@ -94,6 +97,8 @@ impl SimHourInput {
                 (
                     Self {
                         held_fraction: held,
+                        // Only the held part tops up.
+                        held_charge_to_soc: hour.held_charge_to_soc.filter(|_| held > 0.0),
                         ..hour.segment(part)
                     },
                     part,
@@ -210,6 +215,20 @@ pub fn simulate_battery(hours: &[SimHourInput], params: &SimulationParams) -> Si
                 discharge += discharge_ac;
                 import += need - discharge_ac;
             }
+            // The top-up during a smart charge (issue #434): the grid charges
+            // the battery towards the target with whatever rate solar left.
+            if let Some(target) = part
+                .held_charge_to_soc
+                .filter(|target| target.is_finite() && part.discharge_share() == 0.0)
+            {
+                let target_stored = target.clamp(0.0, 100.0) / 100.0 * capacity;
+                let room = (target_stored - stored).max(0.0);
+                let rate_left = (params.max_charge_kw * length - net.max(0.0)).max(0.0);
+                let grid_ac = (room / eta_c).min(rate_left);
+                stored += grid_ac * eta_c;
+                charge += grid_ac;
+                import += grid_ac;
+            }
         }
 
         // Numerical safety: never report SOC outside [0, 100].
@@ -281,6 +300,7 @@ mod tests {
     #[test]
     fn a_segment_scales_every_energy_and_keeps_the_held_share() {
         let full = SimHourInput {
+            held_charge_to_soc: Some(90.0),
             timestamp: 3600,
             solar_kwh: 2.0,
             consumption_kwh: 1.0,
@@ -290,6 +310,7 @@ mod tests {
         assert_eq!(
             full.segment(0.25),
             SimHourInput {
+                held_charge_to_soc: Some(90.0),
                 timestamp: 3600,
                 solar_kwh: 0.5,
                 consumption_kwh: 0.25,
@@ -376,6 +397,83 @@ mod tests {
         let over = simulate_battery(&[with_car(0, 0.0, 1.0, 0.0, 1.5)], &p).hours[0];
         let full = simulate_battery(&[with_car(0, 0.0, 1.0, 0.0, 1.0)], &p).hours[0];
         assert_eq!(over, full, "a share above 1 is the whole hour");
+    }
+
+    // ---- the top-up during a held dispatch (issue #434) ----
+
+    fn topped_up(held: f64, target: f64) -> SimHourInput {
+        SimHourInput {
+            held_charge_to_soc: Some(target),
+            ..with_car(0, 0.0, 0.5, 3.0, held)
+        }
+    }
+
+    #[test]
+    fn a_held_hour_charges_from_the_grid_at_the_full_rate() {
+        // 10 kWh at 50%, 5 kW: 5 kWh AC in, 4.5 kWh stored.
+        let out = simulate_battery(&[topped_up(1.0, 100.0)], &params(10.0, 50.0, 4.0));
+        let h = out.hours[0];
+        assert!((h.charge_kwh - 5.0).abs() < 1e-9, "{h:?}");
+        assert!((h.soc_pct - 95.0).abs() < 1e-9, "{h:?}");
+        // The house and the car import too.
+        assert!((h.import_kwh - 8.5).abs() < 1e-9, "{h:?}");
+        assert_eq!(h.discharge_kwh, 0.0);
+    }
+
+    #[test]
+    fn the_top_up_stops_at_its_target() {
+        let out = simulate_battery(&[topped_up(1.0, 60.0)], &params(10.0, 50.0, 4.0));
+        assert!(
+            (out.hours[0].soc_pct - 60.0).abs() < 1e-9,
+            "{:?}",
+            out.hours[0]
+        );
+        // Already above it: nothing.
+        let out = simulate_battery(&[topped_up(1.0, 60.0)], &params(10.0, 70.0, 4.0));
+        assert_eq!(out.hours[0].charge_kwh, 0.0);
+        assert!((out.hours[0].soc_pct - 70.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn only_the_held_part_of_an_hour_tops_up() {
+        // Half held: 2.5 kWh of grid charge in the held half; the free half
+        // discharges for the house and the car.
+        let out = simulate_battery(&[topped_up(0.5, 100.0)], &params(10.0, 50.0, 4.0));
+        let h = out.hours[0];
+        assert!((h.charge_kwh - 2.5).abs() < 1e-9, "{h:?}");
+        assert!(h.discharge_kwh > 0.0, "{h:?}");
+    }
+
+    #[test]
+    fn solar_charging_in_the_held_hour_shares_the_rate() {
+        // 3 kWh of solar surplus fills 3 kW of the 5 kW; the grid adds 2.
+        let hour = SimHourInput {
+            held_charge_to_soc: Some(100.0),
+            ..with_car(0, 3.5, 0.5, 0.0, 1.0)
+        };
+        let h = simulate_battery(&[hour], &params(10.0, 20.0, 4.0)).hours[0];
+        assert!((h.charge_kwh - 5.0).abs() < 1e-9, "{h:?}");
+        assert!((h.import_kwh - 2.0).abs() < 1e-9, "{h:?}");
+    }
+
+    #[test]
+    fn without_a_target_a_held_hour_is_unchanged() {
+        let with = simulate_battery(
+            &[SimHourInput {
+                held_charge_to_soc: None,
+                ..with_car(0, 0.0, 0.5, 3.0, 1.0)
+            }],
+            &params(10.0, 50.0, 4.0),
+        );
+        let without =
+            simulate_battery(&[with_car(0, 0.0, 0.5, 3.0, 1.0)], &params(10.0, 50.0, 4.0));
+        assert_eq!(with, without);
+        // A nonsense target is ignored.
+        let nan = simulate_battery(&[topped_up(1.0, f64::NAN)], &params(10.0, 50.0, 4.0));
+        assert_eq!(nan, without);
+        // An unheld hour never tops up.
+        let free = simulate_battery(&[topped_up(0.0, 100.0)], &params(10.0, 50.0, 4.0));
+        assert_eq!(free.hours[0].charge_kwh, 0.0);
     }
 
     #[test]
