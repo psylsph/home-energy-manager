@@ -10,6 +10,7 @@ vi.mock('../../src/lib/openExternal', () => ({
 import UpdateBanner from '../../src/components/UpdateBanner';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import { openExternal } from '../../src/lib/openExternal';
+import { CHANGELOG_URL } from '../../src/lib/updateCheck';
 
 const baseInfo = {
   current_version: '0.70.2',
@@ -100,6 +101,15 @@ describe('UpdateBanner', () => {
     expect(openExternal).toHaveBeenCalledWith(
       'https://github.com/psylsph/home-energy-manager/releases/latest',
     );
+  });
+
+  it('opens the changelog when "What\'s New" is clicked (#460)', () => {
+    useInverterStore.setState({ latestVersionInfo: { ...baseInfo } });
+    render(<UpdateBanner />);
+    fireEvent.click(screen.getByRole('button', { name: "What's New" }));
+    expect(openExternal).toHaveBeenCalledWith(CHANGELOG_URL);
+    // The release page stays one click away for the installers.
+    expect(screen.getByRole('button', { name: /view release/i })).toBeTruthy();
   });
 
   it('records a per-version dismissal when the ✕ is clicked', () => {

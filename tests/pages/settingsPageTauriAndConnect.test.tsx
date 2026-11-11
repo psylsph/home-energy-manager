@@ -479,6 +479,18 @@ describe('<SettingsPage/> — smaller controls', () => {
     expect(openExternalMock).toHaveBeenCalledWith('https://github.com/psylsph/home-energy-manager/releases/latest');
   });
 
+  it('opens the changelog from the update notice (#460)', async () => {
+    mount();
+    useInverterStore.setState({
+      latestVersionInfo: { current_version: '0.85.4', latest_version: '9.9.9', update_available: true } as never,
+    });
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: "What's New" }));
+    expect(openExternalMock).toHaveBeenCalledWith(
+      'https://github.com/psylsph/home-energy-manager/blob/master/CHANGELOG.md',
+    );
+  });
+
   it('offers no release button when already up to date', async () => {
     mount();
     useInverterStore.setState({
@@ -488,6 +500,7 @@ describe('<SettingsPage/> — smaller controls', () => {
     // Current and latest are both shown, so the release line is present…
     await screen.findByText(/Latest release:/);
     expect(screen.queryByRole('button', { name: 'View Release' })).toBeNull();
+    expect(screen.queryByRole('button', { name: "What's New" })).toBeNull();
   });
 
   it('opens the project site from About', async () => {
