@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.14.1] - 2026-11-11
+
+### Fixed
+
+- **The EV charger no longer says Charging when nothing is flowing.** The Status page called the charger Charging whenever it reported a charging state, even at 0 W with no cable plugged in, as some charger bridges do. It now says Charging only while power is actually flowing to the car, so the label always agrees with the line on the diagram, in both the orbit and the house view. (#458)
+
 ## [1.14.0] - 2026-11-10
 
 ### Added
