@@ -1,6 +1,6 @@
 import { useInverterStore } from '../store/useInverterStore';
 import { openExternal } from '../lib/openExternal';
-import { isUpdateAvailable, normaliseVersionKey } from '../lib/updateCheck';
+import { CHANGELOG_URL, isUpdateAvailable, normaliseVersionKey } from '../lib/updateCheck';
 
 /**
  * Dismissible "a new version is available" banner, rendered once below the
@@ -15,10 +15,10 @@ import { isUpdateAvailable, normaliseVersionKey } from '../lib/updateCheck';
  * component recomputes the comparison locally so the per-version dismissal
  * logic stays self-contained and unit-testable.
  *
- * Nothing happens automatically — the link opens the GitHub release page in
- * the system browser (via `openExternal`, which uses the Tauri opener plugin
- * in the desktop shell) where the user can download the new build. If the
- * payload carries no URL, the fallback is the `releases/latest` redirect —
+ * Nothing happens automatically — "What's New" opens the changelog and "View
+ * Release" opens the GitHub release page, both in the system browser (via `openExternal`, which uses the Tauri opener plugin
+ * in the desktop shell), where the user can download the new build. If the
+ * payload carries no release URL, the fallback is the `releases/latest` redirect —
  * always the newest published release, matching what the backend's version
  * check fetches.
  */
@@ -38,7 +38,7 @@ export default function UpdateBanner() {
 
   return (
     <div className="bg-amber-950/80 border-b border-amber-500/40 px-4 py-2 text-amber-100 text-sm">
-      <div className="max-w-4xl mx-auto flex items-center gap-2">
+      <div className="max-w-4xl mx-auto flex flex-wrap items-center gap-2">
         <span aria-hidden="true">⬆️</span>
         <strong>
           A new version is available — v{latest}
@@ -48,8 +48,15 @@ export default function UpdateBanner() {
         </span>
         <button
           type="button"
+          onClick={() => void openExternal(CHANGELOG_URL)}
+          className="ml-auto shrink-0 rounded-full hover:bg-amber-500/30 border border-amber-500/30 px-3 py-1 text-xs font-semibold transition-colors"
+        >
+          What&apos;s New
+        </button>
+        <button
+          type="button"
           onClick={() => void openExternal(info.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases/latest')}
-          className="ml-auto shrink-0 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-3 py-1 text-xs font-semibold transition-colors"
+          className="shrink-0 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-3 py-1 text-xs font-semibold transition-colors"
         >
           View Release
         </button>

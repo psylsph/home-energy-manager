@@ -21,6 +21,9 @@
  */
 export const UPDATE_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 
+/** Release notes, opened by the "What's New" buttons next to "View Release" (#460). */
+export const CHANGELOG_URL = 'https://github.com/psylsph/home-energy-manager/blob/master/CHANGELOG.md';
+
 /**
  * Parse the leading `major.minor.patch` triple out of a version string.
  *

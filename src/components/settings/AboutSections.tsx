@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { apiPost } from '../../lib/api';
 import { openExternal } from '../../lib/openExternal';
+import { CHANGELOG_URL } from '../../lib/updateCheck';
 import { useInverterStore } from '../../store/useInverterStore';
 import Toggle from '../Toggle';
 import { SettingsSection } from './SettingsSection';
@@ -52,13 +53,22 @@ export function UpdatesSection({
               Latest release:{' '}
               <span className="font-mono text-text-primary">v{latestVersionInfo.latest_version}</span>
               {latestVersionInfo.update_available && (
-                <button
-                  type="button"
-                  onClick={() => void openExternal(latestVersionInfo.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases/latest')}
-                  className="ml-2 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-2.5 py-0.5 text-xs font-semibold text-amber-100 transition-colors"
-                >
-                  View Release
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void openExternal(latestVersionInfo.release_url ?? 'https://github.com/psylsph/home-energy-manager/releases/latest')}
+                    className="ml-2 rounded-full bg-amber-500/30 hover:bg-amber-500/50 border border-amber-500/30 px-2.5 py-0.5 text-xs font-semibold text-amber-100 transition-colors"
+                  >
+                    View Release
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void openExternal(CHANGELOG_URL)}
+                    className="ml-2 rounded-full hover:bg-amber-500/30 border border-amber-500/30 px-2.5 py-0.5 text-xs font-semibold text-amber-100 transition-colors"
+                  >
+                    What&apos;s New
+                  </button>
+                </>
               )}
             </span>
           </>
