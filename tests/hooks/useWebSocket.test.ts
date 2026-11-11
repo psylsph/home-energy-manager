@@ -68,7 +68,6 @@ function resetStore() {
     evcHost: '',
     evcPower: 0,
     evcChargingState: '',
-    evcCharging: false,
     evcConnected: false,
     evcEverConnected: false,
     evcConnectionState: 'never_connected',
@@ -213,7 +212,6 @@ describe('useWebSocket', () => {
 
     const state = useInverterStore.getState();
     expect(state.evcPower).toBe(3500);
-    expect(state.evcCharging).toBe(true);
     expect(state.evcConnected).toBe(true);
     expect(state.evcChargingState).toBe('Charging');
   });
@@ -272,7 +270,6 @@ describe('useWebSocket', () => {
     });
 
     expect(useInverterStore.getState().evcPower).toBe(3500);
-    expect(useInverterStore.getState().evcCharging).toBe(true);
   });
 
   it('sets evcEverConnected on evc_connected message', () => {
@@ -292,7 +289,6 @@ describe('useWebSocket', () => {
   it('clears EVC data on evc_disconnected message', () => {
     useInverterStore.setState({
       evcPower: 3500,
-      evcCharging: true,
       evcConnected: true,
     });
     renderHook(() => useWebSocket());
@@ -306,7 +302,6 @@ describe('useWebSocket', () => {
 
     const state = useInverterStore.getState();
     expect(state.evcPower).toBe(0);
-    expect(state.evcCharging).toBe(false);
     expect(state.evcConnected).toBe(false);
   });
 

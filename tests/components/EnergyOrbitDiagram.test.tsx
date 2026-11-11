@@ -710,7 +710,6 @@ describe('EnergyOrbitDiagram', () => {
           snapshot={makeSnapshot({ home_power: 7500 })}
           showEvc
           evcPower={7000}
-          evcCharging
           evcConnected
         />,
       );
@@ -742,7 +741,6 @@ describe('EnergyOrbitDiagram', () => {
           snapshot={makeSnapshot({ home_power: 7500 })}
           showEvc
           evcPower={7047}
-          evcCharging
           evcConnected
           evcCableConnected
         />,
@@ -794,7 +792,6 @@ describe('EnergyOrbitDiagram', () => {
           snapshot={makeSnapshot({ home_power: 7500 })}
           showEvc
           evcPower={7000}
-          evcCharging
           evcConnected
           evcCableConnected
           evcSessionEnergyKwh={23}
@@ -836,7 +833,6 @@ describe('EnergyOrbitDiagram', () => {
           snapshot={makeSnapshot({ home_power: 7500 })}
           showEvc
           evcPower={7000}
-          evcCharging
           evcConnected
           evcCableConnected
           evcSessionEnergyKwh={23}
@@ -881,7 +877,6 @@ describe('EnergyOrbitDiagram', () => {
           snapshot={makeSnapshot({ home_power: 7500, grid_power: -7500 })}
           showEvc
           evcPower={7000}
-          evcCharging
           evcConnected
         />,
       );
@@ -899,7 +894,6 @@ describe('EnergyOrbitDiagram', () => {
           snapshot={makeSnapshot({ home_power: 7500, grid_power: -7500 })}
           showEvc
           evcPower={7000}
-          evcCharging
           evcConnected
         />,
       );
@@ -914,7 +908,6 @@ describe('EnergyOrbitDiagram', () => {
           snapshot={makeSnapshot({ home_power: 7000, grid_power: -7000 })}
           showEvc
           evcPower={7000}
-          evcCharging
           evcConnected
         />,
       );

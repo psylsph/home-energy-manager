@@ -76,7 +76,6 @@ function resetStore() {
     evcHost: '',
     evcPower: 0,
     evcChargingState: '',
-    evcCharging: false,
     evcConnected: false,
     evcEverConnected: false,
     evcConnectionState: 'never_connected',

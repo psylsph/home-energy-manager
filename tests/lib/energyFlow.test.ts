@@ -1004,13 +1004,38 @@ describe('buildEnergyFlows — EV charger', () => {
     expect(flowById(vm, 'ev')).toBeUndefined();
   });
 
-  it('uses the resolved evcLabel for the node unit when provided', () => {
+  it('words the node unit from the charger status when provided', () => {
     // Charger configured + reachable but not delivering → "Connected".
-    const vm = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcLabel: 'Connected' });
+    const vm = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcCharger: { connected: true, everConnected: true, chargingState: '' } });
     expect(vm.nodes.find((n) => n.id === 'ev')!.unit).toBe('Connected');
     // A never-reached host → "Not Found" (issue #138).
-    const vm2 = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcLabel: 'Not Found' });
+    const vm2 = buildEnergyFlows(snap(), { evcPowerW: 0, showEvc: true, evcCharger: { connected: false, everConnected: false, chargingState: '' } });
     expect(vm2.nodes.find((n) => n.id === 'ev')!.unit).toBe('Not Found');
+  });
+
+  // Issue #458: a bridged charger reported Charging at 0 W with no cable.
+  // "Charging" must come from the power test that draws the EV line, so the
+  // label and the line can't disagree.
+  it('never says Charging when no EV flow is drawn, whatever the state register says', () => {
+    const charger = { connected: true, everConnected: true, chargingState: 'Charging' };
+    for (const evcPowerW of [0, 30]) {
+      const vm = buildEnergyFlows(snap({ home_power: 500 }), {
+        evcPowerW, noiseThresholdW: 50, showEvc: true, evcCharger: charger,
+      });
+      const ev = vm.nodes.find((n) => n.id === 'ev')!;
+      expect(flowById(vm, 'ev')).toBeUndefined();
+      expect(ev.active).toBe(false);
+      expect(ev.unit).toBe('Connected');
+    }
+  });
+
+  it('says Charging exactly when the EV flow is drawn', () => {
+    const charger = { connected: true, everConnected: true, chargingState: 'Connected' };
+    const vm = buildEnergyFlows(snap({ home_power: 7500 }), {
+      evcPowerW: 7000, noiseThresholdW: 50, showEvc: true, evcCharger: charger,
+    });
+    expect(flowById(vm, 'ev')).toBeDefined();
+    expect(vm.nodes.find((n) => n.id === 'ev')!.unit).toBe('Charging');
   });
 
   it('carries the cable sub-label onto the EV node when provided (HR 2)', () => {
@@ -1019,7 +1044,7 @@ describe('buildEnergyFlows — EV charger', () => {
     const vm = buildEnergyFlows(snap(), {
       evcPowerW: 0,
       showEvc: true,
-      evcLabel: 'Idle',
+      evcCharger: { connected: true, everConnected: true, chargingState: 'Idle' },
       evcCableLabel: 'Cable In',
     });
     const ev = vm.nodes.find((n) => n.id === 'ev');
@@ -1033,7 +1058,7 @@ describe('buildEnergyFlows — EV charger', () => {
     const vm = buildEnergyFlows(snap(), {
       evcPowerW: 0,
       showEvc: true,
-      evcLabel: 'Not Found',
+      evcCharger: { connected: false, everConnected: false, chargingState: '' },
     });
     const ev = vm.nodes.find((n) => n.id === 'ev');
     expect(ev!.subLabel).toBeUndefined();
@@ -1048,7 +1073,7 @@ describe('buildEnergyFlows — EV charger', () => {
     const vm = buildEnergyFlows(snap({ home_power: 7500 }), {
       evcPowerW: 7000,
       showEvc: true,
-      evcLabel: 'Charging',
+      evcCharger: { connected: true, everConnected: true, chargingState: 'Charging' },
       evcCableLabel: 'Cable In',
       evcSessionEnergyKwh: 8.3,
     });
@@ -1082,7 +1107,7 @@ describe('buildEnergyFlows — EV charger', () => {
     const vm = buildEnergyFlows(snap(), {
       evcPowerW: 0,
       showEvc: true,
-      evcLabel: 'Idle',
+      evcCharger: { connected: true, everConnected: true, chargingState: 'Idle' },
       evcSessionEnergyKwh: 7.5,
     });
     const ev = vm.nodes.find((n) => n.id === 'ev');
@@ -1095,7 +1120,7 @@ describe('buildEnergyFlows — EV charger', () => {
     const vm = buildEnergyFlows(snap(), {
       evcPowerW: 0,
       showEvc: true,
-      evcLabel: 'Idle',
+      evcCharger: { connected: true, everConnected: true, chargingState: 'Idle' },
       evcCableLabel: 'Cable In',
       evcSessionEnergyKwh: 0,
     });
@@ -1110,7 +1135,7 @@ describe('buildEnergyFlows — EV charger', () => {
     const vm = buildEnergyFlows(snap(), {
       evcPowerW: 0,
       showEvc: true,
-      evcLabel: 'Idle',
+      evcCharger: { connected: true, everConnected: true, chargingState: 'Idle' },
       evcCableLabel: 'No Cable',
     });
     const ev = vm.nodes.find((n) => n.id === 'ev');
@@ -1642,7 +1667,7 @@ describe('nodeStatus', () => {
   });
 
   it('falls back to the unit line for nodes without a status word', () => {
-    const vm = buildEnergyFlows(snap({ home_power: 500 }), { showEvc: true, evcLabel: 'Not Found' });
+    const vm = buildEnergyFlows(snap({ home_power: 500 }), { showEvc: true, evcCharger: { connected: false, everConnected: false, chargingState: '' } });
     expect(nodeStatus(vm.nodes.find((n) => n.id === 'home')!)).toBe('Consumption');
     expect(nodeStatus(vm.nodes.find((n) => n.id === 'ev')!)).toBe('Not Found');
   });

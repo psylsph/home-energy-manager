@@ -248,7 +248,7 @@ describe('buildHouseScene — odd flows', () => {
 describe('cableLoads', () => {
   it('puts each flow on the cables of both its ends, and the EV flow on its own', () => {
     const { vm } = scene(snap({ solar_power: 4000, pv1_power: 4000, grid_power: 1000, home_power: 3000 }), {
-      showEvc: true, evcPowerW: 2000, evcLabel: 'Charging',
+      showEvc: true, evcPowerW: 2000, evcCharger: { connected: true, everConnected: true, chargingState: 'Charging' },
     });
     const loads = cableLoads(vm.flows);
     expect(loads.solar.out.map((f) => f.id).sort()).toEqual(['export', 'solar']);
@@ -360,7 +360,7 @@ describe('buildHouseScene — readings', () => {
 
   it('adds the EV reading, post wiring and route when a charger is configured', () => {
     const { vm, sc } = scene(snap({ home_power: 7500, grid_power: -7500 }), {
-      showEvc: true, evcPowerW: 7000, evcLabel: 'Charging', evcSessionEnergyKwh: 12,
+      showEvc: true, evcPowerW: 7000, evcCharger: { connected: true, everConnected: true, chargingState: 'Charging' }, evcSessionEnergyKwh: 12,
     });
     expectCablesMatchFlows(vm, sc);
     const ev = reading(sc, 'ev');

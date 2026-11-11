@@ -74,7 +74,6 @@ function resetStore() {
     evcHost: '',
     evcPower: 0,
     evcChargingState: '',
-    evcCharging: false,
     evcConnected: false,
     evcCableConnected: false,
     evcSessionEnergyKwh: 0,
@@ -205,7 +204,6 @@ describe('StatusPage — EVC prop forwarding', () => {
       connectionState: 'connected',
       evcHost: '10.0.0.99',
       evcPower: 7000,
-      evcCharging: true,
       evcChargingState: 'Charging',
       evcConnected: true,
       evcCableConnected: true,
@@ -217,7 +215,6 @@ describe('StatusPage — EVC prop forwarding', () => {
     const props = orbitProps.mock.calls[0][0] as Record<string, unknown>;
     expect(props).toMatchObject({
       evcPower: 7000,
-      evcCharging: true,
       evcChargingState: 'Charging',
       evcConnected: true,
       evcCableConnected: true,
@@ -250,7 +247,7 @@ describe('StatusPage — estimated car charging post (issue #454)', () => {
       carCharging: { forecast_exclude_load_above_kw: 3 },
     });
     render(<StatusPage />);
-    expect(props()).toMatchObject({ showEvc: true, evcEstimated: true, evcPower: 7680, evcCharging: true });
+    expect(props()).toMatchObject({ showEvc: true, evcEstimated: true, evcPower: 7680 });
   });
 
   it('uses the saved charger current', () => {
@@ -270,7 +267,7 @@ describe('StatusPage — estimated car charging post (issue #454)', () => {
       carCharging: { forecast_exclude_load_above_kw: 3 },
     });
     render(<StatusPage />);
-    expect(props()).toMatchObject({ showEvc: true, evcEstimated: true, evcPower: 0, evcCharging: false });
+    expect(props()).toMatchObject({ showEvc: true, evcEstimated: true, evcPower: 0 });
   });
 
   it('shows no post without a threshold, as before', () => {
@@ -300,7 +297,6 @@ describe('StatusPage — estimated car charging post (issue #454)', () => {
       connectionState: 'connected',
       evcHost: '10.0.0.99',
       evcPower: 6500,
-      evcCharging: true,
       evcConnected: true,
       carCharging: { forecast_exclude_load_above_kw: 3 },
     });

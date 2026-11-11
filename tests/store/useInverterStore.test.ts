@@ -15,7 +15,6 @@ describe('useInverterStore', () => {
       evcHost: '',
       evcPower: 0,
       evcChargingState: '',
-      evcCharging: false,
       evcConnected: false,
       evcEverConnected: false,
       evcConnectionState: 'never_connected',
@@ -57,7 +56,7 @@ describe('useInverterStore', () => {
     it('resetEvc clears evcEverConnected and evc fields', () => {
       // First set the latch
       useInverterStore.getState().markEvcConnectedReached();
-      useInverterStore.setState({ evcPower: 500, evcCharging: true, evcConnected: true, evcChargingState: 'Charging' });
+      useInverterStore.setState({ evcPower: 500, evcConnected: true, evcChargingState: 'Charging' });
 
       // Now reset
       useInverterStore.getState().resetEvc();
@@ -65,7 +64,6 @@ describe('useInverterStore', () => {
       const state = useInverterStore.getState();
       expect(state.evcEverConnected).toBe(false);
       expect(state.evcPower).toBe(0);
-      expect(state.evcCharging).toBe(false);
       expect(state.evcConnected).toBe(false);
       expect(state.evcChargingState).toBe('');
     });
@@ -79,22 +77,21 @@ describe('useInverterStore', () => {
   });
 
   describe('setEvcData', () => {
-    it('sets evcPower, evcCharging, evcConnected, evcChargingState', () => {
-      useInverterStore.getState().setEvcData(3500, true, true, 'Charging');
+    it('sets evcPower, evcConnected, evcChargingState', () => {
+      useInverterStore.getState().setEvcData(3500, true, 'Charging');
       const state = useInverterStore.getState();
       expect(state.evcPower).toBe(3500);
-      expect(state.evcCharging).toBe(true);
       expect(state.evcConnected).toBe(true);
       expect(state.evcChargingState).toBe('Charging');
     });
 
     it('also sets evcEverConnected when connected is true', () => {
-      useInverterStore.getState().setEvcData(100, true, true, 'Charging');
+      useInverterStore.getState().setEvcData(100, true, 'Charging');
       expect(useInverterStore.getState().evcEverConnected).toBe(true);
     });
 
     it('does not set evcEverConnected when connected is false', () => {
-      useInverterStore.getState().setEvcData(0, false, false, '');
+      useInverterStore.getState().setEvcData(0, false, '');
       expect(useInverterStore.getState().evcEverConnected).toBe(false);
     });
   });

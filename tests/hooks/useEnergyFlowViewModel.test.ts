@@ -161,4 +161,51 @@ describe('useEnergyFlowViewModel', () => {
       expect(result.current.nodes.find((n) => n.id === 'ev')!.value).toBe('7.7kW');
     });
   });
+
+  describe('EV charger label follows the power, not the state register (issue #458)', () => {
+    // A charger whose state register says Charging, as Brian's bridge does.
+    const charger = {
+      showEvc: true, evcConnected: true, evcEverConnected: true,
+      evcChargingState: 'Charging',
+    };
+    const ev = (over: Record<string, unknown>) => {
+      const { result } = renderHook(() => useEnergyFlowViewModel({ snapshot: snap(), ...charger, ...over }));
+      return result.current.nodes.find((n) => n.id === 'ev')!;
+    };
+
+    it('does not say Charging at 0 W with the cable in', () => {
+      const node = ev({ evcPower: 0, evcCableConnected: true });
+      expect(node.unit).toBe('Connected');
+      expect(node.subLabel).toBe('Cable In');
+      expect(node.active).toBe(false);
+    });
+
+    it('does not say Charging at 0 W with no cable (Brian\'s bridge)', () => {
+      const node = ev({ evcPower: 0, evcCableConnected: false });
+      expect(node.unit).toBe('Connected');
+      expect(node.subLabel).toBe('No Cable');
+    });
+
+    it('does not say Charging for power below the noise threshold, matching the flow line', () => {
+      useInverterStore.setState({ visualNoiseThreshold: 50 });
+      const node = ev({ evcPower: 30, evcCableConnected: true });
+      expect(node.unit).toBe('Connected');
+      expect(node.active).toBe(false);
+    });
+
+    it('says Charging once the power is above the threshold, whatever the state says', () => {
+      useInverterStore.setState({ visualNoiseThreshold: 50 });
+      const node = ev({ evcPower: 7000, evcChargingState: 'Connected', evcCableConnected: true });
+      expect(node.unit).toBe('Charging');
+      expect(node.active).toBe(true);
+    });
+
+    it('still says Idle at 0 W when the charger reports Idle', () => {
+      expect(ev({ evcPower: 0, evcChargingState: 'Idle' }).unit).toBe('Idle');
+    });
+
+    it('says Disconnected at 0 W once the charger has dropped off the network', () => {
+      expect(ev({ evcPower: 0, evcConnected: false }).unit).toBe('Disconnected');
+    });
+  });
 });
