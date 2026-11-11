@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.15.0] - 2026-11-11
+
+### Added
+
+- **A What's New button next to View Release.** When a new version is available, the banner and Settings → About now link straight to the changelog, so you can see what changed before you update. View Release stays for the installers. (#460)
+
 ## [1.14.1] - 2026-11-11
 
 ### Fixed
