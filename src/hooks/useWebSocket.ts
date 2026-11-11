@@ -104,7 +104,6 @@ export function useWebSocket() {
       if (!res.ok) return;
       if (res.reachable && res.snapshot) {
         const snap = res.snapshot;
-        const charging = snap.charging_state === 'Charging' || snap.active_power > 0;
         // Decoupled from the cable state: a reachable snapshot proves the
         // host is on the network, so the network flag is true regardless of
         // whether a cable is plugged in. The cable state (HR 2) is carried
@@ -114,7 +113,6 @@ export function useWebSocket() {
         // render the EVC's own "Idle" label when state=1 (issue #139).
         setEvcData(
           snap.active_power,
-          charging,
           true,
           snap.charging_state,
           cableConnected,
@@ -187,7 +185,6 @@ export function useWebSocket() {
         } else if (data.type === 'evc') {
           evcGenerationRef.current += 1;
           const evc = data as EvcSnapshot;
-          const charging = evc.charging_state === 'Charging' || evc.active_power > 0;
           // Decoupled: an arriving `evc` frame proves the host is reachable
           // over the network, so the network flag is true regardless of the
           // physical cable. The cable state (HR 2 `connection_status`) is
@@ -200,7 +197,6 @@ export function useWebSocket() {
           // (issue #139).
           setEvcData(
             evc.active_power,
-            charging,
             true,
             evc.charging_state,
             cableConnected,
@@ -224,7 +220,7 @@ export function useWebSocket() {
           evcGenerationRef.current += 1;
           const current = useInverterStore.getState();
           if (current.evcLastSuccessAtEpochMs == null) {
-            setEvcData(0, false, false);
+            setEvcData(0, false);
           } else {
             // The following EvcStatus frame decides whether this is a
             // temporary degraded connection or an expired cache. Preserve

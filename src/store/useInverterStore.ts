@@ -110,8 +110,6 @@ interface InverterState {
    * snapshot has arrived yet.
    */
   evcChargingState: string;
-  /** EV Charger charging state (true = actively delivering power). */
-  evcCharging: boolean;
   /** EV Charger Modbus connection/data status. */
   evcConnected: boolean;
   /**
@@ -241,7 +239,6 @@ interface InverterState {
   setCarCharging: (settings: Pick<PollSettings, 'forecast_exclude_load_above_kw' | 'car_charger_current_a'>) => void;
   setEvcData: (
     power: number,
-    charging: boolean,
     connected?: boolean,
     chargingState?: string,
     cableConnected?: boolean,
@@ -563,7 +560,6 @@ export const useInverterStore = create<InverterState>((set) => ({
   carCharging: {},
   evcPower: 0,
   evcChargingState: '',
-  evcCharging: false,
   evcConnected: false,
   evcCableConnected: false,
   evcSessionEnergyKwh: 0,
@@ -712,7 +708,6 @@ export const useInverterStore = create<InverterState>((set) => ({
   setCarCharging: (settings) => set({ carCharging: settings }),
   setEvcData: (
     power,
-    charging,
     connected = true,
     chargingState = '',
     cableConnected = false,
@@ -724,7 +719,6 @@ export const useInverterStore = create<InverterState>((set) => ({
     set((prev) => ({
       evcPower: power,
       evcChargingState: chargingState,
-      evcCharging: charging,
       evcConnected: connected,
       evcCableConnected: cableConnected,
       evcSessionEnergyKwh: sessionEnergyKwh,
@@ -751,7 +745,6 @@ export const useInverterStore = create<InverterState>((set) => ({
         : {
             evcPower: 0,
             evcChargingState: '',
-            evcCharging: false,
             evcCableConnected: false,
             evcSessionEnergyKwh: 0,
           }),
@@ -768,7 +761,6 @@ export const useInverterStore = create<InverterState>((set) => ({
     set({
       evcPower: 0,
       evcChargingState: '',
-      evcCharging: false,
       evcConnected: false,
       evcCableConnected: false,
       evcSessionEnergyKwh: 0,

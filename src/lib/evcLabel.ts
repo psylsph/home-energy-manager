@@ -8,15 +8,17 @@
  * echoed on the Status page when the cable is unplugged after a session
  * (issue #139).
  *
+ * `charging` means power is flowing: `buildEnergyFlows` passes the same
+ * `evcActive` that draws the EV flow line, so the label and the line always
+ * agree (issue #458). The state register alone never makes
+ * it "Charging": a bridged charger can report Charging at 0 W with no cable,
+ * and a real one does while the car has paused itself.
+ *
  * The raw `chargingState` (HR 0 from the EVC — "Unknown", "Idle",
  * "Connected", "Starting", "Charging", "Startup Failure",
  * "End of Charging", "System Failure", "Scheduled", "Updating",
- * "Unstable CP") is consulted alongside `charging` so the app matches
- * what the charger's own display would say. `charging` / `connected` /
- * `everConnected` are kept as fallback inputs because the legacy
- * `setEvcData(power, charging, connected)` callers don't have the raw
- * string handy — those callers still get the previous four-label behaviour
- * (Charging / Connected / Disconnected / Not Found).
+ * "Unstable CP") is consulted when no power flows, so an idle charger
+ * reads "Idle" as its own display would (issue #139).
  *
  * Note: `connected` here is the charger's *network* reachability (we
  * successfully read a Modbus frame from it), NOT the physical cable state.
@@ -41,11 +43,11 @@ export function evcNodeLabel(
   everConnected: boolean,
   chargingState: string = '',
 ): string {
-  // `charging` is the most authoritative signal: live Active_Power
-  // tells us the EVC is actually delivering energy right now, even if
-  // the connection-status bit is stale or the ever-connected latch
-  // hasn't caught up yet (e.g. EvcConnected was just broadcast and
-  // the first register read is in flight — see issue #138).
+  // Power flowing is the most authoritative signal: it tells us the EVC
+  // is delivering energy right now, even if the connection-status bit is
+  // stale or the ever-connected latch hasn't caught up yet (e.g.
+  // EvcConnected was just broadcast and the first register read is in
+  // flight — see issue #138).
   if (charging) return 'Charging';
   // "Idle" wins ahead of the connected flag: a charger that has just
   // finished a session but still has the cable plugged in (state=1,

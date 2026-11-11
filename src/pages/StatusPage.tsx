@@ -41,7 +41,6 @@ export default function StatusPage() {
     evcHost,
     evcPower,
     evcChargingState,
-    evcCharging,
     evcConnected,
     evcCableConnected,
     evcSessionEnergyKwh,
@@ -90,7 +89,6 @@ export default function StatusPage() {
     ? {
         snapshot,
         evcPower: carEstimate,
-        evcCharging: carEstimate > 0,
         showEvc: true,
         evcEstimated: true,
       }
@@ -98,7 +96,6 @@ export default function StatusPage() {
         snapshot,
         evcPower,
         evcChargingState,
-        evcCharging,
         evcConnected,
         evcCableConnected,
         evcSessionEnergyKwh,

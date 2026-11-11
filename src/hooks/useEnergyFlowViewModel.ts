@@ -10,7 +10,6 @@ import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot } from '../lib/types';
 import type { EnergyFlowViewModel } from '../types/energyFlow';
 import { buildEnergyFlows } from '../lib/energyFlow';
-import { evcNodeLabel } from '../lib/evcLabel';
 
 /** Live inputs every energy-flow renderer takes from the Status page. */
 export interface EnergyFlowSourceProps {
@@ -19,8 +18,6 @@ export interface EnergyFlowSourceProps {
   evcPower?: number;
   /** Raw EV Charger charging-state string from HR 0 (issue #139). */
   evcChargingState?: string;
-  /** Whether the EV Charger is actively charging. */
-  evcCharging?: boolean;
   /** Whether the EV Charger is connected/responding. */
   evcConnected?: boolean;
   /** EV Charger physical cable plugged in (HR 2 `connection_status`). */
@@ -48,7 +45,6 @@ export function useEnergyFlowViewModel({
   snapshot,
   evcPower = 0,
   evcChargingState = '',
-  evcCharging = false,
   evcConnected = false,
   evcCableConnected = false,
   evcSessionEnergyKwh = 0,
@@ -63,11 +59,12 @@ export function useEnergyFlowViewModel({
   // the Home reading.
   const homeExcludesCar = useInverterStore((st) => st.homeExcludesCar);
 
-  const evcLabel = !showEvc
-    ? undefined
-    : evcEstimated
-      ? undefined // buildEnergyFlows words it Charging / Idle from the power
-      : evcNodeLabel(evcCharging, evcConnected, !!evcEverConnected, evcChargingState);
+  // The charger's own status; buildEnergyFlows words it into the label, with
+  // "Charging" from the same power test as the flow line (issue #458). The
+  // estimated post has no charger to ask, so it gets none.
+  const evcCharger = showEvc && !evcEstimated
+    ? { connected: evcConnected, everConnected: !!evcEverConnected, chargingState: evcChargingState }
+    : undefined;
   // Cable indicator under the kW value (HR 2 `connection_status`). It's
   // only meaningful while we have a *fresh* frame — when the charger is
   // offline or never reached we genuinely can't see the cable, so we omit
@@ -80,7 +77,7 @@ export function useEnergyFlowViewModel({
     noiseThresholdW: noise,
     evcPowerW: evcPower,
     showEvc,
-    evcLabel,
+    evcCharger,
     evcCableLabel,
     evcSessionEnergyKwh: evcEstimated ? 0 : evcSessionEnergyKwh,
     gridMeterAddress,

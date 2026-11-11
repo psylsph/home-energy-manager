@@ -47,6 +47,7 @@ import { solarOverallPercent } from './solarArrays';
 import { deviceHasBatteryControls } from './deviceCapabilities';
 import { capLineSoc } from './chargeCap';
 import { gridMeterCurrentA, GRID_CT_AUTO } from './meters';
+import { evcNodeLabel } from './evcLabel';
 
 /**
  * Resolve the *visual* endpoint pair of a flow. The charge/ export spokes
@@ -215,6 +216,16 @@ export function batteryModeDisplayLabel(
 // Options + builder
 // ---------------------------------------------------------------------------
 
+/** A configured EV charger's own status, for the EV node's label. */
+export interface EvcChargerStatus {
+  /** The charger answered on the network (a fresh frame), not the cable. */
+  connected: boolean;
+  /** A valid frame has ever arrived from this host (issue #138). */
+  everConnected: boolean;
+  /** Raw HR 0 charging-state string, e.g. "Idle" (issue #139). */
+  chargingState: string;
+}
+
 export interface BuildEnergyFlowsOptions {
   /**
    * Noise floor in watts. Flows and active-node state below this read as
@@ -226,11 +237,14 @@ export interface BuildEnergyFlowsOptions {
   /** When false, the EV node is omitted entirely (charger not configured). */
   showEvc?: boolean;
   /**
-   * Resolved EV node label (e.g. "Charging" / "Idle" / "Connected" /
-   * "Disconnected" / "Not Found") from [`evcNodeLabel`]. When omitted the
-   * node falls back to "Charging" / "Idle" based on power alone.
+   * What the configured EV charger reports about itself, worded into the
+   * node's label ("Charging" / "Idle" / "Connected" / "Disconnected" /
+   * "Not Found") by [`evcNodeLabel`]. "Charging" comes only from the same
+   * power test that draws the EV flow line, so the two always agree
+   * (issue #458). Omitted for the estimated post (issue #454): the node then
+   * says "Charging" / "Idle" from the power alone.
    */
-  evcLabel?: string;
+  evcCharger?: EvcChargerStatus;
   /**
    * EV charger cable sub-label (HR 2 `connection_status`) rendered under
    * the kW value — "Cable In" / "No Cable". Pass `undefined` when the
@@ -804,7 +818,14 @@ export function buildEnergyFlows(
       id: 'ev',
       label: 'EV',
       value: evcValue,
-      unit: opts.evcLabel ?? (evcActive ? 'Charging' : 'Idle'),
+      unit: opts.evcCharger
+        ? evcNodeLabel(
+          evcActive,
+          opts.evcCharger.connected,
+          opts.evcCharger.everConnected,
+          opts.evcCharger.chargingState,
+        )
+        : evcActive ? 'Charging' : 'Idle',
       subLabel: opts.evcCableLabel,
       color: FLOW_COLORS.ev,
       active: evcActive,
