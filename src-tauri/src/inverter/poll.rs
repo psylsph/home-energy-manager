@@ -1076,6 +1076,13 @@ fn pause_probe_count(snapshot: &InverterSnapshot) -> Option<u16> {
     }
 }
 
+fn track_ac_config_pause_read(
+    _reads: &mut PauseProbe,
+    _snapshot: &mut InverterSnapshot,
+    _present: bool,
+) {
+}
+
 /// Keep the last known pause mode and window on a snapshot whose pause probe
 /// didn't produce a reading (failed, or backed off). Only the displayed
 /// fields: the raw read-back stays unset, so nothing that needs a fresh read
@@ -10548,6 +10555,123 @@ mod tests {
             DeviceType::Gen4Hybrid,
         ] {
             assert_eq!(probe(device_type, "620"), None, "{device_type:?}");
+        }
+    }
+
+    fn ac_config_snapshot(device_type: DeviceType, fw: &str) -> InverterSnapshot {
+        InverterSnapshot {
+            device_type,
+            firmware_version: fw.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The AC-coupled models and the All-in-Ones read the pause from the
+    /// HR 300-359 block rather than the probe (issue #433). When that block
+    /// keeps failing, the pause shown is the last one read, so the snapshot
+    /// says it can't be read, after the same three misses the probe allows.
+    #[test]
+    fn missed_ac_config_reads_flag_the_pause_unreadable() {
+        for (device_type, fw) in [
+            (DeviceType::ACCoupled, "200"),
+            (DeviceType::ACCoupledMk2, "200"),
+            (DeviceType::AllInOne6kW, "620"),
+            (DeviceType::AllInOne3_6kW, "620"),
+            (DeviceType::AllInOne5kW, "620"),
+            (DeviceType::ACThreePhase, "620"),
+        ] {
+            let mut misses = PauseProbe::default();
+            for poll in 1..PAUSE_PROBE_MAX_FAILURES {
+                let mut snap = ac_config_snapshot(device_type, fw);
+                track_ac_config_pause_read(&mut misses, &mut snap, false);
+                assert!(
+                    !snap.battery_pause_read_failing,
+                    "{device_type:?}: miss {poll} is a busy dongle"
+                );
+            }
+            for _ in 0..3 {
+                let mut snap = ac_config_snapshot(device_type, fw);
+                track_ac_config_pause_read(&mut misses, &mut snap, false);
+                assert!(snap.battery_pause_read_failing, "{device_type:?}");
+            }
+            let mut snap = ac_config_snapshot(device_type, fw);
+            track_ac_config_pause_read(&mut misses, &mut snap, true);
+            assert!(
+                !snap.battery_pause_read_failing,
+                "{device_type:?}: read again"
+            );
+            let mut snap = ac_config_snapshot(device_type, fw);
+            track_ac_config_pause_read(&mut misses, &mut snap, false);
+            assert!(
+                !snap.battery_pause_read_failing,
+                "{device_type:?}: a good read starts the count again"
+            );
+        }
+    }
+
+    #[test]
+    fn missed_ac_config_reads_must_be_consecutive() {
+        let mut misses = PauseProbe::default();
+        for _ in 0..10 {
+            let mut snap = ac_config_snapshot(DeviceType::ACCoupled, "200");
+            track_ac_config_pause_read(&mut misses, &mut snap, false);
+            assert!(!snap.battery_pause_read_failing);
+            let mut snap = ac_config_snapshot(DeviceType::ACCoupled, "200");
+            track_ac_config_pause_read(&mut misses, &mut snap, true);
+            assert!(!snap.battery_pause_read_failing);
+        }
+    }
+
+    /// A poll on which the model doesn't read the pause from HR 300-359 (its
+    /// firmware not read yet, say) ends the run of misses, so a later miss
+    /// doesn't inherit the count and flag the pause after a single failure.
+    #[test]
+    fn missed_ac_config_count_restarts_when_the_model_has_no_pause() {
+        let mut misses = PauseProbe::default();
+        for _ in 1..PAUSE_PROBE_MAX_FAILURES {
+            let mut snap = ac_config_snapshot(DeviceType::ACCoupled, "200");
+            track_ac_config_pause_read(&mut misses, &mut snap, false);
+        }
+        let mut snap = ac_config_snapshot(DeviceType::ACCoupled, "");
+        track_ac_config_pause_read(&mut misses, &mut snap, false);
+        let mut snap = ac_config_snapshot(DeviceType::ACCoupled, "200");
+        track_ac_config_pause_read(&mut misses, &mut snap, false);
+        assert!(
+            !snap.battery_pause_read_failing,
+            "one miss since the count restarted"
+        );
+    }
+
+    /// Models without the pause in HR 300-359 are left as they were: an AC
+    /// model too old for the pause and the Gateway (whose fast polls skip the
+    /// block on purpose) have nothing to read, and the probe models keep the
+    /// probe's own verdict.
+    #[test]
+    fn missed_ac_config_reads_leave_other_models_alone() {
+        for (device_type, fw) in [(DeviceType::ACCoupled, "199"), (DeviceType::Gateway, "620")] {
+            let mut misses = PauseProbe::default();
+            for _ in 0..PAUSE_PROBE_MAX_FAILURES + 2 {
+                let mut snap = ac_config_snapshot(device_type, fw);
+                track_ac_config_pause_read(&mut misses, &mut snap, false);
+                assert!(!snap.battery_pause_read_failing, "{device_type:?}");
+            }
+        }
+        for (device_type, fw) in [
+            (DeviceType::Gen3Hybrid, "318"),
+            (DeviceType::Gen1Hybrid, "450"),
+        ] {
+            let mut misses = PauseProbe::default();
+            for probe_verdict in [true, false] {
+                for _ in 0..PAUSE_PROBE_MAX_FAILURES + 2 {
+                    let mut snap = ac_config_snapshot(device_type, fw);
+                    snap.battery_pause_read_failing = probe_verdict;
+                    track_ac_config_pause_read(&mut misses, &mut snap, false);
+                    assert_eq!(
+                        snap.battery_pause_read_failing, probe_verdict,
+                        "{device_type:?}"
+                    );
+                }
+            }
         }
     }
 

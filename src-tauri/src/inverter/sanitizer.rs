@@ -6360,6 +6360,133 @@ mod tests {
         assert_eq!(snap.battery_pause_slot.end_hour, 10);
     }
 
+    /// The residential All-in-Ones read their pause, EPS and export priority
+    /// from HR 300-359 too (issue #433), so a missed block must not flash the
+    /// pause to "off". Their charge and discharge limits come from HR 111/112,
+    /// which were read fresh this poll, so those are left alone.
+    #[test]
+    fn optional_ac_config_carries_forward_the_pause_on_the_all_in_ones() {
+        for device_type in [
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+        ] {
+            let mut prev = InverterSnapshot {
+                device_type,
+                charge_rate: 80,
+                discharge_rate: 70,
+                ac_export_priority: 2,
+                ac_eps_enabled: true,
+                battery_pause_mode: 2,
+                ..Default::default()
+            };
+            prev.battery_pause_slot.enabled = true;
+            prev.battery_pause_slot.start_hour = 23;
+            prev.battery_pause_slot.end_hour = 5;
+
+            let mut snap = InverterSnapshot {
+                device_type,
+                charge_rate: 25,
+                discharge_rate: 30,
+                ..Default::default()
+            };
+
+            let changed = carry_forward_optional_block_values(
+                &mut snap,
+                Some(&prev),
+                false,
+                true,
+                true,
+                true,
+            );
+            assert!(changed, "{device_type:?}");
+            assert_eq!(snap.battery_pause_mode, 2, "{device_type:?}");
+            assert!(snap.battery_pause_slot.enabled, "{device_type:?}");
+            assert_eq!(snap.battery_pause_slot.start_hour, 23, "{device_type:?}");
+            assert_eq!(snap.battery_pause_slot.end_hour, 5, "{device_type:?}");
+            assert_eq!(snap.ac_export_priority, 2, "{device_type:?}");
+            assert!(snap.ac_eps_enabled, "{device_type:?}");
+            assert_eq!(snap.charge_rate, 25, "HR 111 is fresh on {device_type:?}");
+            assert_eq!(
+                snap.discharge_rate, 30,
+                "HR 112 is fresh on {device_type:?}"
+            );
+        }
+    }
+
+    /// A missed HR 300-359 block carries the displayed pause forward but not
+    /// the raw read-back, as the out-of-band probe does: the quick-action
+    /// status, the dispatch hold's capture and the charge cap must never take
+    /// the previous poll's registers for this poll's read.
+    #[test]
+    fn optional_ac_config_miss_leaves_the_raw_pause_read_unset() {
+        for device_type in [
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+            DeviceType::ACThreePhase,
+            DeviceType::AllInOne6kW,
+        ] {
+            let prev = InverterSnapshot {
+                device_type,
+                timestamp: 1_800_000_000,
+                battery_pause_mode: 2,
+                battery_pause_mode_raw: Some(2),
+                battery_pause_slot_start_raw: Some(2300),
+                battery_pause_slot_end_raw: Some(500),
+                battery_pause_registers_observed_at: Some(1_800_000_000),
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                device_type,
+                timestamp: 1_800_000_000,
+                ..Default::default()
+            };
+
+            carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true, true);
+
+            assert_eq!(
+                snap.battery_pause_mode, 2,
+                "{device_type:?}: shown as before"
+            );
+            assert_eq!(snap.battery_pause_mode_raw, None, "{device_type:?}");
+            assert_eq!(snap.battery_pause_slot_start_raw, None, "{device_type:?}");
+            assert_eq!(snap.battery_pause_slot_end_raw, None, "{device_type:?}");
+            assert_eq!(
+                snap.battery_pause_registers_observed_at, None,
+                "{device_type:?}"
+            );
+        }
+    }
+
+    /// The AC three-phase reads its limits from HR 1110/1108, not HR 313/314,
+    /// so a missed HR 300-359 block must not put the previous poll's limits
+    /// over the ones the three-phase block read fresh.
+    #[test]
+    fn optional_ac_config_miss_keeps_fresh_three_phase_limits() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::ACThreePhase,
+            charge_rate: 80,
+            discharge_rate: 70,
+            battery_pause_mode: 1,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::ACThreePhase,
+            charge_rate: 40,
+            discharge_rate: 35,
+            ..Default::default()
+        };
+
+        carry_forward_optional_block_values(&mut snap, Some(&prev), false, true, true, true);
+
+        assert_eq!(snap.charge_rate, 40);
+        assert_eq!(snap.discharge_rate, 35);
+        assert_eq!(
+            snap.battery_pause_mode, 1,
+            "the pause still carries forward"
+        );
+    }
+
     #[test]
     fn optional_extended_slots_carry_forward_for_hybrid_hv_gen3() {
         let mut prev = InverterSnapshot {
