@@ -399,18 +399,33 @@ writes charge slot 1 too, so with both on each overwrites the other's schedule.
 the same Import windows the History page costs use. They're in half-hour steps
 and must cover the whole day with no gaps or overlaps (the last one ends 23:59),
 up to 10 of them. A tariff like Octopus Cosy needs six: its three cheap windows
-plus the rate for the hours in between. The app never fetches your rates from
-Octopus, so these are yours to keep up to date. The Planner then charges in
-whichever window is cheapest.
+plus the rate for the hours in between. With an Octopus account connected you
+can set them to **From Octopus** in Energy Tariffs, and HEM fills them in from
+your agreement and keeps them up to date after each sync; otherwise they're
+yours to keep up to date. Tariffs that change every half hour, such as Agile,
+stay manual. The Planner then charges in whichever window is cheapest.
 
-Expect one charge: the Planner plans **one** charge cycle per run, for the
-cheapest window that's still ahead. It ranks windows by rate first. If two
-windows have the same rate, it picks the one later today over the one tomorrow,
-even when the tomorrow window is longer. If the same-rate windows both fall today
-or both fall tomorrow, the longer one wins. So a 22:00–00:00 window can win over a
-04:00–07:00 window at the same rate if it's still ahead today. Three cheap periods
-a day therefore give one charge, not a top-up in each. If you want the Planner to
-use a particular window, make its rate the lowest in your tariff.
+By default the Planner makes one plan a day, for the cheapest window that's
+still ahead. It ranks windows by rate first. If two windows have the same rate,
+it picks the one later today over the one tomorrow, even when the tomorrow window
+is longer. If the same-rate windows both fall today or both fall tomorrow, the
+longer one wins. So a 22:00–00:00 window can win over a 04:00–07:00 window at the
+same rate if it's still ahead today, and three cheap periods a day give one
+charge, which has to last the whole day. If you want the Planner to use a
+particular window, make its rate the lowest in your tariff.
+
+On a tariff with several cheap periods at the same price, such as Cosy, turn on
+**Plan Every Cheap Window** in Plan Settings (it only appears on such a tariff).
+The Planner then plans the next cheap period instead, and the automatic plan runs
+before each one: at your auto-apply lead time, or 30 minutes before with the
+nightly refresh. Each charge only has to keep your minimum until the following
+cheap period, so a sunny day can plan a morning charge and skip the afternoon one.
+Rates within 0.05p of the cheapest count as the same price, and touching slots at
+that price are one cheap period. If HEM is off or asleep until more than 10
+minutes into a cheap period, that period isn't planned, and charge slot 1 keeps
+the times it was last given until the next plan. Unlike Cosy
+mode, which charges in every cheap window regardless, it charges only what each
+gap needs.
 
 ---
 

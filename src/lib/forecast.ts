@@ -635,6 +635,9 @@ export type PlanResponse = {
   recommendation: PlanRecommendation;
   apply: PlanApply;
   export?: ExportAdvice | null;
+  /** How many cheap periods the import tariff has (issue #453); absent
+   *  in plan history rows. */
+  cheap_window_count?: number;
 };
 
 /** Note shown under the Minimum battery level input explaining what a

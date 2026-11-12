@@ -1217,13 +1217,25 @@ where
 /// Notification text for the auto-applied charging plan: charge slot 1
 /// was (re)written with the plan's window at the user's lead time before
 /// the cheap tariff window.
+/// "tomorrow", or for today's window "today" when it starts in the daytime
+/// (06:00–18:00, e.g. Cosy's 13:00, issue #453) and "tonight" otherwise.
+fn plan_day_word(start_hhmm: u16, tomorrow: bool) -> &'static str {
+    if tomorrow {
+        "tomorrow"
+    } else if (600..1800).contains(&start_hhmm) {
+        "today"
+    } else {
+        "tonight"
+    }
+}
+
 pub fn build_plan_applied_message(
     start_hhmm: u16,
     end_hhmm: u16,
     kwh: f64,
     tomorrow: bool,
 ) -> String {
-    let when = if tomorrow { "tomorrow" } else { "tonight" };
+    let when = plan_day_word(start_hhmm, tomorrow);
     format!(
         "📋 Charging plan applied — {:.1} kWh {} {:02}:{:02}–{:02}:{:02} (charge rate 100%).",
         kwh,
@@ -1245,7 +1257,7 @@ pub fn build_plan_applied_hold_message(
     kwh: f64,
     tomorrow: bool,
 ) -> String {
-    let when = if tomorrow { "tomorrow" } else { "tonight" };
+    let when = plan_day_word(start_hhmm, tomorrow);
     format!(
         "📋 Charging plan applied — charge to {}% {} {:02}:{:02}–{:02}:{:02} (about {:.1} kWh), \
          then hold it there while the grid supplies the house.",
@@ -1261,8 +1273,16 @@ pub fn build_plan_applied_hold_message(
 
 /// Notification text for a no-charge-needed plan: the trigger ran but
 /// cleared charge slot 1 (back to Eco) instead of writing a schedule.
-pub fn build_plan_cleared_message() -> String {
-    "📋 Charging plan applied — no charge needed, charge slot 1 cleared for tonight.".to_string()
+/// With every cheap window planned (issue #453) it is cleared only until
+/// the next cheap period's plan.
+pub fn build_plan_cleared_message(every_cheap_window: bool) -> String {
+    if every_cheap_window {
+        "📋 Charging plan applied — no charge needed before the next cheap period, charge slot 1 cleared."
+            .to_string()
+    } else {
+        "📋 Charging plan applied — no charge needed, charge slot 1 cleared for tonight."
+            .to_string()
+    }
 }
 
 /// Notification text for an auto-apply trigger that ran but could not
@@ -2441,9 +2461,26 @@ mod tests {
     #[test]
     fn plan_cleared_message_explains_the_eco_fallback() {
         assert_eq!(
-            build_plan_cleared_message(),
+            build_plan_cleared_message(false),
             "📋 Charging plan applied — no charge needed, charge slot 1 cleared for tonight."
         );
+        assert_eq!(
+            build_plan_cleared_message(true),
+            "📋 Charging plan applied — no charge needed before the next cheap period, charge slot 1 cleared."
+        );
+    }
+
+    #[test]
+    fn a_daytime_window_is_today_not_tonight() {
+        // Issue #453: Cosy's 13:00 period.
+        assert_eq!(
+            build_plan_applied_message(1300, 1430, 4.5, false),
+            "📋 Charging plan applied — 4.5 kWh today 13:00–14:30 (charge rate 100%)."
+        );
+        assert!(build_plan_applied_hold_message(1300, 1600, 60, 3.0, false)
+            .contains("60% today 13:00–16:00"));
+        assert!(build_plan_applied_message(2200, 2359, 3.0, false).contains("tonight 22:00"));
+        assert!(build_plan_applied_message(400, 600, 3.0, false).contains("tonight 04:00"));
     }
 
     #[test]

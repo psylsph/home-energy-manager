@@ -92,7 +92,8 @@ fn rate_outside_window(
     };
     let at = |m: u16| tariff.rate_for_minutes(m % 1440).unwrap_or(window_rate);
     let (first, second) = (at(minute), at(minute + 30));
-    let is_window = |rate: f64| (rate - window_rate).abs() < 1e-9;
+    // A merged cheap period takes its lowest row's rate (issue #453).
+    let is_window = |rate: f64| (rate - window_rate).abs() <= super::CHEAP_RATE_TOLERANCE;
     let window_halves = (is_window(first), is_window(second));
     let smart = |offset: i64, rate: f64| match smart {
         Some((halves, off_peak)) if halves.contains(timestamp + offset) => rate.min(off_peak),
@@ -314,4 +315,37 @@ pub fn plan_cheapest_overall(inputs: &PlanInputs, extras: &CostInputs) -> PlanRe
         rationale,
         PlanStrategy::Cheapest,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::TariffSlot;
+    use chrono::TimeZone;
+
+    #[test]
+    fn a_half_hour_within_the_tolerance_is_the_windows() {
+        // One cheap period 12:00–13:30 merged from 13.00p and 13.02p rows,
+        // so its rate is 13.00p. The 13:00 hour is half window (13.02p),
+        // half peak: what's outside the window costs the peak rate.
+        let slot = |s: &str, e: &str, r: f64| TariffSlot {
+            start: s.into(),
+            end: e.into(),
+            rate: r,
+        };
+        let tariff = TariffConfig {
+            slots: vec![
+                slot("00:00", "12:00", 0.27),
+                slot("12:00", "13:00", 0.1300),
+                slot("13:00", "13:30", 0.1302),
+                slot("13:30", "23:59", 0.27),
+            ],
+        };
+        let one_pm = chrono::Local
+            .with_ymd_and_hms(2026, 1, 12, 13, 0, 0)
+            .unwrap()
+            .timestamp();
+        let rate = rate_outside_window(&tariff, one_pm, 0.1300, None);
+        assert!((rate - 0.27).abs() < 1e-9, "{rate}");
+    }
 }

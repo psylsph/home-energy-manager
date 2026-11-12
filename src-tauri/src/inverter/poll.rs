@@ -654,6 +654,13 @@ pub struct AppState {
     /// before the cheap window (issue #361). In-memory only: a restart in
     /// the lead window records one more snapshot, which is harmless.
     pub forecast_plan_snapshot_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
+    /// The cheap-window occurrence each of the auto-refresh, the auto-apply
+    /// and the plan-history snapshot last planned (issue #453): the gate when
+    /// every cheap window is planned. Set by both modes, so switching it on
+    /// mid-day never plans a window twice. In-memory, like the dates above.
+    pub forecast_plan_refresh_window: Arc<Mutex<Option<crate::forecast::refresh::WindowKey>>>,
+    pub forecast_plan_apply_window: Arc<Mutex<Option<crate::forecast::refresh::WindowKey>>>,
+    pub forecast_plan_snapshot_window: Arc<Mutex<Option<crate::forecast::refresh::WindowKey>>>,
     /// The charge slot the plan last wrote and the window it is for, so it
     /// can be re-planned when Octopus moves a dispatch (issue #404).
     /// In-memory only: after a restart the next daily write starts afresh.
@@ -875,6 +882,9 @@ impl AppState {
             forecast_plan_refresh_warned: Arc::new(Mutex::new(None)),
             forecast_plan_apply_date: Arc::new(Mutex::new(None)),
             forecast_plan_snapshot_date: Arc::new(Mutex::new(None)),
+            forecast_plan_refresh_window: Arc::new(Mutex::new(None)),
+            forecast_plan_apply_window: Arc::new(Mutex::new(None)),
+            forecast_plan_snapshot_window: Arc::new(Mutex::new(None)),
             forecast_plan_cycle: Arc::new(Mutex::new(None)),
             forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),

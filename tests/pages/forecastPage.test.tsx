@@ -1390,6 +1390,68 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     });
   });
 
+  // Issue #453: plan every cheap window.
+  const withCheapWindows = (plan: { ok: true; data: unknown }, count: number) => ({
+    ok: true as const,
+    data: { ...(plan.data as Record<string, unknown>), cheap_window_count: count },
+  });
+
+  it('offers to plan every cheap window only on a tariff with several', async () => {
+    mockPage(withCheapWindows(planPayload('charge'), 1));
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-strategy');
+    expect(screen.queryByTestId('forecast-plan-every-window')).toBeNull();
+  });
+
+  it('saves Plan Every Cheap Window and refetches the plan', async () => {
+    mockPage(withCheapWindows(planPayload('charge'), 3));
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-plan-every-window');
+    expect(row.textContent).toMatch(/Plan Every Cheap Window/);
+    expect(within(row).getByRole('button', { name: 'More about Plan Every Cheap Window' })).toBeTruthy();
+    const toggle = within(row).getByRole('switch', { name: 'Plan Every Cheap Window' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-disabled', 'false'));
+    apiPostMocked.mockClear();
+    apiGetMock.mockClear();
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(apiPostMocked).toHaveBeenCalledWith('/api/settings', {
+        forecast_plan_every_cheap_window: true,
+      });
+    });
+    await waitFor(() => {
+      expect(apiGetMock.mock.calls.some((c) => c[0] === '/api/forecast/plan')).toBe(true);
+    });
+  });
+
+  it('keeps Plan Every Cheap Window visible while on, so it can be switched off', async () => {
+    mockPage(withCheapWindows(planPayload('charge'), 1), {
+      forecast_min_soc_pct: 20,
+      forecast_plan_every_cheap_window: true,
+    });
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-plan-every-window');
+    const toggle = within(row).getByRole('switch', { name: 'Plan Every Cheap Window' });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+  });
+
+  it('reports a failed Plan Every Cheap Window save and stays off', async () => {
+    mockPage(withCheapWindows(planPayload('charge'), 3));
+    apiPostMocked.mockRejectedValueOnce(new Error('Save refused'));
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-plan-every-window');
+    const toggle = within(row).getByRole('switch', { name: 'Plan Every Cheap Window' });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-disabled', 'false'));
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan-every-window-error')).toHaveTextContent(
+        /save refused/i,
+      );
+    });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+  });
+
   it('reports a failed strategy save and keeps the previous choice', async () => {
     mockPage(planPayload('charge'));
     apiPostMocked.mockRejectedValueOnce(new Error('Unknown planner strategy'));

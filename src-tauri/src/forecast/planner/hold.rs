@@ -14,10 +14,12 @@
 //! [`plan_overnight_charge`] runs first, unchanged, and only its `Charge`
 //! outcome is reshaped here.
 
+#[cfg(test)]
+use super::first_reachable_occurrence;
 use super::{
-    charge_duration_minutes, charge_window_for_duration, cheapest_import_window,
-    energy_on_local_day, first_reachable_occurrence, floor_held, hhmm, plan_overnight_charge,
-    post_range, window_overlap_segments, ChargeWindow, PlanInputs, PlanRecommendation,
+    charge_duration_minutes, charge_window_for_duration, energy_on_local_day,
+    first_reachable_occurrence_in, floor_held, hhmm, plan_overnight_charge, post_range,
+    window_overlap_segments, ChargeWindow, PlanInputs, PlanRecommendation,
 };
 use crate::forecast::simulate::{
     simulate_battery_segment, SimHourInput, SimHourResult, SimulationParams,
@@ -282,9 +284,10 @@ pub(super) fn prepare_hold<'a>(inputs: &PlanInputs<'a>) -> Option<HoldContext<'a
         .sim_hours
         .filter(|hours| hours.len() == inputs.simulation.hours.len())?;
     let tariff = inputs.import_tariff?;
-    let window = cheapest_import_window(tariff, inputs.window_pick_minute(), 30)?;
+    let window = inputs.charge_window(tariff)?;
+    let horizon = inputs.horizon_windows(tariff, &window);
     let (selected, next_occurrence_start) =
-        first_reachable_occurrence(sim_hours, &window, inputs.occurrence_at());
+        first_reachable_occurrence_in(sim_hours, &window, &horizon, inputs.occurrence_at());
     let occurrence = selected?;
     let first_index = occurrence.first_index();
     let run = occurrence.run;

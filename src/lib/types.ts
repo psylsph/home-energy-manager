@@ -385,6 +385,9 @@ export interface PollSettings {
   /** How the Planner sizes the overnight charge (issue #359). Defaults
    * to `min_soc`. */
   forecast_plan_strategy?: PlanStrategy;
+  /** Plan a charge before every cheap period, not just the cheapest
+   * (issue #453). Opt-in; defaults to false. */
+  forecast_plan_every_cheap_window?: boolean;
   /** Rated peak capacity (kWp) of the PV2 DC string. 0 = unset. */
   pv2_rated_kw?: number;
   /** External solar arrays measured by CT clamps (AC-coupled). */

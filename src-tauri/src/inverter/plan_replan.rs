@@ -52,7 +52,7 @@ pub(crate) fn hhmm_minutes(hhmm: u16) -> u16 {
 
 /// The local instant `minutes` past midnight on `date` (1440 is the next
 /// midnight), resolved the way the planner dates window occurrences.
-fn local_ts(date: NaiveDate, minutes: u32) -> Option<i64> {
+pub(crate) fn local_ts(date: NaiveDate, minutes: u32) -> Option<i64> {
     use chrono::TimeZone;
     let (date, minutes) = if minutes >= 1440 {
         (date.succ_opt()?, minutes - 1440)
@@ -244,13 +244,18 @@ pub(crate) fn mismatch_count(previous: u8, matches: Option<bool>) -> u8 {
     }
 }
 
-/// The next occurrence of the tariff's cheapest window from `now`, as the
+/// The next occurrence of the planned cheap window from `now` (the cheapest,
+/// or with every cheap window planned the next of them, issue #453), as the
 /// daily write's due-check picks it: `(start, end)` in Unix seconds and the
 /// start as HHMM. Both ends are resolved in local time, so a clock-change
 /// night has its real length. A window ending at 23:59 ends at midnight.
-pub(crate) fn cycle_window(tariff: &TariffConfig, now: DateTime<Local>) -> Option<(i64, i64, u16)> {
+pub(crate) fn cycle_window(
+    tariff: &TariffConfig,
+    now: DateTime<Local>,
+    every_cheap_window: bool,
+) -> Option<(i64, i64, u16)> {
     let now_min = now.hour() as u16 * 60 + now.minute() as u16;
-    let window = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30)?;
+    let window = crate::forecast::planner::plan_window(tariff, now_min, every_cheap_window)?;
     let today = now.date_naive();
     let start_date = if window.start_min >= now_min {
         today
@@ -514,7 +519,7 @@ mod tests {
 
     fn cycle() -> PlanCycle {
         let (window_start, window_end, window_start_hhmm) =
-            cycle_window(&iog(), local(23, 0)).unwrap();
+            cycle_window(&iog(), local(23, 0), false).unwrap();
         PlanCycle {
             trigger: PlanTrigger::AutoApply,
             written_at: local(23, 0).timestamp(),
@@ -582,7 +587,7 @@ mod tests {
 
     #[test]
     fn the_cycle_is_tonights_wrapping_window_in_local_time() {
-        let (start, end, hhmm) = cycle_window(&iog(), local(23, 0)).unwrap();
+        let (start, end, hhmm) = cycle_window(&iog(), local(23, 0), false).unwrap();
         assert_eq!(hhmm, 2330);
         assert_eq!(start, local(23, 30).timestamp() - 20);
         // 05:30 the next morning as the local clock reads it, whatever the
@@ -600,7 +605,7 @@ mod tests {
         let tariff = TariffConfig {
             slots: vec![slot("00:00", "22:00", 0.30), slot("22:00", "23:59", 0.07)],
         };
-        let (start, end, hhmm) = cycle_window(&tariff, local(21, 45)).unwrap();
+        let (start, end, hhmm) = cycle_window(&tariff, local(21, 45), false).unwrap();
         assert_eq!(hhmm, 2200);
         assert_eq!(start, local(22, 0).timestamp() - 20);
         assert_eq!(end, local_on(11, 0, 0).timestamp() - 20);
@@ -889,5 +894,31 @@ mod tests {
             replan_message(SlotSummary::Clear, charge(2330, 100), 3.0, false)
                 .contains("(was no charge)")
         );
+    }
+
+    #[test]
+    fn the_cycle_is_for_the_window_the_plan_picks() {
+        // Issue #453: with every cheap window planned, the cycle is the next
+        // cheap window, as the planner plans it, not the longest one.
+        let slot = |s: &str, e: &str, r: f64| crate::settings::TariffSlot {
+            start: s.into(),
+            end: e.into(),
+            rate: r,
+        };
+        let tariff = TariffConfig {
+            slots: vec![
+                slot("00:00", "01:00", 0.10),
+                slot("01:00", "13:00", 0.27),
+                slot("13:00", "14:00", 0.10),
+                slot("14:00", "22:00", 0.27),
+                slot("22:00", "23:59", 0.10),
+            ],
+        };
+        let now = local(12, 30);
+        let (start, end, hhmm) = cycle_window(&tariff, now, true).unwrap();
+        assert_eq!(hhmm, 1300);
+        assert_eq!(end - start, 3600);
+        let (_, _, hhmm) = cycle_window(&tariff, now, false).unwrap();
+        assert_eq!(hhmm, 2200);
     }
 }

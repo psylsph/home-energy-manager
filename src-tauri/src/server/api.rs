@@ -1911,6 +1911,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "forecast_plan_auto_apply_lead_minutes": settings.forecast_plan_auto_apply_lead_minutes,
             // How the Planner sizes the overnight charge (issue #359).
             "forecast_plan_strategy": settings.forecast_plan_strategy,
+            // Plan before every cheap period, not just the cheapest (#453).
+            "forecast_plan_every_cheap_window": settings.forecast_plan_every_cheap_window,
         }
         })),
     )
@@ -2369,6 +2371,12 @@ pub async fn update_settings(
             }
             persist.forecast_plan_auto_apply_lead_minutes = v as u16;
         }
+        if let Some(v) = body
+            .get("forecast_plan_every_cheap_window")
+            .and_then(|v| v.as_bool())
+        {
+            persist.forecast_plan_every_cheap_window = v;
+        }
         if let Some(v) = body.get("forecast_plan_strategy") {
             persist.forecast_plan_strategy = serde_json::from_value(v.clone()).map_err(|_| {
                 "Unknown planner strategy — expected \"min_soc\", \"hold_window\" or \"cheapest\"".to_string()
@@ -2795,6 +2803,12 @@ fn settings_log_fields(
         out.push(format!(
             "forecast_plan_auto_refresh={}",
             persist.forecast_plan_auto_refresh
+        ));
+    }
+    if is_present("forecast_plan_every_cheap_window") {
+        out.push(format!(
+            "forecast_plan_every_cheap_window={}",
+            persist.forecast_plan_every_cheap_window
         ));
     }
     out
@@ -9155,6 +9169,11 @@ pub(crate) async fn get_forecast_plan_at(
         now.with_timezone(&chrono::Utc),
     )
     .await;
+    // How many cheap periods the tariff has (issue #453): the Plan Settings
+    // offer to plan every one only when there are two or more.
+    let cheap_window_count = settings.import_tariff_config.as_ref().map_or(0, |tariff| {
+        crate::forecast::planner::cheap_import_windows(tariff, 0, 30).len()
+    });
     let (charge, export_advice) = match tokio::task::spawn_blocking(move || {
         let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
@@ -9168,6 +9187,7 @@ pub(crate) async fn get_forecast_plan_at(
             include_current_hour: crate::forecast::planner::plan_needs_current_hour(
                 settings.import_tariff_config.as_ref(),
                 now,
+                settings.forecast_plan_every_cheap_window,
             ),
         });
         compute_full_plan(&forecast, &settings, snapshot.as_ref(), now.timestamp())
@@ -9177,13 +9197,10 @@ pub(crate) async fn get_forecast_plan_at(
         Ok(plan) => plan,
         Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
     };
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "data": plan_response_json(&charge, export_advice.as_ref()),
-        })),
-    )
+    // Outside `plan_response_json`, so plan history rows stay as they were.
+    let mut data = plan_response_json(&charge, export_advice.as_ref());
+    data["cheap_window_count"] = json!(cheap_window_count);
+    (StatusCode::OK, Json(json!({ "ok": true, "data": data })))
 }
 
 /// The `data` block of `GET /api/forecast/plan`: the recommendation, its
@@ -9291,6 +9308,7 @@ pub(crate) fn compute_full_plan(
         hold_window,
         floor_pct: min_soc_pct,
         now_ts,
+        every_cheap_window: settings.forecast_plan_every_cheap_window,
     });
     (charge, Some(export))
 }
@@ -9531,6 +9549,7 @@ fn compute_charge_plan_inner<'a>(
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
         running_window_start,
+        every_cheap_window: settings.forecast_plan_every_cheap_window,
     };
     // A planned smart charge's half-hours are billed off-peak (issue #434).
     let smart_charges = crate::history::OffPeakHalfHours::from_spans(
@@ -21756,6 +21775,69 @@ pub(crate) mod tests {
             let s = crate::settings::Settings::load();
             assert!((s.forecast_charge_efficiency - 0.85).abs() < 1e-9);
             assert!((s.forecast_discharge_efficiency - 0.92).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_every_cheap_window_saves_and_reads_back() {
+        // Issue #453.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_every_cheap_window"], false);
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_every_cheap_window": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(crate::settings::Settings::load().forecast_plan_every_cheap_window);
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_every_cheap_window"], true);
+            // A save without the field leaves it alone.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "cheapest" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(crate::settings::Settings::load().forecast_plan_every_cheap_window);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_plan_says_how_many_cheap_windows_the_tariff_has() {
+        // Issue #453: Cosy has three, Flux one, no tariff none.
+        with_isolated_config_dir_async(|| async {
+            use chrono::TimeZone;
+            let state = test_state();
+            let now = chrono::Local
+                .with_ymd_and_hms(2026, 1, 12, 10, 0, 0)
+                .unwrap();
+            let (_, Json(body)) = get_forecast_plan_at(state.clone(), now).await;
+            assert_eq!(body["data"]["cheap_window_count"], 0, "{body}");
+            let slot = |s: &str, e: &str, r: f64| crate::settings::TariffSlot {
+                start: s.into(),
+                end: e.into(),
+                rate: r,
+            };
+            crate::settings::Settings::update(|s| {
+                s.import_tariff_config = Some(crate::settings::TariffConfig {
+                    slots: vec![
+                        slot("00:00", "04:00", 0.27),
+                        slot("04:00", "07:00", 0.13),
+                        slot("07:00", "13:00", 0.27),
+                        slot("13:00", "16:00", 0.13),
+                        slot("16:00", "22:00", 0.30),
+                        slot("22:00", "23:59", 0.13),
+                    ],
+                });
+            })
+            .unwrap();
+            let (_, Json(body)) = get_forecast_plan_at(state.clone(), now).await;
+            assert_eq!(body["data"]["cheap_window_count"], 3, "{body}");
         })
         .await;
     }

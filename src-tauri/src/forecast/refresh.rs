@@ -228,6 +228,136 @@ pub fn plan_auto_apply_adaptive_warning_due(
     )
 }
 
+/// One occurrence of a cheap window: the local date it opens and its start
+/// minute. The latch for planning every cheap window (issue #453), so each
+/// window is planned once, and a window just after midnight isn't planned
+/// again when the date rolls over.
+pub type WindowKey = (NaiveDate, u16);
+
+/// Whether `window` is under way at local minute `now_min` (a 23:59 end
+/// counts as midnight).
+fn window_active(window: &ChargeWindow, now_min: u16) -> bool {
+    let end = if window.end_min >= 1439 {
+        1440
+    } else {
+        window.end_min
+    };
+    if window.start_min < end {
+        now_min >= window.start_min && now_min < end
+    } else {
+        now_min >= window.start_min || now_min < end
+    }
+}
+
+/// The key of `window`'s occurrence nearest `now`: the one under way, or
+/// else the next to start.
+pub fn occurrence_key(window: &ChargeWindow, now: DateTime<Local>) -> WindowKey {
+    let now_min = now.hour() as u16 * 60 + now.minute() as u16;
+    let date = if window_active(window, now_min) {
+        let elapsed = (now_min + 1440 - window.start_min) % 1440;
+        (now - chrono::Duration::minutes(i64::from(elapsed))).date_naive()
+    } else {
+        let until = (window.start_min + 1440 - now_min) % 1440;
+        (now + chrono::Duration::minutes(i64::from(until))).date_naive()
+    };
+    (date, window.start_min)
+}
+
+/// The key of the window a once-a-day write at `now` was due for, as
+/// [`plan_refresh_due`] and [`plan_auto_apply_due`] find it: the cheapest
+/// window starting within `lead_minutes`, or else the one that started
+/// within the catch-up period. Latched with the date so switching to every
+/// cheap window mid-day doesn't plan that window again (issue #453).
+pub fn once_a_day_window_key(
+    tariff: &TariffConfig,
+    now: DateTime<Local>,
+    lead_minutes: u16,
+) -> Option<WindowKey> {
+    use crate::forecast::planner::cheapest_import_window;
+    let now_min = now.hour() as u16 * 60 + now.minute() as u16;
+    let ahead = cheapest_import_window(tariff, now_min, 30);
+    if let Some(window) = ahead
+        .as_ref()
+        .filter(|w| (w.start_min + 1440 - now_min) % 1440 <= lead_minutes)
+    {
+        return Some(occurrence_key(window, now));
+    }
+    let lookback = (now_min + 1440 - PLAN_REFRESH_CATCH_UP_MINUTES) % 1440;
+    let running = cheapest_import_window(tariff, lookback, 30).filter(|w| {
+        window_active(w, now_min)
+            && (now_min + 1440 - w.start_min) % 1440 <= PLAN_REFRESH_CATCH_UP_MINUTES
+    });
+    running.or(ahead).map(|window| occurrence_key(&window, now))
+}
+
+/// A cheap window that started less than this many minutes ago without a
+/// plan is still planned, as a window under way (issue #453): a zero lead,
+/// a slow poll or a restart can miss the minutes before it. Past its start
+/// minute only in the first minutes of an hour, as the #404 replan: the
+/// forecast counts the current hour from its start, so later than that too
+/// much of it has already gone.
+pub const EVERY_WINDOW_START_GRACE_MINUTES: u16 = 10;
+
+/// What the every-cheap-window gate decided this poll (issue #453).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EveryWindowDue {
+    /// Plan the window with this key now.
+    Due(WindowKey),
+    /// Plan the window with this key, which started within
+    /// [`EVERY_WINDOW_START_GRACE_MINUTES`], as a window under way.
+    DueRunning(WindowKey),
+    /// This window started without a plan longer ago than that (HEM was
+    /// asleep or restarting): latch it and say so, but don't plan it.
+    Missed(WindowKey),
+    NotDue,
+}
+
+/// The gate when every cheap window is planned (issue #453): due when the
+/// next cheap window starts within `lead_minutes`, strictly after now, and
+/// no cheap window is under way; or, for one under way that wasn't planned,
+/// at its start or in its first [`EVERY_WINDOW_START_GRACE_MINUTES`] early in
+/// an hour. Each window
+/// occurrence is due once: `last` is the key of the last one planned (or
+/// missed). Pure tariff arithmetic.
+pub fn every_window_due(
+    now: DateTime<Local>,
+    last: Option<WindowKey>,
+    tariff: Option<&TariffConfig>,
+    lead_minutes: u16,
+) -> EveryWindowDue {
+    let Some(tariff) = tariff else {
+        return EveryWindowDue::NotDue;
+    };
+    let now_min = now.hour() as u16 * 60 + now.minute() as u16;
+    let windows = crate::forecast::planner::cheap_import_windows(tariff, now_min, 30);
+    if let Some(running) = windows.iter().find(|w| window_active(w, now_min)) {
+        let key = occurrence_key(running, now);
+        let elapsed = (now_min + 1440 - running.start_min) % 1440;
+        if last == Some(key) || elapsed > PLAN_REFRESH_CATCH_UP_MINUTES {
+            return EveryWindowDue::NotDue;
+        }
+        // Planned under way, the forecast counts this hour from its start:
+        // fine at the window's start minute (as a plan made then for the
+        // window ahead), or early in the hour.
+        let early_in_hour = now.minute() < crate::inverter::plan_replan::IN_WINDOW_REPLAN_MINUTES;
+        return if elapsed == 0 || (elapsed < EVERY_WINDOW_START_GRACE_MINUTES && early_in_hour) {
+            EveryWindowDue::DueRunning(key)
+        } else {
+            EveryWindowDue::Missed(key)
+        };
+    }
+    let Some(next) = windows.first() else {
+        return EveryWindowDue::NotDue;
+    };
+    let until_start = (next.start_min + 1440 - now_min) % 1440;
+    let key = occurrence_key(next, now);
+    if until_start > 0 && until_start <= lead_minutes && last != Some(key) {
+        EveryWindowDue::Due(key)
+    } else {
+        EveryWindowDue::NotDue
+    }
+}
+
 /// Map a freshly computed plan to the refresh action. The window's
 /// wall-clock bounds use the same 23:59 clamp as the Apply payload so the
 /// inverter's slot register stays enabled for end-of-day windows.
@@ -821,6 +951,7 @@ mod tests {
             now_ts: local_dt(2026, 8, 31, 22, 0).timestamp(),
             current_soc_pct: start_soc,
             running_window_start: None,
+            every_cheap_window: false,
         };
         plan_overnight_charge(&inputs)
     }
@@ -904,5 +1035,325 @@ mod tests {
                 target_soc: 62,
             }
         );
+    }
+
+    // ---- Every cheap window (issue #453) ----
+
+    fn cosy_tariff() -> TariffConfig {
+        tariff(&[
+            ("00:00", "04:00", 0.27),
+            ("04:00", "07:00", 0.13),
+            ("07:00", "13:00", 0.27),
+            ("13:00", "16:00", 0.13),
+            ("16:00", "19:00", 0.40),
+            ("19:00", "22:00", 0.27),
+            ("22:00", "23:59", 0.13),
+        ])
+    }
+
+    /// Walk a day minute by minute through the gate, latching like the
+    /// poll loop does, and return what it decided and when.
+    fn walk(
+        tariff: &TariffConfig,
+        lead: u16,
+        from: DateTime<Local>,
+        minutes: i64,
+        mut last: Option<WindowKey>,
+    ) -> Vec<(String, EveryWindowDue)> {
+        let mut fired = Vec::new();
+        for m in 0..minutes {
+            let now = from + chrono::Duration::minutes(m);
+            let due = every_window_due(now, last, Some(tariff), lead);
+            if let EveryWindowDue::Due(key)
+            | EveryWindowDue::DueRunning(key)
+            | EveryWindowDue::Missed(key) = due
+            {
+                last = Some(key);
+                fired.push((now.format("%d %H:%M").to_string(), due));
+            }
+        }
+        fired
+    }
+
+    #[test]
+    fn every_window_fires_once_before_each_cosy_window() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let fired = walk(&cosy_tariff(), 30, local_dt(2026, 1, 12, 0, 0), 1440, None);
+        assert_eq!(
+            fired,
+            vec![
+                ("12 03:30".to_string(), EveryWindowDue::Due((day, 4 * 60))),
+                ("12 12:30".to_string(), EveryWindowDue::Due((day, 13 * 60))),
+                ("12 21:30".to_string(), EveryWindowDue::Due((day, 22 * 60))),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_window_with_one_cheap_window_fires_once_a_day() {
+        let fired = walk(
+            &flux_tariff(),
+            30,
+            local_dt(2026, 1, 12, 0, 0),
+            2 * 1440,
+            None,
+        );
+        let times: Vec<_> = fired.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(times, vec!["12 01:30", "13 01:30"]);
+    }
+
+    #[test]
+    fn a_window_across_midnight_is_planned_once() {
+        // Intelligent Octopus Go: 23:30–05:30, latched on the date it opens.
+        let iog = tariff(&[
+            ("00:00", "05:30", 0.07),
+            ("05:30", "23:30", 0.30),
+            ("23:30", "23:59", 0.07),
+        ]);
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let fired = walk(&iog, 30, local_dt(2026, 1, 12, 22, 0), 6 * 60, None);
+        assert_eq!(
+            fired,
+            vec![(
+                "12 23:00".to_string(),
+                EveryWindowDue::Due((day, 23 * 60 + 30))
+            )]
+        );
+        // A window opening just after midnight, planned before it, keeps
+        // the opening date's key through the rollover.
+        let late = tariff(&[
+            ("00:00", "00:20", 0.27),
+            ("00:20", "03:00", 0.07),
+            ("03:00", "23:59", 0.27),
+        ]);
+        let fired = walk(&late, 30, local_dt(2026, 1, 12, 23, 0), 120, None);
+        let next = chrono::NaiveDate::from_ymd_opt(2026, 1, 13).unwrap();
+        assert_eq!(
+            fired,
+            vec![("12 23:50".to_string(), EveryWindowDue::Due((next, 20)))]
+        );
+    }
+
+    #[test]
+    fn a_window_that_started_without_a_plan_is_missed_not_planned() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        // Waking at 13:20 inside the 13:00 window.
+        let now = local_dt(2026, 1, 12, 13, 20);
+        assert_eq!(
+            every_window_due(now, None, Some(&cosy_tariff()), 30),
+            EveryWindowDue::Missed((day, 13 * 60))
+        );
+        // Once latched, nothing more until the 22:00 window's lead.
+        let fired = walk(&cosy_tariff(), 30, now, 9 * 60, Some((day, 13 * 60)));
+        let times: Vec<_> = fired.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(times, vec!["12 21:30"]);
+        // Past the catch-up period a running window isn't even reported.
+        assert_eq!(
+            every_window_due(
+                local_dt(2026, 1, 12, 14, 30),
+                None,
+                Some(&cosy_tariff()),
+                30
+            ),
+            EveryWindowDue::NotDue
+        );
+        // Ten minutes in is past the start grace: missed too.
+        assert_eq!(
+            every_window_due(
+                local_dt(2026, 1, 12, 13, 10),
+                None,
+                Some(&cosy_tariff()),
+                30
+            ),
+            EveryWindowDue::Missed((day, 13 * 60))
+        );
+    }
+
+    #[test]
+    fn a_zero_lead_plans_each_window_at_its_start() {
+        // No poll lands strictly before the start with a zero lead, so the
+        // start itself plans the window, as one under way.
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let fired = walk(&cosy_tariff(), 0, local_dt(2026, 1, 12, 0, 0), 1440, None);
+        assert_eq!(
+            fired,
+            vec![
+                (
+                    "12 04:00".to_string(),
+                    EveryWindowDue::DueRunning((day, 4 * 60))
+                ),
+                (
+                    "12 13:00".to_string(),
+                    EveryWindowDue::DueRunning((day, 13 * 60))
+                ),
+                (
+                    "12 22:00".to_string(),
+                    EveryWindowDue::DueRunning((day, 22 * 60))
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_just_started_is_planned_within_the_grace() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let tariff = cosy_tariff();
+        // A slow poll or a restart a few minutes in still plans it.
+        assert_eq!(
+            every_window_due(local_dt(2026, 1, 12, 13, 9), None, Some(&tariff), 1),
+            EveryWindowDue::DueRunning((day, 13 * 60))
+        );
+        // Once planned, it isn't again.
+        assert_eq!(
+            every_window_due(
+                local_dt(2026, 1, 12, 13, 5),
+                Some((day, 13 * 60)),
+                Some(&tariff),
+                1
+            ),
+            EveryWindowDue::NotDue
+        );
+        // A one-minute lead with polls seven minutes apart plans every
+        // window, before it or just after it starts.
+        let mut last = None;
+        let mut planned = Vec::new();
+        for i in 0..(1440 / 7) {
+            let now = local_dt(2026, 1, 12, 0, 0) + chrono::Duration::minutes(i * 7);
+            match every_window_due(now, last, Some(&tariff), 1) {
+                EveryWindowDue::Due(key) | EveryWindowDue::DueRunning(key) => {
+                    last = Some(key);
+                    planned.push(key.1);
+                }
+                EveryWindowDue::Missed(key) => panic!("missed {key:?} at {now}"),
+                EveryWindowDue::NotDue => {}
+            }
+        }
+        assert_eq!(planned, vec![4 * 60, 13 * 60, 22 * 60]);
+    }
+
+    #[test]
+    fn a_half_hour_window_is_planned_under_way_only_at_its_start() {
+        // Planned under way, the forecast counts the hour from 13:00, so
+        // past the start minute too much of it has gone.
+        let t = tariff(&[
+            ("00:00", "13:30", 0.27),
+            ("13:30", "16:00", 0.13),
+            ("16:00", "23:59", 0.27),
+        ]);
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        assert_eq!(
+            every_window_due(local_dt(2026, 1, 12, 13, 30), None, Some(&t), 0),
+            EveryWindowDue::DueRunning((day, 13 * 60 + 30))
+        );
+        assert_eq!(
+            every_window_due(local_dt(2026, 1, 12, 13, 31), None, Some(&t), 0),
+            EveryWindowDue::Missed((day, 13 * 60 + 30))
+        );
+    }
+
+    #[test]
+    fn a_restart_in_the_lead_plans_again() {
+        // In-memory latch: after a restart the window is due again, an
+        // idempotent rewrite of the same slot.
+        let now = local_dt(2026, 1, 12, 12, 40);
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        assert_eq!(
+            every_window_due(now, None, Some(&cosy_tariff()), 30),
+            EveryWindowDue::Due((day, 13 * 60))
+        );
+        assert_eq!(
+            every_window_due(now, Some((day, 13 * 60)), Some(&cosy_tariff()), 30),
+            EveryWindowDue::NotDue
+        );
+    }
+
+    #[test]
+    fn a_long_lead_waits_for_the_previous_window_to_end() {
+        // Cheap 13:00–14:00 and 14:30–16:00: a 120-minute lead would reach
+        // back into the first; the second is planned after it ends instead.
+        let t = tariff(&[
+            ("00:00", "13:00", 0.27),
+            ("13:00", "14:00", 0.10),
+            ("14:00", "14:30", 0.27),
+            ("14:30", "16:00", 0.10),
+            ("16:00", "23:59", 0.27),
+        ]);
+        let fired = walk(&t, 120, local_dt(2026, 1, 12, 10, 0), 6 * 60, None);
+        let times: Vec<_> = fired.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(times, vec!["12 11:00", "12 14:00"]);
+    }
+
+    #[test]
+    fn a_thirty_minute_gap_is_never_due_while_a_slot_runs() {
+        let t = tariff(&[
+            ("00:00", "13:00", 0.27),
+            ("13:00", "14:00", 0.10),
+            ("14:00", "14:30", 0.27),
+            ("14:30", "16:00", 0.10),
+            ("16:00", "23:59", 0.27),
+        ]);
+        for m in 0..1440 {
+            let now = local_dt(2026, 1, 12, 0, 0) + chrono::Duration::minutes(m);
+            let now_min = (m % 1440) as u16;
+            if let EveryWindowDue::Due(_) = every_window_due(now, None, Some(&t), 30) {
+                assert!(
+                    !(13 * 60..14 * 60).contains(&now_min)
+                        && !(14 * 60 + 30..16 * 60).contains(&now_min),
+                    "due at {now}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_window_needs_a_tariff() {
+        assert_eq!(
+            every_window_due(local_dt(2026, 1, 12, 3, 40), None, None, 30),
+            EveryWindowDue::NotDue
+        );
+    }
+
+    #[test]
+    fn occurrence_key_dates_the_opening_of_a_running_window() {
+        let w = crate::forecast::planner::ChargeWindow {
+            start_min: 23 * 60 + 30,
+            end_min: 5 * 60 + 30,
+            tomorrow: false,
+            rate: 0.07,
+        };
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        assert_eq!(
+            occurrence_key(&w, local_dt(2026, 1, 13, 2, 0)),
+            (day, 23 * 60 + 30)
+        );
+        assert_eq!(
+            occurrence_key(&w, local_dt(2026, 1, 12, 23, 0)),
+            (day, 23 * 60 + 30)
+        );
+        assert_eq!(
+            occurrence_key(&w, local_dt(2026, 1, 12, 23, 45)),
+            (day, 23 * 60 + 30)
+        );
+    }
+
+    #[test]
+    fn the_once_a_day_key_is_the_window_it_fired_for() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let cosy = cosy_tariff();
+        // In the lead before 04:00.
+        assert_eq!(
+            once_a_day_window_key(&cosy, local_dt(2026, 1, 12, 3, 40), 30),
+            Some((day, 4 * 60))
+        );
+        // A catch-up inside the 04:00 window is still for 04:00, not 13:00.
+        assert_eq!(
+            once_a_day_window_key(&cosy, local_dt(2026, 1, 12, 4, 15), 30),
+            Some((day, 4 * 60))
+        );
+        assert!(plan_refresh_due(
+            local_dt(2026, 1, 12, 4, 15),
+            None,
+            Some(&cosy)
+        ));
     }
 }

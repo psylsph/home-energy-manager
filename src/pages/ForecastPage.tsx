@@ -386,6 +386,9 @@ export default function ForecastPage() {
   const [planStrategySaving, setPlanStrategySaving] = useState(false);
   const [planStrategyError, setPlanStrategyError] = useState<string | null>(null);
   const [planAutoRefresh, setPlanAutoRefresh] = useState<boolean>(false);
+  const [planEveryWindow, setPlanEveryWindow] = useState(false);
+  const [planEveryWindowSaving, setPlanEveryWindowSaving] = useState(false);
+  const [planEveryWindowError, setPlanEveryWindowError] = useState<string | null>(null);
   const [planAutoApply, setPlanAutoApply] = useState<boolean>(false);
   const [planAutoApplyLeadInput, setPlanAutoApplyLeadInput] = useState<string>('30');
   // True while the checkbox's own save is in flight. The lead field is
@@ -472,6 +475,7 @@ export default function ForecastPage() {
             forecast_plan_auto_apply_enabled?: boolean;
             forecast_plan_auto_apply_lead_minutes?: number;
             forecast_plan_strategy?: PlanStrategy;
+            forecast_plan_every_cheap_window?: boolean;
             forecast_charge_efficiency?: number;
             forecast_discharge_efficiency?: number;
             forecast_exclude_load_above_kw?: number | null;
@@ -493,6 +497,7 @@ export default function ForecastPage() {
           ? settingsRes.data.forecast_plan_strategy
           : 'min_soc',
       );
+      setPlanEveryWindow(settingsRes.data.forecast_plan_every_cheap_window === true);
       setLoadAboveKw(settingsRes.data.forecast_exclude_load_above_kw ?? null);
       if (syncForm) {
         if (settingsRes.data.forecast_min_soc_pct != null) {
@@ -641,6 +646,23 @@ export default function ForecastPage() {
       setPlanStrategyError(e instanceof Error ? e.message : 'Save failed');
     } finally {
       setPlanStrategySaving(false);
+    }
+  };
+
+  // Persist "plan every cheap window" (issue #453). Like the strategy, the
+  // toggle shows the saved value until the save succeeds.
+  const savePlanEveryWindow = async (next: boolean) => {
+    setPlanEveryWindowError(null);
+    setPlanEveryWindowSaving(true);
+    try {
+      await apiPost('/api/settings', { forecast_plan_every_cheap_window: next });
+      setPlanEveryWindow(next);
+      // Refetch — the plan is for the next cheap window now.
+      await load(false);
+    } catch (e) {
+      setPlanEveryWindowError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setPlanEveryWindowSaving(false);
     }
   };
 
@@ -1279,6 +1301,45 @@ export default function ForecastPage() {
               <HelpTip label="Charging Strategy">{STRATEGY_HELP[planStrategy].detail}</HelpTip>
             </p>
           </div>
+          {/* Plan every cheap window (issue #453): only worth offering on a
+              tariff with more than one cheap period, such as Cosy, but kept
+              visible while on so it can always be switched off. */}
+          {(planEveryWindow || (plan?.cheap_window_count ?? 0) >= 2) && (
+            <div className="pt-3 flex flex-col gap-1" data-testid="forecast-plan-every-window">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-text-primary text-xs font-sans font-medium">
+                  Plan Every Cheap Window
+                </span>
+                <Toggle
+                  ariaLabel="Plan Every Cheap Window"
+                  checked={planEveryWindow}
+                  onChange={(next) => void savePlanEveryWindow(next)}
+                  disabled={!data || planEveryWindowSaving}
+                  testId="forecast-plan-every-window-toggle"
+                />
+                {planEveryWindowError && (
+                  <span
+                    data-testid="forecast-plan-every-window-error"
+                    className="text-xs text-red-400"
+                  >
+                    {planEveryWindowError}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-text-secondary font-sans">
+                Plans a charge before each cheap period, sized to last until the next.{' '}
+                <HelpTip label="Plan Every Cheap Window">
+                  Off, the planner makes one plan a day, for your cheapest window, and it has to
+                  last the whole day. On, it plans the next cheap period instead, and each charge
+                  only has to keep your minimum until the following one, so a sunny afternoon can
+                  skip a charge. The automatic plan runs before every cheap period: at your
+                  auto-apply lead time, or 30 minutes before with the nightly refresh. If HEM is off
+                  or asleep until more than 10 minutes into a cheap period, that period isn't
+                  planned and charge slot 1 keeps its previous times until the next.
+                </HelpTip>
+              </p>
+            </div>
+          )}
           {/* Planner floor — the planner sizes the overnight charge so the
               battery never dips below this percentage across the forward
               window. Editing saves immediately and triggers a plan refetch. */}

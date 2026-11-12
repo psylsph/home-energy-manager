@@ -260,7 +260,11 @@ pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapsh
 
 /// The message to send the user for this outcome. Only the auto-apply
 /// notifies; the quiet nightly refresh never does. Pure.
-pub(crate) fn plan_notification(plan: &SlotPlan, trigger: PlanTrigger) -> Option<String> {
+pub(crate) fn plan_notification(
+    plan: &SlotPlan,
+    trigger: PlanTrigger,
+    every_cheap_window: bool,
+) -> Option<String> {
     if trigger != PlanTrigger::AutoApply {
         return None;
     }
@@ -279,7 +283,7 @@ pub(crate) fn plan_notification(plan: &SlotPlan, trigger: PlanTrigger) -> Option
         SlotPlan::Write { writes: Err(_), .. } => {
             build_plan_unavailable_message("the charge slot could not be encoded for this inverter")
         }
-        SlotPlan::Clear { writes: Ok(_) } => build_plan_cleared_message(),
+        SlotPlan::Clear { writes: Ok(_) } => build_plan_cleared_message(every_cheap_window),
         SlotPlan::Clear { writes: Err(_) } => {
             build_plan_unavailable_message("the charge slot could not be cleared for this inverter")
         }
@@ -319,10 +323,12 @@ pub(crate) async fn apply_plan_recommendation(
     rec: &PlanRecommendation,
     trigger: PlanTrigger,
 ) -> Option<QueuedSlot> {
-    let planner_armed = Settings::load_async().await.forecast_plan_armed_target_pct;
+    let settings = Settings::load_async().await;
+    let planner_armed = settings.forecast_plan_armed_target_pct;
     let plan = plan_slot_plan_for(rec, snapshot, planner_armed);
     queue_slot_plan(state, &plan, trigger, planner_armed).await;
-    if let Some(text) = plan_notification(&plan, trigger) {
+    if let Some(text) = plan_notification(&plan, trigger, settings.forecast_plan_every_cheap_window)
+    {
         crate::alerts::send_plan_notification(state, &text).await;
     }
     QueuedSlot::of(&plan)
@@ -464,6 +470,7 @@ async fn compute_plan(
         || crate::forecast::planner::plan_needs_current_hour(
             settings.import_tariff_config.as_ref(),
             now,
+            settings.forecast_plan_every_cheap_window,
         );
     let live_snapshot = snapshot.clone();
     let settings = settings.clone();
@@ -568,6 +575,88 @@ fn adaptive_owns_rate(settings: &Settings) -> bool {
     settings.adaptive_charge_enabled || settings.adaptive_charge_saved_limit.is_some()
 }
 
+/// The window a once-a-day write at `now` is for (see
+/// [`crate::forecast::refresh::once_a_day_window_key`]).
+fn planned_window_key(
+    settings: &Settings,
+    now: DateTime<Local>,
+    lead_minutes: u16,
+) -> Option<crate::forecast::refresh::WindowKey> {
+    let tariff = settings.import_tariff_config.as_ref()?;
+    crate::forecast::refresh::once_a_day_window_key(tariff, now, lead_minutes)
+}
+
+/// Log a cheap window that started before HEM could plan it (issue #453).
+fn log_missed_window(label: &str, key: crate::forecast::refresh::WindowKey) {
+    tracing::info!(
+        "{label}: the {:02}:{:02} cheap period started before HEM could plan it; charge slot 1 keeps its previous times until the next one",
+        key.1 / 60,
+        key.1 % 60
+    );
+}
+
+/// When the daily write is due: once a day for the cheapest window, or with
+/// every cheap window planned, once per window (issue #453).
+enum DailyDue {
+    /// Plan now, latching this window occurrence. `running` is the start
+    /// (Unix seconds) of a window already under way that is planned as one.
+    Due {
+        key: Option<crate::forecast::refresh::WindowKey>,
+        running: Option<i64>,
+    },
+    /// Would be due, but Adaptive Charge owns the charge rate.
+    AdaptiveOwnsRate,
+    NotDue,
+}
+
+/// The start, Unix seconds, of the window occurrence `key` names; `None`
+/// when the clock skipped it.
+fn running_start(key: crate::forecast::refresh::WindowKey) -> Option<i64> {
+    crate::inverter::plan_replan::local_ts(key.0, u32::from(key.1))
+}
+
+/// What the every-cheap-window gate means for a daily write (issue #453).
+/// A missed window is latched in `latch` and logged here.
+fn every_window_daily(
+    due: crate::forecast::refresh::EveryWindowDue,
+    latch: &mut Option<crate::forecast::refresh::WindowKey>,
+    adaptive_owns_rate: bool,
+    label: &str,
+) -> DailyDue {
+    use crate::forecast::refresh::EveryWindowDue;
+    match due {
+        EveryWindowDue::Due(_) | EveryWindowDue::DueRunning(_) if adaptive_owns_rate => {
+            DailyDue::AdaptiveOwnsRate
+        }
+        EveryWindowDue::Due(key) => DailyDue::Due {
+            key: Some(key),
+            running: None,
+        },
+        EveryWindowDue::DueRunning(key) => match running_start(key) {
+            Some(start) => DailyDue::Due {
+                key: Some(key),
+                running: Some(start),
+            },
+            // A start the clock skipped can't anchor a window under way:
+            // planned from now, it would move the running slot.
+            None => every_window_daily(
+                EveryWindowDue::Missed(key),
+                latch,
+                adaptive_owns_rate,
+                label,
+            ),
+        },
+        EveryWindowDue::Missed(key) => {
+            *latch = Some(key);
+            if !adaptive_owns_rate {
+                log_missed_window(label, key);
+            }
+            DailyDue::NotDue
+        }
+        EveryWindowDue::NotDue => DailyDue::NotDue,
+    }
+}
+
 /// The fixed nightly auto-refresh. Does nothing unless it is enabled and the
 /// auto-apply trigger is not (that supersedes it).
 pub(crate) async fn run_plan_refresh(
@@ -584,34 +673,73 @@ pub(crate) async fn run_plan_refresh(
         return;
     }
     let adaptive_owns_rate = adaptive_owns_rate(settings);
-    let last = *state.forecast_plan_refresh_date.lock().await;
     let tariff = settings.import_tariff_config.as_ref();
-    if plan_refresh_due_with_adaptive(now, last, tariff, adaptive_owns_rate) {
-        let planned = compute_plan(state, settings, snapshot, now, None).await;
-        // Mark today done regardless of the outcome shape so a persistent
-        // failure can't turn into a per-poll write storm.
-        *state.forecast_plan_refresh_date.lock().await = Some(now.date_naive());
-        match planned {
-            Ok(plan) => {
-                record_plan_snapshot(state, settings, "refresh", &plan, now).await;
-                let slot =
-                    apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::Refresh)
-                        .await;
-                start_cycle(state, settings, PlanTrigger::Refresh, slot, &plan, now).await;
+    let lead = crate::forecast::refresh::PLAN_REFRESH_LEAD_MINUTES;
+    let due = if settings.forecast_plan_every_cheap_window {
+        let mut latch = state.forecast_plan_refresh_window.lock().await;
+        let gate = crate::forecast::refresh::every_window_due(now, *latch, tariff, lead);
+        every_window_daily(
+            gate,
+            &mut latch,
+            adaptive_owns_rate,
+            PlanTrigger::Refresh.label(),
+        )
+    } else {
+        let last = *state.forecast_plan_refresh_date.lock().await;
+        let key = planned_window_key(settings, now, lead);
+        // The date moves on at midnight, but not the window: one planned
+        // before midnight (or by every-window planning) isn't planned again.
+        if key.is_some() && key == *state.forecast_plan_refresh_window.lock().await {
+            DailyDue::NotDue
+        } else if plan_refresh_due_with_adaptive(now, last, tariff, adaptive_owns_rate) {
+            DailyDue::Due { key, running: None }
+        } else if adaptive_owns_rate && plan_refresh_due(now, last, tariff) {
+            DailyDue::AdaptiveOwnsRate
+        } else {
+            DailyDue::NotDue
+        }
+    };
+    match due {
+        DailyDue::Due { key, running } => {
+            let planned = compute_plan(state, settings, snapshot, now, running).await;
+            // Mark this window done regardless of the outcome shape so a
+            // persistent failure can't turn into a per-poll write storm. The
+            // date says today's once-a-day plan is in the slot: a plan for
+            // one of several cheap windows replaces it, so switching back
+            // still plans the next (the window latch stops a second plan).
+            *state.forecast_plan_refresh_date.lock().await =
+                (!settings.forecast_plan_every_cheap_window).then(|| now.date_naive());
+            *state.forecast_plan_refresh_window.lock().await = key;
+            match planned {
+                Ok(plan) => {
+                    record_plan_snapshot(state, settings, "refresh", &plan, now).await;
+                    let slot =
+                        apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::Refresh)
+                            .await;
+                    let cycle = CycleFor {
+                        trigger: PlanTrigger::Refresh,
+                        now,
+                        running,
+                    };
+                    start_cycle(state, settings, cycle, slot, &plan).await;
+                }
+                Err(e) => tracing::warn!("Forecast plan refresh failed: {e}"),
             }
-            Err(e) => tracing::warn!("Forecast plan refresh failed: {e}"),
         }
-    } else if adaptive_owns_rate && plan_refresh_due(now, last, tariff) {
-        // The refresh would be due but Adaptive Charge owns the charge-limit
-        // register: warn once per day (tracked separately so disabling Adaptive
-        // later in the same lead window still lets the refresh fire) instead
-        // of silently skipping on every poll (CODE_REVIEW.md Major 3).
-        let mut warned = state.forecast_plan_refresh_warned.lock().await;
-        if first_report_today(&mut warned, now.date_naive()) {
-            tracing::warn!(
-                "Forecast plan auto-refresh is enabled but Adaptive Charge owns the charge rate — skipping tonight's slot rewrite"
-            );
+        DailyDue::AdaptiveOwnsRate => {
+            // The refresh would be due but Adaptive Charge owns the
+            // charge-limit register: warn once per day (tracked separately so
+            // disabling Adaptive later in the same lead window still lets the
+            // refresh fire) instead of silently skipping on every poll
+            // (CODE_REVIEW.md Major 3).
+            let mut warned = state.forecast_plan_refresh_warned.lock().await;
+            if first_report_today(&mut warned, now.date_naive()) {
+                tracing::warn!(
+                    "Forecast plan auto-refresh is enabled but Adaptive Charge owns the charge rate — skipping the next cheap period's slot rewrite"
+                );
+            }
         }
+        DailyDue::NotDue => {}
     }
 }
 
@@ -629,41 +757,70 @@ pub(crate) async fn run_plan_auto_apply(
         return;
     }
     let adaptive_owns_rate = adaptive_owns_rate(settings);
-    let last = *state.forecast_plan_apply_date.lock().await;
     let tariff = settings.import_tariff_config.as_ref();
     let lead = settings.forecast_plan_auto_apply_lead_minutes;
-    match plan_auto_apply_decision_with_adaptive(now, last, tariff, lead, adaptive_owns_rate) {
-        PlanApplyDecision::NotDue { reason } => {
-            // Would-be-due but Adaptive Charge owns the charge-limit register:
-            // warn + notify once per day instead of on every poll. Gated on the
-            // apply actually being due, or an Adaptive user with no cheap window
-            // near would get a false alarm every single day.
-            if adaptive_owns_rate && plan_auto_apply_adaptive_warning_due(now, last, tariff, lead) {
-                let first = {
-                    let mut warned = state.forecast_plan_apply_warned.lock().await;
-                    first_report_today(&mut warned, now.date_naive())
-                };
-                if first {
-                    tracing::warn!(
-                        "Forecast plan auto-apply is enabled but Adaptive Charge owns the charge rate — skipping tonight's apply"
-                    );
-                    crate::alerts::send_plan_notification(
-                        state,
-                        &crate::alerts::build_plan_unavailable_message(
-                            "Adaptive Charge owns the charge rate, so tonight's charging is left to it",
-                        ),
-                    )
-                    .await;
-                }
-            } else {
+    let due = if settings.forecast_plan_every_cheap_window {
+        let mut latch = state.forecast_plan_apply_window.lock().await;
+        let gate = crate::forecast::refresh::every_window_due(now, *latch, tariff, lead);
+        every_window_daily(
+            gate,
+            &mut latch,
+            adaptive_owns_rate,
+            PlanTrigger::AutoApply.label(),
+        )
+    } else {
+        let last = *state.forecast_plan_apply_date.lock().await;
+        let key = planned_window_key(settings, now, lead);
+        let planned_already =
+            key.is_some() && key == *state.forecast_plan_apply_window.lock().await;
+        match plan_auto_apply_decision_with_adaptive(now, last, tariff, lead, adaptive_owns_rate) {
+            // The date moves on at midnight, but not the window: one planned
+            // before midnight (or by every-window planning) isn't planned again.
+            _ if planned_already => DailyDue::NotDue,
+            PlanApplyDecision::Due { .. } => DailyDue::Due { key, running: None },
+            // Would-be-due but Adaptive Charge owns the charge-limit register.
+            // Gated on the apply actually being due, or an Adaptive user with
+            // no cheap window near would get a false alarm every single day.
+            PlanApplyDecision::NotDue { .. }
+                if adaptive_owns_rate
+                    && plan_auto_apply_adaptive_warning_due(now, last, tariff, lead) =>
+            {
+                DailyDue::AdaptiveOwnsRate
+            }
+            PlanApplyDecision::NotDue { reason } => {
                 tracing::debug!(reason, "Forecast plan auto-apply standing down");
+                DailyDue::NotDue
             }
         }
-        PlanApplyDecision::Due { .. } => {
-            let planned = compute_plan(state, settings, snapshot, now, None).await;
-            // Mark today done regardless of the outcome shape so a persistent
-            // failure can't turn into a per-poll write/notification storm.
-            *state.forecast_plan_apply_date.lock().await = Some(now.date_naive());
+    };
+    match due {
+        DailyDue::AdaptiveOwnsRate => {
+            // Warn + notify once per day instead of on every poll.
+            let first = {
+                let mut warned = state.forecast_plan_apply_warned.lock().await;
+                first_report_today(&mut warned, now.date_naive())
+            };
+            if first {
+                tracing::warn!(
+                    "Forecast plan auto-apply is enabled but Adaptive Charge owns the charge rate — skipping the next cheap period's apply"
+                );
+                crate::alerts::send_plan_notification(
+                    state,
+                    &crate::alerts::build_plan_unavailable_message(
+                        "Adaptive Charge owns the charge rate, so the next cheap period's charging is left to it",
+                    ),
+                )
+                .await;
+            }
+        }
+        DailyDue::Due { key, running } => {
+            let planned = compute_plan(state, settings, snapshot, now, running).await;
+            // Mark this window done regardless of the outcome shape so a
+            // persistent failure can't turn into a per-poll write/notification
+            // storm. The date is the once-a-day plan's, as for the refresh.
+            *state.forecast_plan_apply_date.lock().await =
+                (!settings.forecast_plan_every_cheap_window).then(|| now.date_naive());
+            *state.forecast_plan_apply_window.lock().await = key;
             match planned {
                 Ok(plan) => {
                     record_plan_snapshot(state, settings, "auto_apply", &plan, now).await;
@@ -674,7 +831,12 @@ pub(crate) async fn run_plan_auto_apply(
                         PlanTrigger::AutoApply,
                     )
                     .await;
-                    start_cycle(state, settings, PlanTrigger::AutoApply, slot, &plan, now).await;
+                    let cycle = CycleFor {
+                        trigger: PlanTrigger::AutoApply,
+                        now,
+                        running,
+                    };
+                    start_cycle(state, settings, cycle, slot, &plan).await;
                 }
                 Err(e) => {
                     tracing::warn!("Forecast plan auto-apply failed: {e}");
@@ -688,7 +850,16 @@ pub(crate) async fn run_plan_auto_apply(
                 }
             }
         }
+        DailyDue::NotDue => {}
     }
+}
+
+/// Which daily write a cycle is for: its trigger, when it ran, and the
+/// start of the window under way it planned, if it planned one.
+struct CycleFor {
+    trigger: PlanTrigger,
+    now: DateTime<Local>,
+    running: Option<i64>,
 }
 
 /// Start the replan's cycle (issue #404) after a daily write: the slot it
@@ -697,15 +868,25 @@ pub(crate) async fn run_plan_auto_apply(
 async fn start_cycle(
     state: &Arc<AppState>,
     settings: &Settings,
-    trigger: PlanTrigger,
+    CycleFor {
+        trigger,
+        now,
+        running,
+    }: CycleFor,
     queued: Option<QueuedSlot>,
     plan: &ComputedPlan,
-    now: DateTime<Local>,
 ) {
-    let window = settings
-        .import_tariff_config
-        .as_ref()
-        .and_then(|tariff| crate::inverter::plan_replan::cycle_window(tariff, now));
+    // A window planned under way is the one that started at `running`.
+    let picked_at = running
+        .and_then(|start| DateTime::from_timestamp(start, 0))
+        .map_or(now, |start| start.with_timezone(&Local));
+    let window = settings.import_tariff_config.as_ref().and_then(|tariff| {
+        crate::inverter::plan_replan::cycle_window(
+            tariff,
+            picked_at,
+            settings.forecast_plan_every_cheap_window,
+        )
+    });
     let cycle =
         queued
             .zip(window)
@@ -935,25 +1116,38 @@ pub(crate) async fn run_plan_snapshot(
     let Some(tariff) = settings.import_tariff_config.as_ref() else {
         return;
     };
-    let now_min = now.hour() as u16 * 60 + now.minute() as u16;
-    let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30) else {
-        return;
-    };
-    let until_start = (window.start_min + 1440 - now_min) % 1440;
-    if until_start > PLAN_SNAPSHOT_LEAD_MINUTES {
-        return;
-    }
-    // One record per window occurrence, keyed on the date the window opens,
-    // so a window just after midnight isn't recorded again once the date
-    // rolls over.
-    let window_date = (now + chrono::Duration::minutes(i64::from(until_start))).date_naive();
-    {
-        let mut recorded = state.forecast_plan_snapshot_date.lock().await;
-        if *recorded == Some(window_date) {
+    if settings.forecast_plan_every_cheap_window {
+        // Once per cheap window (issue #453).
+        use crate::forecast::refresh::{every_window_due, EveryWindowDue};
+        let mut recorded = state.forecast_plan_snapshot_window.lock().await;
+        let EveryWindowDue::Due(key) =
+            every_window_due(now, *recorded, Some(tariff), PLAN_SNAPSHOT_LEAD_MINUTES)
+        else {
+            return;
+        };
+        // Mark first so a failing computation can't retry every poll.
+        *recorded = Some(key);
+    } else {
+        let now_min = now.hour() as u16 * 60 + now.minute() as u16;
+        let Some(window) = crate::forecast::planner::cheapest_import_window(tariff, now_min, 30)
+        else {
+            return;
+        };
+        let until_start = (window.start_min + 1440 - now_min) % 1440;
+        if until_start > PLAN_SNAPSHOT_LEAD_MINUTES {
+            return;
+        }
+        // One record per window occurrence, keyed on the date the window
+        // opens, so a window just after midnight isn't recorded again once
+        // the date rolls over, nor one every-window planning recorded.
+        let key = crate::forecast::refresh::occurrence_key(&window, now);
+        let mut recorded = state.forecast_plan_snapshot_window.lock().await;
+        if *recorded == Some(key) {
             return;
         }
         // Mark first so a failing computation can't retry every poll.
-        *recorded = Some(window_date);
+        *recorded = Some(key);
+        *state.forecast_plan_snapshot_date.lock().await = Some(key.0);
     }
     match compute_plan(state, settings, snapshot, now, None).await {
         Ok(plan) => record_plan_snapshot(state, settings, "before_window", &plan, now).await,
@@ -1369,11 +1563,12 @@ mod tests {
     #[test]
     fn a_hold_plan_notification_names_the_target() {
         let plan = plan_slot_plan(&hold(false), &gen2());
-        let text = plan_notification(&plan, PlanTrigger::AutoApply).expect("auto-apply notifies");
+        let text =
+            plan_notification(&plan, PlanTrigger::AutoApply, false).expect("auto-apply notifies");
         for needle in ["62%", "23:00", "06:00", "tonight", "hold"] {
             assert!(text.contains(needle), "{needle:?} missing from {text:?}");
         }
-        assert!(plan_notification(&plan, PlanTrigger::Refresh).is_none());
+        assert!(plan_notification(&plan, PlanTrigger::Refresh, false).is_none());
     }
 
     // ---- stale hold targets (issue #359 review) ----------------------------
@@ -1571,7 +1766,7 @@ mod tests {
     fn the_quiet_refresh_never_notifies() {
         for plan in all_plans() {
             assert_eq!(
-                plan_notification(&plan, PlanTrigger::Refresh),
+                plan_notification(&plan, PlanTrigger::Refresh, false),
                 None,
                 "{plan:?}"
             );
@@ -1582,7 +1777,7 @@ mod tests {
     fn auto_apply_always_tells_the_user_something() {
         for plan in all_plans() {
             assert!(
-                plan_notification(&plan, PlanTrigger::AutoApply).is_some(),
+                plan_notification(&plan, PlanTrigger::AutoApply, false).is_some(),
                 "{plan:?}"
             );
         }
@@ -1592,18 +1787,19 @@ mod tests {
     fn the_applied_message_names_the_window_and_energy() {
         let tonight = plan_slot_plan(&charge(150, 216, false, 3.24), &gen2());
         assert_eq!(
-            plan_notification(&tonight, PlanTrigger::AutoApply).unwrap(),
+            plan_notification(&tonight, PlanTrigger::AutoApply, false).unwrap(),
             "📋 Charging plan applied — 3.2 kWh tonight 02:30–03:36 (charge rate 100%)."
         );
         let tomorrow = plan_slot_plan(&charge(15, 300, true, 2.0), &gen2());
-        assert!(plan_notification(&tomorrow, PlanTrigger::AutoApply)
+        assert!(plan_notification(&tomorrow, PlanTrigger::AutoApply, false)
             .unwrap()
             .contains("tomorrow 00:15–05:00"));
     }
 
     #[test]
     fn each_failure_has_its_own_explanation() {
-        let note = |plan: &SlotPlan| plan_notification(plan, PlanTrigger::AutoApply).unwrap();
+        let note =
+            |plan: &SlotPlan| plan_notification(plan, PlanTrigger::AutoApply, false).unwrap();
         assert!(note(&plan_slot_plan(&no_charge(), &gen2())).contains("slot 1 cleared"));
         assert!(note(&plan_slot_plan(&no_plan("no tariff"), &gen2())).contains("no tariff"));
         assert!(note(&SlotPlan::Write {
@@ -2278,15 +2474,12 @@ mod tests {
         .await;
         let mut plan = computed(charge(120, 240, false, 3.0)).await;
         plan.dispatch_revision = Some(revision);
-        start_cycle(
-            state,
-            &replan_settings(),
-            PlanTrigger::AutoApply,
-            queued,
-            &plan,
-            written,
-        )
-        .await;
+        let cycle = CycleFor {
+            trigger: PlanTrigger::AutoApply,
+            now: written,
+            running: None,
+        };
+        start_cycle(state, &replan_settings(), cycle, queued, &plan).await;
         state.pending_writes.lock().await.clear();
     }
 
@@ -2571,15 +2764,12 @@ mod tests {
         .await;
         let mut written_plan = computed(charge(0, 30, false, 1.0)).await;
         written_plan.dispatch_revision = Some(0);
-        start_cycle(
-            &state,
-            &settings,
-            PlanTrigger::AutoApply,
-            queued_slot,
-            &written_plan,
-            written,
-        )
-        .await;
+        let cycle = CycleFor {
+            trigger: PlanTrigger::AutoApply,
+            now: written,
+            running: None,
+        };
+        start_cycle(&state, &settings, cycle, queued_slot, &written_plan).await;
         state.pending_writes.lock().await.clear();
         fresh_list(&state, now).await;
         run_plan_replan(&state, &settings, &snapshot, now, false).await;
@@ -2880,6 +3070,344 @@ mod tests {
             let rows = recorded(&state).await;
             assert_eq!(rows.len(), 1, "{rows:?}");
             assert_eq!(rows[0].kind, "refresh");
+        })
+        .await;
+    }
+
+    // ---- Every cheap window (issue #453) ----
+
+    fn cosy_tariff() -> TariffConfig {
+        let slot = |s: &str, e: &str, r: f64| TariffSlot {
+            start: s.into(),
+            end: e.into(),
+            rate: r,
+        };
+        TariffConfig {
+            slots: vec![
+                slot("00:00", "04:00", 0.27),
+                slot("04:00", "07:00", 0.13),
+                slot("07:00", "13:00", 0.27),
+                slot("13:00", "16:00", 0.13),
+                slot("16:00", "19:00", 0.40),
+                slot("19:00", "22:00", 0.27),
+                slot("22:00", "23:59", 0.13),
+            ],
+        }
+    }
+
+    fn every_window(mut settings: Settings) -> Settings {
+        settings.import_tariff_config = Some(cosy_tariff());
+        settings.forecast_plan_every_cheap_window = true;
+        settings
+    }
+
+    /// A poll every five minutes through one day from midnight.
+    fn polls_through_the_day() -> impl Iterator<Item = DateTime<Local>> {
+        let midnight = local_dt(2026, 1, 12, 0, 0);
+        (0..288).map(move |i| midnight + chrono::Duration::minutes(i * 5))
+    }
+
+    fn kinds(rows: &[crate::history::PlanSnapshotRow], kind: &str) -> Vec<i64> {
+        rows.iter()
+            .filter(|row| row.kind == kind)
+            .map(|row| row.recorded_at)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_refresh_plans_each_cosy_window_once() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let settings = every_window(auto_refresh_settings());
+            for now in polls_through_the_day() {
+                run_plan_refresh(&state, &settings, &gen2(), now).await;
+            }
+            assert_eq!(
+                kinds(&recorded(&state).await, "refresh"),
+                vec![
+                    local_dt(2026, 1, 12, 3, 30).timestamp(),
+                    local_dt(2026, 1, 12, 12, 30).timestamp(),
+                    local_dt(2026, 1, 12, 21, 30).timestamp(),
+                ]
+            );
+            let day = NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+            assert_eq!(
+                *state.forecast_plan_refresh_window.lock().await,
+                Some((day, 22 * 60))
+            );
+            // The once-a-day latch is left alone: none of these plans was
+            // the once-a-day plan.
+            assert_eq!(*state.forecast_plan_refresh_date.lock().await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_auto_apply_plans_each_cosy_window_once() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let mut settings = every_window(auto_apply_settings());
+            settings.forecast_plan_auto_apply_lead_minutes = 120;
+            for now in polls_through_the_day() {
+                run_plan_auto_apply(&state, &settings, &gen2(), now).await;
+            }
+            assert_eq!(
+                kinds(&recorded(&state).await, "auto_apply"),
+                vec![
+                    local_dt(2026, 1, 12, 2, 0).timestamp(),
+                    local_dt(2026, 1, 12, 11, 0).timestamp(),
+                    local_dt(2026, 1, 12, 20, 0).timestamp(),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_window_that_started_unplanned_is_latched_and_left_alone() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let settings = every_window(auto_refresh_settings());
+            // Waking inside the 13:00 window.
+            let now = local_dt(2026, 1, 12, 13, 20);
+            run_plan_refresh(&state, &settings, &gen2(), now).await;
+            run_plan_refresh(
+                &state,
+                &settings,
+                &gen2(),
+                now + chrono::Duration::minutes(5),
+            )
+            .await;
+            assert!(recorded(&state).await.is_empty());
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert_eq!(
+                *state.forecast_plan_refresh_window.lock().await,
+                Some((NaiveDate::from_ymd_opt(2026, 1, 12).unwrap(), 13 * 60))
+            );
+            assert_eq!(*state.forecast_plan_refresh_date.lock().await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn switching_it_on_never_plans_the_same_window_twice() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            // The once-a-day refresh plans Cosy's 04:00 at 03:30...
+            let mut settings = auto_refresh_settings();
+            settings.import_tariff_config = Some(cosy_tariff());
+            run_plan_refresh(&state, &settings, &gen2(), local_dt(2026, 1, 12, 3, 30)).await;
+            // ...then the user switches every window on in the same lead.
+            let on = every_window(settings.clone());
+            run_plan_refresh(&state, &on, &gen2(), local_dt(2026, 1, 12, 3, 40)).await;
+            assert_eq!(kinds(&recorded(&state).await, "refresh").len(), 1);
+            // The next window is still planned.
+            run_plan_refresh(&state, &on, &gen2(), local_dt(2026, 1, 12, 12, 40)).await;
+            assert_eq!(kinds(&recorded(&state).await, "refresh").len(), 2);
+            // Switched off again, the 22:00 window is planned: the 13:00
+            // plan only had to last until it.
+            run_plan_refresh(&state, &settings, &gen2(), local_dt(2026, 1, 12, 21, 30)).await;
+            assert_eq!(kinds(&recorded(&state).await, "refresh").len(), 3);
+            // But not twice.
+            run_plan_refresh(&state, &settings, &gen2(), local_dt(2026, 1, 12, 21, 40)).await;
+            assert_eq!(kinds(&recorded(&state).await, "refresh").len(), 3);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn adaptive_charge_still_owns_the_rate_with_every_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let settings = Settings {
+                adaptive_charge_enabled: true,
+                ..every_window(auto_apply_settings())
+            };
+            for now in polls_through_the_day() {
+                run_plan_auto_apply(&state, &settings, &gen2(), now).await;
+            }
+            assert!(recorded(&state).await.is_empty());
+            assert!(state.pending_writes.lock().await.is_empty());
+            // Warned once for the day, not per window.
+            assert_eq!(
+                *state.forecast_plan_apply_warned.lock().await,
+                Some(NaiveDate::from_ymd_opt(2026, 1, 12).unwrap())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_zero_lead_auto_apply_plans_each_cosy_window_at_its_start() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let mut settings = every_window(auto_apply_settings());
+            settings.forecast_plan_auto_apply_lead_minutes = 0;
+            for now in polls_through_the_day() {
+                run_plan_auto_apply(&state, &settings, &gen2(), now).await;
+            }
+            assert_eq!(
+                kinds(&recorded(&state).await, "auto_apply"),
+                vec![
+                    local_dt(2026, 1, 12, 4, 0).timestamp(),
+                    local_dt(2026, 1, 12, 13, 0).timestamp(),
+                    local_dt(2026, 1, 12, 22, 0).timestamp(),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_window_planned_under_way_leaves_its_own_cycle() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let settings = every_window(auto_apply_settings());
+            let queued = apply_plan_recommendation(
+                &state,
+                &gen2(),
+                &charge(13 * 60, 15 * 60, false, 3.0),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            let plan = computed(charge(13 * 60, 15 * 60, false, 3.0)).await;
+            // Planned at 13:05 for the 13:00 window under way, not the
+            // 22:00 one a plan from 13:05 would otherwise be for.
+            let cycle = CycleFor {
+                trigger: PlanTrigger::AutoApply,
+                now: local_dt(2026, 1, 12, 13, 5),
+                running: Some(local_dt(2026, 1, 12, 13, 0).timestamp()),
+            };
+            start_cycle(&state, &settings, cycle, queued, &plan).await;
+            let cycle = state
+                .forecast_plan_cycle
+                .lock()
+                .await
+                .clone()
+                .expect("a cycle");
+            assert_eq!(cycle.window_start, local_dt(2026, 1, 12, 13, 0).timestamp());
+            assert_eq!(cycle.window_end, local_dt(2026, 1, 12, 16, 0).timestamp());
+        })
+        .await;
+    }
+
+    /// A cheap period opening just after midnight, 00:20–05:00.
+    fn after_midnight_tariff() -> TariffConfig {
+        let slot = |s: &str, e: &str, r: f64| TariffSlot {
+            start: s.into(),
+            end: e.into(),
+            rate: r,
+        };
+        TariffConfig {
+            slots: vec![
+                slot("00:00", "00:20", 0.27),
+                slot("00:20", "05:00", 0.09),
+                slot("05:00", "23:59", 0.27),
+            ],
+        }
+    }
+
+    /// A poll every five minutes from 22:00 for four hours.
+    fn polls_over_midnight() -> impl Iterator<Item = DateTime<Local>> {
+        let start = local_dt(2026, 1, 12, 22, 0);
+        (0..48).map(move |i| start + chrono::Duration::minutes(i * 5))
+    }
+
+    #[tokio::test]
+    async fn the_refresh_plans_an_iog_night_once() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let mut settings = auto_refresh_settings();
+            settings.import_tariff_config = Some(iog_tariff());
+            for now in polls_over_midnight() {
+                run_plan_refresh(&state, &settings, &gen2(), now).await;
+            }
+            // Not again at midnight, when the date moves on mid-window.
+            assert_eq!(
+                kinds(&recorded(&state).await, "refresh"),
+                vec![local_dt(2026, 1, 12, 23, 0).timestamp()]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_auto_apply_plans_a_window_after_midnight_once() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let mut settings = auto_apply_settings();
+            settings.import_tariff_config = Some(after_midnight_tariff());
+            settings.forecast_plan_auto_apply_lead_minutes = 120;
+            for now in polls_over_midnight() {
+                run_plan_auto_apply(&state, &settings, &gen2(), now).await;
+            }
+            assert_eq!(
+                kinds(&recorded(&state).await, "auto_apply"),
+                vec![local_dt(2026, 1, 12, 22, 20).timestamp()]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn switching_it_off_after_midnight_never_plans_the_window_again() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let mut off = auto_refresh_settings();
+            off.import_tariff_config = Some(after_midnight_tariff());
+            let on = Settings {
+                forecast_plan_every_cheap_window: true,
+                ..off.clone()
+            };
+            // Every window plans the 00:20 period at 23:50...
+            run_plan_refresh(&state, &on, &gen2(), local_dt(2026, 1, 12, 23, 50)).await;
+            // ...and the user switches it off at 00:05.
+            run_plan_refresh(&state, &off, &gen2(), local_dt(2026, 1, 13, 0, 5)).await;
+            assert_eq!(kinds(&recorded(&state).await, "refresh").len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn switching_it_off_still_snapshots_the_next_window() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let on = every_window(snapshot_settings());
+            let off = Settings {
+                forecast_plan_every_cheap_window: false,
+                ..on.clone()
+            };
+            run_plan_snapshot(&state, &on, &gen2(), local_dt(2026, 1, 12, 12, 30)).await;
+            run_plan_snapshot(&state, &off, &gen2(), local_dt(2026, 1, 12, 21, 30)).await;
+            // The 22:00 window once, not again on switching back on.
+            run_plan_snapshot(&state, &on, &gen2(), local_dt(2026, 1, 12, 21, 40)).await;
+            assert_eq!(
+                kinds(&recorded(&state).await, "before_window"),
+                vec![
+                    local_dt(2026, 1, 12, 12, 30).timestamp(),
+                    local_dt(2026, 1, 12, 21, 30).timestamp(),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_records_each_cosy_window_once() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let settings = every_window(snapshot_settings());
+            for now in polls_through_the_day() {
+                run_plan_snapshot(&state, &settings, &gen2(), now).await;
+            }
+            assert_eq!(
+                kinds(&recorded(&state).await, "before_window"),
+                vec![
+                    local_dt(2026, 1, 12, 3, 30).timestamp(),
+                    local_dt(2026, 1, 12, 12, 30).timestamp(),
+                    local_dt(2026, 1, 12, 21, 30).timestamp(),
+                ]
+            );
         })
         .await;
     }

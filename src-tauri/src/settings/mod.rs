@@ -1579,6 +1579,12 @@ pub struct Settings {
     /// to [`PlanStrategy::MinSoc`], the original behaviour.
     #[serde(default, deserialize_with = "deserialize_or_default")]
     pub forecast_plan_strategy: PlanStrategy,
+    /// Plan a charge before every cheap period, not just the cheapest
+    /// (issue #453): the auto-refresh and auto-apply fire before each one,
+    /// and each plan only has to last until the next. Defaults to off,
+    /// one plan a day as before.
+    #[serde(default)]
+    pub forecast_plan_every_cheap_window: bool,
     /// The charge target a hold plan last armed on the inverter (issue
     /// #359), so the planner can undo that target, and only that one, when
     /// a later plan charges to full or clears the slot. `None` when the
@@ -2254,6 +2260,7 @@ impl Default for Settings {
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
+            forecast_plan_every_cheap_window: false,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
             car_charger_current_a: default_car_charger_current_a(),
@@ -2977,6 +2984,7 @@ mod tests {
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
+            forecast_plan_every_cheap_window: false,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
             car_charger_current_a: default_car_charger_current_a(),
@@ -3348,6 +3356,23 @@ mod tests {
         assert_eq!(json["forecast_plan_strategy"], "hold_window");
         let decoded: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.forecast_plan_strategy, PlanStrategy::HoldWindow);
+    }
+
+    #[test]
+    fn plan_every_cheap_window_defaults_off_and_round_trips() {
+        // Issue #453: an older settings.json loads with it off.
+        let legacy = r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
+            "poll_interval": 60, "auto_connect": true}"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(!decoded.forecast_plan_every_cheap_window);
+        assert!(!Settings::default().forecast_plan_every_cheap_window);
+        let original = Settings {
+            forecast_plan_every_cheap_window: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(decoded.forecast_plan_every_cheap_window);
     }
 
     #[test]
@@ -3775,6 +3800,7 @@ mod tests {
             forecast_plan_auto_apply_enabled: false,
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
+            forecast_plan_every_cheap_window: false,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
             car_charger_current_a: default_car_charger_current_a(),
