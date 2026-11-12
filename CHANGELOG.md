@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.16.0] - 2026-11-12
+
+### Added
+
+- **The Planner can plan a charge before every cheap period, not just the cheapest.** On a tariff with several cheap periods at the same price, such as Cosy, turn on Plan Every Cheap Window in Plan Settings. Each charge then only has to keep your minimum until the next cheap period, so a sunny day can plan a morning charge and skip the afternoon one, and the automatic plan runs before each period. It's off by default, and only appears on a tariff with more than one cheap period. (#453)
+
+### Fixed
+
+- **The nightly plan refresh no longer plans Intelligent Octopus Go twice.** It planned at 23:00 and then again at midnight, part way through the charge. A cheap period starting just after midnight is no longer planned again once the date changes, either.
+- **The Control page says when it can't read the battery pause on the AC-coupled and All-in-One inverters.** If HEM keeps failing to read the pause from these inverters, the Charge Cap and Timed Discharge now say the pause can't be read, instead of showing the last state as if it were current. A single missed read also no longer makes an All-in-One's pause, EPS or export priority briefly show as off. (#433)
+
 ## [1.15.0] - 2026-11-11
 
 ### Added
