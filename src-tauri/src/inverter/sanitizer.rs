@@ -288,20 +288,23 @@ pub(crate) fn carry_forward_optional_block_values(
     let Some(prev) = prev else { return false };
     let mut changed = false;
 
-    // AC-coupled (and Gateway) config is read from optional HR(300-359). If
-    // that optional block is skipped for one poll, keep the previous AC config
-    // values rather than flashing defaults/zeros in the UI.
+    // Every model that polls the optional HR(300-359) block, and the Gateway
+    // on its detail polls, reads AC config from it. If that block is skipped
+    // for one poll, keep the previous AC config values rather than flashing
+    // defaults/zeros in the UI (on the All-in-Ones that includes the pause,
+    // issue #433). The charge and discharge limits only come from this block
+    // on the models that keep them at HR 313/314; the others read them fresh
+    // elsewhere this poll. Only the displayed pause is kept: the raw HR
+    // 318-320 read-back stays unset, as on the out-of-band probe, so nothing
+    // that needs a fresh read (the quick-action status, the dispatch hold's
+    // capture, the charge cap) takes the previous poll's for this one.
     if !has_ac_config_block
-        && matches!(
-            snap.device_type,
-            DeviceType::ACCoupled
-                | DeviceType::ACCoupledMk2
-                | DeviceType::ACThreePhase
-                | DeviceType::Gateway
-        )
+        && (snap.device_type.polls_ac_config_block() || snap.device_type == DeviceType::Gateway)
         && snap.device_type == prev.device_type
     {
-        if snap.charge_rate != prev.charge_rate || snap.discharge_rate != prev.discharge_rate {
+        if snap.device_type.uses_ac_limit_registers()
+            && (snap.charge_rate != prev.charge_rate || snap.discharge_rate != prev.discharge_rate)
+        {
             tracing::warn!(
                 charge_prev = prev.charge_rate,
                 discharge_prev = prev.discharge_rate,
@@ -330,16 +333,6 @@ pub(crate) fn carry_forward_optional_block_values(
             || snap.battery_pause_slot.end_minute != prev.battery_pause_slot.end_minute
         {
             snap.battery_pause_slot = prev.battery_pause_slot.clone();
-            changed = true;
-        }
-        if snap.battery_pause_mode_raw.is_none()
-            || snap.battery_pause_slot_start_raw.is_none()
-            || snap.battery_pause_slot_end_raw.is_none()
-        {
-            snap.battery_pause_mode_raw = prev.battery_pause_mode_raw;
-            snap.battery_pause_slot_start_raw = prev.battery_pause_slot_start_raw;
-            snap.battery_pause_slot_end_raw = prev.battery_pause_slot_end_raw;
-            snap.battery_pause_registers_observed_at = prev.battery_pause_registers_observed_at;
             changed = true;
         }
     }

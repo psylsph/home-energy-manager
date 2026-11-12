@@ -1076,11 +1076,33 @@ fn pause_probe_count(snapshot: &InverterSnapshot) -> Option<u16> {
     }
 }
 
+/// Flag the pause unreadable on the models that read it from the HR 300-359
+/// AC-config block (issue #433) once that block has missed
+/// [`PAUSE_PROBE_MAX_FAILURES`] polls in a row: the pause shown is then the
+/// one carried forward from the last good read. `reads` counts the run (the
+/// probe's own counter, without its pacing: the block is read every poll) and
+/// is cleared by a good read. Models that take the pause from the out-of-band
+/// probe, or have no pause, keep the flag as it is and end the run.
 fn track_ac_config_pause_read(
-    _reads: &mut PauseProbe,
-    _snapshot: &mut InverterSnapshot,
-    _present: bool,
+    reads: &mut PauseProbe,
+    snapshot: &mut InverterSnapshot,
+    present: bool,
 ) {
+    let arm_fw = snapshot.firmware_version.parse::<u16>().unwrap_or(0);
+    if !snapshot.device_type.polls_ac_config_block()
+        || !snapshot.device_type.supports_pause_mode(arm_fw)
+    {
+        reads.succeeded();
+        return;
+    }
+    if present {
+        reads.succeeded();
+    } else if reads.failed() {
+        tracing::warn!(
+            "AC-config block (HR 300-359) missed {PAUSE_PROBE_MAX_FAILURES} polls in a row - the battery pause shown is the last one read"
+        );
+    }
+    snapshot.battery_pause_read_failing = reads.backed_off();
 }
 
 /// Keep the last known pause mode and window on a snapshot whose pause probe
@@ -3968,6 +3990,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 let mut meter_probe_done = false;
                 // Pacing of the out-of-band HR 318 pause read.
                 let mut pause_probe = PauseProbe::default();
+                // HR 300-359 reads missed in a row, on the models that read
+                // the pause from that block instead of the probe.
+                let mut ac_config_pause_reads = PauseProbe::default();
                 let mut cached_external_meters: std::collections::BTreeMap<
                     u8,
                     crate::inverter::model::MeterData,
@@ -4518,6 +4543,11 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     );
                                     let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts, &mut rate_release_counts);
                                     carry_forward_absent_blocks(&mut snapshot, prev.as_ref(), &present);
+                                    track_ac_config_pause_read(
+                                        &mut ac_config_pause_reads,
+                                        &mut snapshot,
+                                        present.ac_config,
+                                    );
                                     let mods = prev.as_ref().map(|p| p.battery_modules.clone());
                                     (s, mods)
                                 };
