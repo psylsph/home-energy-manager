@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.16.1] - 2026-11-13
+
+### Fixed
+
+- **The Planner no longer calls every charge "overnight".** On a tariff like Cosy the next cheap period can be in the afternoon, but the Planner still said "Overnight charge — Tonight". It now says "Cheap-period charge" with Today, Tonight or Tomorrow chosen from when the window actually starts, and the chart caption and help text no longer assume the charge is overnight. (#468)
+- **Octopus's new API address is used.** Octopus has moved its API to `api.oegb-kraken.energy`; the account, consumption, tariff and Agile rates calls, the sign-in and the car dispatch checks now use it. The old address still works, so nothing was broken. Saving Sessions stays on its current address. (#469)
+
 ## [1.16.0] - 2026-11-12
 
 ### Added
