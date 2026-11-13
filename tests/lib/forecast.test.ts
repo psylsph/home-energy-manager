@@ -7,6 +7,7 @@ import {
   truncateSeriesAtNextChargeStart,
   formatForecastXAxisTick,
   forecastPlanTitle,
+  plannerWindowDay,
   chargeTargetReadBack,
   holdTargetPct,
   minimumSocNote,
@@ -538,9 +539,10 @@ describe('forecastPlanTitle', () => {
   };
 
   it('renders a clear headline for each kind', () => {
-    expect(forecastPlanTitle(charge)).toMatch(/overnight charge/i);
+    expect(forecastPlanTitle(charge)).toMatch(/^Cheap-period charge/);
+    expect(forecastPlanTitle(charge)).not.toMatch(/overnight/i);
     expect(forecastPlanTitle(charge)).toMatch(/3\.2/);
-    expect(forecastPlanTitle(noCharge)).toMatch(/No overnight charge/);
+    expect(forecastPlanTitle(noCharge)).toMatch(/^No charge needed/);
     expect(forecastPlanTitle(noPlan)).toMatch(/plan (unavailable|not ready)/i);
   });
 
@@ -558,12 +560,50 @@ describe('forecastPlanTitle', () => {
       slot_target_soc_pct: 75,
     };
     expect(forecastPlanTitle(hold)).toBe(
-      'Overnight charge — Tonight 23:00\u201306:00, to 75% then hold',
+      'Cheap-period charge — Tonight 23:00\u201306:00, to 75% then hold',
     );
   });
 
+  it('calls an afternoon window today, not tonight (issue #468)', () => {
+    const afternoon: Extract<PlanRecommendation, { kind: 'charge' }> = {
+      ...charge,
+      window: { start: '13:00', end: '16:00', rate: 0.13, tomorrow: false },
+      kwh: 10.7,
+    };
+    expect(forecastPlanTitle(afternoon)).toBe('Cheap-period charge — Today 13:00\u201316:00, 10.7 kWh');
+    expect(
+      forecastPlanTitle({ ...afternoon, window: { ...afternoon.window, tomorrow: true } }),
+    ).toBe('Cheap-period charge — Tomorrow 13:00\u201316:00, 10.7 kWh');
+  });
+
   it('keeps the minimum-SOC headline unchanged', () => {
-    expect(forecastPlanTitle(charge)).toBe('Overnight charge — Tomorrow 02:00\u201305:00, 3.2 kWh');
+    expect(forecastPlanTitle(charge)).toBe('Cheap-period charge — Tomorrow 02:00\u201305:00, 3.2 kWh');
+  });
+});
+
+describe('plannerWindowDay (issue #468)', () => {
+  const w = (start: string, tomorrow: boolean) => ({ start, end: '23:59', rate: 0.1, tomorrow });
+
+  it('says Tomorrow for any window starting the next day', () => {
+    expect(plannerWindowDay(w('13:00', true))).toBe('Tomorrow');
+    expect(plannerWindowDay(w('23:30', true))).toBe('Tomorrow');
+  });
+
+  it('says Tonight only for evening and early-morning starts today', () => {
+    expect(plannerWindowDay(w('18:00', false))).toBe('Tonight');
+    expect(plannerWindowDay(w('23:30', false))).toBe('Tonight');
+    expect(plannerWindowDay(w('04:00', false))).toBe('Tonight');
+    expect(plannerWindowDay(w('05:59', false))).toBe('Tonight');
+  });
+
+  it('says Today for daytime starts', () => {
+    expect(plannerWindowDay(w('06:00', false))).toBe('Today');
+    expect(plannerWindowDay(w('13:00', false))).toBe('Today');
+    expect(plannerWindowDay(w('17:59', false))).toBe('Today');
+  });
+
+  it('falls back to Today for an unreadable start', () => {
+    expect(plannerWindowDay(w('soon', false))).toBe('Today');
   });
 });
 
@@ -727,7 +767,7 @@ describe('hold plans (issue #359 review)', () => {
     expect(holdTargetPct({ ...charge, strategy: 'hold_window' })).toBeNull();
     expect(
       forecastPlanTitle({ ...charge, slot_target_soc_pct: 75 }),
-    ).toBe('Overnight charge — Tonight 23:00\u201306:00, 15.0 kWh');
+    ).toBe('Cheap-period charge — Tonight 23:00\u201306:00, 15.0 kWh');
   });
 
   it('reads the target from a cheapest-overall plan too (issue #359)', () => {
@@ -745,7 +785,7 @@ describe('hold plans (issue #359 review)', () => {
         strategy: 'cheapest',
         slot_target_soc_pct: 75,
       }),
-    ).toBe('Overnight charge — Tonight 23:00\u201306:00, to 75% then hold');
+    ).toBe('Cheap-period charge — Tonight 23:00\u201306:00, to 75% then hold');
   });
 
   it('only needs a target read back when one below 100 was requested', () => {

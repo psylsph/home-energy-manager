@@ -36,6 +36,7 @@ import {
   formatForecastXAxisTick,
   forecastExportTitle,
   forecastPlanTitle,
+  plannerWindowDay,
   chargeTargetReadBack,
   holdTargetPct,
   forecastStatusMessages,
@@ -1268,7 +1269,7 @@ export default function ForecastPage() {
               <span aria-hidden className="text-text-secondary transition-transform group-open:rotate-180">⌄</span>
             </summary>
             <div className="border-t border-white/10 px-3 pb-3">
-          {/* Planner strategy (issue #359) — how the overnight charge is
+          {/* Planner strategy (issue #359) — how the cheap-period charge is
               sized. Saves immediately and triggers a plan refetch. */}
           <div className="pt-3 flex flex-col gap-1">
             <div className="flex items-center gap-3 flex-wrap">
@@ -1340,7 +1341,7 @@ export default function ForecastPage() {
               </p>
             </div>
           )}
-          {/* Planner floor — the planner sizes the overnight charge so the
+          {/* Planner floor — the planner sizes the cheap-period charge so the
               battery never dips below this percentage across the forward
               window. Editing saves immediately and triggers a plan refetch. */}
           <div className="pt-3 flex flex-col gap-1">
@@ -1379,7 +1380,7 @@ export default function ForecastPage() {
             <p className="text-[11px] text-text-secondary font-sans">
               The battery stays above this until the next cheap period.{' '}
               <HelpTip label="Minimum Battery Level">
-                The planner sizes the next overnight charge so the battery stays above this
+                The planner sizes the next charge so the battery stays above this
                 level until the following cheap period. Lower means less grid import; higher
                 keeps more backup in reserve.
               </HelpTip>
@@ -1615,7 +1616,7 @@ export default function ForecastPage() {
                 ? 'Auto-apply applies this plan automatically before each cheap window and notifies you — no daily re-apply needed.'
                 : planAutoRefresh
                 ? 'Auto-refresh re-sizes charge slot 1 from the live battery shortly before each cheap period — no daily re-apply needed.'
-                : 'The inverter repeats the applied slot every night, so re-apply tomorrow to keep it in step with the battery.'}
+                : 'The inverter repeats the applied slot every day, so re-apply tomorrow to keep it in step with the battery.'}
             </p>
           )}
           <p data-testid="forecast-plan-tariff-pointer" className="text-[11px] text-text-secondary">
@@ -2072,9 +2073,7 @@ export default function ForecastPage() {
                     className="inline-block w-3 h-px align-middle mr-1"
                     style={{ borderTop: '2px dashed #60a5fa' }}
                   />
-                  SOC if overnight charge enacted —
-                  Tomorrow {plan.recommendation.window.start}–{plan.recommendation.window.end},
-                  {' '}{plan.recommendation.kwh.toFixed(1)} kWh.
+                  {`SOC if charge enacted — ${plannerWindowDay(plan.recommendation.window)} ${plan.recommendation.window.start}–${plan.recommendation.window.end}, ${plan.recommendation.kwh.toFixed(1)} kWh.`}
                 </p>
               ) : null}
               {hasWithSchedule && lineVisible('withCurrent') ? (

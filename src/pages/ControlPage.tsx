@@ -58,6 +58,7 @@ import {
   sliderPositionToDuration,
 } from './forceDuration';
 
+import { agileRatesUrl } from '../lib/agileRates';
 import BatteryCalibrationCycle from '../components/BatteryCalibrationCycle';
 import {
   deriveTimedExportButton,
@@ -1602,8 +1603,7 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
         const now = new Date();
         const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
 
-        const baseUrl = `https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-${region}/standard-unit-rates/`;
-        const url = `${baseUrl}?period_from=${todayStr}T00:00:00Z&page_size=96`;
+        const url = agileRatesUrl(region, todayStr);
         const res = await fetch(url);
         if (!res.ok) {
           if (!cancelled) setPricesError(`API returned ${res.status}`);

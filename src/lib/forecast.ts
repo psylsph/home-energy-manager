@@ -540,7 +540,7 @@ export function truncateSeriesAtNextChargeStart(
   return series.filter(([timestamp]) => timestamp <= nextStartTimestamp);
 }
 
-/** How the Planner sizes the overnight charge (issue #359). */
+/** How the Planner sizes the cheap-period charge (issue #359). */
 export type PlanStrategy = 'min_soc' | 'hold_window' | 'cheapest';
 
 export type PlanRecommendation =
@@ -680,18 +680,30 @@ export function chargeTargetReadBack(
   return desiredTargetSoc >= 100 || actualTargetSoc === desiredTargetSoc;
 }
 
+/** The day word for a planned charge window (issue #468). Cheap windows
+ *  aren't always overnight (Cosy has an afternoon one), so "Tonight" is
+ *  only for a start this evening or in the small hours; a daytime start
+ *  later today is "Today". Anything starting after the planner's `now`
+ *  day is "Tomorrow". */
+export function plannerWindowDay(window: PlannerChargeWindow): 'Today' | 'Tonight' | 'Tomorrow' {
+  if (window.tomorrow) return 'Tomorrow';
+  const startMin = parseHhmmMinutes(window.start);
+  if (startMin != null && (startMin >= 18 * 60 || startMin < 6 * 60)) return 'Tonight';
+  return 'Today';
+}
+
 /** Short headline for the Plan card. Degrades gracefully per kind. */
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {
-    const when = rec.window.tomorrow ? 'Tomorrow' : 'Tonight';
+    const when = plannerWindowDay(rec.window);
     const holdTarget = holdTargetPct(rec);
     if (holdTarget != null) {
-      return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, to ${Math.round(holdTarget)}% then hold`;
+      return `Cheap-period charge — ${when} ${rec.window.start}\u2013${rec.window.end}, to ${Math.round(holdTarget)}% then hold`;
     }
-    return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, ${rec.kwh.toFixed(1)} kWh`;
+    return `Cheap-period charge — ${when} ${rec.window.start}\u2013${rec.window.end}, ${rec.kwh.toFixed(1)} kWh`;
   }
   if (rec.kind === 'no_charge_needed') {
-    return `No overnight charge needed — solar covers the day`;
+    return `No charge needed — solar covers the day`;
   }
   return `Plan not ready yet — ${rec.reason}`;
 }

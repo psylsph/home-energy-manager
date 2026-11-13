@@ -753,7 +753,7 @@ describe('ForecastPage plan card', () => {
     // and kWh the dashed line represents — so the user can tell what
     // the second line means without reading the plan card.
     await waitFor(() => {
-      expect(container.textContent).toMatch(/SOC if overnight charge enacted/);
+      expect(container.textContent).toMatch(/SOC if charge enacted/);
     });
     expect(container.textContent).toMatch(/02:00/);
     expect(container.textContent).toMatch(/03:36/);
@@ -766,14 +766,16 @@ describe('ForecastPage plan card', () => {
       .getByText('Battery Projection · Next 72 Hours')
       .closest('section');
     expect(card).not.toBeNull();
-    const caption = container.textContent?.match(/SOC if overnight charge enacted/);
+    const caption = container.textContent?.match(/SOC if charge enacted/);
     expect(caption).toBeTruthy();
     const chartDiv = screen.getByText('Battery Projection · Next 72 Hours').parentElement
       ?.querySelector('div.h-56');
     expect(chartDiv).not.toBeNull();
     // Caption paragraph lives after the chart div, still inside section.
     const footer = card?.querySelector('[data-testid="forecast-caption-plan"]');
-    expect(footer?.textContent).toMatch(/SOC if overnight charge enacted/);
+    expect(footer?.textContent).toMatch(/SOC if charge enacted/);
+    // The day word needs a space after the dash (JSX drops a newline before an expression).
+    expect(footer?.textContent).toMatch(/SOC if charge enacted — Tomorrow 02:00–03:36, 3\.2 kWh\./);
     expect(footer?.textContent).toMatch(/3\.2 kWh/);
   });
 
@@ -936,7 +938,7 @@ describe('ForecastPage plan card', () => {
       container.querySelectorAll('[data-testid="forecast-charge-marker"]'),
     ).toHaveLength(0);
     expect(screen.queryByTestId('forecast-charge-legend')).toBeNull();
-    expect(screen.queryByText(/SOC if overnight charge enacted/)).toBeNull();
+    expect(screen.queryByText(/SOC if charge enacted/)).toBeNull();
 
     // Toggling back restores everything.
     fireEvent.click(screen.getByRole('button', { name: 'If Charge Enacted' }));
@@ -1017,7 +1019,7 @@ describe('ForecastPage plan card', () => {
     });
     render(<ForecastPage />);
     await waitFor(() => {
-      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/No overnight charge/i);
+      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/No charge needed/i);
     });
     expect(screen.queryByTestId('forecast-plan-apply')).toBeNull();
   });
@@ -1695,7 +1697,7 @@ describe('ForecastPage issue #283 feedback fixes', () => {
     render(<ForecastPage />);
     await waitFor(() => {
       expect(
-        screen.getByText(/planner sizes the next overnight charge so the battery stays/i),
+        screen.getByText(/planner sizes the next charge so the battery stays/i),
       ).toBeTruthy();
     });
   });

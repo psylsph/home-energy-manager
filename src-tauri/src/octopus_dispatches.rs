@@ -2532,7 +2532,7 @@ mod tests {
         let mut settings = Settings::default();
         assert_eq!(
             query_url(&settings),
-            "https://api.octopus.energy/v1/graphql/"
+            "https://api.oegb-kraken.energy/v1/graphql/"
         );
         settings.octopus_api_base_url = "http://127.0.0.1:9/".to_string();
         assert_eq!(query_url(&settings), "http://127.0.0.1:9/v1/graphql/");

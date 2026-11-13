@@ -306,7 +306,8 @@ pub fn export_request(
 // Octopus GraphQL client
 // ---------------------------------------------------------------------------
 
-const OFFICIAL_AUTH_URL: &str = "https://api.octopus.energy/v1/graphql/";
+/// Saving Sessions exist only on Octopus's backend API; the Kraken host that
+/// serves the token exchange and dispatches doesn't have them (issue #469).
 const OFFICIAL_QUERY_URL: &str = "https://api.backend.octopus.energy/v1/graphql/";
 const HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(20);
 const POLL_INTERVAL: StdDuration = StdDuration::from_secs(10 * 60);
@@ -345,7 +346,7 @@ pub(crate) fn endpoints(settings: &Settings) -> (String, String) {
     let base = settings.octopus_api_base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         (
-            OFFICIAL_AUTH_URL.to_string(),
+            format!("{}/v1/graphql/", crate::octopus::OFFICIAL_BASE_URL),
             OFFICIAL_QUERY_URL.to_string(),
         )
     } else {
@@ -4074,5 +4075,14 @@ mod tests {
             assert!(alerts[0].body.contains("could not join"));
         })
         .await;
+    }
+
+    #[test]
+    fn the_default_endpoints_are_the_kraken_host_and_the_sessions_backend() {
+        // Token exchange moved to the Kraken host (issue #469); Saving
+        // Sessions only exists on the backend host, so it stays put.
+        let (auth, query) = endpoints(&Settings::default());
+        assert_eq!(auth, "https://api.oegb-kraken.energy/v1/graphql/");
+        assert_eq!(query, "https://api.backend.octopus.energy/v1/graphql/");
     }
 }

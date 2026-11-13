@@ -382,7 +382,7 @@ export interface PollSettings {
   /** Minutes before the cheap charging tariff window's start at which
    * the auto-apply trigger fires (0–120). Defaults to 30. */
   forecast_plan_auto_apply_lead_minutes?: number;
-  /** How the Planner sizes the overnight charge (issue #359). Defaults
+  /** How the Planner sizes the cheap-period charge (issue #359). Defaults
    * to `min_soc`. */
   forecast_plan_strategy?: PlanStrategy;
   /** Plan a charge before every cheap period, not just the cheapest

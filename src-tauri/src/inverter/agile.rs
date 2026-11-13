@@ -12,10 +12,6 @@ use crate::inverter::state_machines::{
     PriceSlot,
 };
 
-/// The real Octopus endpoint, used unless `agile_api_base_url` overrides it
-/// (tests and self-hosters point it at a mock or mirror).
-const DEFAULT_OCTOPUS_API_BASE: &str = "https://api.octopus.energy";
-
 /// Per-request ceiling. An unreachable or slow price source must never stall
 /// the poll loop for ureq's default connect timeout.
 const FETCH_TIMEOUT_SECS: u64 = 10;
@@ -29,7 +25,7 @@ const FETCH_TIMEOUT_SECS: u64 = 10;
 /// machine Idle and never discharged.
 pub(crate) fn agile_rates_url(base_override: &str, region: &str, today: &str) -> String {
     let base = if base_override.is_empty() {
-        DEFAULT_OCTOPUS_API_BASE
+        crate::octopus::OFFICIAL_BASE_URL
     } else {
         base_override
     };
@@ -210,14 +206,14 @@ mod tests {
     #[test]
     fn the_url_defaults_to_the_real_octopus_endpoint() {
         let url = agile_rates_url("", "C", "2026-10-04");
-        assert!(url.starts_with("https://api.octopus.energy/v1/products/AGILE-24-10-01/"));
+        assert!(url.starts_with("https://api.oegb-kraken.energy/v1/products/AGILE-24-10-01/"));
     }
 
     #[test]
     fn an_override_replaces_the_base_url() {
         let url = agile_rates_url("http://127.0.0.1:9999", "C", "2026-10-04");
         assert!(url.starts_with("http://127.0.0.1:9999/v1/products/"));
-        assert!(!url.contains("octopus.energy"));
+        assert!(!url.contains("kraken.energy") && !url.contains("octopus.energy"));
     }
 
     #[test]

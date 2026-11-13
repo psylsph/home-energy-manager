@@ -21,7 +21,10 @@ use crate::history::{HistoryDb, OctopusConsumptionRow, OctopusTariffPriceRow};
 use crate::inverter::poll::AppState;
 use crate::settings::Settings;
 
-const OFFICIAL_BASE_URL: &str = "https://api.octopus.energy";
+/// Octopus's public API (REST and the Kraken GraphQL), moved from
+/// `api.octopus.energy` to the Kraken host (issue #469). The one place the
+/// default lives; Saving Sessions is the exception, see `octopus_sessions`.
+pub(crate) const OFFICIAL_BASE_URL: &str = "https://api.oegb-kraken.energy";
 const RECENT_INITIAL_DAYS: i64 = 90;
 const RECENT_REFRESH_DAYS: i64 = 7;
 const MAX_FORWARD_REFETCH_DAYS: i64 = 90;
@@ -1321,33 +1324,33 @@ mod tests {
     fn pagination_rejects_a_different_origin_before_reusing_credentials() {
         assert!(validated_next_url(
             Some("https://evil.example/steal".to_string()),
-            "https://api.octopus.energy/"
+            "https://api.oegb-kraken.energy/"
         )
         .is_err());
         assert_eq!(
             validated_next_url(
-                Some("https://api.octopus.energy/v1/next".to_string()),
-                "https://api.octopus.energy/"
+                Some("https://api.oegb-kraken.energy/v1/next".to_string()),
+                "https://api.oegb-kraken.energy/"
             )
             .unwrap(),
-            Some("https://api.octopus.energy/v1/next".to_string())
+            Some("https://api.oegb-kraken.energy/v1/next".to_string())
         );
     }
 
     #[test]
     fn pagination_rejects_cycles_and_unbounded_page_chains() {
-        let prefix = "https://api.octopus.energy/";
-        let first = "https://api.octopus.energy/v1/page=1";
+        let prefix = "https://api.oegb-kraken.energy/";
+        let first = "https://api.oegb-kraken.energy/v1/page=1";
         let mut seen = std::collections::HashSet::from([first.to_string()]);
 
         let cycle =
             validated_next_page(Some(first.to_string()), prefix, first, 1, &seen).unwrap_err();
         assert!(cycle.contains("cycle"), "got: {cycle}");
 
-        let last_allowed = "https://api.octopus.energy/v1/page=1000";
+        let last_allowed = "https://api.oegb-kraken.energy/v1/page=1000";
         seen.insert(last_allowed.to_string());
         let too_many = validated_next_page(
-            Some("https://api.octopus.energy/v1/page=1001".to_string()),
+            Some("https://api.oegb-kraken.energy/v1/page=1001".to_string()),
             prefix,
             last_allowed,
             MAX_OCTOPUS_PAGES,
@@ -1405,7 +1408,11 @@ mod tests {
             }
         }
         // Empty or whitespace-only → the official host.
-        assert_eq!(base_url(&settings("")), OFFICIAL_BASE_URL);
+        assert_eq!(
+            base_url(&settings("")),
+            "https://api.oegb-kraken.energy",
+            "the default is the Kraken host (issue #469)"
+        );
         assert_eq!(base_url(&settings("   \t ")), OFFICIAL_BASE_URL);
         // A custom host is kept verbatim ...
         assert_eq!(
@@ -1456,7 +1463,7 @@ mod tests {
     fn test_validated_next_url_none_is_ok_none() {
         // No `next` link → pagination finished, not an error.
         assert_eq!(
-            validated_next_url(None, "https://api.octopus.energy/").unwrap(),
+            validated_next_url(None, "https://api.oegb-kraken.energy/").unwrap(),
             None
         );
     }
@@ -2552,17 +2559,17 @@ mod tests {
         // URL with a foreign origin → error, not Ok(None)
         assert!(validated_next_url(
             Some("https://evil.example/page".to_string()),
-            "https://api.octopus.energy"
+            "https://api.oegb-kraken.energy"
         )
         .is_err());
         // Matching prefix → Ok(Some)
         assert_eq!(
             validated_next_url(
-                Some("https://api.octopus.energy/v1/page2".to_string()),
-                "https://api.octopus.energy"
+                Some("https://api.oegb-kraken.energy/v1/page2".to_string()),
+                "https://api.oegb-kraken.energy"
             )
             .unwrap(),
-            Some("https://api.octopus.energy/v1/page2".to_string())
+            Some("https://api.oegb-kraken.energy/v1/page2".to_string())
         );
     }
 }

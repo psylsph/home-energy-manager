@@ -396,7 +396,7 @@ describe('ForecastPage — Show past (issue #361)', () => {
     const items = within(list).getAllByTestId('forecast-past-decision');
     expect(items).toHaveLength(1);
     expect(items[0].textContent).toContain('Before the Cheap Window');
-    expect(items[0].textContent).toContain('No overnight charge needed');
+    expect(items[0].textContent).toContain('No charge needed');
     expect(items[0].textContent).toContain('Sunny day — the battery fills from solar.');
   });
 
