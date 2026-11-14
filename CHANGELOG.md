@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.17.0] - 2026-11-14
+
+### Added
+
+- **See how long the battery will last.** Turn on Show Battery Runtime in Settings → Panel Controls and the house view's Battery Level card says when the battery will reach its reserve, such as "Empty tomorrow at 05:30", worked out from your usage and the solar forecast. One to three dots show how sure it is, and the ⓘ next to them explains the range. When a charge slot or the sun will top it up first it says so instead, and while it charges it says when it'll be full. (#472)
+- **Your car's planned charges on the Status page.** With an Octopus account set up, turn on Show Car Charging Slots in Settings → Panel Controls and the Next Charge card shows when Intelligent Octopus Go will next charge the car, or until when it's charging now. It works with the battery hold on or off, and showing the slots never changes what HEM does with the battery. (#474)
+- **Name your CT meters.** A new Meters section in Settings lets you call each clamp something like "Mains In" or "Solar Main Roof". The names appear on the Meters page and in the meter pickers, with the address still shown underneath. (#473)
+
+### Changed
+
+- **Sunlight reads as a word.** The house view's weather corner now says Weak, Low, Moderate, Strong or Intense instead of a figure in W/m², with the exact reading still there on hover. Temperatures also lose the gap before °C. (#475)
+- **Read-only links keep more out of reach.** A `?RO` link now hides the Octopus page as well as Control and Settings, and typing one of their addresses goes back to Status. The Planner stays visible for its forecast, but without Apply or Plan Settings, and links to the hidden pages become plain text. (#471)
+- **The Status page fits the desktop window with Today shown.** The Today card loses its separate heading (its bars already say Today), so nothing scrolls in either view.
+- **The Planner's current-schedule line counts Timed Export.** The "with current schedule" projection now includes your HEM Timed Export windows, so it shows the export coming even while the inverter waits in Eco.
+
+### Fixed
+
+- **The Planner and Status say when a charge-slot hold ends.** The Planner card now reads "then hold until 05:30", and once the battery reaches its target the house view shows Holding Until with the slot's end instead of the charge window. (#470)
+
 ## [1.16.1] - 2026-11-13
 
 ### Fixed
