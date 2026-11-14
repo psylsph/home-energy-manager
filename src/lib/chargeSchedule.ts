@@ -127,6 +127,28 @@ export function batteryEvent(
 }
 
 /**
+ * The charge slots holding the battery now (issue #470): an enabled slot whose
+ * target the battery has reached charges no further and keeps the battery
+ * there until it ends. Only those slots are merged, so the hold ends where a
+ * following slot with a higher target starts charging again. A slot short of
+ * its target isn't a hold, however still the battery is (charge cap, cold
+ * battery, the first poll of the slot). `start === end` covers the whole day.
+ */
+export function holdWindow(
+  snapshot: Pick<InverterSnapshot, 'charge_slots' | 'enable_charge' | 'max_charge_slots' | 'soc'>,
+  nowMinute: number,
+): { start: string; end: string } | null {
+  if (!snapshot.enable_charge) return null;
+  const soc = Math.round(snapshot.soc);
+  // The decoder clamps an unset target to 4, which says nothing about where
+  // the charge stops; the planner and Control never write below 5.
+  const held = capped(snapshot.charge_slots, snapshot.max_charge_slots)
+    .filter((s) => s.target_soc >= 5 && soc >= s.target_soc);
+  const window = mergeScheduleWindows(held).find((w) => isInMergedWindow([w], nowMinute));
+  return window ? { start: formatHHMM(window.start), end: formatHHMM(window.end) } : null;
+}
+
+/**
  * Whether the battery is really doing what the running window is for, so the
  * card can say "…Now" and pulse. A charge or a discharge needs battery power
  * above the noise floor in the right direction (+ = discharging). An export

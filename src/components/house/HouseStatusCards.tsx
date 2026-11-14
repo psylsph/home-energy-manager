@@ -4,7 +4,7 @@
  * segmented level bar in the SOC colour.
  */
 import type { InverterSnapshot } from '../../lib/types';
-import { batteryEvent, batteryStoredKwh, doingIt, type BatteryEventKind, type TimedExportSchedule } from '../../lib/chargeSchedule';
+import { batteryEvent, batteryStoredKwh, doingIt, holdWindow, type BatteryEventKind, type TimedExportSchedule } from '../../lib/chargeSchedule';
 import { useTimedExportSchedule } from '../../hooks/useTimedExportSchedule';
 import { inverterMinuteOfDay } from '../../lib/ecoTimedExport';
 import { batteryBarsLit } from '../../lib/houseFlow';
@@ -55,12 +55,17 @@ function ScheduleCard({ snapshot, timedExport, nowMinute }: {
   const noise = useInverterStore((s) => s.visualNoiseThreshold);
   const event = batteryEvent(snapshot, timedExport, nowMinute);
   const kind = event?.kind ?? 'none';
-  // Inside the window but not doing it (e.g. the charge target is already
-  // reached, or export is paused): say so instead of claiming it, and don't pulse.
+  // Inside the window but not doing it (e.g. a charge short of its target, or
+  // export paused): say so instead of claiming it, and don't pulse.
   const doing = event?.state === 'active' && doingIt(event.kind, snapshot, noise);
   const active = event?.state === 'active';
+  // A charge slot whose target is reached holds the battery until it ends
+  // (issue #470), so name the end rather than the window.
+  const hold = active && !doing && event.kind === 'charge' ? holdWindow(snapshot, nowMinute) : null;
+  const allDay = hold ? hold.start === hold.end : event != null && event.start === event.end;
   const label = !event
     ? 'Schedule'
+    : hold ? (allDay ? 'Holding' : 'Holding Until')
     : active ? (doing ? LABELS[event.kind].doing : LABELS[event.kind].window) : LABELS[event.kind].next;
   return (
     <section className={CARD} data-testid="house-charge-card" data-kind={event?.kind ?? 'none'} data-state={event?.state ?? 'none'}>
@@ -69,7 +74,7 @@ function ScheduleCard({ snapshot, timedExport, nowMinute }: {
       {event ? (
         <span className="font-mono text-base font-semibold text-text-primary whitespace-nowrap" data-testid="house-charge-window">
           {/* Merged slots can cover the whole day (00:00–00:00). */}
-          {event.start === event.end ? 'All day' : `${event.start}–${event.end}`}
+          {allDay ? 'All day' : hold ? hold.end : `${event.start}–${event.end}`}
         </span>
       ) : (
         <span className="text-sm text-text-secondary" data-testid="house-charge-window">None scheduled</span>

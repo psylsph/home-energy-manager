@@ -1177,7 +1177,7 @@ export default function ForecastPage() {
                 <div data-testid="forecast-plan-kwh" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.recommendation.kwh.toFixed(1)} kWh</div>
                 {holdTarget != null && (
                   <div data-testid="forecast-plan-target" className="text-[11px] text-text-secondary">
-                    to {Math.round(holdTarget)}%, then hold
+                    to {Math.round(holdTarget)}%, then hold until {plan.recommendation.window.end}
                   </div>
                 )}
               </div>
