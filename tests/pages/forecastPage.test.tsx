@@ -1472,7 +1472,7 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
     render(<ForecastPage />);
     const target = await screen.findByTestId('forecast-plan-target');
-    expect(target).toHaveTextContent('to 75%, then hold');
+    expect(target).toHaveTextContent('to 75%, then hold until 06:00');
     fireEvent.click(screen.getByTestId('forecast-plan-apply'));
     await waitFor(() => {
       const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');
@@ -1546,7 +1546,7 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
     render(<ForecastPage />);
     expect(await screen.findByTestId('forecast-plan-target')).toHaveTextContent(
-      'to 75%, then hold',
+      'to 75%, then hold until 06:00',
     );
     fireEvent.click(screen.getByTestId('forecast-plan-apply'));
     await waitFor(() => {

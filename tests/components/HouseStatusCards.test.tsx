@@ -74,10 +74,31 @@ describe('<HouseStatusCards/>', () => {
     expect(icon.getAttribute('class')).toBe('motion-safe:animate-pulse');
   });
 
-  it('says Charge Window, without pulsing, inside a slot when the battery is not charging', () => {
+  it('says Holding Until the slot end, without pulsing, once the slot target is reached', () => {
+    // Issue #470: a planner hold charges to its target, then sits in the
+    // slot until it ends; the card says when that is.
+    render(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-01 01:00:00', soc: 75, charge_slots: [{ ...slot(23, 30, 5, 30), target_soc: 75 }] })} />);
+    expect(tid('house-charge-card').getAttribute('data-state')).toBe('active');
+    expect(screen.getByText('Holding Until')).toBeDefined();
+    expect(tid('house-charge-window').textContent).toBe('05:30');
+    expect(tid('house-charge-icon').getAttribute('data-pulsing')).toBe('false');
+  });
+
+  it('says Charge Window, not holding, when the battery is idle below the slot target', () => {
+    // Not charging short of the target is a stalled charge (charge cap, cold
+    // battery, first poll of the slot), not a hold.
     render(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-01 01:00:00', battery_state: 'idle' })} />);
     expect(screen.getByText('Charge Window')).toBeDefined();
+    expect(screen.queryByText('Holding Until')).toBeNull();
+    expect(tid('house-charge-window').textContent).toBe('23:30–05:30');
     expect(tid('house-charge-icon').getAttribute('data-pulsing')).toBe('false');
+  });
+
+  it('says Charge Window, not holding, inside a slot while the battery discharges below target', () => {
+    render(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-01 01:00:00', battery_state: 'discharging', battery_power: 800 })} />);
+    expect(screen.getByText('Charge Window')).toBeDefined();
+    expect(screen.queryByText('Holding Until')).toBeNull();
+    expect(tid('house-charge-window').textContent).toBe('23:30–05:30');
   });
 
   it('says none scheduled, with a plain grey battery, when Timed Charge is off', () => {
@@ -119,6 +140,12 @@ describe('<HouseStatusCards/>', () => {
   it('says All day when the merged slots cover the whole day', () => {
     render(<HouseStatusCards snapshot={snap({ charge_slots: [slot(0, 0, 12, 0), slot(12, 0, 0, 0)] })} />);
     expect(tid('house-charge-card').getAttribute('data-state')).toBe('active');
+    expect(tid('house-charge-window').textContent).toBe('All day');
+  });
+
+  it('says Holding, all day, when an all-day charge has reached its target', () => {
+    render(<HouseStatusCards snapshot={snap({ soc: 100, charge_slots: [slot(0, 0, 12, 0), slot(12, 0, 0, 0)] })} />);
+    expect(screen.getByText('Holding')).toBeDefined();
     expect(tid('house-charge-window').textContent).toBe('All day');
   });
 
@@ -186,9 +213,23 @@ describe('<HouseStatusCards/>', () => {
     });
   });
 
-  it('says Charge Window for a few watts of noise inside the window', () => {
-    render(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-01 01:00:00', battery_state: 'charging', battery_power: -5 })} />);
-    expect(screen.getByText('Charge Window')).toBeDefined();
+  it('keeps saying Holding Until while a held battery wobbles a few tens of watts', () => {
+    const held = { inverter_time: '2026-11-01 01:00:00', soc: 75, charge_slots: [{ ...slot(23, 30, 5, 30), target_soc: 75 }] };
+    for (const battery_power of [-5, 40, 0, 15]) {
+      render(<HouseStatusCards snapshot={snap({ ...held, battery_power })} />);
+      expect(screen.getByText('Holding Until')).toBeDefined();
+      expect(tid('house-charge-window').textContent).toBe('05:30');
+      cleanup();
+    }
+  });
+
+  it('ends the hold where a higher-target slot starts charging again, not at the merged window end', () => {
+    render(<HouseStatusCards snapshot={snap({
+      inverter_time: '2026-11-01 05:00:00', soc: 75,
+      charge_slots: [{ ...slot(4, 0, 5, 30), target_soc: 75 }, { ...slot(5, 30, 7, 0), target_soc: 100 }],
+    })} />);
+    expect(screen.getByText('Holding Until')).toBeDefined();
+    expect(tid('house-charge-window').textContent).toBe('05:30');
   });
 
   it('waits for the Timed Export schedule before saying what comes next', () => {

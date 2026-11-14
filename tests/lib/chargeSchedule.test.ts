@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { batteryEvent, batteryStoredKwh, doingIt } from '../../src/lib/chargeSchedule';
+import { batteryEvent, batteryStoredKwh, doingIt, holdWindow } from '../../src/lib/chargeSchedule';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
 /** Charging card helpers for the house view (issue #422, round 2). */
@@ -182,6 +182,51 @@ describe('doingIt', () => {
   it('discharging: battery power out above the noise floor', () => {
     expect(doingIt('discharge', { battery_power: 300, grid_power: 0 } as InverterSnapshot, noise)).toBe(true);
     expect(doingIt('discharge', { battery_power: 10, grid_power: 0 } as InverterSnapshot, noise)).toBe(false);
+  });
+});
+
+describe('holdWindow', () => {
+  // Issue #470: a charge slot holds the battery once its target is reached.
+  const target = (s: ScheduleSlot, target_soc: number): ScheduleSlot => ({ ...s, target_soc });
+  const hold = (slots: ScheduleSlot[], soc: number, nowMinute: number, over: Partial<InverterSnapshot> = {}) =>
+    holdWindow({ charge_slots: slots, enable_charge: true, max_charge_slots: 0, soc, ...over }, nowMinute);
+
+  it('is the running slot once SOC has reached its target', () => {
+    expect(hold([target(slot(23, 30, 5, 30), 75)], 75, at(1))).toEqual({ start: '23:30', end: '05:30' });
+    expect(hold([target(slot(23, 30, 5, 30), 75)], 90, at(1))).toEqual({ start: '23:30', end: '05:30' });
+  });
+
+  it('is nothing while SOC is still below the target, so a stalled charge is not called a hold', () => {
+    expect(hold([target(slot(23, 30, 5, 30), 100)], 33.5, at(1))).toBeNull();
+    expect(hold([target(slot(23, 30, 5, 30), 75)], 74, at(1))).toBeNull();
+  });
+
+  it('ignores a slot whose target reads 4, the unset value, rather than calling any SOC held', () => {
+    expect(hold([target(slot(23, 30, 5, 30), 4)], 50, at(1))).toBeNull();
+    expect(hold([target(slot(23, 30, 5, 30), 5)], 50, at(1))).not.toBeNull();
+  });
+
+  it('rounds SOC the way the inverter reports it', () => {
+    expect(hold([target(slot(23, 30, 5, 30), 75)], 74.6, at(1))).not.toBeNull();
+    expect(hold([target(slot(23, 30, 5, 30), 75)], 74.4, at(1))).toBeNull();
+  });
+
+  it('ends where a following slot with a higher target starts charging again', () => {
+    const slots = [target(slot(4, 0, 5, 30), 75), target(slot(5, 30, 7, 0), 100)];
+    expect(hold(slots, 75, at(5))).toEqual({ start: '04:00', end: '05:30' });
+    // Both targets met: one hold across both slots.
+    expect(hold(slots, 100, at(5))).toEqual({ start: '04:00', end: '07:00' });
+  });
+
+  it('is nothing outside every slot, when Timed Charge is off, or for slots past the model count', () => {
+    expect(hold([target(slot(23, 30, 5, 30), 75)], 80, at(12))).toBeNull();
+    expect(hold([target(slot(23, 30, 5, 30), 75)], 80, at(1), { enable_charge: false })).toBeNull();
+    expect(hold([slot(10, 0, 11, 0), target(slot(23, 30, 5, 30), 75)], 80, at(1), { max_charge_slots: 1 })).toBeNull();
+    expect(hold([target(slot(23, 30, 5, 30, false), 75)], 80, at(1))).toBeNull();
+  });
+
+  it('covers the whole day when the held slots do', () => {
+    expect(hold([target(slot(0, 0, 12, 0), 50), target(slot(12, 0, 0, 0), 50)], 60, at(3))).toEqual({ start: '00:00', end: '00:00' });
   });
 });
 
