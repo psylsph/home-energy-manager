@@ -26,10 +26,13 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { to: '/settings', label: 'Settings' },
 ];
 
+/** Pages `?RO` read-only mode hides from the nav (issues #114, #471). */
+const READ_ONLY_HIDDEN: ReadonlySet<string> = new Set(['control', 'settings', 'octopus']);
+
 export const LOGS_ITEM: NavItem = { to: '/logs', label: 'Logs' };
 
 export interface NavVisibility {
-  /** `?RO` read-only mode hides Control and Settings (issue #114). */
+  /** `?RO` read-only mode hides Control, Settings (issue #114) and Octopus (issue #471). */
   readOnly: boolean;
   /** Panels hidden in Settings → Panel Controls. */
   hiddenPanels: readonly string[];
@@ -43,7 +46,7 @@ export interface NavVisibility {
 export function visibleNavItems(v: NavVisibility): NavItem[] {
   const items = NAV_ITEMS.filter((item) => {
     const key = item.to.replace(/^\//, '');
-    if (v.readOnly && (key === 'control' || key === 'settings')) return false;
+    if (v.readOnly && READ_ONLY_HIDDEN.has(key)) return false;
     if (key === 'octopus' && !v.octopusConfigured) return false;
     return !key || !v.hiddenPanels.includes(key);
   });

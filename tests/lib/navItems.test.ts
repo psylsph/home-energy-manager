@@ -24,11 +24,12 @@ describe('visibleNavItems', () => {
     expect(items[items.length - 1]).toBe(LOGS_ITEM);
   });
 
-  it('hides Control and Settings in read-only mode', () => {
+  it('hides Control, Settings and Octopus in read-only mode (issues #114, #471)', () => {
     const l = labels({ readOnly: true, octopusConfigured: true });
     expect(l).not.toContain('Control');
     expect(l).not.toContain('Settings');
-    expect(l).toContain('Octopus');
+    expect(l).not.toContain('Octopus');
+    expect(l).toContain('Planner');
   });
 
   it('hides panels hidden in Settings but never Status', () => {

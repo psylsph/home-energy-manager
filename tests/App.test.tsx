@@ -222,12 +222,16 @@ describe('<App/> route-level ErrorBoundary coverage (issue 3.4)', () => {
 describe('<App/> Octopus navigation (issue #212)', () => {
   beforeEach(() => {
     silenceConsoleError();
+    sessionStorage.clear();
+    useInverterStore.setState({ readOnly: false });
     window.location.hash = '#/battery';
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     cleanup();
+    sessionStorage.clear();
+    useInverterStore.setState({ readOnly: false });
     window.location.hash = '';
   });
 
@@ -246,6 +250,34 @@ describe('<App/> Octopus navigation (issue #212)', () => {
       : { ok: true, data: {} });
     render(<App />);
     expect(await screen.findByRole('link', { name: 'Octopus' })).toBeDefined();
+  });
+
+  it('hides the tab in read-only mode (issue #471)', async () => {
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_account_number: 'A-123', octopus_api_key_configured: true } }
+      : { ok: true, data: {} });
+    await navigate('/battery?RO');
+    render(<App />);
+    // Wait for the settings fetch that would reveal the tab.
+    expect(await screen.findByRole('link', { name: 'Planner' })).toBeDefined();
+    await act(async () => {});
+    expect(screen.queryByRole('link', { name: 'Octopus' })).toBeNull();
+  });
+
+  it('sends a typed Octopus URL back to Status in read-only mode (issue #471)', async () => {
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_account_number: 'A-123', octopus_api_key_configured: true } }
+      : { ok: true, data: {} });
+    await navigate('/battery?RO');
+    render(<App />);
+    // Let the settings fetch mark Octopus configured before typing its URL,
+    // so the redirect below is the read-only rule, not a not-yet-loaded one.
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/settings'));
+    await act(async () => {});
+    await navigate('/octopus');
+    await act(async () => {});
+    expect(screen.queryByTestId('mock-Octopus')).toBeNull();
+    expect(window.location.hash).toBe('#/');
   });
 
   it('does not show the tab without an account number', async () => {
@@ -386,6 +418,9 @@ describe('<App/> read-only mode (issue #114)', () => {
     localStorage.clear();
     sessionStorage.clear();
     useInverterStore.setState({ readOnly: false });
+    // The search-string test pushes `/?RO`; leaving it would put every later
+    // test in read-only mode.
+    window.history.replaceState({}, '', '/');
     window.location.hash = '';
   });
 

@@ -80,7 +80,7 @@ export default function RemoteAccessSection({
 
   // The LAN address when known, else whatever this page was loaded from.
   const lanUrl = lanIp ? `http://${lanIp}:${getServerPort()}` : getApiBase();
-  // `?RO` hides Control and Settings in the visitor's browser for that tab
+  // `?RO` hides Control, Settings and Octopus in the visitor's browser for that tab
   // (issue #114) — a convenience for family, not a security boundary.
   const lanReadOnlyUrl = `${lanUrl}?RO`;
   // A tiny glance view for a phone or Apple Watch browser; see INSTALL.md.
@@ -167,7 +167,7 @@ export default function RemoteAccessSection({
 
         <UrlRow url={lanReadOnlyUrl} onCopy={copyUrl} className="mt-2" />
         <p className={HINT}>
-          Read-only link — hides Control and Settings in the visitor's browser (safe to share with family)
+          Read-only link — hides Control, Settings and Octopus in the visitor's browser (safe to share with family)
         </p>
 
         <UrlRow url={miniPageUrl} onCopy={copyUrl} className="mt-2" />

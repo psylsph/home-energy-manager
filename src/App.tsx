@@ -424,7 +424,7 @@ function Layout() {
   }, [setLatestVersionInfo]);
 
   // Read-only mode (?RO URL parameter, issue #114). When the URL carries
-  // `?RO`, hide the Control and Settings nav icons so a household-shared
+  // `?RO`, hide the Control, Settings and Octopus nav icons so a household-shared
   // dashboard link (e.g. for a partner or kids) can't accidentally toggle
   // settings. The sessionStorage flag is set immediately, so the link stays
   // read-only while navigating or reloading in the current tab, but closing
@@ -535,7 +535,8 @@ function Layout() {
           {page('/battery', <BatteryPage />, true)}
           {page('/history', <HistoryPage />, true)}
           {page('/forecast', <ForecastPage />, true)}
-          {octopusConfigured
+          {/* Read-only links don't show the Octopus page at all (issue #471). */}
+          {octopusConfigured && !isReadOnly
             ? page('/octopus', <OctopusPage />)
             : <Route path="/octopus" element={<Navigate to="/" replace />} />}
           {page('/control', <ControlPage />, true)}

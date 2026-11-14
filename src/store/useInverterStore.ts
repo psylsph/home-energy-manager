@@ -28,7 +28,7 @@ interface InverterState {
   developerMode: boolean;
   themeMode: ThemeMode;
   /**
-   * Read-only mode hides the Control and Settings tabs from the bottom
+   * Read-only mode hides the Control, Settings and Octopus tabs from the bottom
    * navigation. Set initially by visiting the app with a `?RO` URL
    * parameter (intended for sharing a household dashboard link with
    * non-admin users — see issue #114). Persisted to sessionStorage so
