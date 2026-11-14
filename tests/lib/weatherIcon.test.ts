@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   SOLAR_LEVEL_BARS,
+  SOLAR_LEVEL_WORDS,
   WEATHER_MAX_AGE_MS,
   currentWeather,
   weatherLocation,
   formatIrradiance,
   formatWeatherTemp,
   solarLevel,
+  solarLevelWord,
   weatherDescription,
   weatherIconKind,
   type LiveWeatherState,
@@ -156,8 +158,10 @@ describe('currentWeather', () => {
 
 describe('formatWeatherTemp', () => {
   it('rounds to whole degrees', () => {
-    expect(formatWeatherTemp(10.4)).toBe('10 °C');
-    expect(formatWeatherTemp(-0.6)).toBe('-1 °C');
+    expect(formatWeatherTemp(10.4)).toBe('10°C');
+    // No space: in the mono font it reads as a gap, worst on one digit (#475).
+    expect(formatWeatherTemp(5)).toBe('5°C');
+    expect(formatWeatherTemp(-0.6)).toBe('-1°C');
   });
 });
 
@@ -167,6 +171,26 @@ describe('solarLevel', () => {
     [1, 1], [200, 1], [201, 2], [486, 3], [999, SOLAR_LEVEL_BARS], [1000, SOLAR_LEVEL_BARS], [1300, SOLAR_LEVEL_BARS],
   ])('%s W/m² lights %s bars', (w, bars) => {
     expect(solarLevel(w)).toBe(bars);
+  });
+});
+
+describe('solarLevelWord (issue #475)', () => {
+  it.each([
+    [0, 'None'], [-10, 'None'], [Number.NaN, 'None'],
+    [1, 'Weak'], [200, 'Weak'], [201, 'Low'], [400, 'Low'], [401, 'Moderate'], [486, 'Moderate'],
+    [600, 'Moderate'], [601, 'Strong'], [800, 'Strong'], [801, 'Intense'], [1300, 'Intense'],
+  ])('%s W/m² reads %s', (w, word) => {
+    expect(solarLevelWord(w)).toBe(word);
+  });
+
+  it('has a word for every bar count, including none lit', () => {
+    expect(SOLAR_LEVEL_WORDS).toHaveLength(SOLAR_LEVEL_BARS + 1);
+  });
+
+  it('always agrees with the bars', () => {
+    for (let w = -50; w <= 1400; w += 7) {
+      expect(solarLevelWord(w)).toBe(SOLAR_LEVEL_WORDS[solarLevel(w)]);
+    }
   });
 });
 

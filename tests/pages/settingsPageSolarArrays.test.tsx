@@ -8,6 +8,7 @@ vi.mock('../../src/lib/api', () => ({
 import SolarArraysSection from '../../src/components/settings/SolarArraysSection';
 import { apiPost } from '../../src/lib/api';
 import type { PollSettings } from '../../src/lib/types';
+import { useInverterStore } from '../../src/store/useInverterStore';
 
 /** Two DC strings and two CT arrays, one of them unnamed. */
 const SAVED: Partial<PollSettings> = {
@@ -31,6 +32,7 @@ describe('<SolarArraysSection/> — Solar Arrays (issue #110)', () => {
   beforeEach(() => {
     silenceConsoleError();
     vi.mocked(apiPost).mockClear();
+    useInverterStore.setState({ meterLabels: { names: {}, solarArrays: [] } });
   });
 
   afterEach(() => {
@@ -102,6 +104,25 @@ describe('<SolarArraysSection/> — Solar Arrays (issue #110)', () => {
       render(<Section />);
       const rows = await screen.findAllByTestId('solar-array-row');
       expect(rows).toHaveLength(2);
+    });
+
+    it("names the meter picker's options from Settings → Meters (issue #473)", async () => {
+      useInverterStore.setState({ meterLabels: { names: { '2': 'Mains In' }, solarArrays: [] } });
+      render(<Section />);
+      const [picker] = await screen.findAllByTestId('solar-array-address');
+      const labels = Array.from((picker as HTMLSelectElement).options).map((o) => o.textContent);
+      expect(labels.slice(0, 3)).toEqual(['0x01', '0x02 · Mains In', '0x03']);
+    });
+
+    it('shares the saved arrays with the Meters page titles (issue #473)', async () => {
+      render(<Section />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Solar Arrays' }));
+      await waitFor(() => {
+        expect(useInverterStore.getState().meterLabels.solarArrays).toEqual([
+          { meter_address: 1, name: 'East roof', rated_kw: 6 },
+          { meter_address: 2, name: '', rated_kw: 4.2 },
+        ]);
+      });
     });
 
     it('hydrates PV1/PV2 kWp inputs from settings (3.8 / 1.3)', async () => {

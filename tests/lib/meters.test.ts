@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+  meterAddressText,
+  meterLabel,
+  meterName,
+  meterOptionLabel,
   gridMeterCurrentA,
   resolveGridMeter,
   BUILTIN_GRID_CT_ADDRESS,
@@ -124,5 +128,49 @@ describe('gridMeterCurrentA', () => {
     // No grid flow right now is still a valid, useful reading relative to the
     // cut-out fuse — don't suppress it as if the meter were missing.
     expect(gridMeterCurrentA([meter(0x00, { i_total: 0 })])).toBe(0);
+  });
+});
+
+describe('meter names (issue #473)', () => {
+  const names = { '1': 'Mains In', '3': '  ' };
+  const arrays = [
+    { meter_address: 1, name: 'Ignored Array', rated_kw: 4 },
+    { meter_address: 2, name: 'Solar Small Roof', rated_kw: 2 },
+    { meter_address: 4, name: '', rated_kw: 3 },
+  ];
+
+  it('formats the address as two hex digits', () => {
+    expect(meterAddressText(1)).toBe('0x01');
+    expect(meterAddressText(9)).toBe('0x09');
+  });
+
+  it("uses the meter's own name first", () => {
+    expect(meterLabel(1, names, arrays)).toBe('Mains In');
+  });
+
+  it('falls back to the Solar Arrays name, then the address', () => {
+    expect(meterLabel(2, names, arrays)).toBe('Solar Small Roof');
+    expect(meterLabel(4, names, arrays)).toBe('Meter 0x04');
+    expect(meterLabel(5, names, arrays)).toBe('Meter 0x05');
+  });
+
+  it('treats a blank name as no name', () => {
+    expect(meterLabel(3, names, arrays)).toBe('Meter 0x03');
+    expect(meterName(3, names, arrays)).toBeNull();
+  });
+
+  it('keeps the built-in grid CT title', () => {
+    expect(meterLabel(0, { '0': 'Grid' }, [])).toBe('Built-in Grid CT');
+  });
+
+  it('works with nothing loaded yet', () => {
+    expect(meterLabel(2)).toBe('Meter 0x02');
+    expect(meterName(2)).toBeNull();
+  });
+
+  it('puts the address first in a picker option', () => {
+    expect(meterOptionLabel(1, names, arrays)).toBe('0x01 · Mains In');
+    expect(meterOptionLabel(2, names, arrays)).toBe('0x02 · Solar Small Roof');
+    expect(meterOptionLabel(5, names, arrays)).toBe('Meter 0x05');
   });
 });

@@ -6,6 +6,20 @@ const timedExport = vi.hoisted(() => ({
   loaded: true,
   calls: 0,
 }));
+// The car's planned charges (issue #474), as `GET /api/octopus/dispatches`
+// returns them; `null` while the switch is off or nothing usable came back.
+const carSlots = vi.hoisted(() => ({
+  value: null as null | Record<string, unknown>,
+  loaded: true,
+}));
+vi.mock('../../src/hooks/useCarChargeSlots', () => ({
+  useCarChargeSlots: () => ({ response: carSlots.value, loaded: carSlots.loaded }),
+}));
+// How long the battery lasts (issue #472); `null` while off or unknown.
+const runtime = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }));
+vi.mock('../../src/hooks/useBatteryRuntime', () => ({
+  useBatteryRuntime: () => runtime.value,
+}));
 vi.mock('../../src/hooks/useTimedExportSchedule', () => ({
   useTimedExportSchedule: () => {
     timedExport.calls += 1;
@@ -15,6 +29,7 @@ vi.mock('../../src/hooks/useTimedExportSchedule', () => ({
 
 import HouseStatusCards from '../../src/components/house/HouseStatusCards';
 import { socColor } from '../../src/lib/energyFlow';
+import { LOCAL_FORMAT } from '../../src/lib/carChargeSlots';
 import { useInverterStore } from '../../src/store/useInverterStore';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
@@ -52,6 +67,9 @@ describe('<HouseStatusCards/>', () => {
   beforeEach(() => {
     timedExport.value = null;
     timedExport.loaded = true;
+    carSlots.value = null;
+    carSlots.loaded = true;
+    runtime.value = null;
     useInverterStore.setState({ visualNoiseThreshold: 20 });
   });
   afterEach(cleanup);
@@ -296,3 +314,143 @@ describe('<HouseStatusCards/>', () => {
   });
 });
 
+
+describe('<HouseStatusCards/> car charging line (issue #474)', () => {
+  // 18:00 UTC on 1 November; the car line is in browser-local time.
+  const NOW = new Date('2026-11-01T18:00:00Z');
+  const at = (iso: string) => LOCAL_FORMAT.time(new Date(iso));
+  const dispatches = (list: Array<{ start: string; end: string; smart?: boolean; kwh?: number }>) => ({
+    ok: true,
+    enabled: false,
+    configured: true,
+    checked_at: '2026-11-01T17:58:00Z',
+    error: null,
+    devices: 1,
+    holding: false,
+    hold_failing: false,
+    stale_after_minutes: 15,
+    dispatches: list.map((d) => ({
+      start: d.start,
+      end: d.end,
+      type: d.smart === false ? 'BOOST' : 'SMART',
+      energy_added_kwh: d.kwh ?? null,
+      smart: d.smart !== false,
+    })),
+  });
+
+  beforeEach(() => {
+    timedExport.value = null;
+    timedExport.loaded = true;
+    carSlots.value = null;
+    carSlots.loaded = true;
+    runtime.value = null;
+    useInverterStore.setState({ visualNoiseThreshold: 20 });
+  });
+  afterEach(cleanup);
+
+  it('shows no line when there is nothing to show', () => {
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(screen.queryByTestId('house-car-charge')).toBeNull();
+  });
+
+  it('shows the next car charge under the battery window, which is unchanged', () => {
+    carSlots.value = dispatches([{ start: '2026-11-01T23:30:00Z', end: '2026-11-02T05:30:00Z', kwh: 12.34 }]);
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    const line = tid('house-car-charge');
+    expect(line.getAttribute('data-state')).toBe('next');
+    expect(line.textContent).toBe(`Car ${at('2026-11-01T23:30:00Z')}–${at('2026-11-02T05:30:00Z')}`);
+    expect(line.getAttribute('title')).toBe('12.3 kWh planned');
+    // The battery's own event is untouched.
+    expect(screen.getByText('Next Charge')).toBeDefined();
+    expect(tid('house-charge-window').textContent).toBe('23:30–05:30');
+    expect(tid('house-charge-card').contains(line)).toBe(true);
+  });
+
+  it("says until when a running car charge goes, without changing the battery's label", () => {
+    carSlots.value = dispatches([{ start: '2026-11-01T17:30:00Z', end: '2026-11-01T19:00:00Z' }]);
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    const line = tid('house-car-charge');
+    expect(line.getAttribute('data-state')).toBe('active');
+    expect(line.textContent).toBe(`Car charging until ${at('2026-11-01T19:00:00Z')}`);
+    expect(screen.getByText('Next Charge')).toBeDefined();
+    expect(tid('house-charge-icon').getAttribute('data-pulsing')).toBe('false');
+  });
+
+  it('marks a boost', () => {
+    carSlots.value = dispatches([{ start: '2026-11-01T19:00:00Z', end: '2026-11-01T20:00:00Z', smart: false }]);
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(tid('house-car-charge').textContent).toMatch(/ · Boost$/);
+  });
+
+  it('hides the line for a stale or failed check', () => {
+    carSlots.value = { ...dispatches([{ start: '2026-11-01T23:30:00Z', end: '2026-11-02T05:30:00Z' }]), checked_at: '2026-11-01T17:00:00Z' };
+    const { unmount } = render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(screen.queryByTestId('house-car-charge')).toBeNull();
+    unmount();
+    carSlots.value = { ...dispatches([{ start: '2026-11-01T23:30:00Z', end: '2026-11-02T05:30:00Z' }]), error: 'Octopus is down' };
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(screen.queryByTestId('house-car-charge')).toBeNull();
+  });
+
+  it('still shows the car on a Gateway, where the schedule is unavailable', () => {
+    carSlots.value = dispatches([{ start: '2026-11-01T23:30:00Z', end: '2026-11-02T05:30:00Z' }]);
+    render(<HouseStatusCards snapshot={snap({ device_type_code: '7001' })} now={NOW} />);
+    expect(tid('house-charge-card').getAttribute('data-state')).toBe('unavailable');
+    expect(tid('house-charge-card').contains(tid('house-car-charge'))).toBe(true);
+  });
+
+  it('waits for the car check as well as the schedule, so the card does not jump', () => {
+    carSlots.loaded = false;
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(tid('house-charge-card').getAttribute('data-state')).toBe('loading');
+  });
+});
+
+describe('<HouseStatusCards/> battery runtime line (issue #472)', () => {
+  const NOW = new Date('2026-11-01T18:00:00Z');
+  const local = (iso: string) => {
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+  beforeEach(() => {
+    timedExport.value = null;
+    timedExport.loaded = true;
+    carSlots.value = null;
+    runtime.value = null;
+    useInverterStore.setState({ visualNoiseThreshold: 20 });
+  });
+  afterEach(cleanup);
+
+  it('shows no line while off or unknown', () => {
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(screen.queryByTestId('house-battery-runtime')).toBeNull();
+  });
+
+  it('says when the battery reaches its reserve, with a confidence in dots', () => {
+    const at = Date.parse('2026-11-01T18:30:00Z') / 1000;
+    runtime.value = { outcome: 'empty_at', at, earliest: at - 1800, latest: at + 3600, confidence: 'medium', computed_at: at - 1800 };
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    const line = tid('house-battery-runtime');
+    expect(tid('house-battery-card').contains(line)).toBe(true);
+    expect(tid('house-runtime-text').textContent).toMatch(new RegExp(`^Empty (at|tomorrow at) ${local('2026-11-01T18:30:00Z')}$`));
+    const dots = [...line.querySelectorAll('[data-testid="house-runtime-dot"]')];
+    expect(dots).toHaveLength(3);
+    expect(dots.filter((d) => d.getAttribute('data-lit') === 'true')).toHaveLength(2);
+    expect(line.getAttribute('title')).toMatch(/medium confidence$/);
+    // The dots aren't the only signal, and an ⓘ says what they mean.
+    expect(tid('house-runtime-dots').getAttribute('aria-label')).toBe('Medium confidence');
+    const info = screen.getByRole('button', { name: 'More about Battery Runtime' });
+    expect(line.contains(info)).toBe(true);
+    // It stays out of the schedule card, which holds the car line (#474).
+    expect(tid('house-charge-card').contains(line)).toBe(false);
+  });
+
+  it('shows a refill without dots', () => {
+    const at = Date.parse('2026-11-01T23:30:00Z') / 1000;
+    runtime.value = { outcome: 'recharges_first', at, by: 'charge', computed_at: Date.parse('2026-11-01T17:58:00Z') / 1000 };
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(tid('house-runtime-text').textContent).toMatch(/^Lasts until the .* charge$/);
+    expect(screen.queryByTestId('house-runtime-dots')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'More about Battery Runtime' })).toBeNull();
+  });
+});

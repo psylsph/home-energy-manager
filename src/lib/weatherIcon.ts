@@ -104,13 +104,25 @@ export function weatherLocation(state: LiveWeatherState | null | undefined): Wea
 export const SOLAR_LEVEL_BARS = 5;
 const W_M2_PER_BAR = 200;
 
-/** Lit bars for an irradiance: any sun lights one, 1000 W/m² or more lights all five. */
+/** Lit bars for an irradiance: any sun lights one, over 800 W/m² lights all five. */
 export function solarLevel(wM2: number): number {
   if (!Number.isFinite(wM2) || wM2 <= 0) return 0;
   return Math.min(SOLAR_LEVEL_BARS, Math.ceil(wM2 / W_M2_PER_BAR));
 }
 
-/** Irradiance as shown under the temperature, e.g. `"486 W/m²"`. */
+/**
+ * One word per bar count (issue #475), index 0 for a daytime zero. The scale
+ * is absolute, not relative to the season: it says what the panels can make
+ * now, so a clear December noon really is Weak or Low.
+ */
+export const SOLAR_LEVEL_WORDS = ['None', 'Weak', 'Low', 'Moderate', 'Strong', 'Intense'] as const;
+
+/** The word shown under the temperature, always matching `solarLevel()`'s bars. */
+export function solarLevelWord(wM2: number): (typeof SOLAR_LEVEL_WORDS)[number] {
+  return SOLAR_LEVEL_WORDS[solarLevel(wM2)];
+}
+
+/** Irradiance for the hover title and screen-reader label, e.g. `"486 W/m²"`. */
 export function formatIrradiance(wM2: number): string {
   return `${Math.round(wM2)} W/m²`;
 }
@@ -139,5 +151,6 @@ export function currentWeather(state: LiveWeatherState | null | undefined, now: 
 
 /** Temperature as shown next to the icon, e.g. `"10 °C"`. */
 export function formatWeatherTemp(c: number): string {
-  return `${Math.round(c)} °C`;
+  // No space before °C: in the mono font it reads as a gap (#475 follow-up).
+  return `${Math.round(c)}°C`;
 }

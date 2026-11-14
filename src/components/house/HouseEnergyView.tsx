@@ -56,6 +56,7 @@ import {
   formatIrradiance,
   formatWeatherTemp,
   solarLevel,
+  solarLevelWord,
   type CurrentWeather,
   type WeatherIconKind,
 } from '../../lib/weatherIcon';
@@ -192,7 +193,9 @@ function Weather({ weather }: { weather: CurrentWeather }) {
   const { solarWm2 } = weather;
   const lit = solarWm2 == null ? 0 : solarLevel(solarWm2);
   const label = `${weather.description}, ${formatWeatherTemp(weather.temperatureC)}`
-    + (solarWm2 == null ? '' : `, sunlight ${formatIrradiance(solarWm2)}`);
+    + (solarWm2 == null
+      ? ''
+      : `, sunlight ${solarLevelWord(solarWm2).toLowerCase()} (${formatIrradiance(solarWm2)})`);
   return (
     <g data-testid="house-weather" data-kind={weather.kind} aria-label={label}>
       {/* Centred on the digits of the temperature (baseline 68, ~12 px tall). */}
@@ -201,8 +204,10 @@ function Weather({ weather }: { weather: CurrentWeather }) {
         {formatWeatherTemp(weather.temperatureC)}
       </text>
       {solarWm2 != null && (
-        // Solar intensity: five bars (200 W/m² each) plus the reading.
+        // Solar intensity: five bars (200 W/m² each) plus a word for them
+        // (issue #475); the figure is in the hover title.
         <g data-testid="house-solar-intensity" data-level={lit}>
+          <title>{`Sunlight ${formatIrradiance(solarWm2)}`}</title>
           {Array.from({ length: SOLAR_LEVEL_BARS }, (_, i) => (
             <rect
               key={i}
@@ -213,7 +218,7 @@ function Weather({ weather }: { weather: CurrentWeather }) {
             />
           ))}
           <text x={44} y={86} fill={TEXT_SECONDARY} fontSize={11} fontFamily={MONO} data-testid="house-solar-value">
-            {formatIrradiance(solarWm2)}
+            {solarLevelWord(solarWm2)}
           </text>
         </g>
       )}

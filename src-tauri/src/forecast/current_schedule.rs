@@ -30,7 +30,7 @@ use crate::forecast::time_windows::{
     split_hour_segments, window_overlap_hours as absolute_window_overlap_hours,
     window_overlap_segments as absolute_window_overlap_segments,
 };
-use crate::inverter::model::InverterSnapshot;
+use crate::inverter::model::{InverterSnapshot, ScheduleSlot};
 
 /// One timed window: an enabled inverter slot, resolved to wall-clock
 /// minutes and kW.
@@ -90,6 +90,27 @@ impl CurrentSchedule {
             }
         }
         schedule
+    }
+
+    /// Add HEM's own Timed Export windows (`slots`, the enabled ones):
+    /// outside them HEM leaves the inverter in Eco with its slots cleared, so
+    /// the snapshot alone doesn't show the export coming. A window the
+    /// inverter already has (inside one) isn't added twice.
+    pub fn add_timed_export(&mut self, slots: &[ScheduleSlot], discharge_limit_kw: f64) {
+        if !(discharge_limit_kw.is_finite() && discharge_limit_kw > 0.0) {
+            return;
+        }
+        for slot in slots.iter().filter(|s| s.enabled) {
+            let window = ScheduledWindow {
+                start_min: u16::from(slot.start_hour) * 60 + u16::from(slot.start_minute),
+                end_min: u16::from(slot.end_hour) * 60 + u16::from(slot.end_minute),
+                rate_kw: discharge_limit_kw,
+                target_soc_pct: f64::from(slot.target_soc).clamp(0.0, 100.0),
+            };
+            if !self.discharge_windows.contains(&window) {
+                self.discharge_windows.push(window);
+            }
+        }
     }
 
     /// True when no slot would run — the projection must then be
@@ -291,6 +312,36 @@ mod tests {
                 ..Default::default()
             })
             .collect()
+    }
+
+    // --- HEM's Timed Export (issue #472 review) -------------------------
+
+    #[test]
+    fn timed_export_slots_add_discharge_windows_once() {
+        let slot = |enabled, start_hour| ScheduleSlot {
+            enabled,
+            start_hour,
+            start_minute: 0,
+            end_hour: start_hour + 1,
+            end_minute: 0,
+            target_soc: 20,
+        };
+        let mut schedule = CurrentSchedule::default();
+        schedule.add_timed_export(&[slot(true, 18), slot(false, 20), slot(true, 18)], 2.5);
+        assert_eq!(
+            schedule.discharge_windows,
+            vec![ScheduledWindow {
+                start_min: 18 * 60,
+                end_min: 19 * 60,
+                rate_kw: 2.5,
+                target_soc_pct: 20.0
+            }],
+            "disabled slots skipped, a window already there not added twice"
+        );
+        // No usable rate, nothing to export at.
+        let mut none = CurrentSchedule::default();
+        none.add_timed_export(&[slot(true, 18)], 0.0);
+        assert!(none.is_empty());
     }
 
     // --- from_snapshot gating -------------------------------------------

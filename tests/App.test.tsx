@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
@@ -252,16 +252,75 @@ describe('<App/> Octopus navigation (issue #212)', () => {
     expect(await screen.findByRole('link', { name: 'Octopus' })).toBeDefined();
   });
 
+  it('turns the car line on from the saved setting only with Octopus set up (issue #474)', async () => {
+    onTestFinished(() => useInverterStore.setState({ showCarCharging: false }));
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_account_number: 'A-123', octopus_api_key_configured: true, status_show_car_charging: true } }
+      : { ok: true, data: {} });
+    render(<App />);
+    await waitFor(() => expect(useInverterStore.getState().showCarCharging).toBe(true));
+    cleanup();
+
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { octopus_account_number: '', octopus_api_key_configured: true, status_show_car_charging: true } }
+      : { ok: true, data: {} });
+    render(<App />);
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/settings'));
+    await act(async () => {});
+    expect(useInverterStore.getState().showCarCharging).toBe(false);
+    expect(useInverterStore.getState().navSettingsLoaded).toBe(true);
+  });
+
+  it('settles the car line when the settings request stalls, after its timeout (issue #474)', async () => {
+    // A stalled request (a slow Pi, a half-open proxy connection) mustn't
+    // leave the Next Charge card loading for ever.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    onTestFinished(() => {
+      vi.useRealTimers();
+      useInverterStore.setState({ navSettingsLoaded: false });
+    });
+    useInverterStore.setState({ navSettingsLoaded: false });
+    onTestFinished(() => useInverterStore.setState({ showCarCharging: false }));
+    let answer: (value: unknown) => void = () => {};
+    vi.mocked(apiGet).mockImplementation((path: string) => path === '/api/settings'
+      ? new Promise((resolve) => { answer = resolve; })
+      : Promise.resolve({ ok: true, data: {} }) as never);
+    render(<App />);
+    await act(async () => { vi.advanceTimersByTime(9_000); });
+    expect(useInverterStore.getState().navSettingsLoaded).toBe(false);
+    await act(async () => { vi.advanceTimersByTime(2_000); });
+    await waitFor(() => expect(useInverterStore.getState().navSettingsLoaded).toBe(true));
+    // The late answer still counts when it comes.
+    await act(async () => answer({ ok: true, data: {
+      octopus_account_number: 'A-123', octopus_api_key_configured: true, status_show_car_charging: true,
+    } }));
+    await waitFor(() => expect(useInverterStore.getState().showCarCharging).toBe(true));
+  });
+
+  it('settles the car line even when the settings fail to load (issue #474)', async () => {
+    onTestFinished(() => useInverterStore.setState({ navSettingsLoaded: false }));
+    useInverterStore.setState({ navSettingsLoaded: false });
+    vi.mocked(apiGet).mockRejectedValue(new Error('offline'));
+    render(<App />);
+    await waitFor(() => expect(useInverterStore.getState().navSettingsLoaded).toBe(true));
+    expect(useInverterStore.getState().showCarCharging).toBe(false);
+  });
+
   it('hides the tab in read-only mode (issue #471)', async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
       ? { ok: true, data: { octopus_account_number: 'A-123', octopus_api_key_configured: true } }
       : { ok: true, data: {} });
     await navigate('/battery?RO');
     render(<App />);
-    // Wait for the settings fetch that would reveal the tab.
-    expect(await screen.findByRole('link', { name: 'Planner' })).toBeDefined();
+    // Let the settings fetch that would reveal the tab settle first.
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/settings'));
+    await act(async () => {});
     await act(async () => {});
     expect(screen.queryByRole('link', { name: 'Octopus' })).toBeNull();
+    // Positive control: the same settings show the tab once read-only is off.
+    await navigate('/battery');
+    await act(async () => useInverterStore.getState().setReadOnly(false));
+    expect(await screen.findByRole('link', { name: 'Octopus' })).toBeDefined();
   });
 
   it('sends a typed Octopus URL back to Status in read-only mode (issue #471)', async () => {
@@ -436,6 +495,17 @@ describe('<App/> read-only mode (issue #114)', () => {
     // The two tabs the issue asks to hide are gone from the bottom bar.
     expect(screen.queryByRole('link', { name: 'Control' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull();
+  });
+
+  it.each([
+    ['/control', 'mock-Control'],
+    ['/settings', 'mock-Settings'],
+  ] as const)('sends a typed %s URL back to Status in read-only mode (issue #471)', async (route, testId) => {
+    await navigate(`${route}?RO`);
+    render(<App />);
+    await act(async () => {});
+    expect(screen.queryByTestId(testId)).toBeNull();
+    expect(window.location.hash).toBe('#/');
   });
 
   it('shows Control and Settings nav links on the default URL (no ?RO)', async () => {

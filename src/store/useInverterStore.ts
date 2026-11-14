@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot, LatestVersionInfo, PollSettings } from '../lib/types';
+import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot, LatestVersionInfo, PollSettings, SolarArrayConfig } from '../lib/types';
+import type { MeterNames } from '../lib/meters';
 import type { GridLineWeight } from '../lib/historyRangeConfig';
 import type { InverterTemperatureAlertConfig } from '../lib/gridFault';
 
@@ -100,6 +101,25 @@ interface InverterState {
    * (the feature is off).
    */
   carCharging: Pick<PollSettings, 'forecast_exclude_load_above_kw' | 'car_charger_current_a'>;
+  /**
+   * Meter names and solar arrays from Settings (issue #473), mirrored here so
+   * the Meters page and the Grid CT Meter picker can title each CT clamp
+   * through `lib/meters.ts::meterLabel` without their own fetch. Empty until
+   * the settings load, so meters keep their address titles meanwhile.
+   */
+  meterLabels: { names: MeterNames; solarArrays: SolarArrayConfig[] };
+  /**
+   * Show the car's planned Octopus charges in the house view's Next Charge
+   * card (issue #474): the saved `status_show_car_charging` while an Octopus
+   * account is set up. Loaded with the nav settings; false until then.
+   */
+  showCarCharging: boolean;
+  /**
+   * App's settings fetch has settled (either way), so `showCarCharging` is
+   * known. Until then the car line isn't ready, so the Next Charge card waits
+   * once rather than showing and then jumping (issue #474).
+   */
+  navSettingsLoaded: boolean;
   /** EV Charger active power (watts), updated by EVC poll loop. */
   evcPower: number;
   /**
@@ -193,6 +213,11 @@ interface InverterState {
    */
   homeExcludesCar: boolean;
   /**
+   * Issue #472: show when the battery will reach its reserve in the house
+   * view's Battery Level card. Off by default; persisted to localStorage.
+   */
+  showBatteryRuntime: boolean;
+  /**
    * Noise floor in watts for the energy flow diagram. Flows below this
    * value are treated as zero — no animated line, no arrow, displayed
    * value rounds to "0W". Default: 20W.
@@ -237,6 +262,9 @@ interface InverterState {
   setInverterTempConfig: (config: InverterTemperatureAlertConfig) => void;
   setEvcHost: (host: string) => void;
   setCarCharging: (settings: Pick<PollSettings, 'forecast_exclude_load_above_kw' | 'car_charger_current_a'>) => void;
+  setMeterLabels: (patch: Partial<{ names: MeterNames; solarArrays: SolarArrayConfig[] }>) => void;
+  setShowCarCharging: (show: boolean) => void;
+  setNavSettingsLoaded: (loaded: boolean) => void;
   setEvcData: (
     power: number,
     connected?: boolean,
@@ -276,6 +304,7 @@ interface InverterState {
   setEnergyFlowDisplay: (display: EnergyFlowDisplay) => void;
   setShowTodayStats: (show: boolean) => void;
   setHomeExcludesCar: (enabled: boolean) => void;
+  setShowBatteryRuntime: (show: boolean) => void;
   setVisualNoiseThreshold: (threshold: number) => void;
   setGridMeterAddress: (address: number) => void;
   /**
@@ -442,6 +471,14 @@ function loadHomeExcludesCar(): boolean {
   return false;
 }
 
+function loadShowBatteryRuntime(): boolean {
+  try {
+    // Opt-in (issue #472): only the literal "true" turns it on.
+    return localStorage.getItem('showBatteryRuntime') === 'true';
+  } catch { /* ignore */ }
+  return false;
+}
+
 function loadVisualNoiseThreshold(): number {
   try {
     const stored = localStorage.getItem('visualNoiseThreshold');
@@ -545,6 +582,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   energyFlowDisplay: loadEnergyFlowDisplay(),
   showTodayStats: loadShowTodayStats(),
   homeExcludesCar: loadHomeExcludesCar(),
+  showBatteryRuntime: loadShowBatteryRuntime(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
@@ -558,6 +596,9 @@ export const useInverterStore = create<InverterState>((set) => ({
   timedExportArmFailed: false,
   evcHost: '',
   carCharging: {},
+  meterLabels: { names: {}, solarArrays: [] },
+  showCarCharging: false,
+  navSettingsLoaded: false,
   evcPower: 0,
   evcChargingState: '',
   evcConnected: false,
@@ -656,6 +697,12 @@ export const useInverterStore = create<InverterState>((set) => ({
     } catch { /* ignore */ }
     set({ homeExcludesCar: enabled });
   },
+  setShowBatteryRuntime: (show) => {
+    try {
+      localStorage.setItem('showBatteryRuntime', String(show));
+    } catch { /* ignore */ }
+    set({ showBatteryRuntime: show });
+  },
   setVisualNoiseThreshold: (threshold) => {
     try {
       localStorage.setItem('visualNoiseThreshold', String(threshold));
@@ -706,6 +753,9 @@ export const useInverterStore = create<InverterState>((set) => ({
   setInverterTempConfig: (config) => set({ inverterTempConfig: config }),
   setEvcHost: (host) => set({ evcHost: host }),
   setCarCharging: (settings) => set({ carCharging: settings }),
+  setMeterLabels: (patch) => set((s) => ({ meterLabels: { ...s.meterLabels, ...patch } })),
+  setShowCarCharging: (show) => set({ showCarCharging: show }),
+  setNavSettingsLoaded: (loaded) => set({ navSettingsLoaded: loaded }),
   setEvcData: (
     power,
     connected = true,

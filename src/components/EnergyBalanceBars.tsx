@@ -98,9 +98,11 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
     <section
       data-testid="today-balance"
       aria-label="Today's Energy Balance"
-      className="bg-bg-surface rounded-lg p-3 sm:p-4 md:p-5 h-full flex flex-col gap-2"
+      // No separate "Today" heading: the bar titles say it, and dropping it
+      // lets the Status page fit the desktop app's default window
+      // with the statistics and the house cards' extra lines shown.
+      className="bg-bg-surface rounded-lg p-3 sm:p-4 h-full flex flex-col gap-2"
     >
-      <h2 className="hidden md:block text-text-primary text-base font-semibold tracking-wide">Today</h2>
       {empty ? (
         <p className="text-xs text-text-secondary">No energy recorded yet today.</p>
       ) : (

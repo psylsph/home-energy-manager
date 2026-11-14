@@ -665,6 +665,9 @@ pub struct AppState {
     /// can be re-planned when Octopus moves a dispatch (issue #404).
     /// In-memory only: after a restart the next daily write starts afresh.
     pub(crate) forecast_plan_cycle: Arc<Mutex<Option<crate::inverter::plan_replan::PlanCycle>>>,
+    /// The last battery runtime answer (issue #472), reused for a few
+    /// minutes so the Status page's poll doesn't rebuild the forecast.
+    pub(crate) battery_runtime: Arc<Mutex<Option<crate::server::api::BatteryRuntimeCache>>>,
     /// Weather subsystem state — current config, last fetch result, backfill
     /// progress. Always present (not `Option<…>` like `history`) so the API
     /// layer doesn't have to special-case "weather not yet initialised".
@@ -686,6 +689,10 @@ pub struct AppState {
     pub octopus_dispatches: Arc<Mutex<crate::octopus_dispatches::DispatchesState>>,
     /// Wakes the dispatch loop early (the hold was just switched).
     pub octopus_dispatches_wake: Arc<tokio::sync::Notify>,
+    /// The dispatch list fetched for the Status page alone while the hold
+    /// is off (issue #474). Only `GET /api/octopus/dispatches` reads it, so
+    /// showing the car's slots never holds, charges, plans or prices.
+    pub octopus_dispatches_display: Arc<Mutex<crate::octopus_dispatches::DispatchesState>>,
     /// When a booked export last failed to apply or revert (inverter clock),
     /// so the next try waits a minute instead of hammering the dongle.
     pub export_once_backoff: Arc<Mutex<std::collections::HashMap<String, chrono::NaiveDateTime>>>,
@@ -886,6 +893,7 @@ impl AppState {
             forecast_plan_apply_window: Arc::new(Mutex::new(None)),
             forecast_plan_snapshot_window: Arc::new(Mutex::new(None)),
             forecast_plan_cycle: Arc::new(Mutex::new(None)),
+            battery_runtime: Arc::new(Mutex::new(None)),
             forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
             evc_reachability: Arc::new(Mutex::new(crate::evc::EvcReachability::default())),
@@ -910,6 +918,9 @@ impl AppState {
                 crate::octopus_dispatches::DispatchesState::default(),
             )),
             octopus_dispatches_wake: Arc::new(tokio::sync::Notify::new()),
+            octopus_dispatches_display: Arc::new(Mutex::new(
+                crate::octopus_dispatches::DispatchesState::default(),
+            )),
             export_once_backoff: Arc::new(Mutex::new(std::collections::HashMap::new())),
             update: Arc::new(Mutex::new(crate::update::UpdateState::default())),
             backup: Arc::new(Mutex::new(crate::backup::BackupState::default())),

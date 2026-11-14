@@ -40,6 +40,29 @@ cd src-tauri && cargo test
 
 All three must pass before committing.
 
+## Checking Octopus Car Charging by Hand
+
+To see planned Intelligent Octopus Go charges on the Status page without a
+real Octopus account or car (needs `npm run build`, `cargo build --release`
+and the [GivEnergy Simulator](https://github.com/psylsph/givenergy-simulator)
+built at `~/repos/givenergy-simulator`):
+
+```bash
+npm run mock:octopus -- --with-hem --slot 23:30-05:30@12 --running 40
+```
+
+This starts a mock Octopus API serving a 23:30–05:30 smart charge (12 kWh)
+and one running for another 40 minutes, plus the simulator and a throwaway
+headless HEM at <http://127.0.0.1:7340> already pointed at the mock, with
+Show Car Charging Slots on and the battery hold off. Choose the House view in
+Settings → Panel Controls there to see the car line in the Next Charge card.
+Your own settings in `~/.givenergy-local` are never touched; Ctrl-C stops
+everything and removes the temporary config.
+
+Slots are local times, `HH:MM-HH:MM`, with optional `@kWh` and `:boost`.
+`--file slots.json` reads a JSON array of slots on every request, so you can
+change them while it runs; `--help` lists every option.
+
 ## Code Style
 
 - **Rust**: `cargo fmt` + `cargo clippy`. No integration tests — unit tests only.

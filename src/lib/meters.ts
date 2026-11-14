@@ -1,4 +1,4 @@
-import type { MeterData } from './types';
+import type { MeterData, SolarArrayConfig } from './types';
 
 /**
  * Modbus address of the inverter's built-in grid CT, surfaced by the backend
@@ -120,4 +120,49 @@ export function gridMeterCurrentA(
 
   if (Number.isFinite(grid.i_total)) return Math.abs(grid.i_total);
   return null;
+}
+
+/** Saved meter names (issue #473), keyed by decimal address ("1"-"8"). */
+export type MeterNames = Readonly<Record<string, string>>;
+
+/** A meter's address as the Meters page shows it, e.g. `"0x02"`. */
+export function meterAddressText(address: number): string {
+  return `0x${address.toString(16).padStart(2, '0')}`;
+}
+
+/**
+ * The name a meter was given (issue #473): its own name from Settings →
+ * Meters first, then the name of the solar array it measures, else `null`.
+ * Blank names count as none. The built-in grid CT has no name.
+ */
+export function meterName(
+  address: number,
+  names: MeterNames = {},
+  solarArrays: readonly SolarArrayConfig[] = [],
+): string | null {
+  if (address === BUILTIN_GRID_CT_ADDRESS) return null;
+  const own = names[String(address)]?.trim();
+  if (own) return own;
+  const array = solarArrays.find((a) => a.meter_address === address)?.name?.trim();
+  return array || null;
+}
+
+/** A meter's title: its name, `Built-in Grid CT`, or `Meter 0x01`. */
+export function meterLabel(
+  address: number,
+  names?: MeterNames,
+  solarArrays?: readonly SolarArrayConfig[],
+): string {
+  if (address === BUILTIN_GRID_CT_ADDRESS) return 'Built-in Grid CT';
+  return meterName(address, names, solarArrays) ?? `Meter ${meterAddressText(address)}`;
+}
+
+/** A meter in a picker: `0x02 · Mains In` when named, else `Meter 0x02`. */
+export function meterOptionLabel(
+  address: number,
+  names?: MeterNames,
+  solarArrays?: readonly SolarArrayConfig[],
+): string {
+  const name = meterName(address, names, solarArrays);
+  return name ? `${meterAddressText(address)} · ${name}` : meterLabel(address);
 }

@@ -1889,6 +1889,9 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "pv1_rated_kw": settings.pv1_rated_kw,
             "pv2_rated_kw": settings.pv2_rated_kw,
             "solar_arrays": settings.solar_arrays,
+            "meter_names": settings.meter_names,
+            // Issue #474: the car line in the Status page's Next Charge card.
+            "status_show_car_charging": settings.status_show_car_charging,
             // Issue #283: forecast efficiencies consumed by the SOC
             // projection on the Forecast page.
             "forecast_charge_efficiency": settings.forecast_charge_efficiency,
@@ -2382,6 +2385,15 @@ pub async fn update_settings(
                 "Unknown planner strategy — expected \"min_soc\", \"hold_window\" or \"cheapest\"".to_string()
             })?;
         }
+        if let Some(v) = body
+            .get("status_show_car_charging")
+            .and_then(|v| v.as_bool())
+        {
+            persist.status_show_car_charging = v;
+        }
+        if let Some(v) = body.get("meter_names") {
+            persist.meter_names = crate::settings::parse_meter_names(v)?;
+        }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
             let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
                 .iter()
@@ -2420,6 +2432,15 @@ pub async fn update_settings(
         format!("Settings updated: {}", fields.join(", "))
     };
     tracing::info!("{}", msg);
+
+    // Issue #474: the car line switched; drop any display-only list and
+    // let the dispatch loop fetch (or stop fetching) now.
+    if body_for_response
+        .get("status_show_car_charging")
+        .is_some_and(Value::is_boolean)
+    {
+        crate::octopus_dispatches::display_switched(&state).await;
+    }
 
     // Issue #110 / local-E2E "solar arrays never appear": when the save
     // touched any of the solar-array settings, re-stamp the kWp-derived
@@ -8926,6 +8947,19 @@ pub async fn get_weather(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 /// history counters, current snapshot, settings) — no network access on
 /// the request path, so the endpoint is cheap to poll and hermetic under
 /// test. Degradations are reported as status codes in the payload.
+/// HEM's Timed Export slots while its schedule is on, else none, for the
+/// forecast's "with current schedule" projection and the battery runtime.
+pub(crate) async fn timed_export_slots(
+    state: &AppState,
+) -> Vec<crate::inverter::model::ScheduleSlot> {
+    let config = state.timed_export_config.lock().await;
+    if config.schedule_enabled {
+        config.slots.clone()
+    } else {
+        Vec::new()
+    }
+}
+
 pub async fn get_forecast(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     get_forecast_at(state, chrono::Local::now()).await
 }
@@ -8950,6 +8984,7 @@ pub(crate) async fn get_forecast_at(
         now.with_timezone(&chrono::Utc),
     )
     .await;
+    let timed_export = timed_export_slots(&state).await;
     let payload = match tokio::task::spawn_blocking(move || {
         crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
@@ -8960,6 +8995,7 @@ pub(crate) async fn get_forecast_at(
             now,
             dispatches: &dispatches,
             include_current_hour: false,
+            timed_export_slots: &timed_export,
         })
     })
     .await
@@ -8968,6 +9004,217 @@ pub(crate) async fn get_forecast_at(
         Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
     };
     (StatusCode::OK, Json(json!({ "ok": true, "data": payload })))
+}
+
+/// How long a battery runtime answer is reused (issue #472).
+const BATTERY_RUNTIME_REUSE_SECS: i64 = 5 * 60;
+/// How far before an answer a request that waited for it may have read the
+/// clock and still share it.
+const BATTERY_RUNTIME_WAIT_SECS: i64 = 60;
+/// A move in SOC that's worth a new answer before then, points.
+const BATTERY_RUNTIME_SOC_MOVE: i16 = 2;
+
+/// The last `GET /api/battery/runtime` answer and what it was made from.
+#[derive(Debug, Clone)]
+pub struct BatteryRuntimeCache {
+    computed_at: i64,
+    soc: u8,
+    charging: bool,
+    /// The schedule and battery settings it simulated, as text.
+    key: String,
+    value: Value,
+}
+
+/// What, besides SOC and time, would change the answer: the schedule (the
+/// inverter's and HEM's Timed Export), the inverter's own pause, the
+/// battery's reserve and rates, the planned car charging and the forecast
+/// settings.
+fn battery_runtime_key(
+    snap: &InverterSnapshot,
+    timed_export: &crate::inverter::state_machines::TimedExportConfig,
+    settings: &crate::settings::Settings,
+    dispatch_revision: u64,
+    discharge_paused: bool,
+) -> String {
+    json!({
+        "timed_export": timed_export.schedule_enabled.then_some(&timed_export.slots),
+        "discharge_paused": discharge_paused,
+        "dispatch_revision": dispatch_revision,
+        "hold": settings.octopus_dispatch_hold,
+        "top_up": settings.octopus_dispatch_charge,
+        "charge_efficiency": settings.forecast_charge_efficiency,
+        "discharge_efficiency": settings.forecast_discharge_efficiency,
+        "car_threshold": settings.forecast_exclude_load_above_kw,
+        "enable_charge": snap.enable_charge,
+        "enable_discharge": snap.enable_discharge,
+        "charge_slots": snap.charge_slots,
+        "discharge_slots": snap.discharge_slots,
+        "reserve": snap.battery_reserve,
+        "capacity": snap.battery_capacity_kwh,
+        "charge_rate": snap.charge_rate,
+        "discharge_rate": snap.discharge_rate,
+    })
+    .to_string()
+}
+
+fn battery_runtime_unknown(reason: &str, now: i64) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::OK,
+        Json(
+            json!({ "ok": true, "data": { "outcome": "unknown", "reason": reason, "computed_at": now } }),
+        ),
+    )
+}
+
+/// `GET /api/battery/runtime` (issue #472): when the battery will reach
+/// its reserve, for the house view's Battery Level card. Built from the
+/// same forecast as the Planner, from the live SOC.
+pub async fn get_battery_runtime(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    get_battery_runtime_at(state, chrono::Local::now()).await
+}
+
+pub(crate) async fn get_battery_runtime_at(
+    state: Arc<AppState>,
+    now: chrono::DateTime<chrono::Local>,
+) -> (StatusCode, Json<Value>) {
+    use crate::forecast::runtime::{battery_runtime, runtime_hours, RuntimeInputs};
+    let now_ts = now.timestamp();
+    let Some(snapshot) = state.latest_snapshot.lock().await.clone() else {
+        return battery_runtime_unknown("no_snapshot", now_ts);
+    };
+    // A stale snapshot is no basis for a time.
+    if *state.connection_state.lock().await != ConnectionState::Connected {
+        return battery_runtime_unknown("not_connected", now_ts);
+    }
+    let (charge_kw, discharge_kw) = crate::forecast::battery_rate_limits_kw(&snapshot);
+    if !(snapshot.battery_capacity_kwh.is_finite() && snapshot.battery_capacity_kwh > 0.0)
+        || charge_kw <= 0.0
+        || discharge_kw <= 0.0
+    {
+        return battery_runtime_unknown("no_battery_capacity", now_ts);
+    }
+    let charging = crate::forecast::runtime::is_charging(f64::from(snapshot.battery_power));
+    let timed_export = state.timed_export_config.lock().await.clone();
+    let te_slots = if timed_export.schedule_enabled {
+        timed_export.slots.clone()
+    } else {
+        Vec::new()
+    };
+    let settings = crate::settings::Settings::load_async().await;
+    let dispatches = crate::octopus_dispatches::planning_dispatches(
+        &state,
+        &settings,
+        now.with_timezone(&chrono::Utc),
+    )
+    .await;
+    // The inverter's own discharge pause (HR 318), on its own clock.
+    let minute = crate::inverter::state_machines::inverter_minute_of_day(&snapshot)
+        .unwrap_or_else(|| (now.hour() * 60 + now.minute()) as u16);
+    let discharge_paused =
+        crate::inverter::state_machines::hr318_blocks_discharge(&snapshot, minute);
+    let key = battery_runtime_key(
+        &snapshot,
+        &timed_export,
+        &settings,
+        dispatches.revision,
+        discharge_paused,
+    );
+    // Held across the work below, so requests arriving together (every open
+    // client sees the same SOC move) share one forecast build.
+    let mut cache = state.battery_runtime.lock().await;
+    if let Some(cached) = cache.as_ref() {
+        let age = now_ts - cached.computed_at;
+        // A request that waited for the lock read the clock before the
+        // answer it finds was made, so a slightly negative age is that
+        // request, not a clock step.
+        if (-BATTERY_RUNTIME_WAIT_SECS..BATTERY_RUNTIME_REUSE_SECS).contains(&age)
+            && (i16::from(cached.soc) - i16::from(snapshot.soc)).abs() < BATTERY_RUNTIME_SOC_MOVE
+            && cached.charging == charging
+            && cached.key == key
+        {
+            return (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "data": cached.value })),
+            );
+        }
+    }
+
+    let history = state.history.lock().await.clone();
+    let (weather_enabled, coords) = {
+        let ws = state.weather.lock().await;
+        (
+            ws.config.enabled,
+            ws.config.latitude.zip(ws.config.longitude),
+        )
+    };
+    let snap = snapshot.clone();
+    let worked = tokio::task::spawn_blocking(move || {
+        let payload = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
+            db: history.as_deref(),
+            settings: &settings,
+            snapshot: Some(&snap),
+            weather_enabled,
+            weather_coords: coords,
+            now,
+            dispatches: &dispatches,
+            // From the current minute, so the current hour counts.
+            include_current_hour: true,
+            timed_export_slots: &te_slots,
+        });
+        if !payload.consumption_sufficient {
+            return None;
+        }
+        let inputs = RuntimeInputs {
+            now_ts: now.timestamp(),
+            hours: runtime_hours(&payload, now),
+            dispatch_hours: payload.ev_dispatch_hours.clone(),
+            dispatch_net_of_profile: payload.ev_dispatch_net_of_profile,
+            params: crate::forecast::simulate::SimulationParams {
+                capacity_kwh: f64::from(snap.battery_capacity_kwh),
+                start_soc_pct: f64::from(snap.soc),
+                reserve_soc_pct: f64::from(snap.battery_reserve),
+                max_charge_kw: charge_kw,
+                max_discharge_kw: discharge_kw,
+                charge_efficiency: settings.forecast_charge_efficiency,
+                discharge_efficiency: settings.forecast_discharge_efficiency,
+            },
+            schedule: {
+                let mut schedule =
+                    crate::forecast::current_schedule::CurrentSchedule::from_snapshot(
+                        &snap,
+                        charge_kw,
+                        discharge_kw,
+                    );
+                // The same windows the Planner's "with current schedule" line counts.
+                schedule.add_timed_export(&te_slots, discharge_kw);
+                schedule
+            },
+            battery_power_w: f64::from(snap.battery_power),
+            discharge_paused,
+            profile_days: payload.consumption_days_observed,
+            solar_known: !payload.solar.is_empty(),
+        };
+        Some(battery_runtime(&inputs))
+    })
+    .await;
+    let outcome = match worked {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => return battery_runtime_unknown("insufficient_consumption_history", now_ts),
+        Err(error) => return server_error(&format!("Battery runtime worker failed: {error}")),
+    };
+    let mut value = serde_json::to_value(&outcome).unwrap_or_else(|_| json!({}));
+    if outcome == crate::forecast::runtime::RuntimeOutcome::Unknown {
+        value["reason"] = json!("no_projection");
+    }
+    value["computed_at"] = json!(now_ts);
+    *cache = Some(BatteryRuntimeCache {
+        computed_at: now_ts,
+        soc: snapshot.soc,
+        charging,
+        key,
+        value: value.clone(),
+    });
+    (StatusCode::OK, Json(json!({ "ok": true, "data": value })))
 }
 
 /// Query for `GET /api/forecast/plan-history` (issue #361): unix-second
@@ -9174,6 +9421,7 @@ pub(crate) async fn get_forecast_plan_at(
     let cheap_window_count = settings.import_tariff_config.as_ref().map_or(0, |tariff| {
         crate::forecast::planner::cheap_import_windows(tariff, 0, 30).len()
     });
+    let timed_export = timed_export_slots(&state).await;
     let (charge, export_advice) = match tokio::task::spawn_blocking(move || {
         let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
@@ -9189,6 +9437,7 @@ pub(crate) async fn get_forecast_plan_at(
                 now,
                 settings.forecast_plan_every_cheap_window,
             ),
+            timed_export_slots: &timed_export,
         });
         compute_full_plan(&forecast, &settings, snapshot.as_ref(), now.timestamp())
     })
@@ -21775,6 +22024,396 @@ pub(crate) mod tests {
             let s = crate::settings::Settings::load();
             assert!((s.forecast_charge_efficiency - 0.85).abs() < 1e-9);
             assert!((s.forecast_discharge_efficiency - 0.92).abs() < 1e-9);
+        })
+        .await;
+    }
+
+    /// Issue #472: the state the battery runtime endpoint reads, a week of
+    /// 0.5 kWh-an-hour history and a 10 kWh battery at `soc`, connected.
+    async fn runtime_state(soc: u8, name: &str) -> Arc<AppState> {
+        let state = test_state();
+        let dir = crate::test_util::make_unique_test_dir(name);
+        let db = crate::history::HistoryDb::open(&dir.join("history.db")).unwrap();
+        crate::forecast::tests::seed_full_forecast_state(&db, runtime_now());
+        *state.history.lock().await = Some(Arc::new(db));
+        *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+            soc,
+            battery_capacity_kwh: 10.0,
+            max_battery_power_w: 5000,
+            charge_rate: 50,
+            discharge_rate: 50,
+            battery_reserve: 10,
+            battery_power: 400,
+            ..Default::default()
+        });
+        *state.connection_state.lock().await = ConnectionState::Connected;
+        state
+    }
+
+    fn runtime_now() -> chrono::DateTime<chrono::Local> {
+        chrono::Local
+            .with_ymd_and_hms(2026, 11, 10, 18, 0, 0)
+            .earliest()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_says_when_the_battery_reaches_its_reserve() {
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(50, "runtime-empty").await;
+            let now = runtime_now();
+            let (status, Json(body)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let data = &body["data"];
+            assert_eq!(data["outcome"], "empty_at", "{data}");
+            // 4 kWh above the reserve at 0.5 kWh an hour, through the
+            // discharge efficiency: about seven and a half hours, rounded
+            // to the half hour.
+            let at = data["at"].as_i64().unwrap();
+            assert_eq!(at % 1800, 0);
+            assert!(
+                (now.timestamp() + 7 * 3600..=now.timestamp() + 8 * 3600).contains(&at),
+                "{data}"
+            );
+            // A week of history is enough to plan, not to be sure.
+            assert_eq!(data["confidence"], "low");
+            assert_eq!(data["computed_at"], now.timestamp());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_is_unknown_without_what_it_needs() {
+        with_isolated_config_dir_async(|| async {
+            let now = runtime_now();
+            let state = test_state();
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_eq!(body["data"]["outcome"], "unknown");
+            assert_eq!(body["data"]["reason"], "no_snapshot");
+
+            let state = runtime_state(50, "runtime-disconnected").await;
+            *state.connection_state.lock().await = ConnectionState::Reconnecting;
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_eq!(body["data"]["reason"], "not_connected");
+
+            let state = runtime_state(50, "runtime-no-capacity").await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .battery_capacity_kwh = 0.0;
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_eq!(body["data"]["reason"], "no_battery_capacity");
+
+            // No history: no guess.
+            let state = runtime_state(50, "runtime-no-history").await;
+            *state.history.lock().await = None;
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_eq!(body["data"]["outcome"], "unknown");
+            assert_eq!(body["data"]["reason"], "insufficient_consumption_history");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_counts_the_hem_timed_export_schedule() {
+        // Outside its windows HEM leaves the inverter in Eco with the slots
+        // cleared, so the snapshot alone doesn't show the export coming.
+        with_isolated_config_dir_async(|| async {
+            let now = runtime_now();
+            let state = runtime_state(50, "runtime-timed-export").await;
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), now).await;
+            let eco_at = body["data"]["at"].as_i64().unwrap();
+
+            {
+                let mut config = state.timed_export_config.lock().await;
+                config.schedule_enabled = true;
+                config.slots = vec![crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 19,
+                    start_minute: 0,
+                    end_hour: 21,
+                    end_minute: 0,
+                    target_soc: 10,
+                }];
+            }
+            // A schedule change is a new answer, whatever the cache says.
+            let (_, Json(body)) =
+                get_battery_runtime_at(state.clone(), now + chrono::Duration::minutes(1)).await;
+            assert_eq!(body["data"]["outcome"], "empty_at", "{body}");
+            let export_at = body["data"]["at"].as_i64().unwrap();
+            assert!(
+                export_at <= now.timestamp() + 3 * 3600,
+                "the 19:00 export empties it by 21:00: {export_at} vs Eco {eco_at}"
+            );
+            // Switched off, it's Eco again.
+            state.timed_export_config.lock().await.schedule_enabled = false;
+            let (_, Json(body)) =
+                get_battery_runtime_at(state.clone(), now + chrono::Duration::minutes(2)).await;
+            assert_eq!(body["data"]["at"], eco_at);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_shows_nothing_while_a_pause_holds_the_reserve() {
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(60, "runtime-paused").await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .battery_reserve = 100;
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), runtime_now()).await;
+            assert_eq!(body["data"]["outcome"], "paused");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_shows_nothing_while_the_inverter_pauses_discharge() {
+        // HR 318 mode 2 all day: the AIO dispatch hold, Timed Discharge or
+        // the Pause button, with the reserve left alone.
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(60, "runtime-native-pause").await;
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), runtime_now()).await;
+            assert_eq!(body["data"]["outcome"], "empty_at");
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                let snap = snap.as_mut().unwrap();
+                snap.device_type = crate::inverter::model::DeviceType::ACCoupled;
+                snap.battery_pause_mode = 2;
+            }
+            // The pause is a new answer at once, not five minutes on.
+            let (_, Json(body)) =
+                get_battery_runtime_at(state.clone(), runtime_now() + chrono::Duration::minutes(1))
+                    .await;
+            assert_eq!(body["data"]["outcome"], "paused", "{body}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_follows_a_new_dispatch_list_or_settings_at_once() {
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(50, "runtime-key").await;
+            let now = runtime_now();
+            let (_, Json(first)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_eq!(first["data"]["computed_at"], now.timestamp());
+            // Octopus moved a dispatch: the list's revision moves.
+            state.octopus_dispatches.lock().await.reset();
+            let later = now + chrono::Duration::minutes(1);
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(body["data"]["computed_at"], later.timestamp());
+            // A forecast setting saved.
+            crate::settings::Settings::update(|s| s.forecast_discharge_efficiency = 0.8).unwrap();
+            let later = now + chrono::Duration::minutes(2);
+            let (_, Json(body)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(body["data"]["computed_at"], later.timestamp());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_battery_runtime_requests_share_one_answer() {
+        // Every open client asks at the same 2-point SOC move; on a Pi each
+        // forecast build is costly, so the second waits for the first's.
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(50, "runtime-single-flight").await;
+            let now = runtime_now();
+            let (a, b) = tokio::join!(
+                get_battery_runtime_at(state.clone(), now),
+                get_battery_runtime_at(state.clone(), now + chrono::Duration::seconds(1)),
+            );
+            // Whichever got the lock first built it; the other shared it.
+            // Built apart, they'd be stamped a second apart.
+            assert_eq!(
+                a.1["data"]["computed_at"], b.1["data"]["computed_at"],
+                "one build, shared"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_is_reused_until_it_is_old_or_the_battery_moves() {
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(50, "runtime-cache").await;
+            let now = runtime_now();
+            let (_, Json(first)) = get_battery_runtime_at(state.clone(), now).await;
+            let later = now + chrono::Duration::minutes(4);
+            let (_, Json(again)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(again["data"]["computed_at"], first["data"]["computed_at"]);
+            // A point of SOC isn't worth a new run; two are.
+            state.latest_snapshot.lock().await.as_mut().unwrap().soc = 49;
+            let (_, Json(again)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(again["data"]["computed_at"], now.timestamp());
+            state.latest_snapshot.lock().await.as_mut().unwrap().soc = 48;
+            let (_, Json(again)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(again["data"]["computed_at"], later.timestamp());
+            // Five minutes on, it's run again.
+            let (_, Json(again)) =
+                get_battery_runtime_at(state.clone(), later + chrono::Duration::minutes(5)).await;
+            assert_eq!(
+                again["data"]["computed_at"],
+                (later + chrono::Duration::minutes(5)).timestamp()
+            );
+            // Starting to charge is a change of its own, whatever the time.
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .battery_power = -2000;
+            let at = later + chrono::Duration::minutes(6);
+            let (_, Json(again)) = get_battery_runtime_at(state.clone(), at).await;
+            assert_eq!(again["data"]["outcome"], "charging");
+            assert_eq!(again["data"]["computed_at"], at.timestamp());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_status_car_charging_switch_saves_and_wakes_the_dispatch_check() {
+        // Issue #474: the Status page's car line needs the dispatch list
+        // even with the hold off, so switching it wakes the loop.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["status_show_car_charging"], false);
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "status_show_car_charging": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(crate::settings::Settings::load().status_show_car_charging);
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["status_show_car_charging"], true);
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                state.octopus_dispatches_wake.notified(),
+            )
+            .await
+            .expect("switching it wakes the dispatch loop");
+            // An unrelated save doesn't wake it.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "cheapest" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                state.octopus_dispatches_wake.notified(),
+            )
+            .await
+            .is_err());
+            assert!(crate::settings::Settings::load().status_show_car_charging);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn meter_names_save_trim_and_read_back() {
+        // Issue #473: names for the external CT meters, keyed by decimal
+        // address, display only.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["meter_names"], json!({}));
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "meter_names": {
+                    "1": "  Mains In ",
+                    "2": "Solar Main Roof",
+                    "3": "   ",
+                } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let saved = crate::settings::Settings::load().meter_names;
+            assert_eq!(
+                saved.len(),
+                2,
+                "a blank name means the default label: {saved:?}"
+            );
+            assert_eq!(saved["1"], "Mains In");
+            assert_eq!(saved["2"], "Solar Main Roof");
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(
+                body["data"]["meter_names"],
+                json!({ "1": "Mains In", "2": "Solar Main Roof" })
+            );
+            // A save without the field leaves the names alone.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "cheapest" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(crate::settings::Settings::load().meter_names.len(), 2);
+            // The map replaces the old one, so a name left out is cleared.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "meter_names": { "2": "Solar Main Roof" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let saved = crate::settings::Settings::load().meter_names;
+            assert_eq!(saved.keys().collect::<Vec<_>>(), vec!["2"]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn meter_names_reject_bad_input_without_touching_disk() {
+        // Issue #473: addresses 1-8 only (0 is the built-in grid CT, which
+        // has its own title), names up to 32 characters, strings only.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "meter_names": { "1": "Mains In" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            for bad in [
+                json!({ "0": "Grid" }),
+                json!({ "9": "Garage" }),
+                json!({ "01": "Padded" }),
+                json!({ "x": "Garage" }),
+                json!({ "2": "A".repeat(33) }),
+                json!({ "2": 5 }),
+                json!(["Mains In"]),
+                json!("Mains In"),
+            ] {
+                let (status, _) = update_settings(
+                    State(state.clone()),
+                    Json(json!({ "host": "10.0.0.5", "meter_names": bad.clone() })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+                let saved = crate::settings::Settings::load();
+                assert_eq!(saved.meter_names.len(), 1, "{bad}");
+                assert_eq!(saved.meter_names["1"], "Mains In", "{bad}");
+                assert_ne!(
+                    saved.host, "10.0.0.5",
+                    "{bad}: nothing else is saved either"
+                );
+            }
+            // 32 characters, counted as characters rather than bytes, fits.
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "meter_names": { "8": "é".repeat(32) } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
         })
         .await;
     }

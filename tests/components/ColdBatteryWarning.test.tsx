@@ -50,6 +50,16 @@ describe('<ColdBatteryWarning/>', () => {
 
   afterEach(() => {
     cleanup();
+    useInverterStore.setState({ readOnly: false });
+  });
+
+  it('keeps the advice but not the Control link on a read-only link (issue #471)', async () => {
+    useInverterStore.setState({ readOnly: true });
+    setSnapshot(2.0);
+    const { container } = renderWarning();
+    await waitFor(() => expect(container.textContent).toContain('Cold Battery'));
+    expect(container.textContent).toContain('Enable Auto Winter Mode on the Control page');
+    expect(container.querySelector('a')).toBeNull();
   });
 
   it('renders nothing when there is no snapshot yet', () => {

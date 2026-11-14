@@ -6,6 +6,8 @@
  */
 
 import type { Page } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
 import { test, expect } from './local-fixture.js';
 
 test.describe('Status Page - Loading', () => {
@@ -74,7 +76,7 @@ test.describe('Status Page - Battery Card', () => {
   test('should not show the Battery card', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('region', { name: "Today's Energy Balance" })).toBeVisible({ timeout: 5_000 });
 
     await expect(page.getByRole('heading', { name: 'Battery', exact: true })).toHaveCount(0);
   });
@@ -85,7 +87,7 @@ test.describe('Status Page - Today Balance (issue #429)', () => {
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
 
-    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('region', { name: "Today's Energy Balance" })).toBeVisible({ timeout: 5_000 });
   });
 
   test('should show both bars', async ({ page }) => {
@@ -175,6 +177,16 @@ test.describe('Status Page - API Snapshot', () => {
     expect(typeof data.data.battery_temperature).toBe('number');
   });
 
+  test('battery runtime answers with a known outcome (issue #472)', async ({ baseUrl }) => {
+    const resp = await fetch(`${baseUrl}/api/battery/runtime`);
+    expect(resp.status).toBe(200);
+    const data = await resp.json();
+    expect(data.ok).toBe(true);
+    // A fresh simulator install has no history, so usually "unknown".
+    expect(['empty_at', 'recharges_first', 'lasts_beyond', 'at_reserve', 'charging', 'unknown']).toContain(data.data.outcome);
+    expect(typeof data.data.computed_at).toBe('number');
+  });
+
   test('snapshot has device type', async ({ baseUrl }) => {
     const resp = await fetch(`${baseUrl}/api/snapshot`);
     const data = await resp.json();
@@ -216,6 +228,27 @@ test.describe('Status Page - House View (issue #422)', () => {
         region: 'South England', fetched_at: new Date(now).toISOString(),
         periods: [{ from: new Date(now - 60_000).toISOString(), to: new Date(now + 1_800_000).toISOString(), forecast: 183, index: 'high' }],
       } } }));
+      // And the car's next charge under the battery's (issue #474), which
+      // needs Octopus set up and Show Car Charging Slots on.
+      await page.route('**/api/settings', async (r) => {
+        if (r.request().method() !== 'GET') return r.continue();
+        const res = await r.fetch();
+        const j = await res.json();
+        await r.fulfill({ response: res, json: { ...j, data: {
+          ...j.data, octopus_account_number: 'A-TEST1', octopus_api_key_configured: true, status_show_car_charging: true,
+        } } });
+      });
+      await page.route('**/api/octopus/dispatches', (r) => r.fulfill({ json: {
+        ok: true, enabled: false, configured: true, checked_at: new Date(now).toISOString(), error: null, devices: 1,
+        holding: false, hold_failing: false, stale_after_minutes: 15,
+        dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'BOOST', energy_added_kwh: 7, smart: false }],
+      } }));
+      // And when the battery empties (issue #472), in the card beside it.
+      await page.addInitScript(() => localStorage.setItem('showBatteryRuntime', 'true'));
+      await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
+        outcome: 'empty_at', at: Math.floor(now / 1000) + 86_400 + 3600, earliest: null, latest: null, confidence: 'low',
+        computed_at: Math.floor(now / 1000),
+      } } }));
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
       await expect(page.getByTestId('house-sky')).toBeVisible();
@@ -225,7 +258,10 @@ test.describe('Status Page - House View (issue #422)', () => {
       await expect(page.getByTestId('house-reading-battery')).toBeVisible();
       await expect(page.getByTestId('house-status-pill')).toBeVisible();
       await expect(page.getByTestId('house-charge-card')).toBeVisible();
+      await expect(page.getByTestId('house-car-charge')).toBeVisible();
+      await expect(page.getByTestId('house-car-charge')).toContainText('· Boost');
       await expect(page.getByTestId('house-battery-card')).toBeVisible();
+      await expect(page.getByTestId('house-runtime-text')).toHaveText(/^Empty /);
       // Hidden without ever touching the toggle: the house view's default.
       await expect(page.getByTestId('today-balance')).toHaveCount(0);
       await expect(page.locator('nav.sticky')).toHaveCount(0);
@@ -342,7 +378,6 @@ test.describe('Status Page - House View (issue #422)', () => {
     await page.goto('/#/settings');
     await page.getByRole('switch', { name: 'Show Today Statistics' }).click();
     await page.goto('/#/');
-    await expect(page.getByRole('heading', { name: 'Today' })).toHaveCount(0);
     await expect(page.getByTestId('today-balance')).toHaveCount(0);
   });
 
@@ -385,4 +420,63 @@ test.describe('Status Page - Today Balance on a phone (issue #429)', () => {
     );
     expect(overflows).toBe(0);
   });
+});
+
+test.describe('Status Page - the desktop app\'s default window', () => {
+  // The app opens at tauri.conf.json's window size, read here so the check
+  // follows it: the Status page must fit it unscrolled with the Today
+  // statistics shown, in either view, and in the house view with the car
+  // line (#474) and the battery runtime line (#472) on as well.
+  const { width, height } = (JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'),
+  ) as { app: { windows: { width: number; height: number }[] } }).app.windows[0];
+  for (const [view, lines] of [['orbit', false], ['house', false], ['house', true]] as const) {
+    test(`fits the default window with Today shown (${view}${lines ? ', both card lines on' : ''})`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      const now = Date.now();
+      // No "new version available" banner: whether the backend has seen a
+      // newer release would otherwise decide whether the page fits.
+      await page.route('**/api/latest-version', async (r) => {
+        const res = await r.fetch();
+        const j = await res.json();
+        await r.fulfill({ response: res, json: { ...j, latest_version: j.current_version, update_available: false } });
+      });
+      await page.addInitScript(([v, l]) => {
+        localStorage.setItem('energyFlowDisplay', v);
+        localStorage.setItem('showTodayStats', 'true');
+        localStorage.setItem('showBatteryRuntime', String(l));
+      }, [view, lines] as const);
+      if (lines) {
+        await page.route('**/api/settings', async (r) => {
+          if (r.request().method() !== 'GET') return r.continue();
+          const res = await r.fetch();
+          const j = await res.json();
+          await r.fulfill({ response: res, json: { ...j, data: {
+            ...j.data, octopus_account_number: 'A-TEST1', octopus_api_key_configured: true, status_show_car_charging: true,
+          } } });
+        });
+        await page.route('**/api/octopus/dispatches', (r) => r.fulfill({ json: {
+          ok: true, enabled: false, configured: true, checked_at: new Date(now).toISOString(), error: null, devices: 1,
+          holding: false, hold_failing: false, stale_after_minutes: 15,
+          dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'SMART', energy_added_kwh: 7, smart: true }],
+        } }));
+        await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
+          outcome: 'empty_at', at: Math.floor(now / 1000) + 3 * 3600, earliest: null, latest: null, confidence: 'low',
+          computed_at: Math.floor(now / 1000),
+        } } }));
+      }
+      await page.goto('/');
+      await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
+      await expect(page.getByTestId('today-balance')).toBeVisible();
+      if (lines) {
+        await expect(page.getByTestId('house-car-charge')).toBeVisible();
+        await expect(page.getByTestId('house-battery-runtime')).toBeVisible();
+      }
+      const dims = await page.evaluate(() => ({
+        doc: document.documentElement.scrollHeight,
+        inner: window.innerHeight,
+      }));
+      expect(dims.doc).toBeLessThanOrEqual(dims.inner);
+    });
+  }
 });

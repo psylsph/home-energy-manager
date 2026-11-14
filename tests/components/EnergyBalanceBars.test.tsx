@@ -327,16 +327,13 @@ describe('<EnergyBalanceBars/>', () => {
     }
   });
 
-  it('keeps the Today heading off phones, with no help on it', () => {
+  it('has no separate Today heading: the bar titles say Today, and the section is labelled', () => {
+    // Dropped so the Status page fits the desktop app's default
+    // window (14 November 2026); it was already hidden on phones.
     const { container } = renderBalance(snapshot());
-    const heading = container.querySelector('h2')!;
-    expect(heading.textContent).toBe('Today');
-    expect(heading.className).toContain('hidden');
-    expect(heading.className).toContain('md:block');
-    // The ⓘ moved to the summary line (issue #429 round 2): nothing is
-    // attached to the heading any more.
-    expect(heading.getAttribute('aria-describedby')).toBeNull();
-    expect(heading.querySelector('button')).toBeNull();
+    expect(container.querySelector('h2')).toBeNull();
+    const card = container.querySelector('[data-testid="today-balance"]')!;
+    expect(card.getAttribute('aria-label')).toBe("Today's Energy Balance");
   });
 
   it('colours fills with theme variables, never literals', () => {

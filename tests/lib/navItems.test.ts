@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { LOGS_ITEM, NAV_ITEMS, visibleNavItems, type NavVisibility } from '../../src/lib/navItems';
+import { LOGS_ITEM, NAV_ITEMS, hiddenInReadOnly, visibleNavItems, type NavVisibility } from '../../src/lib/navItems';
 
 /**
  * The page list shared by the bottom bar and the house view's drawer
@@ -42,5 +42,17 @@ describe('visibleNavItems', () => {
 
   it('keeps the master list free of Logs', () => {
     expect(NAV_ITEMS.some((i) => i.to === '/logs')).toBe(false);
+  });
+});
+
+describe('hiddenInReadOnly (issues #114, #471)', () => {
+  it('names the pages a read-only link can reach neither from the nav nor by address', () => {
+    expect(hiddenInReadOnly('/control')).toBe(true);
+    expect(hiddenInReadOnly('/settings')).toBe(true);
+    expect(hiddenInReadOnly('/octopus')).toBe(true);
+    expect(hiddenInReadOnly('control')).toBe(true);
+    for (const open of ['/', '/battery', '/history', '/forecast', '/logs', '/meters']) {
+      expect(hiddenInReadOnly(open)).toBe(false);
+    }
   });
 });

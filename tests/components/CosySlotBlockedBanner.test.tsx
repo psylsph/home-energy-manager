@@ -18,7 +18,7 @@ function show(overrides: Partial<InverterSnapshot> | null) {
 
 afterEach(() => {
   cleanup();
-  useInverterStore.setState({ snapshot: null });
+  useInverterStore.setState({ snapshot: null, readOnly: false });
 });
 
 describe('CosySlotBlockedBanner', () => {
@@ -46,6 +46,14 @@ describe('CosySlotBlockedBanner', () => {
     show({ cosy_enabled: true, cosy_slot_at_risk: true, cosy_blocked_by: 'force' });
     const link = screen.getByRole('link', { name: /Control/ });
     expect(link.getAttribute('href')).toBe('#/control');
+  });
+
+  it('keeps the warning but drops the Control link on a read-only link (issue #471)', () => {
+    // Control isn't reachable read-only: the link would only bounce to Status.
+    useInverterStore.setState({ readOnly: true });
+    show({ cosy_enabled: true, cosy_slot_at_risk: true, cosy_blocked_by: 'force' });
+    expect(screen.getByRole('alert')).toHaveTextContent(/Cosy Charging Is Being Held Back/);
+    expect(screen.queryByRole('link', { name: /Control/ })).toBeNull();
   });
 
   it('stays hidden when no slot is at risk, even though Cosy is blocked', () => {

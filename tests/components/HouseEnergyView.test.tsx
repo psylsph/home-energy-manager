@@ -222,17 +222,20 @@ describe('<HouseEnergyView/>', () => {
     render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
     const w = tid('house-weather')!;
     expect(w.getAttribute('data-kind')).toBe(kind);
-    expect(w.getAttribute('aria-label')).toBe('Test, 10 °C');
-    expect(w.textContent).toContain('10 °C');
+    expect(w.getAttribute('aria-label')).toBe('Test, 10°C');
+    expect(w.textContent).toContain('10°C');
     expect(w.querySelectorAll('path, circle, line').length).toBeGreaterThan(0);
     expect(tid('house-solar-intensity')).toBeNull();
   });
 
-  it('shows the solar intensity under the temperature', () => {
+  it('shows the solar intensity as a word under the temperature', () => {
     weatherState.value = { temperatureC: 14, kind: 'partly-day', description: 'Partly cloudy', solarWm2: 486 };
     render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
-    expect(tid('house-weather')!.getAttribute('aria-label')).toBe('Partly cloudy, 14 °C, sunlight 486 W/m²');
-    expect(tid('house-solar-value')!.textContent).toBe('486 W/m²');
+    // A word instead of the figure (issue #475); the figure stays in the
+    // screen-reader label and the hover title.
+    expect(tid('house-weather')!.getAttribute('aria-label')).toBe('Partly cloudy, 14°C, sunlight moderate (486 W/m²)');
+    expect(tid('house-solar-value')!.textContent).toBe('Moderate');
+    expect(tid('house-solar-intensity')!.querySelector('title')!.textContent).toBe('Sunlight 486 W/m²');
     expect(tid('house-solar-intensity')!.getAttribute('data-level')).toBe('3');
     const bars = [...document.querySelectorAll('[data-testid="house-solar-bar"]')];
     expect(bars).toHaveLength(5);
@@ -244,7 +247,8 @@ describe('<HouseEnergyView/>', () => {
   it('shows a daytime zero with no bars lit', () => {
     weatherState.value = { temperatureC: 3, kind: 'fog', description: 'Fog', solarWm2: 0 };
     render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
-    expect(tid('house-solar-value')!.textContent).toBe('0 W/m²');
+    expect(tid('house-solar-value')!.textContent).toBe('None');
+    expect(tid('house-weather')!.getAttribute('aria-label')).toBe('Fog, 3°C, sunlight none (0 W/m²)');
     expect(tid('house-solar-intensity')!.getAttribute('data-level')).toBe('0');
   });
 

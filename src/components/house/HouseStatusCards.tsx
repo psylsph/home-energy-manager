@@ -1,11 +1,18 @@
 /**
  * The two cards under the house view (issue #422, round 2): the charge or
  * export slot running now or next, and the battery's stored energy with a
- * segmented level bar in the SOC colour.
+ * segmented level bar in the SOC colour. With Show Car Charging Slots on, the
+ * schedule card adds the car's planned Octopus charge as a second line (issue
+ * #474); it never changes the battery's own event.
  */
 import type { InverterSnapshot } from '../../lib/types';
 import { batteryEvent, batteryStoredKwh, doingIt, holdWindow, type BatteryEventKind, type TimedExportSchedule } from '../../lib/chargeSchedule';
 import { useTimedExportSchedule } from '../../hooks/useTimedExportSchedule';
+import { useCarChargeSlots } from '../../hooks/useCarChargeSlots';
+import { carChargeLine, type CarChargeLine } from '../../lib/carChargeSlots';
+import { useBatteryRuntime } from '../../hooks/useBatteryRuntime';
+import { batteryRuntimeLine } from '../../lib/batteryRuntime';
+import HelpTip from '../HelpTip';
 import { inverterMinuteOfDay } from '../../lib/ecoTimedExport';
 import { batteryBarsLit } from '../../lib/houseFlow';
 import { CAP_MARKER_COLOR, capLineSoc, capTitle } from '../../lib/chargeCap';
@@ -40,6 +47,34 @@ function BatteryGlyph({ kind, pulsing }: { kind: BatteryEventKind | 'none'; puls
   );
 }
 
+/** A small car, coloured like the charge it's waiting for. */
+function CarGlyph({ active }: { active: boolean }) {
+  const color = active ? CHARGE_GREEN : 'currentColor';
+  return (
+    <svg width="14" height="10" viewBox="0 0 14 10" aria-hidden="true" className="shrink-0">
+      <path d="M2 6.5 3.4 3h7.2L12 6.5V8.5H2z" fill="none" stroke={color} strokeWidth="1.3" strokeLinejoin="round" />
+      <circle cx="4.2" cy="8.6" r="1.1" fill={color} />
+      <circle cx="9.8" cy="8.6" r="1.1" fill={color} />
+    </svg>
+  );
+}
+
+/** The car's planned charge, under the battery's window (issue #474). */
+function CarChargeRow({ car }: { car: CarChargeLine | null }) {
+  if (!car) return null;
+  return (
+    <span
+      className="flex items-center gap-1 min-w-0 text-[11px] text-text-secondary"
+      data-testid="house-car-charge"
+      data-state={car.state}
+      title={car.title || undefined}
+    >
+      <CarGlyph active={car.state === 'active'} />
+      <span className="truncate">{car.text}</span>
+    </span>
+  );
+}
+
 const LABELS = {
   charge: { next: 'Next Charge', doing: 'Charging Now', window: 'Charge Window' },
   export: { next: 'Next Export', doing: 'Exporting Now', window: 'Export Window' },
@@ -47,10 +82,11 @@ const LABELS = {
 } as const;
 
 /** The charge or export slot running now, or the next to start. */
-function ScheduleCard({ snapshot, timedExport, nowMinute }: {
+function ScheduleCard({ snapshot, timedExport, nowMinute, car }: {
   snapshot: InverterSnapshot;
   timedExport: TimedExportSchedule | null;
   nowMinute: number;
+  car: CarChargeLine | null;
 }) {
   const noise = useInverterStore((s) => s.visualNoiseThreshold);
   const event = batteryEvent(snapshot, timedExport, nowMinute);
@@ -79,11 +115,50 @@ function ScheduleCard({ snapshot, timedExport, nowMinute }: {
       ) : (
         <span className="text-sm text-text-secondary" data-testid="house-charge-window">None scheduled</span>
       )}
+      <CarChargeRow car={car} />
     </section>
   );
 }
 
-function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
+/**
+ * When the battery reaches its reserve (issue #472), with one to three dots
+ * for how sure the forecast is. Off unless Show Battery Runtime is on.
+ */
+function RuntimeRow({ now }: { now: Date }) {
+  const line = batteryRuntimeLine(useBatteryRuntime(), now);
+  if (!line) return null;
+  const confidence = line.confidence
+    ? `${line.confidence[0]!.toUpperCase()}${line.confidence.slice(1)} confidence`
+    : null;
+  return (
+    <span
+      // Wraps rather than truncating: the time is the point, so on a phone
+      // the dots and the ⓘ go to the next line instead of cutting it off.
+      className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0 text-[11px] leading-tight text-text-secondary"
+      data-testid="house-battery-runtime"
+      title={line.title || undefined}
+    >
+      <span className="min-w-0" data-testid="house-runtime-text">{line.text}</span>
+      {line.dots != null && (
+        <span className="flex gap-0.5 shrink-0" role="img" aria-label={confidence ?? undefined} data-testid="house-runtime-dots">
+          {[1, 2, 3].map((n) => (
+            <span
+              key={n}
+              data-testid="house-runtime-dot"
+              data-lit={n <= line.dots!}
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ backgroundColor: n <= line.dots! ? 'var(--color-text-secondary)' : 'var(--color-bg-elevated)' }}
+            />
+          ))}
+        </span>
+      )}
+      {/* The dots need explaining, and phones have no hover title. */}
+      {line.help && <HelpTip label="Battery Runtime" className="shrink-0">{line.help}</HelpTip>}
+    </span>
+  );
+}
+
+function BatteryCard({ snapshot, now }: { snapshot: InverterSnapshot; now: Date }) {
   const stored = batteryStoredKwh(snapshot.soc, snapshot.battery_capacity_kwh);
   const color = socColor(snapshot.soc);
   const lit = batteryBarsLit(snapshot.soc);
@@ -120,6 +195,7 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
           />
         )}
       </span>
+      <RuntimeRow now={now} />
     </section>
   );
 }
@@ -128,12 +204,14 @@ function BatteryCard({ snapshot }: { snapshot: InverterSnapshot }) {
  * On a Gateway (issue #428): its schedule registers are its own copy, not the
  * AIO's, so they can't say when the battery will next charge or export.
  */
-function ScheduleCardUnavailable() {
+function ScheduleCardUnavailable({ car }: { car: CarChargeLine | null }) {
   return (
     <section className={CARD} data-testid="house-charge-card" data-kind="none" data-state="unavailable">
       <BatteryGlyph kind="none" pulsing={false} />
       <span className={LABEL}>Schedule</span>
       <span className="text-sm text-text-secondary" data-testid="house-charge-window">Not available on a Gateway</span>
+      {/* The car doesn't depend on the battery controls. */}
+      <CarChargeRow car={car} />
     </section>
   );
 }
@@ -151,7 +229,12 @@ function ScheduleCardLoading() {
 }
 
 /** The schedule card once the Timed Export schedule is fetched (not on a Gateway, where it isn't shown). */
-function LiveScheduleCard({ snapshot, now }: { snapshot: InverterSnapshot; now: Date }) {
+function LiveScheduleCard({ snapshot, now, car, carLoaded }: {
+  snapshot: InverterSnapshot;
+  now: Date;
+  car: CarChargeLine | null;
+  carLoaded: boolean;
+}) {
   const { schedule, loaded } = useTimedExportSchedule();
   // Slots are in inverter local time and HEM may run in a UTC container, so
   // the minute comes from the inverter's clock. The browser clock is only
@@ -159,18 +242,23 @@ function LiveScheduleCard({ snapshot, now }: { snapshot: InverterSnapshot; now: 
   // backend), where it's all we have — windows may be off if the two
   // disagree.
   const nowMinute = inverterMinuteOfDay(snapshot) ?? now.getHours() * 60 + now.getMinutes();
-  return loaded
-    ? <ScheduleCard snapshot={snapshot} timedExport={schedule} nowMinute={nowMinute} />
+  // Wait for the car check too, so its line doesn't make the card jump.
+  return loaded && carLoaded
+    ? <ScheduleCard snapshot={snapshot} timedExport={schedule} nowMinute={nowMinute} car={car} />
     : <ScheduleCardLoading />;
 }
 
 export default function HouseStatusCards({ snapshot, now = new Date() }: { snapshot: InverterSnapshot; now?: Date }) {
+  // Dispatches are UTC instants, shown in the browser's time like the
+  // Octopus page, not on the inverter's clock.
+  const { response, loaded: carLoaded } = useCarChargeSlots();
+  const car = carChargeLine(response, now);
   return (
     <div className="grid grid-cols-2 gap-3" data-testid="house-status-cards">
       {deviceHasBatteryControls(snapshot.device_type_code)
-        ? <LiveScheduleCard snapshot={snapshot} now={now} />
-        : <ScheduleCardUnavailable />}
-      <BatteryCard snapshot={snapshot} />
+        ? <LiveScheduleCard snapshot={snapshot} now={now} car={car} carLoaded={carLoaded} />
+        : <ScheduleCardUnavailable car={carLoaded ? car : null} />}
+      <BatteryCard snapshot={snapshot} now={now} />
     </div>
   );
 }

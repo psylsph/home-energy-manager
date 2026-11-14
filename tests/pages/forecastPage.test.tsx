@@ -642,6 +642,32 @@ describe('ForecastPage plan card', () => {
     expect(screen.queryByText('Automatic Planning')).toBeNull();
   });
 
+  it('shows the plan but no controls on a read-only link (issue #471)', async () => {
+    onTestFinished(() => useInverterStore.setState({ readOnly: false }));
+    useInverterStore.setState({ readOnly: true });
+    apiGetMock.mockImplementation(async (path: string) => {
+      if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+      if (path === '/api/forecast/plan') return planPayload('charge');
+      return { ok: true, data: {} };
+    });
+    const { container } = render(<ForecastPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan').textContent).toMatch(/3\.2/);
+    });
+    // The projection and the recommendation stay.
+    expect(screen.getByText('Today’s Recommendation')).toBeTruthy();
+    expect(screen.getByTestId('forecast-plan').textContent).toMatch(/02:00/);
+    // Nothing that writes: no Apply, no plan settings.
+    expect(screen.queryByTestId('forecast-plan-apply')).toBeNull();
+    expect(screen.queryByText('Plan Settings')).toBeNull();
+    expect(screen.queryByTestId('forecast-plan-strategy')).toBeNull();
+    expect(screen.queryByTestId('forecast-min-soc-input')).toBeNull();
+    expect(screen.queryByTestId('forecast-auto-apply-toggle')).toBeNull();
+    expect(screen.queryByTestId('forecast-charge-eff-input')).toBeNull();
+    expect(container.querySelectorAll('input, select').length).toBe(0);
+    expect(apiPostMocked).not.toHaveBeenCalled();
+  });
+
   it('shows inverter-write progress while applying the charge plan', async () => {
     let resolveSlot: ((value: unknown) => void) | undefined;
     apiPostMocked.mockImplementationOnce(() => new Promise((resolve) => {

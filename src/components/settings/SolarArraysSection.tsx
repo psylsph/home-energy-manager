@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { apiPost } from '../../lib/api';
 import { cleanCtArrays, positiveOrZero, type CtArrayRow } from '../../lib/settingsForm';
+import { meterAddressText, meterOptionLabel } from '../../lib/meters';
 import type { PollSettings } from '../../lib/types';
+import { useInverterStore } from '../../store/useInverterStore';
 import { SettingsSection } from './SettingsSection';
 import { useSettingsSave, type Flash } from './useSettingsSave';
 
@@ -61,6 +63,10 @@ export default function SolarArraysSection({
     })),
   );
   const { busy: saving, run } = useSettingsSave(flash);
+  // Meter names (issue #473) label the picker; the saved arrays name meters
+  // on the Meters page, so they're shared through the store.
+  const meterNames = useInverterStore((s) => s.meterLabels.names);
+  const setMeterLabels = useInverterStore((s) => s.setMeterLabels);
 
   const updateRow = (idx: number, patch: Partial<CtArrayRow>) =>
     setCtArrays((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
@@ -73,6 +79,7 @@ export default function SolarArraysSection({
         pv2_rated_kw: positiveOrZero(pv2),
         solar_arrays: cleaned,
       });
+      setMeterLabels({ solarArrays: cleaned });
       // Show what was saved, so a second Save sends the same thing.
       setCtArrays(cleaned.map((a) => ({ ...a, rated_kw: kwpText(a.rated_kw) })));
       return 'Solar arrays saved';
@@ -128,7 +135,11 @@ export default function SolarArraysSection({
                     data-testid="solar-array-address"
                   >
                     {METER_ADDRESSES.map((n) => (
-                      <option key={n} value={n}>0x{n.toString(16).padStart(2, '0')}</option>
+                      <option key={n} value={n}>
+                        {meterNames[String(n)]?.trim()
+                          ? meterOptionLabel(n, meterNames)
+                          : meterAddressText(n)}
+                      </option>
                     ))}
                   </select>
                 </div>

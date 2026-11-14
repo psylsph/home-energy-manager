@@ -392,6 +392,10 @@ export interface PollSettings {
   pv2_rated_kw?: number;
   /** External solar arrays measured by CT clamps (AC-coupled). */
   solar_arrays?: SolarArrayConfig[];
+  /** CT meter names (issue #473), keyed by decimal address "1"-"8". */
+  meter_names?: Record<string, string>;
+  /** Show the car's planned Octopus charges in the Next Charge card (issue #474). */
+  status_show_car_charging?: boolean;
 }
 
 export interface DiscoveredInverter {

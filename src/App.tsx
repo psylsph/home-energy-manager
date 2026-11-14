@@ -11,7 +11,7 @@ import { UPDATE_REFRESH_INTERVAL_MS } from './lib/updateCheck';
 import { formatPercent, formatTimestamp } from './lib/format';
 import { buildSystemAlerts } from './lib/gridFault';
 import { socColor } from './lib/energyFlow';
-import { visibleNavItems } from './lib/navItems';
+import { hiddenInReadOnly, visibleNavItems } from './lib/navItems';
 import { useInverterStore } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -309,6 +309,9 @@ const NAV_ICONS: Record<string, ComponentType> = {
  * natural form a user would bookmark, but HashRouter doesn't surface it
  * through `useSearchParams` so we read `window.location.search` directly.
  */
+/** How long the nav settings may take before the page goes on without them. */
+const NAV_SETTINGS_TIMEOUT_MS = 10_000;
+
 function urlHasRO(hashSearchParams: URLSearchParams): boolean {
   if (hashSearchParams.has('RO')) return true;
   if (typeof window === 'undefined') return false;
@@ -323,7 +326,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setCarCharging, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setNavSettingsLoaded, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
   const [octopusConfigured, setOctopusConfigured] = useState(false);
 
   // Load navigation-affecting settings on mount. The Octopus page is opt-in:
@@ -333,7 +336,12 @@ function Layout() {
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await apiGet<{ ok: boolean; data: PollSettings }>('/api/settings');
+        // A stalled request mustn't leave the Next Charge card waiting on
+        // `navSettingsLoaded` for ever (issue #474): after a while the page
+        // goes on without the settings, and still applies them if they come.
+        const giveUp = setTimeout(() => setNavSettingsLoaded(true), NAV_SETTINGS_TIMEOUT_MS);
+        const res = await apiGet<{ ok: boolean; data: PollSettings }>('/api/settings')
+          .finally(() => clearTimeout(giveUp));
         if (res.ok && res.data.hidden_panels) {
           setHiddenPanels(res.data.hidden_panels);
         }
@@ -345,18 +353,27 @@ function Layout() {
             forecast_exclude_load_above_kw: res.data.forecast_exclude_load_above_kw,
             car_charger_current_a: res.data.car_charger_current_a,
           });
+          setMeterLabels({
+            names: res.data.meter_names ?? {},
+            solarArrays: res.data.solar_arrays ?? [],
+          });
         }
-        setOctopusConfigured(Boolean(
+        const octopusOn = Boolean(
           res.ok
           && res.data.octopus_account_number
           && res.data.octopus_api_key_configured,
-        ));
+        );
+        setOctopusConfigured(octopusOn);
+        // The car line in the Next Charge card (issue #474) needs Octopus.
+        setShowCarCharging(octopusOn && res.data.status_show_car_charging === true);
       } catch { /* use defaults */ }
+      // Either way the car line's switch is now known (issue #474).
+      setNavSettingsLoaded(true);
     };
     void load();
     window.addEventListener('octopus-settings-changed', load);
     return () => window.removeEventListener('octopus-settings-changed', load);
-  }, [setHiddenPanels, setEvcHost, setCarCharging]);
+  }, [setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setNavSettingsLoaded]);
 
   // Seed the inverter-temperature alert thresholds from the backend so the
   // SystemAlertBanners render with the saved config. The store is the single
@@ -477,9 +494,14 @@ function Layout() {
   // is applied, so a route cannot be added without it (CODE_REVIEW issue 3.4).
   //
   // `hideable` panels redirect to "/" when the user has hidden that tab via
-  // Settings (`hiddenPanels`); the core pages are always shown.
+  // Settings (`hiddenPanels`); the core pages are always shown. A read-only
+  // link (`?RO`) sends a typed address of a page it hides back to "/" too,
+  // from the same list as the nav (issues #114, #471).
   function page(path: string, element: React.ReactNode, hideable = false) {
-    if (hideable && hiddenPanels.includes(path.replace(/^\//, ''))) {
+    if (
+      (isReadOnly && hiddenInReadOnly(path))
+      || (hideable && hiddenPanels.includes(path.replace(/^\//, '')))
+    ) {
       return <Route path={path} element={<Navigate to="/" replace />} />;
     }
     // Keying the boundary by path gives each route its own boundary instance:
@@ -535,8 +557,7 @@ function Layout() {
           {page('/battery', <BatteryPage />, true)}
           {page('/history', <HistoryPage />, true)}
           {page('/forecast', <ForecastPage />, true)}
-          {/* Read-only links don't show the Octopus page at all (issue #471). */}
-          {octopusConfigured && !isReadOnly
+          {octopusConfigured
             ? page('/octopus', <OctopusPage />)
             : <Route path="/octopus" element={<Navigate to="/" replace />} />}
           {page('/control', <ControlPage />, true)}

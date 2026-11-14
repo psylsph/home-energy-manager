@@ -91,6 +91,7 @@ function resetStore() {
     connectionState: 'disconnected',
     developerMode: false,
     panelGraphsEnabled: true,
+    meterLabels: { names: {}, solarArrays: [] },
   });
 }
 
@@ -229,6 +230,25 @@ describe('MetersPage', () => {
       render(<MetersPage />);
       expect(screen.getByText('Meter 0x01')).toBeDefined();
       expect(screen.queryByText('Built-in Grid CT')).toBeNull();
+    });
+
+    it('titles a named meter with its name, keeping the address under it (issue #473)', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          meters: [externalMeter({ address: 1 }), externalMeter({ address: 2 }), externalMeter({ address: 3 })],
+        }),
+        connectionState: 'connected',
+        meterLabels: {
+          names: { '1': 'Mains In' },
+          solarArrays: [{ meter_address: 2, name: 'Solar Small Roof', rated_kw: 2 }],
+        },
+      });
+      render(<MetersPage />);
+      const titles = screen.getAllByTestId('meter-title').map((t) => t.textContent);
+      expect(titles).toEqual(['Mains In', 'Solar Small Roof', 'Meter 0x03']);
+      const addresses = screen.getAllByTestId('meter-address').map((t) => t.textContent);
+      // Only the named meters need the address repeated.
+      expect(addresses).toEqual(['0x01', '0x02']);
     });
 
     it('shows per-phase power for a real external clamp', () => {

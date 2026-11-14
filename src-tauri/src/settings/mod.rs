@@ -1806,6 +1806,11 @@ pub struct Settings {
     /// Only acts while `octopus_dispatch_hold` is on.
     #[serde(default)]
     pub octopus_dispatch_charge: bool,
+    /// Show the car's planned Intelligent Octopus Go charges in the Status
+    /// page's Next Charge card (issue #474). With the hold off, the dispatch
+    /// loop then fetches a display-only list that nothing acts on.
+    #[serde(default)]
+    pub status_show_car_charging: bool,
     /// The running top-up, saved before its first write so a restart can
     /// always put the charge settings back.
     #[serde(default, deserialize_with = "deserialize_or_default")]
@@ -1853,6 +1858,45 @@ pub struct Settings {
     /// on the first poll.
     #[serde(default)]
     pub solar_meter_baselines: std::collections::BTreeMap<String, SolarMeterBaseline>,
+    /// Names for the external CT meters (issue #473), keyed by decimal
+    /// address ("1"-"8"), shown on the Meters page and in the meter pickers.
+    /// Display only: they never change which meter is the grid CT or a solar
+    /// array. No entry means the address title (`Meter 0x01`).
+    #[serde(default)]
+    pub meter_names: std::collections::BTreeMap<String, String>,
+}
+
+/// Longest meter name accepted (issue #473), in characters.
+pub const METER_NAME_MAX_CHARS: usize = 32;
+
+/// Parses a `meter_names` object from a settings save (issue #473): keys
+/// "1"-"8" exactly, string values trimmed, blanks dropped (blank means the
+/// default label). Anything else is an error, so the whole save is refused.
+pub fn parse_meter_names(
+    value: &serde_json::Value,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let object = value
+        .as_object()
+        .ok_or("meter_names must be an object of address → name")?;
+    let mut names = std::collections::BTreeMap::new();
+    for (key, name) in object {
+        if !matches!(key.as_str(), "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8") {
+            return Err(format!("Meter names are for addresses 1-8, not \"{key}\""));
+        }
+        let name = name
+            .as_str()
+            .ok_or_else(|| format!("Meter {key}'s name must be text"))?
+            .trim();
+        if name.chars().count() > METER_NAME_MAX_CHARS {
+            return Err(format!(
+                "Meter {key}'s name is longer than {METER_NAME_MAX_CHARS} characters"
+            ));
+        }
+        if !name.is_empty() {
+            names.insert(key.clone(), name.to_string());
+        }
+    }
+    Ok(names)
 }
 
 fn default_http_port() -> u16 {
@@ -2303,6 +2347,7 @@ impl Default for Settings {
             dispatch_hold_active_persisted: false,
             dispatch_hold_native: None,
             octopus_dispatch_charge: false,
+            status_show_car_charging: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
@@ -2315,6 +2360,7 @@ impl Default for Settings {
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),
             solar_meter_baselines: std::collections::BTreeMap::new(),
+            meter_names: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -2807,6 +2853,10 @@ mod tests {
         assert_eq!(s.pv1_rated_kw, 0.0);
         assert_eq!(s.pv2_rated_kw, 0.0);
         assert!(s.solar_arrays.is_empty());
+        // Issue #473: no meter names, so every meter keeps its address title.
+        assert!(s.meter_names.is_empty());
+        // Issue #474: the car line is opt-in, so no display-only fetching.
+        assert!(!s.status_show_car_charging);
         // Issue #212 starts with no supplier credentials (which is also "off").
         assert!(s.octopus_api_key.is_empty());
         assert!(s.octopus_account_number.is_empty());
@@ -3054,6 +3104,7 @@ mod tests {
             dispatch_hold_active_persisted: false,
             dispatch_hold_native: None,
             octopus_dispatch_charge: false,
+            status_show_car_charging: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
@@ -3086,6 +3137,9 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            meter_names: [("2".to_string(), "Solar Main Roof".to_string())]
+                .into_iter()
+                .collect(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -3149,6 +3203,7 @@ mod tests {
         assert_eq!(decoded.solar_arrays.len(), 2);
         assert_eq!(decoded.solar_arrays[0].meter_address, 1);
         assert_eq!(decoded.solar_arrays[0].name, "East roof");
+        assert_eq!(decoded.meter_names["2"], "Solar Main Roof");
         assert_eq!(decoded.solar_arrays[0].rated_kw, 6.0);
         assert_eq!(decoded.solar_arrays[1].meter_address, 2);
         assert!(decoded.solar_arrays[1].name.is_empty());
@@ -3841,6 +3896,7 @@ mod tests {
             dispatch_hold_active_persisted: false,
             dispatch_hold_native: None,
             octopus_dispatch_charge: false,
+            status_show_car_charging: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
@@ -3850,6 +3906,7 @@ mod tests {
             pv2_rated_kw: 0.0,
             solar_arrays: Vec::new(),
             solar_meter_baselines: std::collections::BTreeMap::new(),
+            meter_names: std::collections::BTreeMap::new(),
         };
 
         // We can't easily override the settings path for testing,

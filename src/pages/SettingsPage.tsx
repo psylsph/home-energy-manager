@@ -7,6 +7,7 @@ import { AboutSection, DeveloperSection, UpdatesSection } from '../components/se
 import AppSection from '../components/settings/AppSection';
 import ConnectionSection from '../components/settings/ConnectionSection';
 import EvChargerSection from '../components/settings/EvChargerSection';
+import MetersSection from '../components/settings/MetersSection';
 import NotificationsSection from '../components/settings/NotificationsSection';
 import OctopusSection from '../components/settings/OctopusSection';
 import PanelControlsSection from '../components/settings/PanelControlsSection';
@@ -114,6 +115,7 @@ export default function SettingsPage() {
         <OctopusSection id={S.octopus} flash={flash} initial={initial} onConfiguredChange={setOctopusOn} />
         <TariffsSection id={S.tariffs} flash={flash} initial={initial} />
         <SolarArraysSection id={S.solarArrays} flash={flash} initial={initial} />
+        <MetersSection id={S.meters} flash={flash} initial={initial} />
         <WeatherSection id={S.weather} flash={flash} />
 
         {/* Alerts */}

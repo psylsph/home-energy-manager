@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router';
+import PageLink from './PageLink';
 import { useInverterStore } from '../store/useInverterStore';
 import { apiGet } from '../lib/api';
 
@@ -66,9 +66,10 @@ export default function ColdBatteryWarning() {
       </p>
       <p className="text-text-secondary text-xs">
         Enable{' '}
-        <Link to="/control" className="text-text-primary underline hover:text-text-primary">
+        {/* Plain text on a read-only link, which can't open Control (issue #471). */}
+        <PageLink to="/control" className="text-text-primary underline hover:text-text-primary">
           Auto Winter Mode
-        </Link>{' '}
+        </PageLink>{' '}
         on the Control page to automatically charge the battery when cold —
         this warms the cells and protects battery health.
       </p>

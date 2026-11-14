@@ -474,6 +474,7 @@ async fn compute_plan(
         );
     let live_snapshot = snapshot.clone();
     let settings = settings.clone();
+    let timed_export = crate::server::api::timed_export_slots(state).await;
     tokio::task::spawn_blocking(move || {
         let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
@@ -484,6 +485,7 @@ async fn compute_plan(
             now,
             dispatches: &dispatches,
             include_current_hour,
+            timed_export_slots: &timed_export,
         });
         let (rec, export) = match running_window_start {
             Some(start) => (

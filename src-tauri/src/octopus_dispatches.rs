@@ -618,51 +618,114 @@ fn plan_changed(previous: Option<&[Dispatch]>, fresh: &[Dispatch], now: DateTime
         })
 }
 
+/// Whether the Status page wants the car's planned charges (issue #474).
+/// While the hold is on it shares the hold's list; otherwise the loop
+/// fetches a display-only list into `AppState::octopus_dispatches_display`.
+pub(crate) fn display_wanted(settings: &Settings) -> bool {
+    settings.status_show_car_charging && crate::octopus::configured(settings)
+}
+
+/// The car line was switched on or off (issue #474): forget the
+/// display-only list, so a check already asking Octopus can't bring it back,
+/// and wake the loop to fetch or stop.
+pub async fn display_switched(state: &AppState) {
+    state.octopus_dispatches_display.lock().await.reset();
+    state.octopus_dispatches_wake.notify_one();
+}
+
+/// Which list a check fills.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// The hold's, which the hold, the top-up, the planner, the replan, the
+    /// rate stamping and the dispatch log all follow.
+    Hold,
+    /// The Status page's alone (issue #474): nothing acts on it.
+    Display,
+}
+
+impl Target {
+    fn slot(self, state: &AppState) -> &tokio::sync::Mutex<DispatchesState> {
+        match self {
+            Self::Hold => &state.octopus_dispatches,
+            Self::Display => &state.octopus_dispatches_display,
+        }
+    }
+}
+
+/// What a check against `current` can reuse, with its generation.
+fn known(current: &DispatchesState, now: DateTime<Utc>) -> (u64, Known) {
+    let token = current
+        .token
+        .as_ref()
+        .filter(|(_, at)| (now - *at).abs() < Duration::minutes(TOKEN_REUSE_MINUTES))
+        .map(|(token, _)| token.0.clone());
+    let devices = current
+        .devices_checked_at
+        .filter(|at| (now - *at).abs() < Duration::hours(DEVICE_REFRESH_HOURS))
+        .map(|_| current.devices.clone());
+    let previous_devices = if devices.is_none() {
+        current.devices.clone()
+    } else {
+        Vec::new()
+    };
+    (
+        current.generation,
+        Known {
+            token,
+            devices,
+            previous_devices,
+        },
+    )
+}
+
+/// Forget a list nobody wants any more, if it holds anything.
+fn forget_unwanted(current: &mut DispatchesState) {
+    if current.checked_at.is_some() || current.error.is_some() || current.token.is_some() {
+        current.reset();
+    }
+}
+
 /// One pass: read the dispatches and publish them.
 pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
-    // Read the generation before the settings: a switch after this point
-    // bumps it, and the answer below is then dropped.
-    let (generation, known) = {
-        let current = state.octopus_dispatches.lock().await;
-        let token = current
-            .token
-            .as_ref()
-            .filter(|(_, at)| (now - *at).abs() < Duration::minutes(TOKEN_REUSE_MINUTES))
-            .map(|(token, _)| token.0.clone());
-        let devices = current
-            .devices_checked_at
-            .filter(|at| (now - *at).abs() < Duration::hours(DEVICE_REFRESH_HOURS))
-            .map(|_| current.devices.clone());
-        let previous_devices = if devices.is_none() {
-            current.devices.clone()
-        } else {
-            Vec::new()
-        };
-        (
-            current.generation,
-            Known {
-                token,
-                devices,
-                previous_devices,
-            },
-        )
-    };
+    // Read the generations before the settings: a switch after this point
+    // bumps one, and the answer below is then dropped.
+    let hold = known(&*state.octopus_dispatches.lock().await, now);
+    let display = known(&*state.octopus_dispatches_display.lock().await, now);
     let settings = Settings::load_async().await;
-    if !wanted(&settings) {
+    if wanted(&settings) {
+        // The display shares the hold's list: one fetch, and the card can
+        // never disagree with what the hold acts on.
+        forget_unwanted(&mut *state.octopus_dispatches_display.lock().await);
+        return check_into(state, Target::Hold, hold, settings, now).await;
+    }
+    {
         let mut current = state.octopus_dispatches.lock().await;
         // A hold that is off has nothing to wait for after a restart.
         current.restart_hold_until = None;
-        if current.checked_at.is_some() || current.error.is_some() || current.token.is_some() {
-            current.reset();
-        }
+        forget_unwanted(&mut current);
+    }
+    if !display_wanted(&settings) {
+        forget_unwanted(&mut *state.octopus_dispatches_display.lock().await);
         return;
     }
+    check_into(state, Target::Display, display, settings, now).await;
+}
+
+/// Ask Octopus and publish the answer into `target`'s list. Only the hold's
+/// list writes the dispatch log.
+async fn check_into(
+    state: &Arc<AppState>,
+    target: Target,
+    (generation, known): (u64, Known),
+    settings: Settings,
+    now: DateTime<Utc>,
+) {
     let fetched = tokio::task::spawn_blocking(move || fetch_blocking(&settings, known))
         .await
         .map_err(|error| format!("Dispatch check failed: {error}"))
         .and_then(|result| result);
 
-    let mut current = state.octopus_dispatches.lock().await;
+    let mut current = target.slot(state).lock().await;
     if current.generation != generation {
         return;
     }
@@ -701,8 +764,10 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
             // hold was switched on (both leave `checked_at` empty), then only
             // the changes.
             let previous = current.checked_at.map(|_| current.dispatches.as_slice());
-            if let Some(line) = planned_change(previous, &fresh, now, &chrono::Local) {
-                tracing::info!("{line}");
+            if target == Target::Hold {
+                if let Some(line) = planned_change(previous, &fresh, now, &chrono::Local) {
+                    tracing::info!("{line}");
+                }
             }
             if plan_changed(previous, &fresh, now) {
                 current.revision = current.revision.wrapping_add(1);
@@ -720,9 +785,10 @@ pub async fn check_once(state: &Arc<AppState>, now: DateTime<Utc>) {
             current.error = Some(error);
         }
     }
-    // The hold is decided; the log is written after, off the lock.
+    // The hold is decided; the log is written after, off the lock, and only
+    // for the hold's list: showing the car's slots never logs (issue #474).
     drop(current);
-    let Some(sightings) = sightings else {
+    let Some(sightings) = sightings.filter(|_| target == Target::Hold) else {
         return;
     };
     let seen_at = now.timestamp();
@@ -777,7 +843,13 @@ pub async fn run_dispatches_loop(state: Arc<AppState>) {
 /// GET /api/octopus/dispatches
 pub async fn get_dispatches(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = Settings::load_async().await;
-    let current = state.octopus_dispatches.lock().await.clone();
+    // The hold's list while it's on; otherwise the Status page's own
+    // display-only list (issue #474), empty unless that is on.
+    let current = if wanted(&settings) {
+        state.octopus_dispatches.lock().await.clone()
+    } else {
+        state.octopus_dispatches_display.lock().await.clone()
+    };
     // Only while holding: a restore still being retried is not a charge.
     let hold_state = state.dispatch_hold_state.lock().await.clone();
     let holding = hold_state == crate::inverter::poll::DispatchHoldState::Holding;
@@ -872,6 +944,9 @@ pub async fn set_hold(
     // Either way the old list goes: off must stop holding at the next poll,
     // and on starts from a fresh read.
     state.octopus_dispatches.lock().await.reset();
+    // The display's own list goes too: on, it shares the hold's; off, the
+    // next check fetches a fresh one if the Status page still wants it.
+    state.octopus_dispatches_display.lock().await.reset();
     state.octopus_dispatches_wake.notify_one();
     if !enabled {
         // Car charging isn't logged while the hold is off, so the log no
@@ -1786,6 +1861,242 @@ mod tests {
             let current = state.octopus_dispatches.lock().await.clone();
             assert!(current.dispatches.is_empty(), "the late answer is dropped");
             assert!(!current.hold_now(utc(NOW)));
+        })
+        .await;
+    }
+
+    // ---- display-only checks for the Status page (issue #474) ----
+
+    /// Running at `NOW` and still listed by the endpoint, which drops
+    /// dispatches that have ended by the real clock.
+    fn long_dispatch() -> Value {
+        dispatches_response(json!([dispatch(
+            "2026-10-17T11:30:00+00:00",
+            "2099-01-01T00:00:00+00:00",
+            json!("SMART"),
+            json!(4.2)
+        )]))
+    }
+
+    async fn configure_display(mock: &MockOctopus, hold: bool, display: bool) -> Arc<AppState> {
+        let state = configure(mock, hold).await;
+        Settings::update(|s| s.status_show_car_charging = display).unwrap();
+        state
+    }
+
+    async fn served(state: &Arc<AppState>) -> Value {
+        let (status, Json(body)) = get_dispatches(State(state.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[tokio::test]
+    async fn nothing_is_asked_with_both_the_hold_and_the_display_off() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure_display(&mock, false, false).await;
+            check_once(&state, utc(NOW)).await;
+            assert!(mock.seen().is_empty(), "no Octopus requests at all");
+            assert_eq!(state.octopus_dispatches.lock().await.checked_at, None);
+            assert_eq!(
+                state.octopus_dispatches_display.lock().await.checked_at,
+                None
+            );
+            assert_eq!(served(&state).await["checked_at"], Value::Null);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_display_alone_fills_only_its_own_list_and_nothing_acts_on_it() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(long_dispatch()).await;
+            let state = configure_display(&mock, false, true).await;
+            let (db, _path) = log_db("dispatch-display-only");
+            *state.history.lock().await = Some(db.clone());
+            let planning_before = planning_dispatches(&state, &Settings::load(), utc(NOW)).await;
+
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(mock.count("flexPlannedDispatches"), 1);
+
+            // The display's list has it...
+            let display = state.octopus_dispatches_display.lock().await.clone();
+            assert_eq!(display.checked_at, Some(utc(NOW)));
+            assert_eq!(display.dispatches.len(), 1);
+            // ...and everything that acts on a list sees none: the hold, the
+            // top-up, the planner, the replan and the rate stamping all read
+            // the hold's list, which stays as it was.
+            let hold = state.octopus_dispatches.lock().await.clone();
+            assert_eq!(hold.checked_at, None);
+            assert!(hold.dispatches.is_empty());
+            assert!(!hold.hold_now(utc("2026-10-17T12:10:00+00:00")));
+            assert!(hold
+                .off_peak_half_hours(utc("2026-10-17T12:10:00+00:00"))
+                .is_empty());
+            assert_eq!(
+                planning_dispatches(&state, &Settings::load(), utc(NOW)).await,
+                planning_before
+            );
+            // No dispatch log either.
+            assert!(logged(&db).is_empty());
+            assert_eq!(db.dispatch_log_since(), None);
+
+            // The endpoint serves the display's list, shape unchanged.
+            let body = served(&state).await;
+            assert_eq!(body["enabled"], false);
+            assert_eq!(body["devices"], 1);
+            assert_eq!(body["holding"], false);
+            assert_eq!(body["dispatches"].as_array().unwrap().len(), 1);
+            assert_eq!(body["dispatches"][0]["smart"], true);
+            assert!(body["checked_at"].is_string());
+
+            // Later checks reuse the display's own token and device list.
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            assert_eq!(mock.count("obtainKrakenToken"), 1);
+            assert_eq!(mock.count("devices("), 1);
+            assert_eq!(mock.count("flexPlannedDispatches"), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn with_the_hold_on_the_display_shares_its_list_without_a_second_fetch() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(long_dispatch()).await;
+            let state = configure_display(&mock, true, true).await;
+            check_once(&state, utc(NOW)).await;
+            assert_eq!(
+                mock.count("flexPlannedDispatches"),
+                1,
+                "one fetch per check"
+            );
+            assert_eq!(mock.count("obtainKrakenToken"), 1);
+            assert_eq!(
+                state.octopus_dispatches.lock().await.checked_at,
+                Some(utc(NOW))
+            );
+            assert_eq!(
+                state.octopus_dispatches_display.lock().await.checked_at,
+                None
+            );
+            let body = served(&state).await;
+            assert_eq!(body["enabled"], true);
+            assert_eq!(body["dispatches"].as_array().unwrap().len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn switching_the_hold_moves_the_display_between_the_two_lists() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(long_dispatch()).await;
+            let state = configure_display(&mock, false, true).await;
+            check_once(&state, utc(NOW)).await;
+            assert!(state
+                .octopus_dispatches_display
+                .lock()
+                .await
+                .checked_at
+                .is_some());
+
+            // On: the display's list goes at once, so a stale copy can't
+            // linger, and the next check fills the hold's.
+            let (status, _) =
+                set_hold(State(state.clone()), Json(HoldRequest { enabled: true })).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                state.octopus_dispatches_display.lock().await.checked_at,
+                None
+            );
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            assert!(state.octopus_dispatches.lock().await.checked_at.is_some());
+            assert_eq!(
+                state.octopus_dispatches_display.lock().await.checked_at,
+                None
+            );
+
+            // Off again: the hold's list goes, and the display fetches its own.
+            let (status, _) =
+                set_hold(State(state.clone()), Json(HoldRequest { enabled: false })).await;
+            assert_eq!(status, StatusCode::OK);
+            check_once(&state, utc("2026-10-17T12:06:00+00:00")).await;
+            assert_eq!(state.octopus_dispatches.lock().await.checked_at, None);
+            assert_eq!(
+                state.octopus_dispatches_display.lock().await.checked_at,
+                Some(utc("2026-10-17T12:06:00+00:00"))
+            );
+            assert_eq!(
+                served(&state).await["dispatches"].as_array().unwrap().len(),
+                1
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn turning_the_display_off_forgets_its_list() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            let state = configure_display(&mock, false, true).await;
+            check_once(&state, utc(NOW)).await;
+            Settings::update(|s| s.status_show_car_charging = false).unwrap();
+            check_once(&state, utc("2026-10-17T12:03:00+00:00")).await;
+            assert_eq!(mock.count("flexPlannedDispatches"), 1, "no more requests");
+            assert_eq!(
+                state.octopus_dispatches_display.lock().await.checked_at,
+                None
+            );
+            assert_eq!(served(&state).await["dispatches"], json!([]));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_display_answer_dropped_by_switching_it_off_is_not_kept() {
+        with_isolated_config_dir_async(|| async {
+            let mock = MockOctopus::spawn(one_dispatch()).await;
+            mock.dispatches_delay_ms
+                .store(400, std::sync::atomic::Ordering::Relaxed);
+            let state = configure_display(&mock, false, true).await;
+            let checking = tokio::spawn({
+                let state = state.clone();
+                async move { check_once(&state, utc(NOW)).await }
+            });
+            for _ in 0..200 {
+                if mock.count("flexPlannedDispatches") > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            // The settings save switches it off while Octopus is answering.
+            Settings::update(|s| s.status_show_car_charging = false).unwrap();
+            display_switched(&state).await;
+            checking.await.unwrap();
+            assert_eq!(
+                state.octopus_dispatches_display.lock().await.checked_at,
+                None
+            );
+            assert!(state
+                .octopus_dispatches_display
+                .lock()
+                .await
+                .dispatches
+                .is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn switching_the_display_wakes_the_loop() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            display_switched(&state).await;
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                state.octopus_dispatches_wake.notified(),
+            )
+            .await
+            .expect("the dispatch loop is woken");
         })
         .await;
     }

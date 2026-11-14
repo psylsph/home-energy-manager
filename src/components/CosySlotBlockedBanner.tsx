@@ -1,6 +1,7 @@
 import { Link } from 'react-router';
 import { useInverterStore } from '../store/useInverterStore';
 import { COSY_BLOCK_REASONS } from '../lib/cosyBlocked';
+import ReadOnlyHidden from './ReadOnlyHidden';
 
 /**
  * App-wide banner for a Cosy slot that is running, or about to start, while
@@ -27,9 +28,12 @@ export default function CosySlotBlockedBanner() {
           {reason ? `${reason}.` : 'Something is holding the inverter.'} It will resume by itself
           once this clears.
         </span>
-        <Link to="/control" className="underline underline-offset-2 hover:text-white">
-          Open Control
-        </Link>
+        {/* A read-only link can't open Control (issue #471): the warning stays. */}
+        <ReadOnlyHidden>
+          <Link to="/control" className="underline underline-offset-2 hover:text-white">
+            Open Control
+          </Link>
+        </ReadOnlyHidden>
       </div>
     </div>
   );

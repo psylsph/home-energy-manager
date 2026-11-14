@@ -16,6 +16,7 @@ import {
   YAxis,
 } from 'recharts';
 import { apiGet, apiPost } from '../lib/api';
+import ReadOnlyHidden from '../components/ReadOnlyHidden';
 import { openExternal } from '../lib/openExternal';
 import { useDeferredSave } from '../hooks/useDeferredSave';
 import Toggle from '../components/Toggle';
@@ -1214,6 +1215,7 @@ export default function ForecastPage() {
             </p>
           )}
           {batteryControls && plan.apply && plan.recommendation.kind === 'charge' && (
+            <ReadOnlyHidden>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -1235,6 +1237,7 @@ export default function ForecastPage() {
                 </span>
               )}
             </div>
+            </ReadOnlyHidden>
           )}
           {/* Automatic planning sits out on a Gateway (issue #428). */}
           {batteryControls && (
@@ -1263,6 +1266,9 @@ export default function ForecastPage() {
           {planAutoHandling && <PlannerModeWarning snapshot={snapshot} />}
           </div>
           )}
+          {/* Every Plan Settings field saves, so a read-only link (issue #471)
+              shows the plan without them. */}
+          <ReadOnlyHidden>
           <details className="group rounded-lg bg-bg-elevated/50">
             <summary className="cursor-pointer list-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs font-medium text-text-primary">
               <span>Plan Settings</span>
@@ -1606,6 +1612,7 @@ export default function ForecastPage() {
           </div>
             </div>
           </details>
+          </ReadOnlyHidden>
           {plan.recommendation.kind === 'charge' && (
             <p
               data-testid="forecast-plan-cycle-note"

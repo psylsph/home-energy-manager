@@ -16,6 +16,7 @@ pub mod current_schedule;
 pub mod dispatch_load;
 pub mod planner;
 pub mod refresh;
+pub mod runtime;
 pub mod simulate;
 pub mod solar;
 pub(crate) mod time_windows;
@@ -191,6 +192,10 @@ pub struct ForecastInputs<'a> {
     /// without it the minutes to the next hour aren't in the plan at all.
     /// Only the replan asks for it, near the top of an hour.
     pub include_current_hour: bool,
+    /// HEM's Timed Export slots while its schedule is on (empty otherwise),
+    /// for the "with current schedule" projection: outside the windows the
+    /// inverter's own slots are cleared, so the snapshot doesn't show them.
+    pub timed_export_slots: &'a [crate::inverter::model::ScheduleSlot],
 }
 
 fn current_local_hour_start_ts(now: DateTime<Local>) -> i64 {
@@ -498,7 +503,8 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                     .last()
                     .map(|h| h.soc_pct)
                     .unwrap_or(snap.soc as f64);
-                let schedule = CurrentSchedule::from_snapshot(snap, charge_kw, discharge_kw);
+                let mut schedule = CurrentSchedule::from_snapshot(snap, charge_kw, discharge_kw);
+                schedule.add_timed_export(inputs.timed_export_slots, discharge_kw);
                 let with_current_schedule = if schedule.is_empty() {
                     None
                 } else {
@@ -1473,6 +1479,7 @@ pub(crate) mod tests {
             now,
             dispatches: &NO_DISPATCHES,
             include_current_hour: false,
+            timed_export_slots: &[],
         }
     }
 
@@ -2009,6 +2016,7 @@ pub(crate) mod tests {
             now,
             dispatches: &PlanningDispatches::default(),
             include_current_hour: false,
+            timed_export_slots: &[],
         };
         let payload = build_forecast_payload(&inputs);
         for code in [
@@ -2116,6 +2124,48 @@ pub(crate) mod tests {
             build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
         let battery = payload.battery.as_ref().expect("battery projection");
         assert!(battery.with_current_schedule.is_none());
+    }
+
+    #[test]
+    fn payload_counts_hem_timed_export_windows_in_the_current_schedule() {
+        // Outside its windows HEM leaves the inverter in Eco with the slots
+        // cleared, so the snapshot alone shows no schedule; the Planner's
+        // "with current schedule" line must still show the export coming.
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_full_forecast_state(&db, now);
+        let snap = battery_snapshot();
+        let settings = five_kwp_settings();
+        let slots = [crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 18,
+            start_minute: 0,
+            end_hour: 20,
+            end_minute: 0,
+            target_soc: 10,
+        }];
+        let mut inputs = full_forecast_inputs(&db, Some(&snap), now, &settings);
+        inputs.timed_export_slots = &slots;
+        let payload = build_forecast_payload(&inputs);
+        let battery = payload.battery.as_ref().expect("battery projection");
+        let with = battery
+            .with_current_schedule
+            .as_ref()
+            .expect("the export is a schedule");
+        let at = |series: &[(i64, f64)], hour: u32| {
+            let ts = local_dt(2025, 6, 15, hour, 0).timestamp();
+            series
+                .iter()
+                .find(|(t, _)| *t == ts)
+                .map(|(_, soc)| *soc)
+                .unwrap()
+        };
+        assert!(
+            at(with, 19) < at(&battery.hours, 19) - 5.0,
+            "the export drains it: {} vs Eco {}",
+            at(with, 19),
+            at(&battery.hours, 19)
+        );
     }
 
     #[test]

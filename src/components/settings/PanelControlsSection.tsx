@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useCallback, useState, type ReactNode } from 'react';
 import { apiPost } from '../../lib/api';
 import { useInverterStore } from '../../store/useInverterStore';
 import Toggle from '../Toggle';
 import { SettingsGroup, SettingsSection } from './SettingsSection';
 import { useSettingsSave, type Flash } from './useSettingsSave';
 import HelpTip from '../HelpTip';
+import { meterOptionLabel } from '../../lib/meters';
 
 const BASE_PANELS = [
   ['power', 'Power'],
@@ -79,7 +80,11 @@ export default function PanelControlsSection({
 
       <PanelGraphsGroup />
       <HistoryAveragesGroup />
-      <EnergyFlowGroup />
+      <EnergyFlowGroup
+        carCharging={
+          octopusConfigured ? <CarChargingSlotsToggle flash={flash} /> : null
+        }
+      />
       <GridLinesGroup />
     </SettingsSection>
   );
@@ -226,19 +231,63 @@ function HistoryAveragesGroup() {
   );
 }
 
-function EnergyFlowGroup() {
+/**
+ * Show Car Charging Slots (issue #474): the car's planned Octopus charges in
+ * the house view's Next Charge card. Saved in settings.json, because the
+ * backend fetches the list for it while the battery hold is off; offered only
+ * once an Octopus account is saved, in either view, so it can always be
+ * switched off. Shows the store's value, which App loads with the settings,
+ * so it stays right however often it mounts.
+ */
+function CarChargingSlotsToggle({ flash }: { flash: Flash }) {
+  const checked = useInverterStore((s) => s.showCarCharging);
+  const setShowCarCharging = useInverterStore((s) => s.setShowCarCharging);
+  const setChecked = useCallback(
+    async (next: boolean) => {
+      setShowCarCharging(next);
+      try {
+        await apiPost('/api/settings', { status_show_car_charging: next });
+        flash(next ? CAR_SLOTS_TEXT.on : CAR_SLOTS_TEXT.off, true);
+      } catch (e) {
+        setShowCarCharging(!next);
+        flash(`${CAR_SLOTS_TEXT.fail}: ${e instanceof Error ? e.message : String(e)}`, false);
+      }
+    },
+    [setShowCarCharging, flash],
+  );
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-0.5">
+        <span className={LABEL}>Show Car Charging Slots</span>
+        <span className={HINT}>Show Octopus's planned car charges in the house view's Next Charge card.</span>
+      </div>
+      <Toggle checked={checked} ariaLabel="Show Car Charging Slots" onChange={(next) => void setChecked(next)} />
+    </div>
+  );
+}
+
+const CAR_SLOTS_TEXT = {
+  on: 'Car charging slots shown',
+  off: 'Car charging slots hidden',
+  fail: 'Failed to save',
+};
+
+function EnergyFlowGroup({ carCharging }: { carCharging: ReactNode }) {
   const showFlowStatusWords = useInverterStore((s) => s.showFlowStatusWords);
   const setShowFlowStatusWords = useInverterStore((s) => s.setShowFlowStatusWords);
   const visualNoiseThreshold = useInverterStore((s) => s.visualNoiseThreshold);
   const setVisualNoiseThreshold = useInverterStore((s) => s.setVisualNoiseThreshold);
   const gridMeterAddress = useInverterStore((s) => s.gridMeterAddress);
   const setGridMeterAddress = useInverterStore((s) => s.setGridMeterAddress);
+  const meterLabels = useInverterStore((s) => s.meterLabels);
   const energyFlowDisplay = useInverterStore((s) => s.energyFlowDisplay);
   const setEnergyFlowDisplay = useInverterStore((s) => s.setEnergyFlowDisplay);
   const showTodayStats = useInverterStore((s) => s.showTodayStats);
   const setShowTodayStats = useInverterStore((s) => s.setShowTodayStats);
   const homeExcludesCar = useInverterStore((s) => s.homeExcludesCar);
   const setHomeExcludesCar = useInverterStore((s) => s.setHomeExcludesCar);
+  const showBatteryRuntime = useInverterStore((s) => s.showBatteryRuntime);
+  const setShowBatteryRuntime = useInverterStore((s) => s.setShowBatteryRuntime);
   // External CT clamps (address >= 0x01) — offered as the grid-CT source for
   // AC-coupled systems whose grid isn't the built-in 0x00 meter. The meter
   // list is replaced each snapshot, so only its addresses are taken (as a
@@ -296,6 +345,29 @@ function EnergyFlowGroup() {
         </div>
         <Toggle checked={showTodayStats} ariaLabel="Show Today Statistics" onChange={setShowTodayStats} />
       </div>
+
+      {/* Issue #474: in both views, since it makes HEM ask Octopus. */}
+      {carCharging}
+
+      {/* Issue #472: and the Battery Level card, where the runtime goes. */}
+      {energyFlowDisplay === 'house' && (
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col gap-0.5">
+            <span className={LABEL}>
+              Show Battery Runtime{' '}
+              <HelpTip label="Show Battery Runtime">
+                The Battery Level card says when the battery will reach its reserve, from the Planner&apos;s forecast of
+                your usage and solar, rounded to the half hour. The dots show how sure it is: three when busy and quiet
+                days agree to within an hour, one when they're far apart or there's under two weeks of history. When a
+                charge slot or the sun will refill it first, it says so instead, and while it charges it says
+                when it&apos;ll be full.
+              </HelpTip>
+            </span>
+            <span className={HINT}>Show when the battery reaches its reserve in the Battery Level card.</span>
+          </div>
+          <Toggle checked={showBatteryRuntime} ariaLabel="Show Battery Runtime" onChange={setShowBatteryRuntime} />
+        </div>
+      )}
 
       {/* Issue #457: show Home without the car's charging, off by default.
           Applies to both the orbit and the house view — they share the one
@@ -356,7 +428,7 @@ function EnergyFlowGroup() {
             <option value={0}>Auto (Recommended)</option>
             {externalMeters.map((m) => (
               <option key={m.address} value={m.address}>
-                Meter 0x{m.address.toString(16).padStart(2, '0')}
+                {meterOptionLabel(m.address, meterLabels.names, meterLabels.solarArrays)}
               </option>
             ))}
             {/* An offline configured meter keeps its option so the select
@@ -364,7 +436,7 @@ function EnergyFlowGroup() {
             {gridMeterAddress !== 0 &&
               !externalMeters.some((m) => m.address === gridMeterAddress) && (
               <option value={gridMeterAddress}>
-                Meter 0x{gridMeterAddress.toString(16).padStart(2, '0')} (offline)
+                {meterOptionLabel(gridMeterAddress, meterLabels.names, meterLabels.solarArrays)} (offline)
               </option>
             )}
           </select>

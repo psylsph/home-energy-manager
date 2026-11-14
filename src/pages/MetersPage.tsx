@@ -1,6 +1,7 @@
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, MeterData } from '../lib/types';
 import { formatEnergy } from '../lib/format';
+import { meterAddressText, meterLabel, meterName } from '../lib/meters';
 import AwaitingConnection from '../components/AwaitingConnection';
 
 /** A phase is "active" if it has a plausible non-zero voltage (>10 V). */
@@ -32,6 +33,10 @@ function LifetimeTotalsCard({ snapshot }: { snapshot: InverterSnapshot }) {
 }
 
 function MeterCard({ meter }: { meter: MeterData }) {
+  // Names from Settings → Meters, or the solar array the clamp measures
+  // (issue #473); the address stays visible under a name.
+  const { names, solarArrays } = useInverterStore((s) => s.meterLabels);
+  const named = meterName(meter.address, names, solarArrays) != null;
   const dir = meter.p_active_total >= 0 ? '↓ Import' : '↑ Export';
   const absPower = Math.abs(meter.p_active_total);
 
@@ -51,9 +56,16 @@ function MeterCard({ meter }: { meter: MeterData }) {
   return (
     <div className="bg-bg-surface rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-text-primary font-medium">
-          {isSynthetic ? 'Built-in Grid CT' : `Meter 0x${meter.address.toString(16).padStart(2, '0')}`}
-        </span>
+        <div className="flex flex-col min-w-0">
+          <span className="text-text-primary font-medium truncate" data-testid="meter-title">
+            {meterLabel(meter.address, names, solarArrays)}
+          </span>
+          {named && (
+            <span className="text-xs text-text-secondary font-mono" data-testid="meter-address">
+              {meterAddressText(meter.address)}
+            </span>
+          )}
+        </div>
         <span className="text-xs text-text-secondary font-mono">{meter.frequency.toFixed(2)} Hz</span>
       </div>
 

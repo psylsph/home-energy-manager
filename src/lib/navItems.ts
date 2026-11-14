@@ -26,8 +26,17 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { to: '/settings', label: 'Settings' },
 ];
 
-/** Pages `?RO` read-only mode hides from the nav (issues #114, #471). */
+/** Pages `?RO` read-only mode hides from the nav and its routes (issues #114, #471). */
 const READ_ONLY_HIDDEN: ReadonlySet<string> = new Set(['control', 'settings', 'octopus']);
+
+/**
+ * Whether a read-only link can't reach this page (`/control` or `control`):
+ * the nav leaves it out and its route sends a typed address back to Status,
+ * so the two can't disagree.
+ */
+export function hiddenInReadOnly(path: string): boolean {
+  return READ_ONLY_HIDDEN.has(path.replace(/^\//, ''));
+}
 
 export const LOGS_ITEM: NavItem = { to: '/logs', label: 'Logs' };
 
@@ -46,7 +55,7 @@ export interface NavVisibility {
 export function visibleNavItems(v: NavVisibility): NavItem[] {
   const items = NAV_ITEMS.filter((item) => {
     const key = item.to.replace(/^\//, '');
-    if (v.readOnly && READ_ONLY_HIDDEN.has(key)) return false;
+    if (v.readOnly && hiddenInReadOnly(key)) return false;
     if (key === 'octopus' && !v.octopusConfigured) return false;
     return !key || !v.hiddenPanels.includes(key);
   });

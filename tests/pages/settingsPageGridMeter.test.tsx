@@ -47,7 +47,11 @@ describe('<PanelControlsSection/> — Grid CT meter picker (issue #192)', () => 
   beforeEach(() => {
     silenceConsoleError();
     localStorage.removeItem('gridMeterAddress');
-    useInverterStore.setState({ gridMeterAddress: 0, snapshot: null });
+    useInverterStore.setState({
+      gridMeterAddress: 0,
+      snapshot: null,
+      meterLabels: { names: {}, solarArrays: [] },
+    });
   });
 
   afterEach(() => {
@@ -76,6 +80,26 @@ describe('<PanelControlsSection/> — Grid CT meter picker (issue #192)', () => 
     expect(labels).toContain('Auto (Recommended)');
     expect(labels).toContain('Meter 0x01');
     expect(labels).toContain('Meter 0x02');
+  });
+
+  it('names the meters as Settings → Meters does, including an offline one (issue #473)', async () => {
+    localStorage.setItem('gridMeterAddress', '3');
+    useInverterStore.setState({
+      gridMeterAddress: 3,
+      snapshot: snapshotWith([meter(0x01), meter(0x02)]),
+      meterLabels: {
+        names: { '1': 'Mains In', '3': 'Garage' },
+        solarArrays: [{ meter_address: 2, name: 'Solar Small Roof', rated_kw: 2 }],
+      },
+    });
+    render(<Section />);
+    const select = (await screen.findByTestId('grid-ct-meter-select')) as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual([
+      'Auto (Recommended)',
+      '0x01 · Mains In',
+      '0x02 · Solar Small Roof',
+      '0x03 · Garage (offline)',
+    ]);
   });
 
   it('selecting an external CT updates the store and persists to localStorage', async () => {
