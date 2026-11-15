@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 
-// Issue #452: the Dongle Web Page option sits in Developer Controls beside
-// Inverter Reboot, in both Control page layouts, and only in developer mode.
+// Issue #452: the Dongle Web Page option sits in Developer Controls directly
+// above Inverter Reboot, in both Control page layouts, and only in developer
+// mode.
 
 vi.mock('../../src/lib/api', () => ({
   apiGet: vi.fn(async (path: string) => {
@@ -47,12 +48,16 @@ describe('<ControlPage/> — Dongle Web Page (issue #452)', () => {
   it.each([
     ['a single-phase inverter', {}],
     ['a Gateway', { device_type_code: '7001' }],
-  ])('is offered beside Inverter Reboot in developer mode on %s', async (_name, overrides) => {
+  ])('is offered directly above Inverter Reboot in developer mode on %s', async (_name, overrides) => {
     connect(overrides, true);
     render(<ControlPage />);
-    expect(screen.getByRole('heading', { name: 'Inverter Reboot' })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'Dongle Web Page' })).toBeTruthy();
     expect(await screen.findByRole('button', { name: 'Open Dongle Page' })).toBeTruthy();
+    const dongle = screen.getByRole('heading', { name: 'Dongle Web Page' });
+    const reboot = screen.getByRole('heading', { name: 'Inverter Reboot' });
+    // Dongle Web Page comes first, with no other section title between them.
+    expect(dongle.compareDocumentPosition(reboot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const titles = screen.getAllByRole('heading', { level: 3 });
+    expect(titles[titles.indexOf(dongle) + 1]).toBe(reboot);
   });
 
   it.each([
