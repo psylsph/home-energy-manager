@@ -760,6 +760,23 @@ describe('ForecastPage plan card', () => {
       spy.mockRestore();
     });
 
+    it('still says Applied when the inverter takes longer than a single write to confirm', async () => {
+      // Two requests queue several paced writes, each of which a busy dongle
+      // can retry, so the plan can take well over 15 s to read back.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<ForecastPage />);
+      const apply = await screen.findByTestId('forecast-plan-apply');
+      fireEvent.click(apply);
+      await waitFor(() => expect(apiPostMocked).toHaveBeenCalledWith('/api/control/timed-charge', { enabled: true }));
+
+      act(() => { vi.advanceTimersByTime(40_000); });
+      await act(async () => { await Promise.resolve(); });
+      expect(apply).toHaveTextContent('Applying…');
+      act(() => { useInverterStore.setState({ snapshot: snap(planSlot, true) } as never); });
+      await waitFor(() => expect(apply).toHaveTextContent('Applied ✓'));
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
     it('says the inverter has not confirmed it, without rolling back, when nothing reads it back', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       render(<ForecastPage />);
@@ -767,7 +784,7 @@ describe('ForecastPage plan card', () => {
       fireEvent.click(apply);
       await waitFor(() => expect(apiPostMocked).toHaveBeenCalledWith('/api/control/timed-charge', { enabled: true }));
 
-      act(() => { vi.advanceTimersByTime(15_000); });
+      act(() => { vi.advanceTimersByTime(60_000); });
       expect(await screen.findByRole('alert')).toHaveTextContent(
         /The plan was sent but the inverter has not confirmed it yet/,
       );
