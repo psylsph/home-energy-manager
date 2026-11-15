@@ -849,6 +849,19 @@ mod tests {
     }
 
     #[test]
+    fn a_point_under_a_low_reserve_is_below_it() {
+        // 3% against a 4% reserve reads "Below Reserve"; 4% reads "At Reserve".
+        let mut under = inputs(T0, T0, 3.0, [1.0, 1.0, 1.0]);
+        under.params.reserve_soc_pct = 4.0;
+        assert_eq!(battery_runtime(&under), RuntimeOutcome::BelowReserve);
+        let mut at = inputs(T0, T0, 4.0, [1.0, 1.0, 1.0]);
+        at.params.reserve_soc_pct = 4.0;
+        assert_eq!(battery_runtime(&at), RuntimeOutcome::AtReserve);
+        assert_eq!(reserve_band(3.0, 4.0), -1);
+        assert_eq!(reserve_band(4.0, 4.0), 0);
+    }
+
+    #[test]
     fn at_reserve_when_there() {
         let at_reserve = inputs(T0, T0, 10.3, [1.0, 1.0, 1.0]);
         assert_eq!(battery_runtime(&at_reserve), RuntimeOutcome::AtReserve);
@@ -875,9 +888,9 @@ mod tests {
         let mut floor = inputs(T0, T0, 30.0, [1.0, 1.0, 1.0]);
         floor.params.reserve_soc_pct = 45.0;
         assert_eq!(battery_runtime(&floor), RuntimeOutcome::BelowReserve);
-        // Two or more points under its reserve (an outage, standby losses):
+        // Under its reserve (an outage, standby losses), even by a point:
         // says so, not "at its reserve", and not paused.
-        for soc in [9.0, 17.0, 18.0] {
+        for soc in [9.0, 17.0, 18.0, 19.0, 19.4] {
             let mut under = inputs(T0, T0, soc, [1.0, 1.0, 1.0]);
             under.params.reserve_soc_pct = 20.0;
             assert_eq!(
@@ -886,9 +899,8 @@ mod tests {
                 "{soc}"
             );
         }
-        // At it, a point under (a battery parked there often reads one low),
-        // or within the tolerance above it: at its reserve.
-        for soc in [19.0, 19.5, 20.0, 20.4] {
+        // At it, or within the float tolerance either side: at its reserve.
+        for soc in [19.5, 20.0, 20.4] {
             let mut at = inputs(T0, T0, soc, [1.0, 1.0, 1.0]);
             at.params.reserve_soc_pct = 20.0;
             assert_eq!(battery_runtime(&at), RuntimeOutcome::AtReserve, "{soc}");

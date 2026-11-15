@@ -105,8 +105,8 @@ describe('batteryRuntimeLine (issue #472)', () => {
 
   it('covers the rest', () => {
     expect(line({ outcome: 'lasts_beyond', hours: 24 })!.text).toBe('Lasts over 24 hours');
-    expect(line({ outcome: 'at_reserve' })!.text).toBe('At reserve');
-    expect(line({ outcome: 'below_reserve' })!.text).toBe('Below reserve');
+    expect(line({ outcome: 'at_reserve' })!.text).toBe('At Reserve');
+    expect(line({ outcome: 'below_reserve' })!.text).toBe('Below Reserve');
     expect(batteryRuntimeLine(null, NOW, UTC)).toBeNull();
   });
 
