@@ -8,7 +8,7 @@
  * this returns. Colours, status words, numbers and the noise threshold all
  * come from the view model, so the house and the orbit always agree.
  */
-import type { ConnectionState } from './types';
+import type { ConnectionState, InverterSnapshot } from './types';
 import type { EnergyFlow, EnergyFlowViewModel, FlowNode, FlowNodeId } from '../types/energyFlow';
 import { FLOW_COLORS, UNKNOWN_MODE_LABEL, batteryFillFraction, nodeStatus, socColor, visualEndpoints } from './energyFlow';
 import {
@@ -188,6 +188,35 @@ export function batteryBarsLit(soc: number): number {
   const f = batteryFillFraction(soc);
   if (f <= 0) return 0;
   return Math.max(1, Math.round(f * BATTERY_BARS));
+}
+
+/** Flashes an element while SOC is below the reserve (`index.css`). */
+export const RESERVE_FLASH = 'reserve-flash';
+
+/**
+ * SOC this many points under the reserve or more is below it. A battery
+ * parked at its reserve often reads a point low, which is still at it. The
+ * runtime line's "Below Reserve" uses the same edge (`runtime.rs`).
+ */
+export const BELOW_RESERVE_POINTS = 2;
+/** Battery power under this (W, negative = charging) is charging, as in `runtime.rs::is_charging`. */
+const CHARGING_W = -100;
+
+/**
+ * SOC is under the inverter's reserve (after an outage, standby losses, or a
+ * raised floor) and it isn't charging back up, so the house view flashes.
+ * HEM's reserve pause writes 100, which isn't a reserve the battery has
+ * fallen below; a system with no battery capacity has nothing to warn about.
+ */
+export function belowReserve(
+  snapshot: Pick<InverterSnapshot, 'soc' | 'battery_reserve' | 'battery_capacity_kwh' | 'battery_power'>,
+): boolean {
+  const { soc, battery_reserve: reserve, battery_capacity_kwh: capacity, battery_power: power } = snapshot;
+  const charging = Number.isFinite(power) && power < CHARGING_W;
+  return Number.isFinite(soc) && Number.isFinite(reserve) && reserve < 100
+    && Number.isFinite(capacity) && capacity > 0
+    && !charging
+    && soc <= reserve - BELOW_RESERVE_POINTS;
 }
 
 function project(points: WorldPoint[]): ScreenPoint[] {

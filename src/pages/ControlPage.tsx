@@ -285,11 +285,16 @@ function InverterWriteProgress({ detail = 'This can take several seconds. Please
 
 const CHARGE_SLOT_CONFIRM_TIMEOUT_MS = 15_000;
 /**
- * A power-limit change waits for the poll loop's next write pass (up to one poll
- * cycle) plus the paced write itself, and then for a snapshot that reads it
- * back, so allow comfortably longer than a charge slot's single-pass wait.
+ * A power-control change waits for the poll loop's next write pass (up to one
+ * poll cycle) plus the paced write itself, and then for a snapshot that reads
+ * it back, so allow comfortably longer than a charge slot's single-pass wait.
  */
-const POWER_LIMIT_CONFIRM_TIMEOUT_MS = 20_000;
+const POWER_CONTROL_CONFIRM_TIMEOUT_MS = 20_000;
+/** What the banner adds when a power control isn't read back in time. */
+const DEFAULT_CONFIRM_HINT = 'It may still be applying';
+/** A running Force Charge holds manual charge and discharge limit changes. */
+const LIMIT_CONFIRM_HINT = 'It may still be applying; a running Force Charge holds limit changes until it ends';
+const RESERVE_CONFIRM_HINT = 'It may still be applying, or a pause may be holding the reserve';
 const TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS = 15_000;
 
 function chargeSlotMatchesReadback(
@@ -309,39 +314,6 @@ function chargeSlotMatchesReadback(
     && actual.end_hour === desired.end_hour
     && actual.end_minute === desired.end_minute
     && actual.target_soc === desired.target_soc;
-}
-
-/**
- * Charge-slot writes are queued by the API and then applied register by
- * register by the poll loop. Keep the editor pending until a newer WebSocket
- * snapshot confirms the complete slot, rather than hiding progress as soon
- * as the backend accepts the queue request.
- */
-function waitForChargeSlotReadback(
-  index: number,
-  desired: ScheduleSlot,
-  snapshotBeforeSave: InverterSnapshot | null,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    let unsubscribe = () => {};
-    let settled = false;
-    const finish = (confirmed: boolean) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeout);
-      unsubscribe();
-      resolve(confirmed);
-    };
-    const check = () => {
-      const current = useInverterStore.getState().snapshot;
-      if (current !== snapshotBeforeSave && chargeSlotMatchesReadback(current, index, desired)) {
-        finish(true);
-      }
-    };
-    const timeout = window.setTimeout(() => finish(false), CHARGE_SLOT_CONFIRM_TIMEOUT_MS);
-    unsubscribe = useInverterStore.subscribe(check);
-    check();
-  });
 }
 
 function timedDischargeMatchesReadback(
@@ -366,32 +338,6 @@ function timedDischargeMatchesReadback(
     && pauseSlot.start_minute === desired.end_minute
     && pauseSlot.end_hour === desired.start_hour
     && pauseSlot.end_minute === desired.start_minute;
-}
-
-function waitForTimedDischargeReadback(
-  desired: ScheduleSlot,
-  snapshotBeforeSave: InverterSnapshot | null,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    let unsubscribe = () => {};
-    let settled = false;
-    const finish = (confirmed: boolean) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeout);
-      unsubscribe();
-      resolve(confirmed);
-    };
-    const check = () => {
-      const current = useInverterStore.getState().snapshot;
-      if (current !== snapshotBeforeSave && timedDischargeMatchesReadback(current, desired)) {
-        finish(true);
-      }
-    };
-    const timeout = window.setTimeout(() => finish(false), TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS);
-    unsubscribe = useInverterStore.subscribe(check);
-    check();
-  });
 }
 
 /**
@@ -3191,11 +3137,12 @@ export default function ControlPage() {
   // the quick actions).
   const forceDischargeActive = forceDischargeActiveForState;
   const [reserveSaving, setReserveSaving] = useState(false);
-  // Every in-flight power-limit save (charge and discharge can overlap), so
-  // closing the page cancels all of them, including one still posting.
-  const powerLimitSavesRef = useRef(new Set<AbortController>());
+  // Every in-flight read-back wait (power controls, charge slots, Timed
+  // Discharge; they can overlap), so closing the page cancels all of them,
+  // including one whose POST is still in flight.
+  const readbackWaitsRef = useRef(new Set<AbortController>());
   useEffect(() => {
-    const saves = powerLimitSavesRef.current;
+    const saves = readbackWaitsRef.current;
     return () => {
       for (const controller of saves) controller.abort();
       saves.clear();
@@ -3213,7 +3160,8 @@ export default function ControlPage() {
   // slider kept showing the rejected value and the write looked confirmed.
   // Failures surface here and clear the draft so the slider snaps back to
   // the inverter's actual setting.
-  const [powerControlSaveError, setPowerControlSaveError] = useState<string | null>(null);
+  // `source` is the control's label, so one control's success only clears its own error.
+  const [powerControlSaveError, setPowerControlSaveError] = useState<{ source: string; message: string } | null>(null);
   // Duration (in minutes) for Force Charge and Force Discharge quick actions.
   // The UI offers five-minute increments from 5m to 24h on a logarithmic
   // track. The backend clamps the submitted 1440-minute endpoint to 1439
@@ -3449,6 +3397,29 @@ export default function ControlPage() {
     }
   };
 
+  /**
+   * Slot writes are queued by the API and then applied register by register by
+   * the poll loop, so the editor stays pending until a newer snapshot confirms
+   * the whole slot. Throws `message` when none does in time; resolves false
+   * when the page was closed meanwhile.
+   */
+  const confirmSlot = async (
+    readBack: (snapshot: InverterSnapshot) => boolean,
+    snapshotBeforeSave: InverterSnapshot | null,
+    timeoutMs: number,
+    message: string,
+  ): Promise<boolean> => {
+    const controller = new AbortController();
+    readbackWaitsRef.current.add(controller);
+    try {
+      const result = await waitForSnapshotReadback(readBack, snapshotBeforeSave, timeoutMs, controller.signal);
+      if (result === 'timeout') throw new Error(message);
+      return result === 'confirmed';
+    } finally {
+      readbackWaitsRef.current.delete(controller);
+    }
+  };
+
   const handleSlotSave = async (index: number, slot: ScheduleSlot, path: string) => {
     if (path === '/api/control/timed-discharge') {
       const snapshotBeforeSave = useInverterStore.getState().snapshot;
@@ -3460,10 +3431,12 @@ export default function ControlPage() {
         end_hour: slot.end_hour,
         end_minute: slot.end_minute,
       });
-      const confirmed = await waitForTimedDischargeReadback(slot, snapshotBeforeSave);
-      if (!confirmed) {
-        throw new Error('Timed Discharge did not confirm the change. Please try again.');
-      }
+      await confirmSlot(
+        (snap) => timedDischargeMatchesReadback(snap, slot),
+        snapshotBeforeSave,
+        TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS,
+        'Timed Discharge did not confirm the change. Please try again.',
+      );
       return;
     }
 
@@ -3494,10 +3467,14 @@ export default function ControlPage() {
       },
     );
     if (path === '/api/control/charge-slot') {
-      const confirmed = await waitForChargeSlotReadback(index, slot, snapshotBeforeSave);
-      if (!confirmed) {
-        throw new Error('Charge slot did not confirm the change. Please try again.');
-      }
+      const confirmed = await confirmSlot(
+        (snap) => chargeSlotMatchesReadback(snap, index, slot),
+        snapshotBeforeSave,
+        CHARGE_SLOT_CONFIRM_TIMEOUT_MS,
+        'Charge slot did not confirm the change. Please try again.',
+      );
+      // The page was closed: nothing left to update.
+      if (!confirmed) return;
     }
     // `apiPost` returns the backend envelope unchanged. The schedule is a
     // top-level field on this endpoint; accept the nested shape too for
@@ -3538,122 +3515,144 @@ export default function ControlPage() {
     }
   };
 
-  const handleReserveSave = async () => {
-    setReserveSaving(true);
-    try {
-      await apiPost('/api/control/reserve', { soc: reserveSoc });
-      setPowerControlSaveError(null);
-    } catch (e: unknown) {
-      console.warn("Minimum SOC save failed:", e);
-      setPowerControlSaveError(`Minimum SOC save failed: ${describeSaveFailure(e)}`);
-      setDraftReserve(null);
-    }
-    setReserveSaving(false);
-  };
+
+  /** Show a power control's error, replacing whatever the banner held. */
+  const showPowerControlError = (source: string, message: string) =>
+    setPowerControlSaveError({ source, message });
+  /**
+   * Clear the banner only if it holds this control's error: a confirmed save of
+   * one control mustn't hide another's timeout or failure.
+   */
+  const clearPowerControlError = (source: string) =>
+    setPowerControlSaveError((current) => (current?.source === source ? null : current));
 
   /**
-   * Wait for the inverter to read a just-saved limit back. The POST only means
-   * "queued"; the poll loop applies the write a few seconds later, and a running
-   * Force Charge holds manual limit changes until it ends. Records the outcome in
-   * the error banner and hands the slider back to the inverter's value either way
-   * (several percentages share one register, so a kept draft could sit under the
-   * wrong label). Returns false when the page was closed meanwhile, in which case
-   * nothing may be updated.
+   * Wait for the inverter to read a just-saved power control back. The POST
+   * only means "queued"; the poll loop applies the write a few seconds later
+   * (and a running Force Charge holds manual limit changes until it ends).
+   * Records the outcome in the error banner and hands the slider back to the
+   * inverter's value either way (for the limits, several percentages share one
+   * register, so a kept draft could sit under the wrong label). Returns false
+   * when the page was closed meanwhile, in which case nothing may be updated.
    */
-  const confirmPowerLimit = async (
+  const confirmPowerControl = async (
     label: string,
-    field: 'charge_rate' | 'discharge_rate',
-    raw: number,
+    readBack: (snapshot: InverterSnapshot) => boolean,
     snapshotBeforeSave: InverterSnapshot | null,
     signal: AbortSignal,
     resetDraft: () => void,
+    timeoutHint: string,
   ): Promise<boolean> => {
     const result = await waitForSnapshotReadback(
-      (snap) => snap[field] === raw,
+      readBack,
       snapshotBeforeSave,
-      POWER_LIMIT_CONFIRM_TIMEOUT_MS,
+      POWER_CONTROL_CONFIRM_TIMEOUT_MS,
       signal,
     );
     if (result === 'aborted') return false;
     if (result === 'timeout') {
-      setPowerControlSaveError(describeSaveFailure(new Error(
-        `${label} was sent but the inverter has not confirmed it yet. It may still be applying; `
-        + 'a running Force Charge holds limit changes until it ends',
+      showPowerControlError(label, describeSaveFailure(new Error(
+        `${label} was sent but the inverter has not confirmed it yet. ${timeoutHint}`,
       )));
     } else {
-      setPowerControlSaveError(null);
+      clearPowerControlError(label);
     }
     resetDraft();
     return true;
   };
 
   /**
-   * Save a charge or discharge limit and keep it pending until the inverter
-   * confirms. The abort controller exists before the POST so a page closed while
-   * the request is still in flight cancels the wait that would follow it.
+   * Save a power control (Minimum SOC, a charge or discharge limit, the active
+   * power limit) and keep it pending until the inverter confirms. The abort
+   * controller exists before the POST so a page closed while the request is
+   * still in flight cancels the wait that would follow it.
    */
-  const savePowerLimit = async (
+  const savePowerControl = async (
     label: string,
     path: string,
-    field: 'charge_rate' | 'discharge_rate',
-    raw: number,
+    body: Record<string, number>,
+    readBack: (snapshot: InverterSnapshot) => boolean,
     setSaving: (saving: boolean) => void,
     resetDraft: () => void,
+    timeoutHint = DEFAULT_CONFIRM_HINT,
   ) => {
     const controller = new AbortController();
-    powerLimitSavesRef.current.add(controller);
+    readbackWaitsRef.current.add(controller);
     setSaving(true);
     const snapshotBeforeSave = useInverterStore.getState().snapshot;
     try {
-      await apiPost(path, { limit: raw });
-      if (!await confirmPowerLimit(label, field, raw, snapshotBeforeSave, controller.signal, resetDraft)) return;
+      await apiPost(path, body);
+      if (!await confirmPowerControl(
+        label,
+        readBack,
+        snapshotBeforeSave,
+        controller.signal,
+        resetDraft,
+        timeoutHint,
+      )) return;
     } catch (e: unknown) {
       if (controller.signal.aborted) return;
       console.warn(`${label} save failed:`, e);
-      setPowerControlSaveError(`${label} save failed: ${describeSaveFailure(e)}`);
+      showPowerControlError(label, `${label} save failed: ${describeSaveFailure(e)}`);
       resetDraft();
     } finally {
-      powerLimitSavesRef.current.delete(controller);
+      readbackWaitsRef.current.delete(controller);
     }
     setSaving(false);
   };
 
+  const handleReserveSave = async () => {
+    const soc = reserveSoc;
+    await savePowerControl(
+      'Minimum SOC',
+      '/api/control/reserve',
+      { soc },
+      (snap) => snap.battery_reserve === soc,
+      setReserveSaving,
+      () => setDraftReserve(null),
+      RESERVE_CONFIRM_HINT,
+    );
+  };
+
   const handleChargeRateSave = async () => {
     if (chargeRate == null) return;
-    await savePowerLimit(
+    const limit = percentToRawLimit(chargeRate, limitScale);
+    await savePowerControl(
       'Charge Power Limit',
       '/api/control/charge-rate',
-      'charge_rate',
-      percentToRawLimit(chargeRate, limitScale),
+      { limit },
+      (snap) => snap.charge_rate === limit,
       setChargeRateSaving,
       () => setDraftCharge(null),
+      LIMIT_CONFIRM_HINT,
     );
   };
 
   const handleDischargeRateSave = async () => {
     if (dischargeRate == null) return;
-    await savePowerLimit(
+    const limit = percentToRawLimit(dischargeRate, limitScale);
+    await savePowerControl(
       'Discharge Power Limit',
       '/api/control/discharge-rate',
-      'discharge_rate',
-      percentToRawLimit(dischargeRate, limitScale),
+      { limit },
+      (snap) => snap.discharge_rate === limit,
       setDischargeRateSaving,
       () => setDraftDischarge(null),
+      LIMIT_CONFIRM_HINT,
     );
   };
 
   const handleActivePowerSave = async () => {
     if (activePowerRate == null) return;
-    setActivePowerSaving(true);
-    try {
-      await apiPost('/api/control/active-power-rate', { rate: activePowerRate });
-      setPowerControlSaveError(null);
-    } catch (e: unknown) {
-      console.warn("Active power rate save failed:", e);
-      setPowerControlSaveError(`Active power rate save failed: ${describeSaveFailure(e)}`);
-      setDraftActivePower(null);
-    }
-    setActivePowerSaving(false);
+    const rate = activePowerRate;
+    await savePowerControl(
+      'Inverter Active Power Limit',
+      '/api/control/active-power-rate',
+      { rate },
+      (snap) => snap.active_power_rate === rate,
+      setActivePowerSaving,
+      () => setDraftActivePower(null),
+    );
   };
 
   // Connection gate: when not connected, short-circuit the entire JSX so
@@ -4194,7 +4193,7 @@ export default function ControlPage() {
             role="alert"
             className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300"
           >
-            {powerControlSaveError}
+            {powerControlSaveError.message}
           </div>
         )}
         {/* EPS is deliberately a separate card so its switch cannot be mistaken

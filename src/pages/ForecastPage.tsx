@@ -79,6 +79,7 @@ import type { HistoryPoint, PastRange, PlanHistorySnapshot } from '../lib/planHi
 import type { InverterSnapshot } from '../lib/types';
 import { deviceHasBatteryControls } from '../lib/deviceCapabilities';
 import { useInverterStore } from '../store/useInverterStore';
+import { waitForSnapshotReadback } from '../lib/readback';
 import HelpTip from '../components/HelpTip';
 import PlannerModeWarning from '../components/PlannerModeWarning';
 import PageLink from '../components/PageLink';
@@ -272,7 +273,7 @@ function forecastChargeSlotMatchesReadback(
   snapshot: InverterSnapshot | null,
   desired: ForecastChargeSlot,
 ): boolean {
-  const actual = snapshot?.charge_slots[desired.slot - 1];
+  const actual = snapshot?.charge_slots?.[desired.slot - 1];
   if (!actual) return false;
   return actual.enabled === desired.enabled
     && actual.start_hour === desired.start_hour
@@ -281,35 +282,6 @@ function forecastChargeSlotMatchesReadback(
     && actual.end_minute === desired.end_minute
     && chargeTargetReadBack(desired.target_soc, actual.target_soc)
     && snapshot?.enable_charge === true;
-}
-
-/** Charge-slot writes are queued by the backend and applied by the poll loop.
- * Keep the Forecast progress state up until a newer snapshot confirms the
- * requested slot, matching the Control page's user-facing behaviour. */
-function waitForForecastChargeReadback(
-  desired: ForecastChargeSlot,
-  snapshotBeforeApply: InverterSnapshot,
-): Promise<void> {
-  return new Promise((resolve) => {
-    let unsubscribe = () => {};
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeout);
-      unsubscribe();
-      resolve();
-    };
-    const check = () => {
-      const current = useInverterStore.getState().snapshot;
-      if (current !== snapshotBeforeApply && forecastChargeSlotMatchesReadback(current, desired)) {
-        finish();
-      }
-    };
-    const timeout = window.setTimeout(finish, FORECAST_CHARGE_CONFIRM_TIMEOUT_MS);
-    unsubscribe = useInverterStore.subscribe(check);
-    check();
-  });
 }
 
 type ForecastGridOverlayProps = {
@@ -377,6 +349,10 @@ export default function ForecastPage() {
   const [applyState, setApplyState] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
   const [appliedPlanIdentity, setAppliedPlanIdentity] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
+  // An apply waiting for the inverter to read the plan back; closing the
+  // page cancels it, so nothing outlives the page.
+  const applyWaitRef = useRef<AbortController | null>(null);
+  useEffect(() => () => applyWaitRef.current?.abort(), []);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [minSocPctInput, setMinSocPctInput] = useState<string>('20');
@@ -744,6 +720,10 @@ export default function ForecastPage() {
     if (!plan || !plan.apply) return;
     const identity = forecastPlanIdentity(plan);
     const snapshotBeforeApply = useInverterStore.getState().snapshot;
+    // Made before the POSTs, so a page closed while they're in flight
+    // cancels the wait that follows them.
+    const controller = new AbortController();
+    applyWaitRef.current = controller;
     setApplyState('sending');
     setApplyError(null);
     let chargeSlotWritten = false;
@@ -751,8 +731,24 @@ export default function ForecastPage() {
       await apiPost('/api/control/charge-slot', plan.apply.charge_slot);
       chargeSlotWritten = true;
       await apiPost('/api/control/timed-charge', plan.apply.timed_charge);
+      // Both POSTs only queue the writes; keep the progress up until a newer
+      // snapshot shows the slot, as the Control page does.
       if (snapshotBeforeApply) {
-        await waitForForecastChargeReadback(plan.apply.charge_slot, snapshotBeforeApply);
+        const desired = plan.apply.charge_slot;
+        const readBack = await waitForSnapshotReadback(
+          (snap) => forecastChargeSlotMatchesReadback(snap, desired),
+          snapshotBeforeApply,
+          FORECAST_CHARGE_CONFIRM_TIMEOUT_MS,
+          controller.signal,
+        );
+        if (applyWaitRef.current === controller) applyWaitRef.current = null;
+        if (readBack === 'aborted') return;
+        if (readBack !== 'confirmed') {
+          // The writes may still land, so nothing is rolled back.
+          setApplyState('error');
+          setApplyError('The plan was sent but the inverter has not confirmed it yet. It may still be applying.');
+          return;
+        }
       }
       setAppliedPlanIdentity(identity);
       setApplyState('done');

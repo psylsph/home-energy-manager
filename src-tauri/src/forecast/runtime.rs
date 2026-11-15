@@ -30,6 +30,23 @@ pub const ROUND_SECS: i64 = 30 * 60;
 /// SOC within this of the reserve counts as there (the simulation stops at
 /// the reserve exactly; float noise aside).
 const AT_RESERVE_PCT: f64 = 0.5;
+/// SOC this far under the reserve or more is below it. A battery parked at
+/// its reserve often reads a point low, which is still at it. The house view
+/// (`houseFlow.ts::BELOW_RESERVE_POINTS`) flashes from the same edge.
+const BELOW_RESERVE_PCT: f64 = 2.0;
+
+/// Where the SOC sits against the reserve: -1 below it, 0 at it, 1 above.
+/// The endpoint's cache keys on it, so a one-point move across an edge
+/// gets a fresh answer.
+pub fn reserve_band(soc: f64, reserve: f64) -> i8 {
+    if soc <= reserve - BELOW_RESERVE_PCT {
+        -1
+    } else if soc <= reserve + AT_RESERVE_PCT {
+        0
+    } else {
+        1
+    }
+}
 /// A rise of more than this in an hour means the battery is being refilled.
 const RISE_PCT: f64 = 0.5;
 /// Battery power below this (W, negative = charging) means charging now.
@@ -100,6 +117,9 @@ pub enum RuntimeOutcome {
     LastsBeyond { hours: i64 },
     /// Already at the reserve.
     AtReserve,
+    /// Under the reserve (after an outage or standby losses, or a raised
+    /// floor such as a Saving Session's): the inverter won't discharge it.
+    BelowReserve,
     /// Discharge is paused (HEM's reserve pauses write 100; the inverter's
     /// own pause, HR 318): it won't drain until that ends, and when that is
     /// isn't known.
@@ -359,12 +379,15 @@ pub fn battery_runtime(inputs: &RuntimeInputs) -> RuntimeOutcome {
     }
     let (soc, reserve) = (inputs.params.start_soc_pct, inputs.params.reserve_soc_pct);
     // HEM's reserve pauses write 100; the inverter's own pause leaves the
-    // reserve alone. A floor below 100 holds it at its reserve instead.
+    // reserve alone. Under a floor below 100 the battery is held where it
+    // is: at its reserve, or below it once two or more points under.
     if reserve >= 100.0 || inputs.discharge_paused {
         return RuntimeOutcome::Paused;
     }
-    if soc <= reserve + AT_RESERVE_PCT {
-        return RuntimeOutcome::AtReserve;
+    match reserve_band(soc, reserve) {
+        -1 => return RuntimeOutcome::BelowReserve,
+        0 => return RuntimeOutcome::AtReserve,
+        _ => {}
     }
     empty_outcome(inputs, false)
 }
@@ -847,16 +870,28 @@ mod tests {
         let mut native = inputs(T0, T0, 60.0, [1.0, 1.0, 1.0]);
         native.discharge_paused = true;
         assert_eq!(battery_runtime(&native), RuntimeOutcome::Paused);
-        // A raised floor below 100 (a Saving Session) holds it where it is:
-        // at its reserve, as the inverter sees it.
+        // A raised floor below 100 (a Saving Session) holds it where it is,
+        // under the reserve the inverter sees: not a pause.
         let mut floor = inputs(T0, T0, 30.0, [1.0, 1.0, 1.0]);
         floor.params.reserve_soc_pct = 45.0;
-        assert_eq!(battery_runtime(&floor), RuntimeOutcome::AtReserve);
-        // Below its reserve after an outage or standby losses: at it, not paused.
-        for soc in [9.0, 17.0] {
+        assert_eq!(battery_runtime(&floor), RuntimeOutcome::BelowReserve);
+        // Two or more points under its reserve (an outage, standby losses):
+        // says so, not "at its reserve", and not paused.
+        for soc in [9.0, 17.0, 18.0] {
             let mut under = inputs(T0, T0, soc, [1.0, 1.0, 1.0]);
             under.params.reserve_soc_pct = 20.0;
-            assert_eq!(battery_runtime(&under), RuntimeOutcome::AtReserve, "{soc}");
+            assert_eq!(
+                battery_runtime(&under),
+                RuntimeOutcome::BelowReserve,
+                "{soc}"
+            );
+        }
+        // At it, a point under (a battery parked there often reads one low),
+        // or within the tolerance above it: at its reserve.
+        for soc in [19.0, 19.5, 20.0, 20.4] {
+            let mut at = inputs(T0, T0, soc, [1.0, 1.0, 1.0]);
+            at.params.reserve_soc_pct = 20.0;
+            assert_eq!(battery_runtime(&at), RuntimeOutcome::AtReserve, "{soc}");
         }
     }
 

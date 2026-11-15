@@ -30,6 +30,8 @@ import type { ConnectionState } from '../../lib/types';
 import { FLOW_COLORS } from '../../lib/energyFlow';
 import {
   READING_HIT_WIDTH,
+  RESERVE_FLASH,
+  belowReserve,
   buildHouseScene,
   type GridTone,
   type HouseReading,
@@ -411,7 +413,7 @@ function Route({ route, reduced }: { route: HouseRoute; reduced: boolean }) {
   );
 }
 
-function BatteryCabinet({ barsLit, color, capSoc }: { barsLit: number; color: string; capSoc: number | null }) {
+function BatteryCabinet({ barsLit, color, capSoc, pulsing }: { barsLit: number; color: string; capSoc: number | null; pulsing: boolean }) {
   const x0 = HOUSE.x1;
   const x1 = HOUSE.x1 + BATTERY_BOX.depth;
   const { y0, y1, z0, z1 } = BATTERY_BOX;
@@ -434,7 +436,11 @@ function BatteryCabinet({ barsLit, color, capSoc }: { barsLit: number; color: st
     );
   });
   return (
-    <g data-testid="house-battery">
+    <g
+      data-testid="house-battery"
+      data-below-reserve={pulsing}
+      className={pulsing ? RESERVE_FLASH : undefined}
+    >
       <polygon points={polygonPoints([w(x0, y1, z0), w(x1, y1, z0), w(x1, y1, z1), w(x0, y1, z1)])} fill={fill} stroke={color} strokeWidth={1.3} strokeLinejoin="round" />
       <polygon points={polygonPoints([w(x1, y1, z0), w(x1, y0, z0), w(x1, y0, z1), w(x1, y1, z1)])} fill={fill} stroke={color} strokeWidth={1.3} strokeLinejoin="round" />
       <polygon points={polygonPoints([w(x0, y0, z1), w(x1, y0, z1), w(x1, y1, z1), w(x0, y1, z1)])} fill={fill} stroke={color} strokeWidth={1.3} strokeLinejoin="round" />
@@ -476,6 +482,7 @@ function EvPost() {
 
 function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEnergyViewProps) {
   const vm = useEnergyFlowViewModel(source);
+  const batteryBelowReserve = belowReserve(source.snapshot);
   const { weather, location } = useLiveWeather();
   const carbon = useCarbonIntensity();
   // Always the third row under the weather, so it never meets a weather
@@ -552,7 +559,12 @@ function HouseEnergyViewInner({ connectionState, gridFault, ...source }: HouseEn
             ))}
           </g>
 
-          <BatteryCabinet barsLit={scene.battery.barsLit} color={scene.battery.color} capSoc={capLineSoc(source.snapshot)} />
+          <BatteryCabinet
+            barsLit={scene.battery.barsLit}
+            color={scene.battery.color}
+            capSoc={capLineSoc(source.snapshot)}
+            pulsing={batteryBelowReserve}
+          />
 
           {/* Idle wiring, then one moving cable per part with power on it. The
               EV post is drawn over its cable's end so the cable meets the

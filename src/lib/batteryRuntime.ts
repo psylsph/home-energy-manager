@@ -12,6 +12,7 @@ export type BatteryRuntime =
   | { outcome: 'recharges_first'; at: number; by: 'charge' | 'solar'; computed_at?: number }
   | { outcome: 'lasts_beyond'; hours: number; computed_at?: number }
   | { outcome: 'at_reserve'; computed_at?: number }
+  | { outcome: 'below_reserve'; computed_at?: number }
   | { outcome: 'full_at'; at: number; soc: number; computed_at?: number }
   | { outcome: 'paused'; computed_at?: number }
   | { outcome: 'charging'; computed_at?: number }
@@ -39,6 +40,7 @@ export function readBatteryRuntime(value: unknown): BatteryRuntime | null {
       return isNum(data.at) && isNum(data.soc) ? (data as BatteryRuntime) : null;
     case 'paused':
     case 'at_reserve':
+    case 'below_reserve':
     case 'charging':
     case 'unknown':
       return data as BatteryRuntime;
@@ -152,7 +154,9 @@ export function batteryRuntimeLine(
     case 'lasts_beyond':
       return { text: `Lasts over ${runtime.hours} hours`, dots: null, confidence: null, title: '', help: null };
     case 'at_reserve':
-      return { text: 'At its reserve', dots: null, confidence: null, title: '', help: null };
+      return { text: 'At Reserve', dots: null, confidence: null, title: '', help: null };
+    case 'below_reserve':
+      return { text: 'Below Reserve', dots: null, confidence: null, title: '', help: null };
     case 'full_at': {
       const text = `${runtime.soc >= 100 ? 'Full' : `${Math.round(runtime.soc)}%`} ${when(runtime.at, now, format)}`;
       return { text, dots: null, confidence: null, title: '', help: null };

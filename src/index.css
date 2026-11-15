@@ -253,3 +253,11 @@ select {
   background-position: right 8px center;
   padding-right: 28px;
 }
+
+/* Below the battery reserve (house view): a strong fade so it's noticed. */
+@keyframes reserve-flash {
+  50% { opacity: 0.15; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .reserve-flash { animation: reserve-flash 1s ease-in-out infinite; }
+}

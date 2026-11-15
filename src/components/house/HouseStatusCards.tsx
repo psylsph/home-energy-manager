@@ -14,7 +14,7 @@ import { useBatteryRuntime } from '../../hooks/useBatteryRuntime';
 import { batteryRuntimeLine } from '../../lib/batteryRuntime';
 import HelpTip from '../HelpTip';
 import { inverterMinuteOfDay } from '../../lib/ecoTimedExport';
-import { batteryBarsLit } from '../../lib/houseFlow';
+import { RESERVE_FLASH, batteryBarsLit, belowReserve } from '../../lib/houseFlow';
 import { CAP_MARKER_COLOR, capLineSoc, capTitle } from '../../lib/chargeCap';
 import { BATTERY_BARS } from '../../lib/houseGeometry';
 import { formatPercent } from '../../lib/format';
@@ -163,6 +163,7 @@ function BatteryCard({ snapshot, now }: { snapshot: InverterSnapshot; now: Date 
   const color = socColor(snapshot.soc);
   const lit = batteryBarsLit(snapshot.soc);
   const cap = capLineSoc(snapshot);
+  const flash = belowReserve(snapshot);
   return (
     <section className={CARD} data-testid="house-battery-card">
       <span className="flex items-baseline gap-1">
@@ -172,9 +173,19 @@ function BatteryCard({ snapshot, now }: { snapshot: InverterSnapshot; now: Date 
         <span className="font-mono text-xs text-text-secondary">kWh</span>
       </span>
       <span className={LABEL}>
-        Battery Level · <span style={{ color }} data-testid="house-battery-level">{formatPercent(snapshot.soc)}</span>
+        Battery Level · <span
+          style={{ color }}
+          data-testid="house-battery-level"
+          data-below-reserve={flash}
+          className={flash ? RESERVE_FLASH : undefined}
+        >{formatPercent(snapshot.soc)}</span>
       </span>
-      <span className="relative flex gap-0.5" aria-hidden="true">
+      <span
+        className={`relative flex gap-0.5${flash ? ` ${RESERVE_FLASH}` : ''}`}
+        aria-hidden="true"
+        data-testid="house-battery-bars"
+        data-below-reserve={flash}
+      >
         {Array.from({ length: BATTERY_BARS }, (_, i) => (
           <span
             key={i}

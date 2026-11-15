@@ -9058,6 +9058,10 @@ fn battery_runtime_key(
         "charge_slots": snap.charge_slots,
         "discharge_slots": snap.discharge_slots,
         "reserve": snap.battery_reserve,
+        "reserve_band": crate::forecast::runtime::reserve_band(
+            f64::from(snap.soc),
+            f64::from(snap.battery_reserve),
+        ),
         "capacity": snap.battery_capacity_kwh,
         "charge_rate": snap.charge_rate,
         "discharge_rate": snap.discharge_rate,
@@ -22313,6 +22317,31 @@ pub(crate) mod tests {
             let (_, Json(again)) = get_battery_runtime_at(state.clone(), at).await;
             assert_eq!(again["data"]["outcome"], "charging");
             assert_eq!(again["data"]["computed_at"], at.timestamp());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_is_rebuilt_when_the_soc_crosses_the_reserve() {
+        // The house view's flash follows the live SOC, so a one-point move
+        // across the reserve's edges can't keep the old line for 5 minutes.
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(11, "runtime-cache-reserve").await;
+            let now = runtime_now();
+            let (_, Json(first)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_ne!(first["data"]["outcome"], "at_reserve");
+            let later = now + chrono::Duration::minutes(1);
+            state.latest_snapshot.lock().await.as_mut().unwrap().soc = 10;
+            let (_, Json(at)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(at["data"]["outcome"], "at_reserve");
+            // A point under is still at it, and reused.
+            state.latest_snapshot.lock().await.as_mut().unwrap().soc = 9;
+            let (_, Json(still)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(still["data"]["computed_at"], at["data"]["computed_at"]);
+            // Two under is below it: one point from the last answer, but new.
+            state.latest_snapshot.lock().await.as_mut().unwrap().soc = 8;
+            let (_, Json(below)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(below["data"]["outcome"], "below_reserve");
         })
         .await;
     }
