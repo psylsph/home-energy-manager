@@ -3703,8 +3703,8 @@ export default function ControlPage() {
               <h2 className="text-text-primary font-semibold text-lg">Developer Controls</h2>
               <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
             </div>
-            <RebootInverterSection />
             <DongleWebPageSection />
+            <RebootInverterSection />
           </section>
         )}
       </div>
@@ -4445,8 +4445,8 @@ export default function ControlPage() {
               <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
             </div>
             <BatteryCalibrationSection />
-            <RebootInverterSection />
             <DongleWebPageSection />
+            <RebootInverterSection />
           </section>
         )}
       </section>
