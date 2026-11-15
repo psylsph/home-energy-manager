@@ -3161,7 +3161,9 @@ export default function ControlPage() {
   // Failures surface here and clear the draft so the slider snaps back to
   // the inverter's actual setting.
   // `source` is the control's label, so one control's success only clears its own error.
-  const [powerControlSaveError, setPowerControlSaveError] = useState<{ source: string; message: string } | null>(null);
+  // One entry per control, oldest first, so each control's error stays until
+  // that control saves cleanly.
+  const [powerControlSaveErrors, setPowerControlSaveErrors] = useState<{ source: string; message: string }[]>([]);
   // Duration (in minutes) for Force Charge and Force Discharge quick actions.
   // The UI offers five-minute increments from 5m to 24h on a logarithmic
   // track. The backend clamps the submitted 1440-minute endpoint to 1439
@@ -3516,15 +3518,18 @@ export default function ControlPage() {
   };
 
 
-  /** Show a power control's error, replacing whatever the banner held. */
+  /** Show a power control's error, replacing only that control's earlier one. */
   const showPowerControlError = (source: string, message: string) =>
-    setPowerControlSaveError({ source, message });
+    setPowerControlSaveErrors((current) => [
+      ...current.filter((e) => e.source !== source),
+      { source, message },
+    ]);
   /**
-   * Clear the banner only if it holds this control's error: a confirmed save of
-   * one control mustn't hide another's timeout or failure.
+   * Clear this control's error only: a confirmed save of one control mustn't
+   * hide another's timeout or failure.
    */
   const clearPowerControlError = (source: string) =>
-    setPowerControlSaveError((current) => (current?.source === source ? null : current));
+    setPowerControlSaveErrors((current) => current.filter((e) => e.source !== source));
 
   /**
    * Wait for the inverter to read a just-saved power control back. The POST
@@ -4188,12 +4193,12 @@ export default function ControlPage() {
         {/* Optional charge cap (issue #426) */}
         <ChargeCapSection />
         {powerControlSaving && <InverterWriteProgress />}
-        {powerControlSaveError && (
+        {powerControlSaveErrors.length > 0 && (
           <div
             role="alert"
-            className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300"
+            className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300 space-y-1"
           >
-            {powerControlSaveError.message}
+            {powerControlSaveErrors.map((e) => <p key={e.source}>{e.message}</p>)}
           </div>
         )}
         {/* EPS is deliberately a separate card so its switch cannot be mistaken
