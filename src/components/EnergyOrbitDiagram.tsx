@@ -44,7 +44,8 @@ function satellitePositions(showEv: boolean): Partial<Record<FlowNodeId, { x: nu
   if (showEv) {
     return {
       solar: { x: CX, y: 78 },
-      ev: { x: 145, y: 208 },
+      // High enough that its labels end above the battery's glow.
+      ev: { x: 145, y: 192 },
       battery: { x: 92, y: 370 },
       grid: { x: 428, y: 370 },
     };
@@ -544,6 +545,11 @@ function SatelliteNode({ node, x, y, r, mobile, showStatusWords }: NodeProps) {
     node.subLabel ??
     ((node.id === 'solar' || node.id === 'grid') ? node.unit : '');
   const showSubLabel = subLabelText.length > 0;
+  // The EV's smaller text stacks tighter, and its status word takes the
+  // cable line's place when there's none, so it stays off the battery below.
+  const valueY = y + r + (isEv ? 26 : 32);
+  const subLabelY = y + r + (isEv ? 44 : 50);
+  const statusY = isEv ? y + r + (showSubLabel ? 62 : 46) : y + r + 72;
 
   return (
     <g aria-label={`${node.label}: ${value} ${status}`}>
@@ -591,7 +597,7 @@ function SatelliteNode({ node, x, y, r, mobile, showStatusWords }: NodeProps) {
 
       <text
         x={x}
-        y={y + r + 32}
+        y={valueY}
         textAnchor="middle"
         fill="var(--app-text-primary, #F0F6FC)"
         fontSize={isEv ? (mobile ? 16 : 15) : (mobile ? 20 : 19)}
@@ -604,7 +610,7 @@ function SatelliteNode({ node, x, y, r, mobile, showStatusWords }: NodeProps) {
         <text
           data-testid={`${node.id}-sublabel`}
           x={x}
-          y={y + r + 50}
+          y={subLabelY}
           textAnchor="middle"
           fill="var(--app-text-primary, #F0F6FC)"
           fontSize={mobile ? 14 : 13}
@@ -616,7 +622,7 @@ function SatelliteNode({ node, x, y, r, mobile, showStatusWords }: NodeProps) {
       {showStatusWords && (
         <text
           x={x}
-          y={y + r + 72}
+          y={statusY}
           textAnchor="middle"
           fill="var(--app-text-secondary, #8B949E)"
           fontSize={mobile ? 15 : 14}
