@@ -252,7 +252,12 @@ function ForecastApplyProgress() {
 }
 
 type ForecastChargeSlot = NonNullable<PlanResponse['apply']>['charge_slot'];
-const FORECAST_CHARGE_CONFIRM_TIMEOUT_MS = 15_000;
+/**
+ * How long Apply waits for the slot to read back. Longer than the Control
+ * page's single-register wait: two requests queue several writes paced apart,
+ * each of which a busy dongle can retry, before the next poll reads them.
+ */
+const FORECAST_CHARGE_CONFIRM_TIMEOUT_MS = 60_000;
 
 function forecastPlanIdentity(plan: PlanResponse): string {
   // The recommendation is included alongside the write payload because the
