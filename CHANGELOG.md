@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.17.3] - 2026-11-15
+
+### Changed
+
+- **Dongle Web Page sits above Inverter Reboot.** In Developer Controls on the Control page, the link to the WiFi dongle's own page now comes before the reboot button.
 
 ### Fixed
 
