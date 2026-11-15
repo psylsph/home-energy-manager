@@ -78,6 +78,19 @@ describe('<PanelControlsSection/> — Show Car Charging Slots', () => {
     await waitFor(() => expect(useInverterStore.getState().showCarCharging).toBe(false));
   });
 
+  it('takes no second click while its save is in flight (issue #476)', async () => {
+    let finish: (value: unknown) => void = () => {};
+    vi.mocked(apiPost).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    renderSection(true);
+    fireEvent.click(toggle()!);
+    await waitFor(() => expect(toggle()!.getAttribute('aria-disabled')).toBe('true'));
+    fireEvent.click(toggle()!);
+    expect(apiPost).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ ok: true, data: {} }));
+    expect(toggle()!.getAttribute('aria-disabled')).not.toBe('true');
+    expect(useInverterStore.getState().showCarCharging).toBe(true);
+  });
+
   it('moves back, leaving the card as it was, when the save fails', async () => {
     vi.mocked(apiPost).mockRejectedValueOnce(new Error('disk full'));
     renderSection(true);

@@ -418,14 +418,28 @@ describe('splitPowerValue', () => {
 
 describe('houseStatusPill', () => {
   it('reads On Grid when connected with no fault', () => {
-    expect(houseStatusPill('Eco', 'connected', false)).toEqual({ mode: 'Eco', grid: 'On Grid', tone: 'ok' });
+    expect(houseStatusPill('Eco', 'connected', false)).toEqual({ mode: 'Eco', modeActive: true, grid: 'On Grid', tone: 'ok' });
   });
   it('prefers the connection state over a stale grid fault', () => {
-    expect(houseStatusPill('Eco', 'reconnecting', true)).toEqual({ mode: 'Eco', grid: 'Reconnecting', tone: 'warn' });
-    expect(houseStatusPill('Eco', 'disconnected', true)).toEqual({ mode: 'Eco', grid: 'Disconnected', tone: 'fault' });
+    expect(houseStatusPill('Eco', 'reconnecting', true)).toEqual({ mode: 'Eco', modeActive: false, grid: 'Reconnecting', tone: 'warn' });
+    expect(houseStatusPill('Eco', 'disconnected', true)).toEqual({ mode: 'Eco', modeActive: false, grid: 'Disconnected', tone: 'fault' });
   });
   it('shows a dash when the mode is unknown', () => {
-    expect(houseStatusPill(undefined, 'connected', true)).toEqual({ mode: '—', grid: 'Grid Offline', tone: 'fault' });
+    expect(houseStatusPill(undefined, 'connected', true)).toEqual({ mode: '—', modeActive: false, grid: 'Grid Offline', tone: 'fault' });
+  });
+  // Issue #476: a live mode reads as active, even with the grid down (the
+  // inverter still runs it); a stale or unknown one doesn't.
+  it('marks a live mode active while connected, grid fault or not', () => {
+    expect(houseStatusPill('Timed Demand (Discharging)', 'connected', false).modeActive).toBe(true);
+    expect(houseStatusPill('Eco', 'connected', true).modeActive).toBe(true);
+  });
+  it('leaves a mode the inverter reports as unknown grey, even while connected', () => {
+    // As the view model labels it, so a renamed label can't turn it green.
+    const unknown = buildEnergyFlows(snap({ battery_mode: 'unknown' }), { noiseThresholdW: 20 }).nodes.find((n) => n.id === 'battery')!.mode!;
+    expect(houseStatusPill(unknown, 'connected', false).modeActive).toBe(false);
+    expect(houseStatusPill('Unknown', 'connected', false).modeActive).toBe(false);
+    expect(houseStatusPill('Unknown (Charging)', 'connected', false).modeActive).toBe(false);
+    expect(houseStatusPill('', 'connected', false).modeActive).toBe(false);
   });
 });
 

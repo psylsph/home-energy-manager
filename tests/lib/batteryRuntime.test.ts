@@ -93,16 +93,53 @@ describe('batteryRuntimeLine (issue #472)', () => {
     expect(line({ outcome: 'full_at', at: ts('2026-11-15T04:00:00Z'), soc: 80 })!.text).toBe('80% tomorrow at 04:00');
   });
 
-  it('shows nothing while paused', () => {
-    expect(line({ outcome: 'paused' })).toBeNull();
+  // Issue #476: with the toggle on, a blank card looked broken, so a pause
+  // says so rather than showing nothing.
+  it('says discharge is paused, with why there is no time behind the ⓘ', () => {
+    const l = line({ outcome: 'paused' })!;
+    expect(l.text).toBe('Discharge paused');
+    expect(l.dots).toBeNull();
+    expect(l.confidence).toBeNull();
+    expect(l.help).toMatch(/won't discharge until the pause ends/);
   });
 
-  it('covers the rest, and shows nothing while charging or unknown', () => {
+  it('covers the rest', () => {
     expect(line({ outcome: 'lasts_beyond', hours: 24 })!.text).toBe('Lasts over 24 hours');
     expect(line({ outcome: 'at_reserve' })!.text).toBe('At its reserve');
-    expect(line({ outcome: 'charging' })).toBeNull();
-    expect(line({ outcome: 'unknown', reason: 'no_snapshot' })).toBeNull();
     expect(batteryRuntimeLine(null, NOW, UTC)).toBeNull();
+  });
+
+  // Issue #476 follow-up: with the toggle on, a blank card looked broken. An
+  // answer the backend can't give says so, with the reason behind the ⓘ.
+  it('says it cannot calculate while charging faster than the forecast', () => {
+    const l = line({ outcome: 'charging' })!;
+    expect(l.text).toBe('Unable to calculate: charging faster than forecast');
+    expect(l.dots).toBeNull();
+    expect(l.confidence).toBeNull();
+    expect(l.help).toMatch(/forecast/);
+    expect(l.help).toMatch(/Force Charge/);
+  });
+
+  it.each([
+    ['no_snapshot', /no live reading/],
+    ['not_connected', /no live reading/],
+    ['no_battery_capacity', /battery capacity or power limits/],
+    ['insufficient_consumption_history', /usage history/],
+    ['no_projection', /couldn't be run/],
+  ])('says it cannot calculate when unknown (%s), with the reason in the help', (reason, help) => {
+    const l = line({ outcome: 'unknown', reason })!;
+    expect(l.text).toBe('Unable to calculate');
+    expect(l.dots).toBeNull();
+    expect(l.help).toMatch(help);
+  });
+
+  it('gives a general reason for an unknown one it does not recognise, or none', () => {
+    expect(line({ outcome: 'unknown', reason: 'something_new' })!.help).toMatch(/couldn't be run/);
+    expect(line({ outcome: 'unknown' })!.text).toBe('Unable to calculate');
+  });
+
+  it('still drops a stale cannot-calculate answer', () => {
+    expect(line({ outcome: 'charging', computed_at: ts('2026-11-14T17:44:00Z') })).toBeNull();
   });
 
   it('drops an answer more than 15 minutes old', () => {

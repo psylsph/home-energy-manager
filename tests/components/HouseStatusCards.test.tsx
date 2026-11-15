@@ -421,7 +421,7 @@ describe('<HouseStatusCards/> battery runtime line (issue #472)', () => {
   });
   afterEach(cleanup);
 
-  it('shows no line while off or unknown', () => {
+  it('shows no line while off', () => {
     render(<HouseStatusCards snapshot={snap()} now={NOW} />);
     expect(screen.queryByTestId('house-battery-runtime')).toBeNull();
   });
@@ -443,6 +443,14 @@ describe('<HouseStatusCards/> battery runtime line (issue #472)', () => {
     expect(line.contains(info)).toBe(true);
     // It stays out of the schedule card, which holds the car line (#474).
     expect(tid('house-charge-card').contains(line)).toBe(false);
+  });
+
+  it('says it cannot calculate while charging faster than forecast, with an ⓘ', () => {
+    runtime.value = { outcome: 'charging', computed_at: Date.parse('2026-11-01T17:58:00Z') / 1000 };
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(tid('house-runtime-text').textContent).toBe('Unable to calculate: charging faster than forecast');
+    expect(screen.queryByTestId('house-runtime-dots')).toBeNull();
+    expect(tid('house-battery-runtime').contains(screen.getByRole('button', { name: 'More about Battery Runtime' }))).toBe(true);
   });
 
   it('shows a refill without dots', () => {

@@ -271,6 +271,69 @@ describe('<App/> Octopus navigation (issue #212)', () => {
     expect(useInverterStore.getState().navSettingsLoaded).toBe(true);
   });
 
+  it('turns the battery runtime line on and off from settings.json (issue #476)', async () => {
+    onTestFinished(() => useInverterStore.setState({ showBatteryRuntime: false }));
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { status_show_battery_runtime: true } }
+      : { ok: true, data: {} });
+    render(<App />);
+    await waitFor(() => expect(useInverterStore.getState().showBatteryRuntime).toBe(true));
+    cleanup();
+
+    // Settings without it turn it off again. (The old per-browser key is
+    // covered by tests/store/useInverterStore.batteryRuntime.test.ts, which
+    // reloads the store.)
+    vi.mocked(apiGet).mockImplementation(async () => ({ ok: true, data: {} }));
+    render(<App />);
+    // On from the first render, so this waits for the load to turn it off.
+    await waitFor(() => expect(useInverterStore.getState().showBatteryRuntime).toBe(false));
+  });
+
+  // Issue #476: App's settings load and a Settings toggle race. A load that
+  // started before the user flipped a toggle must not put the old value back.
+  it('keeps a toggle flipped while its settings load was in flight', async () => {
+    onTestFinished(() => useInverterStore.setState({ showBatteryRuntime: false, showCarCharging: false }));
+    useInverterStore.setState({ showBatteryRuntime: false, showCarCharging: false });
+    let answer: (value: unknown) => void = () => {};
+    vi.mocked(apiGet).mockImplementation((path: string) => path === '/api/settings'
+      ? new Promise((resolve) => { answer = resolve; })
+      : Promise.resolve({ ok: true, data: {} }) as never);
+    render(<App />);
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/settings'));
+    // The user turns both on, as the Settings toggles do, while it's pending.
+    act(() => {
+      const store = useInverterStore.getState();
+      store.changeStatusToggle('showBatteryRuntime', true);
+      store.changeStatusToggle('showCarCharging', true);
+    });
+    // The load answers with what was saved before.
+    await act(async () => answer({ ok: true, data: {
+      octopus_account_number: 'A-123', octopus_api_key_configured: true,
+      status_show_battery_runtime: false, status_show_car_charging: false,
+    } }));
+    await waitFor(() => expect(useInverterStore.getState().navSettingsLoaded).toBe(true));
+    expect(useInverterStore.getState().showBatteryRuntime).toBe(true);
+    expect(useInverterStore.getState().showCarCharging).toBe(true);
+  });
+
+  it('still applies the other toggle from that load', async () => {
+    onTestFinished(() => useInverterStore.setState({ showBatteryRuntime: false, showCarCharging: false }));
+    useInverterStore.setState({ showBatteryRuntime: false, showCarCharging: false });
+    let answer: (value: unknown) => void = () => {};
+    vi.mocked(apiGet).mockImplementation((path: string) => path === '/api/settings'
+      ? new Promise((resolve) => { answer = resolve; })
+      : Promise.resolve({ ok: true, data: {} }) as never);
+    render(<App />);
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/settings'));
+    act(() => useInverterStore.getState().changeStatusToggle('showCarCharging', true));
+    await act(async () => answer({ ok: true, data: {
+      octopus_account_number: 'A-123', octopus_api_key_configured: true,
+      status_show_battery_runtime: true, status_show_car_charging: false,
+    } }));
+    await waitFor(() => expect(useInverterStore.getState().showBatteryRuntime).toBe(true));
+    expect(useInverterStore.getState().showCarCharging).toBe(true);
+  });
+
   it('settles the car line when the settings request stalls, after its timeout (issue #474)', async () => {
     // A stalled request (a slow Pi, a half-open proxy connection) mustn't
     // leave the Next Charge card loading for ever.

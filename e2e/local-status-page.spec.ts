@@ -236,6 +236,8 @@ test.describe('Status Page - House View (issue #422)', () => {
         const j = await res.json();
         await r.fulfill({ response: res, json: { ...j, data: {
           ...j.data, octopus_account_number: 'A-TEST1', octopus_api_key_configured: true, status_show_car_charging: true,
+          // And when the battery empties (issue #472), in the card beside it.
+          status_show_battery_runtime: true,
         } } });
       });
       await page.route('**/api/octopus/dispatches', (r) => r.fulfill({ json: {
@@ -243,11 +245,10 @@ test.describe('Status Page - House View (issue #422)', () => {
         holding: false, hold_failing: false, stale_after_minutes: 15,
         dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'BOOST', energy_added_kwh: 7, smart: false }],
       } }));
-      // And when the battery empties (issue #472), in the card beside it.
-      await page.addInitScript(() => localStorage.setItem('showBatteryRuntime', 'true'));
+      // The longest line the card can show (issue #476), so the fit below
+      // covers it.
       await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
-        outcome: 'empty_at', at: Math.floor(now / 1000) + 86_400 + 3600, earliest: null, latest: null, confidence: 'low',
-        computed_at: Math.floor(now / 1000),
+        outcome: 'charging', computed_at: Math.floor(now / 1000),
       } } }));
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
@@ -261,7 +262,7 @@ test.describe('Status Page - House View (issue #422)', () => {
       await expect(page.getByTestId('house-car-charge')).toBeVisible();
       await expect(page.getByTestId('house-car-charge')).toContainText('· Boost');
       await expect(page.getByTestId('house-battery-card')).toBeVisible();
-      await expect(page.getByTestId('house-runtime-text')).toHaveText(/^Empty /);
+      await expect(page.getByTestId('house-runtime-text')).toHaveText('Unable to calculate: charging faster than forecast');
       // Hidden without ever touching the toggle: the house view's default.
       await expect(page.getByTestId('today-balance')).toHaveCount(0);
       await expect(page.locator('nav.sticky')).toHaveCount(0);
@@ -441,11 +442,10 @@ test.describe('Status Page - the desktop app\'s default window', () => {
         const j = await res.json();
         await r.fulfill({ response: res, json: { ...j, latest_version: j.current_version, update_available: false } });
       });
-      await page.addInitScript(([v, l]) => {
+      await page.addInitScript((v) => {
         localStorage.setItem('energyFlowDisplay', v);
         localStorage.setItem('showTodayStats', 'true');
-        localStorage.setItem('showBatteryRuntime', String(l));
-      }, [view, lines] as const);
+      }, view);
       if (lines) {
         await page.route('**/api/settings', async (r) => {
           if (r.request().method() !== 'GET') return r.continue();
@@ -453,6 +453,7 @@ test.describe('Status Page - the desktop app\'s default window', () => {
           const j = await res.json();
           await r.fulfill({ response: res, json: { ...j, data: {
             ...j.data, octopus_account_number: 'A-TEST1', octopus_api_key_configured: true, status_show_car_charging: true,
+            status_show_battery_runtime: true,
           } } });
         });
         await page.route('**/api/octopus/dispatches', (r) => r.fulfill({ json: {
@@ -460,9 +461,9 @@ test.describe('Status Page - the desktop app\'s default window', () => {
           holding: false, hold_failing: false, stale_after_minutes: 15,
           dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'SMART', energy_added_kwh: 7, smart: true }],
         } }));
+        // The longest runtime line (issue #476).
         await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
-          outcome: 'empty_at', at: Math.floor(now / 1000) + 3 * 3600, earliest: null, latest: null, confidence: 'low',
-          computed_at: Math.floor(now / 1000),
+          outcome: 'charging', computed_at: Math.floor(now / 1000),
         } } }));
       }
       await page.goto('/');

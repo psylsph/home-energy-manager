@@ -133,6 +133,30 @@ describe('<HouseEnergyView/>', () => {
     expect(tid('house-status-pill')!.getAttribute('data-tone')).toBe('fault');
   });
 
+  // Issue #476: the mode word was grey beside a green On Grid, so Eco read
+  // as switched off. Colour alone now carries the state; there's no dot.
+  it('draws an active mode in the same green as On Grid, with no status dot', () => {
+    render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault={false} />);
+    const mode = tid('house-mode')!;
+    const grid = tid('house-grid-state')!;
+    expect(mode.textContent).toBe('Eco');
+    expect(grid.getAttribute('fill')).toBe('#22C55E');
+    expect(mode.getAttribute('fill')).toBe(grid.getAttribute('fill'));
+    expect(tid('house-status-pill')!.querySelector('circle')).toBeNull();
+  });
+
+  it('greys the mode and colours the grid word by state while reconnecting', () => {
+    render(<HouseEnergyView snapshot={snap()} connectionState="reconnecting" gridFault={false} />);
+    expect(tid('house-mode')!.getAttribute('fill')).toBe('var(--app-text-secondary, #8B949E)');
+    expect(tid('house-grid-state')!.getAttribute('fill')).toBe('#F59E0B');
+  });
+
+  it('keeps the mode green and turns the grid word red on a grid fault', () => {
+    render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault />);
+    expect(tid('house-mode')!.getAttribute('fill')).toBe('#22C55E');
+    expect(tid('house-grid-state')!.getAttribute('fill')).toBe('#EF4444');
+  });
+
   it('shows Reconnecting while the connection is being restored', () => {
     render(<HouseEnergyView snapshot={snap()} connectionState="reconnecting" gridFault={false} />);
     expect(tid('house-grid-state')!.textContent).toBe('Reconnecting');
