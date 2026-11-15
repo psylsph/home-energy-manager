@@ -722,6 +722,34 @@ describe('EnergyOrbitDiagram', () => {
       expect(container.querySelectorAll('[data-flow-id]').length).toBeGreaterThanOrEqual(1);
     });
 
+    // The EV node's labels used to run down onto the battery's ring and
+    // glow, so "Charging" sat on top of the battery.
+    it.each([
+      { name: 'desktop', mobile: false, cable: false }, { name: 'desktop', mobile: false, cable: true },
+      { name: 'mobile', mobile: true, cable: false }, { name: 'mobile', mobile: true, cable: true },
+    ])('keeps its labels clear of the battery node ($name, cable line $cable)', ({ mobile, cable }) => {
+      mockMatchMedia({ '(max-width: 767px)': mobile });
+      useInverterStore.setState({ showFlowStatusWords: true });
+      const { container } = render(
+        <EnergyOrbitDiagram
+          snapshot={makeSnapshot({ home_power: 7500, battery_power: 1400 })}
+          showEvc
+          evcPower={7000}
+          evcConnected={cable}
+          evcCableConnected={cable}
+        />,
+      );
+      const ev = container.querySelector('[data-node-body="ev"]')!.parentElement!;
+      const texts = [...ev.querySelectorAll('text')];
+      expect(texts.map((t) => t.textContent)).toContain('Charging');
+      expect(!!ev.querySelector('[data-testid="ev-sublabel"]')).toBe(cable);
+      // A baseline plus a quarter of the font size covers the descenders.
+      const lowest = Math.max(...texts.map((t) => Number(t.getAttribute('y')) + Number(t.getAttribute('font-size')) / 4));
+      const battery = container.querySelector('[data-node-body="battery"]')!;
+      const glowTop = Number(battery.getAttribute('cy')) - Number(battery.getAttribute('r')) - 10;
+      expect(lowest).toBeLessThanOrEqual(glowTop - 4);
+    });
+
     it('shows "Not Found" for a configured-but-unreachable charger (issue #138)', () => {
       useInverterStore.setState({ showFlowStatusWords: true });
       const { container } = render(
