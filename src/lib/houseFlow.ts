@@ -196,7 +196,7 @@ export const RESERVE_FLASH = 'reserve-flash';
 /**
  * SOC this many points under the reserve or more is below it. A battery
  * parked at its reserve often reads a point low, which is still at it. The
- * runtime line's "Below Reserve" uses the same edge (`runtime.rs`).
+ * runtime line's "Below reserve" uses the same edge (`runtime.rs`).
  */
 export const BELOW_RESERVE_POINTS = 2;
 /** Battery power under this (W, negative = charging) is charging, as in `runtime.rs::is_charging`. */
