@@ -453,6 +453,40 @@ describe('<ControlPage/> — Minimum SOC and Active Power Limit wait for read-ba
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
   });
 
+  it("keeps an earlier control's error when a later one fails and then confirms", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    silenceConsole();
+    render(<ControlPage />);
+    // The charge limit is never read back…
+    const charge = powerSliders()[2] as HTMLInputElement;
+    fireEvent.change(charge, { target: { value: '30' } });
+    fireEvent.click(saveButtonFor(charge));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 15 }));
+    act(() => { vi.advanceTimersByTime(20_000); });
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toMatch(/Charge Power Limit was sent but/);
+    });
+
+    // …then a Minimum SOC save fails: both errors show.
+    vi.mocked(apiPost).mockRejectedValueOnce(new Error('dongle busy'));
+    const slider = screen.getByLabelText('Minimum SOC') as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: positionFor(10) } });
+    fireEvent.click(saveButtonFor(slider));
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toMatch(/Minimum SOC save failed/);
+    });
+    expect(screen.getByRole('alert').textContent).toMatch(/Charge Power Limit was sent but/);
+
+    // Minimum SOC saves again and confirms: only its own error goes.
+    fireEvent.change(slider, { target: { value: positionFor(10) } });
+    fireEvent.click(saveButtonFor(slider));
+    await waitFor(() => expect(vi.mocked(apiPost).mock.calls.filter(([p]) => p === '/api/control/reserve')).toHaveLength(2));
+    act(() => { useInverterStore.setState({ snapshot: makeSnapshot({ battery_reserve: 10 }) }); });
+    await waitFor(() => expect(saveButtonFor(slider).textContent).toBe('Save'));
+    expect(screen.getByRole('alert').textContent).toMatch(/Charge Power Limit was sent but/);
+    expect(screen.getByRole('alert').textContent).not.toMatch(/Minimum SOC/);
+  });
+
   it('keeps Active Power Limit applying until the inverter reads it back', async () => {
     render(<ControlPage />);
     const active = powerSliders()[4] as HTMLInputElement;
