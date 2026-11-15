@@ -30,16 +30,17 @@ pub const ROUND_SECS: i64 = 30 * 60;
 /// SOC within this of the reserve counts as there (the simulation stops at
 /// the reserve exactly; float noise aside).
 const AT_RESERVE_PCT: f64 = 0.5;
-/// SOC this far under the reserve or more is below it. A battery parked at
-/// its reserve often reads a point low, which is still at it. The house view
-/// (`houseFlow.ts::BELOW_RESERVE_POINTS`) flashes from the same edge.
-const BELOW_RESERVE_PCT: f64 = 2.0;
+/// SOC more than this under the reserve is below it: any whole point under,
+/// with the same float tolerance as [`AT_RESERVE_PCT`]. The house view's
+/// flash (`houseFlow.ts::BELOW_RESERVE_POINTS`) waits for two points under,
+/// so a battery parked a point low doesn't flash.
+const BELOW_RESERVE_PCT: f64 = 0.5;
 
 /// Where the SOC sits against the reserve: -1 below it, 0 at it, 1 above.
 /// The endpoint's cache keys on it, so a one-point move across an edge
 /// gets a fresh answer.
 pub fn reserve_band(soc: f64, reserve: f64) -> i8 {
-    if soc <= reserve - BELOW_RESERVE_PCT {
+    if soc < reserve - BELOW_RESERVE_PCT {
         -1
     } else if soc <= reserve + AT_RESERVE_PCT {
         0
@@ -380,7 +381,7 @@ pub fn battery_runtime(inputs: &RuntimeInputs) -> RuntimeOutcome {
     let (soc, reserve) = (inputs.params.start_soc_pct, inputs.params.reserve_soc_pct);
     // HEM's reserve pauses write 100; the inverter's own pause leaves the
     // reserve alone. Under a floor below 100 the battery is held where it
-    // is: at its reserve, or below it once two or more points under.
+    // is: at its reserve, or below it once a point under.
     if reserve >= 100.0 || inputs.discharge_paused {
         return RuntimeOutcome::Paused;
     }

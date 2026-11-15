@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **"Below Reserve" shows as soon as the battery drops under its reserve.** A battery one point under its reserve, such as 3% against a 4% reserve, used to read "At Reserve"; it now reads "Below Reserve". The house view still only flashes from two points under.
+- **"At Reserve" and "Below Reserve" are capitalised again.** 1.17.2 changed them to "At reserve" and "Below reserve".
+
 ## [1.17.2] - 2026-11-15
 
 ### Changed

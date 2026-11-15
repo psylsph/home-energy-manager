@@ -194,9 +194,10 @@ export function batteryBarsLit(soc: number): number {
 export const RESERVE_FLASH = 'reserve-flash';
 
 /**
- * SOC this many points under the reserve or more is below it. A battery
- * parked at its reserve often reads a point low, which is still at it. The
- * runtime line's "Below reserve" uses the same edge (`runtime.rs`).
+ * SOC this many points under the reserve or more flashes. A battery parked at
+ * its reserve often reads a point low, and that shouldn't flash. The runtime
+ * line says "Below Reserve" from a point under (`runtime.rs`); only the flash
+ * waits for two.
  */
 export const BELOW_RESERVE_POINTS = 2;
 /** Battery power under this (W, negative = charging) is charging, as in `runtime.rs::is_charging`. */

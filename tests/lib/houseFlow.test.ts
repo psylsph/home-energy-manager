@@ -512,7 +512,7 @@ describe('buildHouseScene — home without the car (issue #457)', () => {
 
 describe('belowReserve', () => {
   const base = { soc: 15, battery_reserve: 20, battery_capacity_kwh: 9.5, battery_power: 0 };
-  it('is true only two or more points under a real reserve, like the runtime line', () => {
+  it('is true only two or more points under a real reserve (the runtime line says so from one)', () => {
     expect(belowReserve(base)).toBe(true);
     expect(belowReserve({ ...base, soc: 18 })).toBe(true);
     // A battery parked at its reserve often reads a point low: still at it.

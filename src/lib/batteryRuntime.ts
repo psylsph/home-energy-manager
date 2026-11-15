@@ -154,9 +154,9 @@ export function batteryRuntimeLine(
     case 'lasts_beyond':
       return { text: `Lasts over ${runtime.hours} hours`, dots: null, confidence: null, title: '', help: null };
     case 'at_reserve':
-      return { text: 'At reserve', dots: null, confidence: null, title: '', help: null };
+      return { text: 'At Reserve', dots: null, confidence: null, title: '', help: null };
     case 'below_reserve':
-      return { text: 'Below reserve', dots: null, confidence: null, title: '', help: null };
+      return { text: 'Below Reserve', dots: null, confidence: null, title: '', help: null };
     case 'full_at': {
       const text = `${runtime.soc >= 100 ? 'Full' : `${Math.round(runtime.soc)}%`} ${when(runtime.at, now, format)}`;
       return { text, dots: null, confidence: null, title: '', help: null };
