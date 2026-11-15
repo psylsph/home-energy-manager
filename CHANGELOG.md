@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.17.2] - 2026-11-15
+
+### Changed
+
+- **The house view warns when the battery is below its reserve.** The battery in the house picture and the Battery Level card's percentage and level bars flash while the charge is two or more points under the reserve, whatever your alert settings. They stop once it's charging back up, and stay still if your device is set to reduce motion.
+- **The battery runtime says when it's below the reserve.** With Show Battery Runtime on, the Battery Level card now reads "Below reserve" when the charge has dropped under the reserve, such as after a power cut, and "At reserve" when it's there.
+
+### Fixed
+
+- **Minimum SOC and the Inverter Active Power Limit wait for the inverter.** Saving either now keeps "Applying…" up until the inverter confirms the new value, like the charge and discharge limits, instead of the notice only flashing up. If it never confirms you're told, and the slider shows the inverter's real setting.
+- **The Planner no longer says Applied when the inverter didn't confirm.** If the charge slot isn't confirmed in time, Apply now says so and offers to retry, rather than showing Applied ✓.
+- **A short burst of house load no longer counts as car charging.** With the car charging estimate on, the load now has to stay above your threshold for three minutes or more before it's treated as the car, so a minute of oven, kettle and shower together stays in Home. History, Today, the reports and the forecast all re-work past days the same way.
+- **One save's success no longer hides another's error.** On the Control page, a Minimum SOC or limit change that went through could clear the warning that a different one hadn't been confirmed.
+
 ## [1.17.1] - 2026-11-15
 
 ### Changed
