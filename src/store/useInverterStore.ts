@@ -223,9 +223,9 @@ interface InverterState {
   homeExcludesCar: boolean;
   /**
    * Issue #472: show when the battery will reach its reserve in the house
-   * view's Battery Level card. The saved `status_show_battery_runtime`
-   * (settings.json since #476, so every browser shares it), loaded with the
-   * nav settings; false until then.
+   * view's Battery Level card, or under the orbit. The saved
+   * `status_show_battery_runtime` (settings.json since #476, so every
+   * browser shares it), loaded with the nav settings; false until then.
    */
   showBatteryRuntime: boolean;
   /**

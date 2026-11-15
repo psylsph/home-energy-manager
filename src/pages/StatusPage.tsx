@@ -2,6 +2,7 @@ import { useInverterStore } from '../store/useInverterStore';
 import { useReconnect } from '../hooks/useReconnect';
 import { useNow } from '../hooks/useNow';
 import EnergyOrbitDiagram from '../components/EnergyOrbitDiagram';
+import BatteryRuntimeRow from '../components/BatteryRuntimeRow';
 import HouseEnergyView from '../components/house/HouseEnergyView';
 import EnergyBalanceBars from '../components/EnergyBalanceBars';
 import HouseStatusCards from '../components/house/HouseStatusCards';
@@ -183,7 +184,11 @@ export default function StatusPage() {
               gridFault={hasGridFault(snapshot)}
             />
           ) : (
-            <EnergyOrbitDiagram {...flowProps} />
+            <>
+              <EnergyOrbitDiagram {...flowProps} />
+              {/* No Battery Level card here, so the runtime (issue #472) sits under the diagram. */}
+              <BatteryRuntimeRow view="orbit" />
+            </>
           )}
         </section>
 

@@ -10,9 +10,7 @@ import { batteryEvent, batteryStoredKwh, doingIt, holdWindow, type BatteryEventK
 import { useTimedExportSchedule } from '../../hooks/useTimedExportSchedule';
 import { useCarChargeSlots } from '../../hooks/useCarChargeSlots';
 import { carChargeLine, type CarChargeLine } from '../../lib/carChargeSlots';
-import { useBatteryRuntime } from '../../hooks/useBatteryRuntime';
-import { batteryRuntimeLine } from '../../lib/batteryRuntime';
-import HelpTip from '../HelpTip';
+import BatteryRuntimeRow from '../BatteryRuntimeRow';
 import { inverterMinuteOfDay } from '../../lib/ecoTimedExport';
 import { RESERVE_FLASH, batteryBarsLit, belowReserve } from '../../lib/houseFlow';
 import { CAP_MARKER_COLOR, capLineSoc, capTitle } from '../../lib/chargeCap';
@@ -120,45 +118,7 @@ function ScheduleCard({ snapshot, timedExport, nowMinute, car }: {
   );
 }
 
-/**
- * When the battery reaches its reserve (issue #472), with one to three dots
- * for how sure the forecast is. Off unless Show Battery Runtime is on.
- */
-function RuntimeRow({ now }: { now: Date }) {
-  const line = batteryRuntimeLine(useBatteryRuntime(), now);
-  if (!line) return null;
-  const confidence = line.confidence
-    ? `${line.confidence[0]!.toUpperCase()}${line.confidence.slice(1)} confidence`
-    : null;
-  return (
-    <span
-      // Wraps rather than truncating: the time is the point, so on a phone
-      // the dots and the ⓘ go to the next line instead of cutting it off.
-      className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0 text-[11px] leading-tight text-text-secondary"
-      data-testid="house-battery-runtime"
-      title={line.title || undefined}
-    >
-      <span className="min-w-0" data-testid="house-runtime-text">{line.text}</span>
-      {line.dots != null && (
-        <span className="flex gap-0.5 shrink-0" role="img" aria-label={confidence ?? undefined} data-testid="house-runtime-dots">
-          {[1, 2, 3].map((n) => (
-            <span
-              key={n}
-              data-testid="house-runtime-dot"
-              data-lit={n <= line.dots!}
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ backgroundColor: n <= line.dots! ? 'var(--color-text-secondary)' : 'var(--color-bg-elevated)' }}
-            />
-          ))}
-        </span>
-      )}
-      {/* The dots need explaining, and phones have no hover title. */}
-      {line.help && <HelpTip label="Battery Runtime" className="shrink-0">{line.help}</HelpTip>}
-    </span>
-  );
-}
-
-function BatteryCard({ snapshot, now }: { snapshot: InverterSnapshot; now: Date }) {
+function BatteryCard({ snapshot, now }: { snapshot: InverterSnapshot; now?: Date }) {
   const stored = batteryStoredKwh(snapshot.soc, snapshot.battery_capacity_kwh);
   const color = socColor(snapshot.soc);
   const lit = batteryBarsLit(snapshot.soc);
@@ -206,7 +166,7 @@ function BatteryCard({ snapshot, now }: { snapshot: InverterSnapshot; now: Date 
           />
         )}
       </span>
-      <RuntimeRow now={now} />
+      <BatteryRuntimeRow now={now} view="house" />
     </section>
   );
 }
@@ -259,7 +219,8 @@ function LiveScheduleCard({ snapshot, now, car, carLoaded }: {
     : <ScheduleCardLoading />;
 }
 
-export default function HouseStatusCards({ snapshot, now = new Date() }: { snapshot: InverterSnapshot; now?: Date }) {
+export default function HouseStatusCards({ snapshot, now: pinnedNow }: { snapshot: InverterSnapshot; now?: Date }) {
+  const now = pinnedNow ?? new Date();
   // Dispatches are UTC instants, shown in the browser's time like the
   // Octopus page, not on the inverter's clock.
   const { response, loaded: carLoaded } = useCarChargeSlots();
@@ -269,7 +230,8 @@ export default function HouseStatusCards({ snapshot, now = new Date() }: { snaps
       {deviceHasBatteryControls(snapshot.device_type_code)
         ? <LiveScheduleCard snapshot={snapshot} now={now} car={car} carLoaded={carLoaded} />
         : <ScheduleCardUnavailable car={carLoaded ? car : null} />}
-      <BatteryCard snapshot={snapshot} now={now} />
+      {/* The runtime row keeps its own clock unless one is pinned. */}
+      <BatteryCard snapshot={snapshot} now={pinnedNow} />
     </div>
   );
 }

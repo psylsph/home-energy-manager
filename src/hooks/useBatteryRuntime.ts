@@ -10,9 +10,9 @@ export const BATTERY_RUNTIME_TIMEOUT_MS = 20_000;
 
 /**
  * When the battery will reach its reserve (issue #472), for the house
- * view's Battery Level card. Asks `GET /api/battery/runtime` only while
- * Settings → Panel Controls → Show Battery Runtime is on, every minute and
- * when SOC moves by two points. A failed refresh keeps the last answer;
+ * view's Battery Level card or the line under the orbit. Asks
+ * `GET /api/battery/runtime` only while Settings → Panel Controls → Show
+ * Battery Runtime is on, every minute and when SOC moves by two points. A failed refresh keeps the last answer;
  * `batteryRuntimeLine` drops it once it's stale.
  */
 export function useBatteryRuntime(): BatteryRuntime | null {

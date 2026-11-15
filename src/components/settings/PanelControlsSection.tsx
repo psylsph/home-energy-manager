@@ -305,8 +305,9 @@ const RUNTIME_TEXT = { on: 'Battery runtime shown', off: 'Battery runtime hidden
 
 /**
  * Show Battery Runtime (issue #472). Saved in settings.json (#476), not
- * localStorage, so every browser and device shares it. Offered with the
- * house view only, where the Battery Level card is.
+ * localStorage, so every browser and device shares it. Offered in both
+ * views: the house shows it in its Battery Level card, the orbit under the
+ * diagram.
  */
 function BatteryRuntimeToggle({ flash }: { flash: Flash }) {
   return (
@@ -317,15 +318,15 @@ function BatteryRuntimeToggle({ flash }: { flash: Flash }) {
         <>
           Show Battery Runtime{' '}
           <HelpTip label="Show Battery Runtime">
-            The Battery Level card says when the battery will reach its reserve, from the Planner&apos;s forecast of
-            your usage and solar, rounded to the half hour. The dots show how sure it is: three when busy and quiet
-            days agree to within an hour, one when they're far apart or there's under two weeks of history. When a
-            charge slot or the sun will refill it first, it says so instead, and while it charges it says
-            when it&apos;ll be full. When it can&apos;t work out a time, or discharge is paused, it says so.
+            The Status page says when the battery will reach its reserve, from the Planner&apos;s forecast of your
+            usage and solar, rounded to the half hour: in the house view&apos;s Battery Level card, or under the
+            orbit. The dots show how sure it is: three when busy and quiet days agree to within an hour, one when
+            they're far apart or there's under two weeks of history. When a charge slot or the sun will refill it
+            first, it says so instead, and while it charges it says when it&apos;ll be full. When it can&apos;t work out a time, or discharge is paused, it says so.
           </HelpTip>
         </>
       }
-      hint="Show when the battery reaches its reserve in the Battery Level card."
+      hint="Show when the battery reaches its reserve on the Status page."
       text={RUNTIME_TEXT}
       flash={flash}
     />
@@ -407,8 +408,8 @@ function EnergyFlowGroup({ carCharging, flash }: { carCharging: ReactNode; flash
       {/* Issue #474: in both views, since it makes HEM ask Octopus. */}
       {carCharging}
 
-      {/* Issue #472: and the Battery Level card, where the runtime goes. */}
-      {energyFlowDisplay === 'house' && <BatteryRuntimeToggle flash={flash} />}
+      {/* Issue #472: the Battery Level card in the house view, under the orbit otherwise. */}
+      <BatteryRuntimeToggle flash={flash} />
 
       {/* Issue #457: show Home without the car's charging, off by default.
           Applies to both the orbit and the house view — they share the one
