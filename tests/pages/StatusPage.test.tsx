@@ -28,6 +28,12 @@ vi.mock('../../src/components/ColdBatteryWarning', () => ({
   default: () => <div data-testid="cold-battery-warning">ColdBatteryWarning</div>,
 }));
 
+// How long the battery lasts (issue #472); `null` while off or unknown.
+const runtime = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }));
+vi.mock('../../src/hooks/useBatteryRuntime', () => ({
+  useBatteryRuntime: () => runtime.value,
+}));
+
 // Mock apiPost
 vi.mock('../../src/lib/api', () => ({
   apiPost: vi.fn(),
@@ -88,6 +94,7 @@ function resetStore() {
 beforeEach(() => {
   cleanup();
   resetStore();
+  runtime.value = null;
 });
 
 afterEach(() => {
@@ -240,6 +247,58 @@ describe('StatusPage', () => {
       const grid = container.querySelector('[data-testid="status-landscape-grid"]')!;
       // The orbit alone takes the full width; the house keeps a column for its cards.
       expect(grid.className.includes('lg:grid-cols-2')).toBe(display === 'house');
+    });
+
+    describe('battery runtime on the orbit (issue #472)', () => {
+      const tid = (id: string) => screen.getByTestId(id);
+
+      it('shows no line while off', () => {
+        useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'orbit' });
+        render(<StatusPage />);
+        expect(screen.queryByTestId('orbit-battery-runtime')).toBeNull();
+      });
+
+      it('says when the battery reaches its reserve, under the orbit in its card', () => {
+        const now = Date.now() / 1000;
+        const at = now + 3 * 3600;
+        runtime.value = { outcome: 'empty_at', at, earliest: at - 1800, latest: at + 3600, confidence: 'high', computed_at: now };
+        useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'orbit' });
+        render(<StatusPage />);
+        const line = tid('orbit-battery-runtime');
+        const card = tid('energy-orbit-diagram').parentElement!;
+        expect(card.contains(line)).toBe(true);
+        // After the diagram, not over it.
+        expect(tid('energy-orbit-diagram').compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        // Away from the Battery Level card it needs to say it's the battery:
+        // an icon on screen, the word for screen readers.
+        expect(line.textContent).toMatch(/^Battery: /);
+        expect(line.querySelector('[data-testid="orbit-runtime-icon"]')).not.toBeNull();
+        expect(tid('orbit-runtime-text').textContent).toMatch(/^Empty (at|tomorrow at|\w+ at) \d\d:\d\d$/);
+        const dots = [...line.querySelectorAll('[data-testid="orbit-runtime-dot"]')];
+        expect(dots.filter((d) => d.getAttribute('data-lit') === 'true')).toHaveLength(3);
+        expect(tid('orbit-runtime-dots').getAttribute('aria-label')).toBe('High confidence');
+        expect(line.contains(screen.getByRole('button', { name: 'More about Battery Runtime' }))).toBe(true);
+      });
+
+      // The hook keeps its last answer when a refresh fails (backend down),
+      // so the row has to re-check its age on its own clock.
+      it('drops the line once its answer is stale, with nothing else re-rendering', () => {
+        vi.useFakeTimers({ now: new Date('2026-11-01T18:00:00Z') });
+        const now = Date.now() / 1000;
+        runtime.value = { outcome: 'charging', computed_at: now - 14 * 60 };
+        useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'disconnected', energyFlowDisplay: 'orbit' });
+        render(<StatusPage />);
+        expect(screen.queryByTestId('orbit-battery-runtime')).not.toBeNull();
+        act(() => { vi.advanceTimersByTime(2 * 60_000); });
+        expect(screen.queryByTestId('orbit-battery-runtime')).toBeNull();
+      });
+
+      it('shows no orbit line in the house view', () => {
+        runtime.value = { outcome: 'charging', computed_at: Date.now() / 1000 };
+        useInverterStore.setState({ snapshot: makeSnapshot(), connectionState: 'connected', energyFlowDisplay: 'house' });
+        render(<StatusPage />);
+        expect(screen.queryByTestId('orbit-battery-runtime')).toBeNull();
+      });
     });
 
     it('passes the connection and grid-fault state to the house', () => {

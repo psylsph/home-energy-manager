@@ -423,16 +423,57 @@ test.describe('Status Page - Today Balance on a phone (issue #429)', () => {
   });
 });
 
+test.describe('Status Page - Orbit battery runtime on a phone (issue #472)', () => {
+  test('fits 390×763 unscrolled with the runtime line under the orbit', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 763 });
+    const now = Date.now();
+    await page.route('**/api/latest-version', async (r) => {
+      const res = await r.fetch();
+      const j = await res.json();
+      await r.fulfill({ response: res, json: { ...j, latest_version: j.current_version, update_available: false } });
+    });
+    await page.addInitScript(() => {
+      localStorage.setItem('energyFlowDisplay', 'orbit');
+      localStorage.setItem('showTodayStats', 'false');
+    });
+    await page.route('**/api/settings', async (r) => {
+      if (r.request().method() !== 'GET') return r.continue();
+      const res = await r.fetch();
+      const j = await res.json();
+      await r.fulfill({ response: res, json: { ...j, data: { ...j.data, status_show_battery_runtime: true } } });
+    });
+    // The longest line (issue #476), so it has to wrap at this width.
+    await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
+      outcome: 'charging', computed_at: Math.floor(now / 1000),
+    } } }));
+    await page.goto('/');
+    await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
+    await expect(page.getByTestId('orbit-runtime-text')).toHaveText('Unable to calculate: charging faster than forecast');
+    await expect(page.getByTestId('orbit-battery-runtime').getByRole('button', { name: 'More about Battery Runtime' })).toBeVisible();
+    const dims = await page.evaluate(() => {
+      const main = document.querySelector('main') as HTMLElement;
+      return {
+        doc: document.documentElement.scrollHeight,
+        inner: window.innerHeight,
+        main: main.scrollHeight,
+        mainClient: main.clientHeight,
+      };
+    });
+    expect(dims.doc).toBeLessThanOrEqual(dims.inner);
+    expect(dims.main).toBeLessThanOrEqual(dims.mainClient);
+  });
+});
+
 test.describe('Status Page - the desktop app\'s default window', () => {
   // The app opens at tauri.conf.json's window size, read here so the check
   // follows it: the Status page must fit it unscrolled with the Today
-  // statistics shown, in either view, and in the house view with the car
-  // line (#474) and the battery runtime line (#472) on as well.
+  // statistics shown, in either view, with the battery runtime line (#472)
+  // on as well, and the house view's car line (#474).
   const { width, height } = (JSON.parse(
     fs.readFileSync(path.join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'),
   ) as { app: { windows: { width: number; height: number }[] } }).app.windows[0];
-  for (const [view, lines] of [['orbit', false], ['house', false], ['house', true]] as const) {
-    test(`fits the default window with Today shown (${view}${lines ? ', both card lines on' : ''})`, async ({ page }) => {
+  for (const [view, lines] of [['orbit', false], ['orbit', true], ['house', false], ['house', true]] as const) {
+    test(`fits the default window with Today shown (${view}${lines ? ', runtime and car lines on' : ''})`, async ({ page }) => {
       await page.setViewportSize({ width, height });
       const now = Date.now();
       // No "new version available" banner: whether the backend has seen a
@@ -469,10 +510,8 @@ test.describe('Status Page - the desktop app\'s default window', () => {
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
       await expect(page.getByTestId('today-balance')).toBeVisible();
-      if (lines) {
-        await expect(page.getByTestId('house-car-charge')).toBeVisible();
-        await expect(page.getByTestId('house-battery-runtime')).toBeVisible();
-      }
+      if (lines && view === 'house') await expect(page.getByTestId('house-car-charge')).toBeVisible();
+      if (lines) await expect(page.getByTestId(`${view}-battery-runtime`)).toBeVisible();
       const dims = await page.evaluate(() => ({
         doc: document.documentElement.scrollHeight,
         inner: window.innerHeight,

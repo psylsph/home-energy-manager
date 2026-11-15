@@ -11,9 +11,10 @@ import { useInverterStore } from '../../src/store/useInverterStore';
 
 /**
  * Settings → Panel Controls → Show Battery Runtime (issue #472): when the
- * battery reaches its reserve, in the house view's Battery Level card. Off
- * by default, saved in settings.json so every browser and device shares it
- * (it used to be per-browser localStorage, which looked broken elsewhere).
+ * battery reaches its reserve, in the house view's Battery Level card or
+ * under the orbit. Off by default, saved in settings.json so every browser
+ * and device shares it (it used to be per-browser localStorage, which
+ * looked broken elsewhere).
  */
 describe('<PanelControlsSection/> — Show Battery Runtime', () => {
   const flash = vi.fn();
@@ -99,9 +100,10 @@ describe('<PanelControlsSection/> — Show Battery Runtime', () => {
     expect(useInverterStore.getState().statusToggleRevision.showBatteryRuntime).toBeGreaterThan(before);
   });
 
-  it('is only offered with the house view, which has the Battery Level card', () => {
-    useInverterStore.setState({ energyFlowDisplay: 'orbit' });
+  // The orbit shows it too, under the diagram (issue #472, round 2).
+  it.each(['house', 'orbit'] as const)('is offered with the %s view', (display) => {
+    useInverterStore.setState({ energyFlowDisplay: display });
     renderSection();
-    expect(toggle()).toBeNull();
+    expect(toggle()).not.toBeNull();
   });
 });
