@@ -176,6 +176,21 @@ describe('<HouseEnergyView/>', () => {
     expect(bars.filter((b) => b.getAttribute('data-lit') === 'true')).toHaveLength(12);
   });
 
+  it('pulses the battery cabinet while SOC is below the reserve', () => {
+    const { rerender } = render(
+      <HouseEnergyView snapshot={snap({ soc: 15, battery_reserve: 20 })} connectionState="connected" gridFault={false} />,
+    );
+    const battery = () => tid('house-battery')!;
+    expect(battery().getAttribute('data-below-reserve')).toBe('true');
+    expect(battery().getAttribute('class')).toBe('reserve-flash');
+    // The reading's own percentage stays still: it's plain white text, so a
+    // flash there only distracts.
+    expect(tid('house-value-battery')!.querySelector('[class]')).toBeNull();
+    rerender(<HouseEnergyView snapshot={snap({ soc: 20, battery_reserve: 20 })} connectionState="connected" gridFault={false} />);
+    expect(battery().getAttribute('data-below-reserve')).toBe('false');
+    expect(battery().getAttribute('class')).toBeNull();
+  });
+
   // Charge cap (issue #426).
   it('marks the charge cap on the battery cabinet only while it is on', () => {
     const { rerender } = render(

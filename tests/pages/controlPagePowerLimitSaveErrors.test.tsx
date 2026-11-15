@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // Review H16: the power-limit / Minimum-SOC saves caught failures with a
@@ -233,8 +233,6 @@ describe('<ControlPage/> — power-control save failures surface and reconcile',
 
     // Drag to 80% and save. The Minimum SOC slider maps positions through a
     // logarithmic scale, so drive it the same way the page does.
-    const positionFor = (soc: number) =>
-      String(logarithmicValueToPosition(soc, 4, 100, LOGARITHMIC_RANGE_MAX));
     fireEvent.change(slider, { target: { value: positionFor(80) } });
     expect(slider.getAttribute('aria-valuenow')).toBe('80');
     fireEvent.click(saveButtonFor(slider));
@@ -319,15 +317,173 @@ describe('<ControlPage/> — power-control save failures surface and reconcile',
     render(<ControlPage />);
 
     const slider = screen.getByLabelText('Minimum SOC') as HTMLInputElement;
-    fireEvent.change(slider, { target: { value: '80' } });
+    fireEvent.change(slider, { target: { value: positionFor(80) } });
     fireEvent.click(saveButtonFor(slider));
     await screen.findByRole('alert');
 
-    // Retry the same save; it now succeeds and the banner clears.
-    fireEvent.change(slider, { target: { value: '80' } });
+    // Retry the same save; it now succeeds, the inverter reads it back, and
+    // the banner clears.
+    fireEvent.change(slider, { target: { value: positionFor(80) } });
     fireEvent.click(saveButtonFor(slider));
+    await waitFor(() => expect(reserveCalls).toBe(2));
+    act(() => {
+      useInverterStore.setState({ snapshot: makeSnapshot({ battery_reserve: 80 }) });
+    });
     await waitFor(() => {
       expect(screen.queryByRole('alert')).toBeNull();
     });
+  });
+});
+
+const positionFor = (soc: number) =>
+  String(logarithmicValueToPosition(soc, 4, 100, LOGARITHMIC_RANGE_MAX));
+
+/**
+ * The POST only queues a write; the poll loop applies it a few seconds later.
+ * Minimum SOC and Active Power Limit used to drop their "Applying…" state as
+ * soon as the POST returned, so the progress notice only flashed up. Like the
+ * charge and discharge limits, they must stay pending until a newer snapshot
+ * reads the value back, and say so when it never does.
+ */
+describe('<ControlPage/> — Minimum SOC and Active Power Limit wait for read-back', () => {
+  beforeEach(() => {
+    silenceConsole();
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    window.localStorage.clear();
+    vi.mocked(apiPost).mockReset();
+    vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+      connectedHost: '192.168.1.36:8899',
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    cleanup();
+    useInverterStore.setState({ snapshot: null, connectionState: 'disconnected' });
+  });
+
+  const progress = () => screen.queryByText('Applying Changes to Inverter…');
+
+  it('keeps Minimum SOC applying until the inverter reads it back', async () => {
+    render(<ControlPage />);
+    const slider = screen.getByLabelText('Minimum SOC') as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: positionFor(10) } });
+    fireEvent.click(saveButtonFor(slider));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/control/reserve', { soc: 10 }));
+
+    // The POST has returned but nothing has read the value back yet.
+    await act(async () => { await Promise.resolve(); });
+    expect(saveButtonFor(slider).textContent).toBe('Applying…');
+    expect(progress()).not.toBeNull();
+    expect(slider.getAttribute('aria-valuenow')).toBe('10');
+
+    // A newer snapshot that still shows the old value doesn't confirm it.
+    act(() => { useInverterStore.setState({ snapshot: makeSnapshot() }); });
+    expect(saveButtonFor(slider).textContent).toBe('Applying…');
+
+    act(() => { useInverterStore.setState({ snapshot: makeSnapshot({ battery_reserve: 10 }) }); });
+    await waitFor(() => expect(saveButtonFor(slider).textContent).toBe('Save'));
+    expect(progress()).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(slider.getAttribute('aria-valuenow')).toBe('10');
+  });
+
+  it('says so and shows the inverter value when Minimum SOC is never read back', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<ControlPage />);
+    const slider = screen.getByLabelText('Minimum SOC') as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: positionFor(10) } });
+    fireEvent.click(saveButtonFor(slider));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/control/reserve', { soc: 10 }));
+
+    act(() => { vi.advanceTimersByTime(20_000); });
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toMatch(/Minimum SOC was sent but the inverter has not confirmed it yet/);
+    });
+    expect(saveButtonFor(slider).textContent).toBe('Save');
+    expect(progress()).toBeNull();
+    expect(slider.getAttribute('aria-valuenow')).toBe('20');
+  });
+
+  it("doesn't let one control's confirmed save clear another control's error", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<ControlPage />);
+    // The charge limit is never read back (a running Force Charge holds it)…
+    const charge = powerSliders()[2] as HTMLInputElement;
+    fireEvent.change(charge, { target: { value: '30' } });
+    fireEvent.click(saveButtonFor(charge));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/control/charge-rate', { limit: 15 }));
+    act(() => { vi.advanceTimersByTime(20_000); });
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toMatch(/Charge Power Limit was sent but/);
+    });
+
+    // …then Minimum SOC saves and confirms: the charge limit's error stays.
+    const slider = screen.getByLabelText('Minimum SOC') as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: positionFor(10) } });
+    fireEvent.click(saveButtonFor(slider));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/control/reserve', { soc: 10 }));
+    act(() => { useInverterStore.setState({ snapshot: makeSnapshot({ battery_reserve: 10 }) }); });
+    await waitFor(() => expect(saveButtonFor(slider).textContent).toBe('Save'));
+    expect(screen.getByRole('alert').textContent).toMatch(/Charge Power Limit was sent but/);
+
+    // Saving the charge limit again and confirming it clears its own error.
+    fireEvent.change(powerSliders()[2], { target: { value: '30' } });
+    fireEvent.click(saveButtonFor(powerSliders()[2]));
+    await waitFor(() => expect(vi.mocked(apiPost).mock.calls.filter(([p]) => p === '/api/control/charge-rate')).toHaveLength(2));
+    act(() => { useInverterStore.setState({ snapshot: makeSnapshot({ battery_reserve: 10, charge_rate: 15 }) }); });
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('keeps Active Power Limit applying until the inverter reads it back', async () => {
+    render(<ControlPage />);
+    const active = powerSliders()[4] as HTMLInputElement;
+    fireEvent.change(active, { target: { value: '60' } });
+    fireEvent.click(saveButtonFor(active));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/control/active-power-rate', { rate: 60 }));
+
+    await act(async () => { await Promise.resolve(); });
+    expect(saveButtonFor(active).textContent).toBe('Applying…');
+    expect(progress()).not.toBeNull();
+
+    act(() => { useInverterStore.setState({ snapshot: makeSnapshot({ active_power_rate: 60 }) }); });
+    await waitFor(() => expect(saveButtonFor(active).textContent).toBe('Save'));
+    expect(progress()).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(active.value).toBe('60');
+  });
+
+  it('says so and shows the inverter value when Active Power Limit is never read back', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<ControlPage />);
+    const active = powerSliders()[4] as HTMLInputElement;
+    fireEvent.change(active, { target: { value: '60' } });
+    fireEvent.click(saveButtonFor(active));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/control/active-power-rate', { rate: 60 }));
+
+    act(() => { vi.advanceTimersByTime(20_000); });
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toMatch(/Inverter Active Power Limit was sent but the inverter has not confirmed it yet/);
+    });
+    expect(saveButtonFor(active).textContent).toBe('Save');
+    expect(active.value).toBe('100');
   });
 });

@@ -4,6 +4,7 @@ import {
   READING_HIT_WIDTH,
   READING_SLOTS,
   batteryBarsLit,
+  belowReserve,
   buildHouseScene,
   cableLoads,
   electricalDetail,
@@ -506,5 +507,31 @@ describe('buildHouseScene — home without the car (issue #457)', () => {
     // flow the spokes describe.
     expect(cable(sc, 'home')).toMatchObject({ watts: 7400, supplies: false });
     expectCablesMatchFlows(vm, sc);
+  });
+});
+
+describe('belowReserve', () => {
+  const base = { soc: 15, battery_reserve: 20, battery_capacity_kwh: 9.5, battery_power: 0 };
+  it('is true only two or more points under a real reserve, like the runtime line', () => {
+    expect(belowReserve(base)).toBe(true);
+    expect(belowReserve({ ...base, soc: 18 })).toBe(true);
+    // A battery parked at its reserve often reads a point low: still at it.
+    expect(belowReserve({ ...base, soc: 19 })).toBe(false);
+    expect(belowReserve({ ...base, soc: 20 })).toBe(false);
+    expect(belowReserve({ ...base, soc: 60 })).toBe(false);
+  });
+  it("doesn't flash while it's charging back up, by the runtime's own threshold", () => {
+    expect(belowReserve({ ...base, battery_power: -150 })).toBe(false);
+    // Under 100 W of charge is noise, and discharge is still below it.
+    expect(belowReserve({ ...base, battery_power: -50 })).toBe(true);
+    expect(belowReserve({ ...base, battery_power: 300 })).toBe(true);
+  });
+  it("ignores HEM's reserve pause, which writes 100", () => {
+    expect(belowReserve({ ...base, soc: 60, battery_reserve: 100 })).toBe(false);
+  });
+  it('ignores a system with no battery or readings it cannot trust', () => {
+    expect(belowReserve({ ...base, battery_capacity_kwh: 0 })).toBe(false);
+    expect(belowReserve({ ...base, soc: Number.NaN })).toBe(false);
+    expect(belowReserve({ ...base, battery_reserve: undefined as unknown as number })).toBe(false);
   });
 });

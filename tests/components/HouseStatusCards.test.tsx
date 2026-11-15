@@ -74,6 +74,19 @@ describe('<HouseStatusCards/>', () => {
   });
   afterEach(cleanup);
 
+  it('flashes the battery percentage and level bars while SOC is below the reserve', () => {
+    const { rerender } = render(<HouseStatusCards snapshot={snap({ soc: 1, battery_reserve: 4 })} />);
+    for (const id of ['house-battery-level', 'house-battery-bars']) {
+      expect(tid(id).getAttribute('data-below-reserve'), id).toBe('true');
+      expect(tid(id).className, id).toMatch(/\breserve-flash\b/);
+    }
+    rerender(<HouseStatusCards snapshot={snap({ soc: 4, battery_reserve: 4 })} />);
+    for (const id of ['house-battery-level', 'house-battery-bars']) {
+      expect(tid(id).getAttribute('data-below-reserve'), id).toBe('false');
+      expect(tid(id).className, id).not.toMatch(/reserve-flash/);
+    }
+  });
+
   it('shows the next charge slot with a still battery icon', () => {
     render(<HouseStatusCards snapshot={snap()} />);
     expect(tid('house-charge-card').getAttribute('data-state')).toBe('next');

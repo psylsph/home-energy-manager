@@ -183,7 +183,7 @@ test.describe('Status Page - API Snapshot', () => {
     const data = await resp.json();
     expect(data.ok).toBe(true);
     // A fresh simulator install has no history, so usually "unknown".
-    expect(['empty_at', 'recharges_first', 'lasts_beyond', 'at_reserve', 'charging', 'unknown']).toContain(data.data.outcome);
+    expect(['empty_at', 'recharges_first', 'lasts_beyond', 'at_reserve', 'below_reserve', 'full_at', 'paused', 'charging', 'unknown']).toContain(data.data.outcome);
     expect(typeof data.data.computed_at).toBe('number');
   });
 

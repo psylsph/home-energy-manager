@@ -56,3 +56,14 @@ describe('src/index.css — house view theme variables', () => {
     expect(light.get('roof')).not.toBe(dark.get('roof'));
   });
 });
+
+describe('src/index.css — below-reserve flash', () => {
+  // The class names the house view sets; the animation only runs where the
+  // viewer hasn't asked for reduced motion.
+  it('animates the flash class, only without reduced motion', () => {
+    const guarded = css.match(/@media \(prefers-reduced-motion: no-preference\)\s*\{([\s\S]*?)\n\}/);
+    expect(guarded).not.toBeNull();
+    expect(guarded![1]).toMatch(/\.reserve-flash\s*\{\s*animation: reserve-flash /);
+    expect(css).toMatch(/@keyframes reserve-flash\s*\{[^}]*opacity: 0\.15/);
+  });
+});

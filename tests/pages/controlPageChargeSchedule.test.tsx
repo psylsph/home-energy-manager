@@ -448,6 +448,36 @@ describe('<ControlPage/> — Charge Schedule armed vs not-active (issue #135)', 
     });
   });
 
+  it('stops waiting for the charge slot when the page is closed', async () => {
+    // Count the store subscriptions still open: the wait's must go with the page.
+    const open = new Set<() => void>();
+    const subscribe = useInverterStore.subscribe;
+    const spy = vi.spyOn(useInverterStore, 'subscribe').mockImplementation((listener) => {
+      const unsubscribe = subscribe(listener);
+      const tracked = () => { open.delete(tracked); unsubscribe(); };
+      open.add(tracked);
+      return tracked;
+    });
+    vi.mocked(apiPost).mockResolvedValueOnce({ ok: true, data: {} });
+    useInverterStore.setState({
+      snapshot: makeSnapshot(),
+      developerMode: false,
+      connectionState: 'connected',
+    });
+    const { unmount } = render(<ControlPage />);
+
+    const section = await chargeScheduleSection();
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/control/charge-slot',
+      expect.objectContaining({ slot: 1 }),
+    ));
+    await act(async () => { await Promise.resolve(); });
+    unmount();
+    expect(open.size).toBe(0);
+    spy.mockRestore();
+  });
+
   it('reports an unconfirmed charge-slot save when readback times out', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(apiPost).mockResolvedValueOnce({ ok: true, data: {} });

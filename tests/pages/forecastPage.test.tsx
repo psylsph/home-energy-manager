@@ -701,6 +701,82 @@ describe('ForecastPage plan card', () => {
     expect(apply).not.toBeDisabled();
   });
 
+  describe('waits for the inverter to read the plan back', () => {
+    // The POSTs only queue the writes; the poll loop applies them later. A
+    // read-back that never came used to resolve silently and say Applied ✓.
+    const idleSlot = { enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100 };
+    const planSlot = { enabled: true, start_hour: 2, start_minute: 0, end_hour: 3, end_minute: 36, target_soc: 100 };
+    const snap = (slot: typeof idleSlot, enableCharge: boolean) => ({
+      soc: 50,
+      max_battery_power_w: 5000,
+      enable_charge: enableCharge,
+      charge_slots: [slot, idleSlot],
+    });
+
+    beforeEach(() => {
+      useInverterStore.setState({ snapshot: snap(idleSlot, false) } as never);
+      apiPostMocked.mockResolvedValue({ ok: true });
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+        if (path === '/api/forecast/plan') return planPayload('charge');
+        return { ok: true, data: {} };
+      });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      useInverterStore.setState({ snapshot: null } as never);
+    });
+
+    it('says Applied once a newer snapshot shows the slot', async () => {
+      render(<ForecastPage />);
+      const apply = await screen.findByTestId('forecast-plan-apply');
+      fireEvent.click(apply);
+      await waitFor(() => expect(apiPostMocked).toHaveBeenCalledWith('/api/control/timed-charge', { enabled: true }));
+      expect(apply).toHaveTextContent('Applying…');
+
+      act(() => { useInverterStore.setState({ snapshot: snap(planSlot, true) } as never); });
+      await waitFor(() => expect(apply).toHaveTextContent('Applied ✓'));
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('stops waiting when the page is closed mid-apply', async () => {
+      // Count the store subscriptions still open: the wait's must go with the page.
+      const open = new Set<() => void>();
+      const subscribe = useInverterStore.subscribe;
+      const spy = vi.spyOn(useInverterStore, 'subscribe').mockImplementation((listener) => {
+        const unsubscribe = subscribe(listener);
+        const tracked = () => { open.delete(tracked); unsubscribe(); };
+        open.add(tracked);
+        return tracked;
+      });
+      const { unmount } = render(<ForecastPage />);
+      const apply = await screen.findByTestId('forecast-plan-apply');
+      fireEvent.click(apply);
+      await waitFor(() => expect(apiPostMocked).toHaveBeenCalledWith('/api/control/timed-charge', { enabled: true }));
+      await act(async () => { await Promise.resolve(); });
+      unmount();
+      expect(open.size).toBe(0);
+      spy.mockRestore();
+    });
+
+    it('says the inverter has not confirmed it, without rolling back, when nothing reads it back', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<ForecastPage />);
+      const apply = await screen.findByTestId('forecast-plan-apply');
+      fireEvent.click(apply);
+      await waitFor(() => expect(apiPostMocked).toHaveBeenCalledWith('/api/control/timed-charge', { enabled: true }));
+
+      act(() => { vi.advanceTimersByTime(15_000); });
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        /The plan was sent but the inverter has not confirmed it yet/,
+      );
+      expect(apply).toHaveTextContent('Retry Apply');
+      // The writes may still land, so nothing is undone.
+      expect(apiPostMocked).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('clears the forecast slot when timed charge enabling fails after slot write', async () => {
     useInverterStore.setState({ snapshot: null } as never);
     apiGetMock.mockImplementation(async (path: string) => {

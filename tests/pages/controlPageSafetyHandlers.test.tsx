@@ -439,7 +439,7 @@ describe('<ControlPage/> — power limit saves', () => {
     fireEvent.click(saveFor(active));
 
     await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toMatch(/Active power rate save failed/);
+      expect(screen.getByRole('alert').textContent).toMatch(/Inverter Active Power Limit save failed/);
       expect(screen.getByRole('alert').textContent).toMatch(/busy/);
     });
     await waitFor(() => expect(active.value).toBe('100'));
