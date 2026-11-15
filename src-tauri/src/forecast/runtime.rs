@@ -71,6 +71,9 @@ pub struct RuntimeInputs {
     pub schedule: CurrentSchedule,
     /// Battery power now, W (negative = charging).
     pub battery_power_w: f64,
+    /// Solar power now, W. Lifts the current hour's median and optimistic
+    /// solar when the sun is beating the forecast (issue #476).
+    pub live_solar_w: f64,
     /// The inverter's own discharge pause (HR 318 mode 2 or 3) covers now.
     pub discharge_paused: bool,
     pub profile_days: u32,
@@ -141,13 +144,24 @@ pub fn round_to_half_hour(ts: i64) -> i64 {
 
 /// The hourly inputs for day `which` (0 pessimistic, 1 median, 2
 /// optimistic), the current hour cut to what's left of it.
+///
+/// For the rest of the current hour the median and optimistic days take the
+/// live solar where it beats the forecast (issue #476): a sunny morning on a
+/// dull forecast otherwise can't see the charge it's making. The pessimistic
+/// day keeps the forecast, since the sun may not last the hour.
 fn sim_hours(inputs: &RuntimeInputs, which: usize) -> Vec<SimHourInput> {
+    let live_kwh = (which > 0 && inputs.live_solar_w.is_finite() && inputs.live_solar_w > 0.0)
+        .then(|| inputs.live_solar_w / 1000.0);
     let mut hours: Vec<SimHourInput> = inputs
         .hours
         .iter()
-        .map(|hour| SimHourInput {
+        .enumerate()
+        .map(|(i, hour)| SimHourInput {
             timestamp: hour.timestamp,
-            solar_kwh: hour.solar[which],
+            solar_kwh: match live_kwh {
+                Some(live) if i == 0 => hour.solar[which].max(live),
+                _ => hour.solar[which],
+            },
             consumption_kwh: hour.consumption[which],
             ..Default::default()
         })
@@ -474,6 +488,7 @@ mod tests {
             params: params(start_soc),
             schedule: CurrentSchedule::default(),
             battery_power_w: 500.0,
+            live_solar_w: 0.0,
             discharge_paused: false,
             profile_days: 30,
             solar_known: true,
@@ -742,6 +757,63 @@ mod tests {
         // reserve takes 4.7 hours from 02:00.
         let (at, ..) = empty_at(&battery_runtime(&i));
         assert_eq!(at, T0 + 6 * HOUR_SECS + 1800);
+    }
+
+    #[test]
+    fn live_sun_above_a_dull_forecast_carries_the_rest_of_this_hour() {
+        // Issue #476: 1.4 kW of sun at half past while the forecast expects
+        // none. Charging at 800 W, the forecast alone can't see the charge
+        // and gives no time; the live reading for the rest of the hour can.
+        let now = T0 + 1800;
+        let mut dull = inputs(now, T0, 50.0, [0.6, 0.6, 0.6]);
+        dull.battery_power_w = -800.0;
+        assert_eq!(battery_runtime(&dull), RuntimeOutcome::Charging);
+
+        let mut sunny = dull.clone();
+        sunny.live_solar_w = 1400.0;
+        let (at, earliest, ..) = empty_at(&battery_runtime(&sunny));
+        // Later than the same day without the half-hour of sun.
+        let mut no_sun_now = sunny.clone();
+        no_sun_now.battery_power_w = 0.0;
+        no_sun_now.live_solar_w = 0.0;
+        let (without, ..) = empty_at(&battery_runtime(&no_sun_now));
+        assert!(at > without, "{at} vs {without}");
+        // The pessimistic day keeps the forecast: the sun may not last.
+        assert!(earliest.is_some_and(|e| e < at), "{earliest:?} vs {at}");
+    }
+
+    #[test]
+    fn live_sun_never_lowers_a_brighter_forecast_or_reaches_past_this_hour() {
+        let mut forecast = inputs(T0, T0, 50.0, [1.0, 1.0, 1.0]);
+        forecast.battery_power_w = -2000.0;
+        for hour in &mut forecast.hours {
+            hour.solar = [3.0; 3];
+        }
+        let mut dimmer_now = forecast.clone();
+        dimmer_now.live_solar_w = 500.0;
+        assert_eq!(battery_runtime(&dimmer_now), battery_runtime(&forecast));
+
+        // Bright now, dark forecast from the next hour: only this hour gains.
+        let mut one_hour = inputs(T0, T0, 50.0, [1.0, 1.0, 1.0]);
+        one_hour.live_solar_w = 3000.0;
+        one_hour.battery_power_w = -2000.0;
+        let mut forecast_says_so = inputs(T0, T0, 50.0, [1.0, 1.0, 1.0]);
+        forecast_says_so.battery_power_w = -2000.0;
+        forecast_says_so.hours[0].solar = [0.0, 3.0, 3.0];
+        assert_eq!(
+            battery_runtime(&one_hour),
+            battery_runtime(&forecast_says_so)
+        );
+    }
+
+    #[test]
+    fn a_reading_that_is_not_a_power_is_ignored() {
+        for junk in [f64::NAN, f64::INFINITY, -1500.0] {
+            let mut i = inputs(T0 + 1800, T0, 50.0, [0.6, 0.6, 0.6]);
+            i.battery_power_w = -800.0;
+            i.live_solar_w = junk;
+            assert_eq!(battery_runtime(&i), RuntimeOutcome::Charging, "{junk}");
+        }
     }
 
     #[test]

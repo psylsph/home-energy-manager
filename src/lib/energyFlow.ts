@@ -148,8 +148,11 @@ export function batteryFillFraction(soc: number): number {
 // the underlying HR(27) mode stays visible.
 // ---------------------------------------------------------------------------
 
+/** The label for the inverter's own unknown mode; the house pill greys it (issue #476). */
+export const UNKNOWN_MODE_LABEL = 'Unknown';
+
 const BATTERY_MODE_LABELS: Record<string, string> = {
-  unknown: 'Unknown',
+  unknown: UNKNOWN_MODE_LABEL,
   eco: 'Eco',
   eco_paused: 'Eco Paused',
   timed_demand: 'Timed Demand',

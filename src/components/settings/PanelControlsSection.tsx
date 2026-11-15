@@ -1,6 +1,6 @@
 import { useCallback, useState, type ReactNode } from 'react';
 import { apiPost } from '../../lib/api';
-import { useInverterStore } from '../../store/useInverterStore';
+import { useInverterStore, type StatusToggleKey } from '../../store/useInverterStore';
 import Toggle from '../Toggle';
 import { SettingsGroup, SettingsSection } from './SettingsSection';
 import { useSettingsSave, type Flash } from './useSettingsSave';
@@ -84,6 +84,7 @@ export default function PanelControlsSection({
         carCharging={
           octopusConfigured ? <CarChargingSlotsToggle flash={flash} /> : null
         }
+        flash={flash}
       />
       <GridLinesGroup />
     </SettingsSection>
@@ -232,47 +233,106 @@ function HistoryAveragesGroup() {
 }
 
 /**
- * Show Car Charging Slots (issue #474): the car's planned Octopus charges in
- * the house view's Next Charge card. Saved in settings.json, because the
- * backend fetches the list for it while the battery hold is off; offered only
- * once an Octopus account is saved, in either view, so it can always be
- * switched off. Shows the store's value, which App loads with the settings,
- * so it stays right however often it mounts.
+ * A Panel Controls switch saved in settings.json and mirrored in the store,
+ * which App loads with the settings, so it stays right however often it
+ * mounts. Sets the store at once and puts it back if the save fails. While
+ * the save is in flight it takes no clicks, so two saves can't land out of
+ * order, and the change goes through `changeStatusToggle`, so a settings
+ * load already in flight leaves it alone (issue #476).
  */
-function CarChargingSlotsToggle({ flash }: { flash: Flash }) {
-  const checked = useInverterStore((s) => s.showCarCharging);
-  const setShowCarCharging = useInverterStore((s) => s.setShowCarCharging);
+function SavedStatusToggle({ storeKey, settingKey, label, hint, text, flash }: {
+  storeKey: StatusToggleKey;
+  settingKey: string;
+  /** The label's content; a HelpTip may follow the words. */
+  label: ReactNode;
+  hint: string;
+  text: { on: string; off: string; ariaLabel: string };
+  flash: Flash;
+}) {
+  const checked = useInverterStore((s) => s[storeKey]);
+  const changeStatusToggle = useInverterStore((s) => s.changeStatusToggle);
+  const [saving, setSaving] = useState(false);
   const setChecked = useCallback(
     async (next: boolean) => {
-      setShowCarCharging(next);
+      setSaving(true);
+      changeStatusToggle(storeKey, next);
       try {
-        await apiPost('/api/settings', { status_show_car_charging: next });
-        flash(next ? CAR_SLOTS_TEXT.on : CAR_SLOTS_TEXT.off, true);
+        await apiPost('/api/settings', { [settingKey]: next });
+        flash(next ? text.on : text.off, true);
       } catch (e) {
-        setShowCarCharging(!next);
-        flash(`${CAR_SLOTS_TEXT.fail}: ${e instanceof Error ? e.message : String(e)}`, false);
+        changeStatusToggle(storeKey, !next);
+        flash(`Failed to save: ${e instanceof Error ? e.message : String(e)}`, false);
+      } finally {
+        setSaving(false);
       }
     },
-    [setShowCarCharging, flash],
+    [changeStatusToggle, storeKey, settingKey, text, flash],
   );
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="flex flex-col gap-0.5">
-        <span className={LABEL}>Show Car Charging Slots</span>
-        <span className={HINT}>Show Octopus's planned car charges in the house view's Next Charge card.</span>
+        <span className={LABEL}>{label}</span>
+        <span className={HINT}>{hint}</span>
       </div>
-      <Toggle checked={checked} ariaLabel="Show Car Charging Slots" onChange={(next) => void setChecked(next)} />
+      <Toggle checked={checked} ariaLabel={text.ariaLabel} disabled={saving} onChange={(next) => void setChecked(next)} />
     </div>
   );
 }
 
-const CAR_SLOTS_TEXT = {
-  on: 'Car charging slots shown',
-  off: 'Car charging slots hidden',
-  fail: 'Failed to save',
-};
+const CAR_SLOTS_TEXT = { on: 'Car charging slots shown', off: 'Car charging slots hidden', ariaLabel: 'Show Car Charging Slots' };
 
-function EnergyFlowGroup({ carCharging }: { carCharging: ReactNode }) {
+/**
+ * Show Car Charging Slots (issue #474): the car's planned Octopus charges in
+ * the house view's Next Charge card. Saved in settings.json, because the
+ * backend fetches the list for it while the battery hold is off; offered only
+ * once an Octopus account is saved, in either view, so it can always be
+ * switched off.
+ */
+function CarChargingSlotsToggle({ flash }: { flash: Flash }) {
+  return (
+    <SavedStatusToggle
+      storeKey="showCarCharging"
+      settingKey="status_show_car_charging"
+      label="Show Car Charging Slots"
+      hint="Show Octopus's planned car charges in the house view's Next Charge card."
+      text={CAR_SLOTS_TEXT}
+      flash={flash}
+    />
+  );
+}
+
+const RUNTIME_TEXT = { on: 'Battery runtime shown', off: 'Battery runtime hidden', ariaLabel: 'Show Battery Runtime' };
+
+/**
+ * Show Battery Runtime (issue #472). Saved in settings.json (#476), not
+ * localStorage, so every browser and device shares it. Offered with the
+ * house view only, where the Battery Level card is.
+ */
+function BatteryRuntimeToggle({ flash }: { flash: Flash }) {
+  return (
+    <SavedStatusToggle
+      storeKey="showBatteryRuntime"
+      settingKey="status_show_battery_runtime"
+      label={
+        <>
+          Show Battery Runtime{' '}
+          <HelpTip label="Show Battery Runtime">
+            The Battery Level card says when the battery will reach its reserve, from the Planner&apos;s forecast of
+            your usage and solar, rounded to the half hour. The dots show how sure it is: three when busy and quiet
+            days agree to within an hour, one when they're far apart or there's under two weeks of history. When a
+            charge slot or the sun will refill it first, it says so instead, and while it charges it says
+            when it&apos;ll be full. When it can&apos;t work out a time, or discharge is paused, it says so.
+          </HelpTip>
+        </>
+      }
+      hint="Show when the battery reaches its reserve in the Battery Level card."
+      text={RUNTIME_TEXT}
+      flash={flash}
+    />
+  );
+}
+
+function EnergyFlowGroup({ carCharging, flash }: { carCharging: ReactNode; flash: Flash }) {
   const showFlowStatusWords = useInverterStore((s) => s.showFlowStatusWords);
   const setShowFlowStatusWords = useInverterStore((s) => s.setShowFlowStatusWords);
   const visualNoiseThreshold = useInverterStore((s) => s.visualNoiseThreshold);
@@ -286,8 +346,6 @@ function EnergyFlowGroup({ carCharging }: { carCharging: ReactNode }) {
   const setShowTodayStats = useInverterStore((s) => s.setShowTodayStats);
   const homeExcludesCar = useInverterStore((s) => s.homeExcludesCar);
   const setHomeExcludesCar = useInverterStore((s) => s.setHomeExcludesCar);
-  const showBatteryRuntime = useInverterStore((s) => s.showBatteryRuntime);
-  const setShowBatteryRuntime = useInverterStore((s) => s.setShowBatteryRuntime);
   // External CT clamps (address >= 0x01) — offered as the grid-CT source for
   // AC-coupled systems whose grid isn't the built-in 0x00 meter. The meter
   // list is replaced each snapshot, so only its addresses are taken (as a
@@ -350,24 +408,7 @@ function EnergyFlowGroup({ carCharging }: { carCharging: ReactNode }) {
       {carCharging}
 
       {/* Issue #472: and the Battery Level card, where the runtime goes. */}
-      {energyFlowDisplay === 'house' && (
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex flex-col gap-0.5">
-            <span className={LABEL}>
-              Show Battery Runtime{' '}
-              <HelpTip label="Show Battery Runtime">
-                The Battery Level card says when the battery will reach its reserve, from the Planner&apos;s forecast of
-                your usage and solar, rounded to the half hour. The dots show how sure it is: three when busy and quiet
-                days agree to within an hour, one when they're far apart or there's under two weeks of history. When a
-                charge slot or the sun will refill it first, it says so instead, and while it charges it says
-                when it&apos;ll be full.
-              </HelpTip>
-            </span>
-            <span className={HINT}>Show when the battery reaches its reserve in the Battery Level card.</span>
-          </div>
-          <Toggle checked={showBatteryRuntime} ariaLabel="Show Battery Runtime" onChange={setShowBatteryRuntime} />
-        </div>
-      )}
+      {energyFlowDisplay === 'house' && <BatteryRuntimeToggle flash={flash} />}
 
       {/* Issue #457: show Home without the car's charging, off by default.
           Applies to both the orbit and the house view — they share the one

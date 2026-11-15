@@ -70,7 +70,7 @@ export interface BatteryRuntimeLine {
   confidence: RuntimeConfidence | null;
   /** For the hover title and screen readers. */
   title: string;
-  /** What the time and the dots mean, for the ⓘ; `null` without dots. */
+  /** For the ⓘ: what the time and the dots mean, or why there's no time; `null` when the line says it all. */
   help: string | null;
 }
 
@@ -79,6 +79,19 @@ const DOT_WORDS: Record<RuntimeConfidence, string> = {
   medium: 'Medium confidence (two dots): a busy and a quiet day are within three hours of each other.',
   low: "Low confidence (one dot): a busy and a quiet day are more than three hours apart, or there's under two weeks of history.",
 };
+
+/** Why an `unknown` answer had no time, for the ⓘ (issue #476). */
+const UNKNOWN_REASONS = new Map<string, string>([
+  ['no_snapshot', "There's no live reading from the inverter yet."],
+  ['not_connected', "There's no live reading from the inverter while it's disconnected."],
+  ['no_battery_capacity', "The inverter hasn't reported its battery capacity or power limits yet."],
+  ['insufficient_consumption_history', "There isn't enough usage history yet to forecast your load."],
+]);
+const UNKNOWN_FALLBACK = "The forecast couldn't be run from the current readings.";
+
+const PAUSED_HELP = "The battery won't discharge until the pause ends (the Pause button, a limiter, the Octopus hold or the inverter's own pause), and when that is isn't known, so there's no time to give.";
+
+const CHARGING_HELP = "The battery is charging, but the forecast for this hour doesn't predict it: a sunnier day than forecast, or a Force Charge, which the forecast doesn't model. A time returns once the charge stops or the forecast catches up.";
 
 /** The backend reuses an answer for five minutes; past this it's stale. */
 const MAX_AGE_SECS = 15 * 60;
@@ -102,7 +115,7 @@ function when(at: number, now: Date, f: RuntimeFormat): string {
   return day ? `${day} at ${time}` : `at ${time}`;
 }
 
-/** The card's line, or `null` to show none (charging, unknown, stale). */
+/** The card's line, or `null` to show none (stale, or an outcome this build doesn't know). */
 export function batteryRuntimeLine(
   runtime: BatteryRuntime | null,
   now: Date,
@@ -144,6 +157,19 @@ export function batteryRuntimeLine(
       const text = `${runtime.soc >= 100 ? 'Full' : `${Math.round(runtime.soc)}%`} ${when(runtime.at, now, format)}`;
       return { text, dots: null, confidence: null, title: '', help: null };
     }
+    // With the toggle on, a blank card looks broken: say why there's no time.
+    case 'paused':
+      return { text: 'Discharge paused', dots: null, confidence: null, title: '', help: PAUSED_HELP };
+    case 'charging':
+      return { text: 'Unable to calculate: charging faster than forecast', dots: null, confidence: null, title: '', help: CHARGING_HELP };
+    case 'unknown':
+      return {
+        text: 'Unable to calculate',
+        dots: null,
+        confidence: null,
+        title: '',
+        help: UNKNOWN_REASONS.get(runtime.reason ?? '') ?? UNKNOWN_FALLBACK,
+      };
     default:
       return null;
   }

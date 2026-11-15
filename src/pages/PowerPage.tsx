@@ -31,7 +31,7 @@ import {
   trimDomainStartToFirstDataPoint,
 } from '../lib/historyRangeConfig';
 import { formatPower, formatTimestamp } from '../lib/format';
-import { getSeriesOpacity } from '../lib/chartSeries';
+import { getSeriesOpacity, SOC_COLOR } from '../lib/chartSeries';
 import { estimateCarPower } from '../lib/carCharging';
 import HelpTip from '../components/HelpTip';
 import { SeriesLegend } from '../components/SeriesLegend';
@@ -114,7 +114,7 @@ const POWER_SERIES: { key: PowerSeriesKey; label: string; color: string }[] = [
 
 const HOME_POWER_SERIES = POWER_SERIES.find((series) => series.key === 'homePower');
 const DIRECTIONAL_POWER_SERIES = POWER_SERIES.filter((series) => series.key !== 'homePower');
-const SOC_SERIES = { key: 'soc', label: 'Battery SOC', color: '#A78BFA' } as const;
+const SOC_SERIES = { key: 'soc', label: 'Battery SOC', color: SOC_COLOR } as const;
 const CAR_POWER_SERIES = { key: 'carPower', label: 'Car Charging', color: '#C084FC' } as const;
 const HOUSE_POWER_LABEL = 'Home (Excl. Car)';
 const POWER_CHART_SERIES: SeriesLegendItem<PowerChartKey>[] = [
@@ -547,7 +547,7 @@ function renderCombinedPowerChart(rows: PowerRow[]): string {
     .map((row) => `${xFor(row.t).toFixed(1)},${yForSoc(row.soc ?? 0).toFixed(1)}`)
     .join(' ');
   const socLine = socPoints
-    ? `<polyline points="${socPoints}" fill="none" stroke="#A78BFA" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round" />`
+    ? `<polyline points="${socPoints}" fill="none" stroke="${SOC_COLOR}" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round" />`
     : '';
   const grid = [-1, -0.5, 0, 0.5, 1].map((ratio) => {
     const y = top + chartH / 2 - ratio * chartH / 2;
@@ -561,7 +561,7 @@ function renderCombinedPowerChart(rows: PowerRow[]): string {
   }).join('');
   const legendItems = [
     ...series,
-    { key: 'soc' as const, label: 'SOC', color: '#A78BFA', dash: '5 4' },
+    { key: 'soc' as const, label: 'SOC', color: SOC_COLOR, dash: '5 4' },
   ].map((item, index) => {
     const x = left + index * 135;
     return `<g><line x1="${x}" x2="${x + 20}" y1="18" y2="18" stroke="${item.color}" stroke-width="3" stroke-dasharray="${item.dash}" />`

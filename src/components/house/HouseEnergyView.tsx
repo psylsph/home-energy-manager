@@ -104,18 +104,19 @@ function Pill({ x, y, text, color, testId }: { x: number; y: number; text: strin
 function TopPill({ pill }: { pill: HouseStatusPill }) {
   const fontSize = 11;
   const modeW = textWidth(pill.mode, fontSize);
-  const gridW = textWidth(pill.grid, fontSize) + 12;
+  const gridW = textWidth(pill.grid, fontSize);
   const width = modeW + gridW + 46;
   const x = (HOUSE_VIEWBOX.width - width) / 2;
+  // Colour alone carries the state (issue #476): no status dot.
   const tone = TONE_COLORS[pill.tone];
+  const modeColor = pill.modeActive ? TONE_COLORS.ok : TEXT_SECONDARY;
   const sepX = x + 16 + modeW + 7;
   return (
     <g data-testid="house-status-pill" data-tone={pill.tone}>
       <rect x={x} y={4} width={width} height={24} rx={12} fill="var(--app-bg-elevated, #21262D)" fillOpacity={0.7} stroke="var(--app-house-plot-edge, #30363D)" strokeWidth={1} />
-      <text x={x + 16} y={20} fill={TEXT_SECONDARY} fontSize={fontSize} fontWeight={600} fontFamily={SANS} data-testid="house-mode">{pill.mode}</text>
+      <text x={x + 16} y={20} fill={modeColor} fontSize={fontSize} fontWeight={600} fontFamily={SANS} data-testid="house-mode">{pill.mode}</text>
       <line x1={sepX} y1={10} x2={sepX} y2={22} stroke={TEXT_SECONDARY} strokeOpacity={0.5} strokeWidth={1} />
-      <circle cx={sepX + 12} cy={16} r={3.5} fill={tone} />
-      <text x={sepX + 20} y={20} fill={tone} fontSize={fontSize} fontWeight={600} fontFamily={SANS} data-testid="house-grid-state">{pill.grid}</text>
+      <text x={sepX + 7} y={20} fill={tone} fontSize={fontSize} fontWeight={600} fontFamily={SANS} data-testid="house-grid-state">{pill.grid}</text>
     </g>
   );
 }

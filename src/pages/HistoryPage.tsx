@@ -33,6 +33,7 @@ import {
   getSeriesOpacity,
   hasMeaningfulAverage,
   removeSpikes,
+  SOC_COLOR,
 } from '../lib/chartSeries';
 import HelpTip, { HeadingWithHelp } from '../components/HelpTip';
 import { SeriesLegend } from '../components/SeriesLegend';
@@ -116,7 +117,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean, carEnabled = fals
           title: 'SOC %',
           unit: '%',
           yDomain: [0, 100],
-          fields: [{ field: 'soc', color: '#6366F1' }],
+          fields: [{ field: 'soc', color: SOC_COLOR }],
         },
         {
           key: 'battery-power',

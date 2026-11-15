@@ -1811,6 +1811,11 @@ pub struct Settings {
     /// loop then fetches a display-only list that nothing acts on.
     #[serde(default)]
     pub status_show_car_charging: bool,
+    /// Show when the battery reaches its reserve in the Status page's
+    /// Battery Level card (issue #472). Display only: here rather than in a
+    /// browser's localStorage so every browser and device shares it (#476).
+    #[serde(default)]
+    pub status_show_battery_runtime: bool,
     /// The running top-up, saved before its first write so a restart can
     /// always put the charge settings back.
     #[serde(default, deserialize_with = "deserialize_or_default")]
@@ -2348,6 +2353,7 @@ impl Default for Settings {
             dispatch_hold_native: None,
             octopus_dispatch_charge: false,
             status_show_car_charging: false,
+            status_show_battery_runtime: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
@@ -2857,6 +2863,9 @@ mod tests {
         assert!(s.meter_names.is_empty());
         // Issue #474: the car line is opt-in, so no display-only fetching.
         assert!(!s.status_show_car_charging);
+        // Issue #472: the battery runtime line is opt-in; settings.json since
+        // #476 so every browser shares it.
+        assert!(!s.status_show_battery_runtime);
         // Issue #212 starts with no supplier credentials (which is also "off").
         assert!(s.octopus_api_key.is_empty());
         assert!(s.octopus_account_number.is_empty());
@@ -3105,6 +3114,7 @@ mod tests {
             dispatch_hold_native: None,
             octopus_dispatch_charge: false,
             status_show_car_charging: false,
+            status_show_battery_runtime: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
@@ -3897,6 +3907,7 @@ mod tests {
             dispatch_hold_native: None,
             octopus_dispatch_charge: false,
             status_show_car_charging: false,
+            status_show_battery_runtime: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,

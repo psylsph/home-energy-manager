@@ -10,7 +10,7 @@
  */
 import type { ConnectionState } from './types';
 import type { EnergyFlow, EnergyFlowViewModel, FlowNode, FlowNodeId } from '../types/energyFlow';
-import { FLOW_COLORS, batteryFillFraction, nodeStatus, socColor, visualEndpoints } from './energyFlow';
+import { FLOW_COLORS, UNKNOWN_MODE_LABEL, batteryFillFraction, nodeStatus, socColor, visualEndpoints } from './energyFlow';
 import {
   BATTERY_BARS,
   EV_LEG,
@@ -125,6 +125,8 @@ export type GridTone = 'ok' | 'warn' | 'fault';
 export interface HouseStatusPill {
   /** Full battery mode label, never truncated. */
   mode: string;
+  /** A live, known mode: drawn green like On Grid, else grey (issue #476). */
+  modeActive: boolean;
   grid: string;
   tone: GridTone;
 }
@@ -160,17 +162,25 @@ export function splitPowerValue(value: string): { number: string; unit: string; 
   return { number: m[1], unit: m[2], suffix: m[3] };
 }
 
-/** The top pill: battery mode on the left, connection / grid state on the right. */
+/**
+ * The top pill: battery mode on the left, connection / grid state on the
+ * right. The mode is active while connected and known (not missing or the
+ * inverter's Unknown); a grid fault leaves it active, since the inverter
+ * still runs it (issue #476).
+ */
 export function houseStatusPill(
   mode: string | undefined,
   connectionState: ConnectionState,
   gridFault: boolean,
 ): HouseStatusPill {
   const m = mode ?? '—';
-  if (connectionState === 'reconnecting') return { mode: m, grid: 'Reconnecting', tone: 'warn' };
-  if (connectionState !== 'connected') return { mode: m, grid: 'Disconnected', tone: 'fault' };
-  if (gridFault) return { mode: m, grid: 'Grid Offline', tone: 'fault' };
-  return { mode: m, grid: 'On Grid', tone: 'ok' };
+  // The inverter's own unknown mode keeps its label, with any "(Charging)"
+  // annotation after it.
+  const modeActive = connectionState === 'connected' && Boolean(mode) && !mode?.startsWith(UNKNOWN_MODE_LABEL);
+  if (connectionState === 'reconnecting') return { mode: m, modeActive, grid: 'Reconnecting', tone: 'warn' };
+  if (connectionState !== 'connected') return { mode: m, modeActive, grid: 'Disconnected', tone: 'fault' };
+  if (gridFault) return { mode: m, modeActive, grid: 'Grid Offline', tone: 'fault' };
+  return { mode: m, modeActive, grid: 'On Grid', tone: 'ok' };
 }
 
 /** Number of lit SOC bars on the battery cabinet (rounded, any lit bar shown from 1%). */

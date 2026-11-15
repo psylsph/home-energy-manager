@@ -10,7 +10,7 @@ import {
   YAxis,
 } from 'recharts';
 import { fetchHistory } from '../lib/api';
-import { removeSpikes } from '../lib/chartSeries';
+import { removeSpikes, SOC_COLOR } from '../lib/chartSeries';
 import {
   getHistoryChartGridProps,
   formatHistoryXAxisTick,
@@ -29,7 +29,6 @@ import type { TimePoint } from '../lib/types';
 // preference (Today or Rolling 24H). Same fetch path, spike filter, and axis
 // helpers as the History charts — no parallel data pipeline.
 
-const SOC_COLOR = '#6366F1';
 const FIELD = 'soc';
 
 function chartTitle(scale: 'today' | '24h'): string {

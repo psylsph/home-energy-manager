@@ -1,5 +1,11 @@
 import type { TimePoint } from './types';
 
+/**
+ * Battery SOC on every chart: History, the Battery page and Power. A light
+ * violet, since the old indigo was hard to read on the dark theme (issue #476).
+ */
+export const SOC_COLOR = '#A78BFA';
+
 export function getSeriesOpacity(muted: boolean): number {
   return muted ? 0.22 : 1;
 }

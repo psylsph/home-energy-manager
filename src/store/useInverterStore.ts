@@ -20,6 +20,9 @@ export type BatteryModeKind = 'eco' | 'timed_charge' | 'timed_export' | 'timed_d
 export type BatteryModePending = { kind: BatteryModeKind; enabled: boolean };
 export type EvcConnectionState = 'never_connected' | 'connected' | 'degraded' | 'disconnected';
 
+/** The settings.json toggles the store mirrors, changed through `changeStatusToggle`. */
+export type StatusToggleKey = 'showCarCharging' | 'showBatteryRuntime';
+
 interface InverterState {
   snapshot: InverterSnapshot | null;
   /** When this browser received `snapshot`, in ms on the local clock (#362). */
@@ -114,6 +117,12 @@ interface InverterState {
    * account is set up. Loaded with the nav settings; false until then.
    */
   showCarCharging: boolean;
+  /**
+   * Per settings.json toggle mirrored here, bumped by every user change to
+   * it, so App's settings load can tell its answer is older than the change
+   * and leave that toggle alone (issue #476).
+   */
+  statusToggleRevision: Record<StatusToggleKey, number>;
   /**
    * App's settings fetch has settled (either way), so `showCarCharging` is
    * known. Until then the car line isn't ready, so the Next Charge card waits
@@ -214,7 +223,9 @@ interface InverterState {
   homeExcludesCar: boolean;
   /**
    * Issue #472: show when the battery will reach its reserve in the house
-   * view's Battery Level card. Off by default; persisted to localStorage.
+   * view's Battery Level card. The saved `status_show_battery_runtime`
+   * (settings.json since #476, so every browser shares it), loaded with the
+   * nav settings; false until then.
    */
   showBatteryRuntime: boolean;
   /**
@@ -264,6 +275,8 @@ interface InverterState {
   setCarCharging: (settings: Pick<PollSettings, 'forecast_exclude_load_above_kw' | 'car_charger_current_a'>) => void;
   setMeterLabels: (patch: Partial<{ names: MeterNames; solarArrays: SolarArrayConfig[] }>) => void;
   setShowCarCharging: (show: boolean) => void;
+  /** The user switched one of the settings.json toggles: set it and bump its `statusToggleRevision`. */
+  changeStatusToggle: (key: StatusToggleKey, value: boolean) => void;
   setNavSettingsLoaded: (loaded: boolean) => void;
   setEvcData: (
     power: number,
@@ -362,6 +375,18 @@ function loadThemeMode(): ThemeMode {
   } catch {
     return 'dark';
   }
+}
+
+/**
+ * Show Battery Runtime was a per-browser localStorage flag in v1.17.0; it is
+ * settings.json now (issue #476), loaded by App. Clear the obsolete key and
+ * start off until the settings arrive.
+ */
+function dropOldBatteryRuntimeKey(): false {
+  try {
+    localStorage.removeItem('showBatteryRuntime');
+  } catch { /* ignore */ }
+  return false;
 }
 
 function loadReadOnly(): boolean {
@@ -471,14 +496,6 @@ function loadHomeExcludesCar(): boolean {
   return false;
 }
 
-function loadShowBatteryRuntime(): boolean {
-  try {
-    // Opt-in (issue #472): only the literal "true" turns it on.
-    return localStorage.getItem('showBatteryRuntime') === 'true';
-  } catch { /* ignore */ }
-  return false;
-}
-
 function loadVisualNoiseThreshold(): number {
   try {
     const stored = localStorage.getItem('visualNoiseThreshold');
@@ -582,7 +599,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   energyFlowDisplay: loadEnergyFlowDisplay(),
   showTodayStats: loadShowTodayStats(),
   homeExcludesCar: loadHomeExcludesCar(),
-  showBatteryRuntime: loadShowBatteryRuntime(),
+  showBatteryRuntime: dropOldBatteryRuntimeKey(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
   gridLineWeight: loadGridLineWeight(),
@@ -598,6 +615,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   carCharging: {},
   meterLabels: { names: {}, solarArrays: [] },
   showCarCharging: false,
+  statusToggleRevision: { showCarCharging: 0, showBatteryRuntime: 0 },
   navSettingsLoaded: false,
   evcPower: 0,
   evcChargingState: '',
@@ -697,12 +715,7 @@ export const useInverterStore = create<InverterState>((set) => ({
     } catch { /* ignore */ }
     set({ homeExcludesCar: enabled });
   },
-  setShowBatteryRuntime: (show) => {
-    try {
-      localStorage.setItem('showBatteryRuntime', String(show));
-    } catch { /* ignore */ }
-    set({ showBatteryRuntime: show });
-  },
+  setShowBatteryRuntime: (show) => set({ showBatteryRuntime: show }),
   setVisualNoiseThreshold: (threshold) => {
     try {
       localStorage.setItem('visualNoiseThreshold', String(threshold));
@@ -755,6 +768,11 @@ export const useInverterStore = create<InverterState>((set) => ({
   setCarCharging: (settings) => set({ carCharging: settings }),
   setMeterLabels: (patch) => set((s) => ({ meterLabels: { ...s.meterLabels, ...patch } })),
   setShowCarCharging: (show) => set({ showCarCharging: show }),
+  changeStatusToggle: (key, value) =>
+    set((s) => ({
+      [key]: value,
+      statusToggleRevision: { ...s.statusToggleRevision, [key]: s.statusToggleRevision[key] + 1 },
+    })),
   setNavSettingsLoaded: (loaded) => set({ navSettingsLoaded: loaded }),
   setEvcData: (
     power,

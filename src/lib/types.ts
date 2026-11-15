@@ -396,6 +396,8 @@ export interface PollSettings {
   meter_names?: Record<string, string>;
   /** Show the car's planned Octopus charges in the Next Charge card (issue #474). */
   status_show_car_charging?: boolean;
+  /** Show the battery runtime line in the Battery Level card (issues #472, #476). */
+  status_show_battery_runtime?: boolean;
 }
 
 export interface DiscoveredInverter {

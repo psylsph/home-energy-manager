@@ -12,7 +12,7 @@ import { formatPercent, formatTimestamp } from './lib/format';
 import { buildSystemAlerts } from './lib/gridFault';
 import { socColor } from './lib/energyFlow';
 import { hiddenInReadOnly, visibleNavItems } from './lib/navItems';
-import { useInverterStore } from './store/useInverterStore';
+import { useInverterStore, type StatusToggleKey } from './store/useInverterStore';
 import StatusPage from './pages/StatusPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import UpdateBanner from './components/UpdateBanner';
@@ -326,7 +326,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setNavSettingsLoaded, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setShowBatteryRuntime, setNavSettingsLoaded, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
   const [octopusConfigured, setOctopusConfigured] = useState(false);
 
   // Load navigation-affecting settings on mount. The Octopus page is opt-in:
@@ -340,6 +340,11 @@ function Layout() {
         // `navSettingsLoaded` for ever (issue #474): after a while the page
         // goes on without the settings, and still applies them if they come.
         const giveUp = setTimeout(() => setNavSettingsLoaded(true), NAV_SETTINGS_TIMEOUT_MS);
+        // A toggle the user flips while this is in flight is newer than the
+        // answer (issue #476), so the answer leaves that toggle alone.
+        const revision = useInverterStore.getState().statusToggleRevision;
+        const unchanged = (key: StatusToggleKey) =>
+          useInverterStore.getState().statusToggleRevision[key] === revision[key];
         const res = await apiGet<{ ok: boolean; data: PollSettings }>('/api/settings')
           .finally(() => clearTimeout(giveUp));
         if (res.ok && res.data.hidden_panels) {
@@ -365,7 +370,14 @@ function Layout() {
         );
         setOctopusConfigured(octopusOn);
         // The car line in the Next Charge card (issue #474) needs Octopus.
-        setShowCarCharging(octopusOn && res.data.status_show_car_charging === true);
+        if (unchanged('showCarCharging')) {
+          setShowCarCharging(octopusOn && res.data.status_show_car_charging === true);
+        }
+        // The Battery Level card's runtime line (issue #472), shared by every
+        // browser since #476.
+        if (unchanged('showBatteryRuntime')) {
+          setShowBatteryRuntime(res.ok && res.data.status_show_battery_runtime === true);
+        }
       } catch { /* use defaults */ }
       // Either way the car line's switch is now known (issue #474).
       setNavSettingsLoaded(true);
@@ -373,7 +385,7 @@ function Layout() {
     void load();
     window.addEventListener('octopus-settings-changed', load);
     return () => window.removeEventListener('octopus-settings-changed', load);
-  }, [setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setNavSettingsLoaded]);
+  }, [setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setShowBatteryRuntime, setNavSettingsLoaded]);
 
   // Seed the inverter-temperature alert thresholds from the backend so the
   // SystemAlertBanners render with the saved config. The store is the single

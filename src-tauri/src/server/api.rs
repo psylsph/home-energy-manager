@@ -1892,6 +1892,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "meter_names": settings.meter_names,
             // Issue #474: the car line in the Status page's Next Charge card.
             "status_show_car_charging": settings.status_show_car_charging,
+            // Issue #472/#476: the battery runtime line in the Battery Level card.
+            "status_show_battery_runtime": settings.status_show_battery_runtime,
             // Issue #283: forecast efficiencies consumed by the SOC
             // projection on the Forecast page.
             "forecast_charge_efficiency": settings.forecast_charge_efficiency,
@@ -2390,6 +2392,12 @@ pub async fn update_settings(
             .and_then(|v| v.as_bool())
         {
             persist.status_show_car_charging = v;
+        }
+        if let Some(v) = body
+            .get("status_show_battery_runtime")
+            .and_then(|v| v.as_bool())
+        {
+            persist.status_show_battery_runtime = v;
         }
         if let Some(v) = body.get("meter_names") {
             persist.meter_names = crate::settings::parse_meter_names(v)?;
@@ -9190,6 +9198,7 @@ pub(crate) async fn get_battery_runtime_at(
                 schedule
             },
             battery_power_w: f64::from(snap.battery_power),
+            live_solar_w: f64::from(snap.solar_power),
             discharge_paused,
             profile_days: payload.consumption_days_observed,
             solar_known: !payload.solar.is_empty(),
@@ -22219,6 +22228,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn battery_runtime_counts_the_live_sun_for_the_rest_of_this_hour() {
+        // Issue #476: charging off sun the forecast doesn't expect. Without
+        // the live reading there's no time; with it the charge is seen.
+        with_isolated_config_dir_async(|| async {
+            let now = runtime_now();
+            let state = runtime_state(50, "runtime-live-sun-off").await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .battery_power = -2000;
+            let (_, Json(body)) = get_battery_runtime_at(state, now).await;
+            assert_eq!(body["data"]["outcome"], "charging", "{body}");
+
+            let state = runtime_state(50, "runtime-live-sun-on").await;
+            {
+                let mut snap = state.latest_snapshot.lock().await;
+                let snap = snap.as_mut().unwrap();
+                snap.battery_power = -2000;
+                snap.solar_power = 3000;
+            }
+            let (_, Json(body)) = get_battery_runtime_at(state, now).await;
+            assert_eq!(body["data"]["outcome"], "empty_at", "{body}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn concurrent_battery_runtime_requests_share_one_answer() {
         // Every open client asks at the same 2-point SOC move; on a Pi each
         // forecast build is costly, so the second waits for the first's.
@@ -22315,6 +22354,45 @@ pub(crate) mod tests {
             .await
             .is_err());
             assert!(crate::settings::Settings::load().status_show_car_charging);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_battery_runtime_switch_saves_and_reads_back() {
+        // Issue #476: Show Battery Runtime lives in settings.json, so every
+        // browser and device sees the same choice.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["status_show_battery_runtime"], false);
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "status_show_battery_runtime": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(crate::settings::Settings::load().status_show_battery_runtime);
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["status_show_battery_runtime"], true);
+            // Anything but a boolean leaves it alone, as does a save of
+            // other fields.
+            for body in [
+                json!({ "status_show_battery_runtime": "false" }),
+                json!({ "status_show_battery_runtime": null }),
+                json!({ "forecast_plan_strategy": "cheapest" }),
+            ] {
+                let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::OK);
+                assert!(crate::settings::Settings::load().status_show_battery_runtime);
+            }
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "status_show_battery_runtime": false })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!crate::settings::Settings::load().status_show_battery_runtime);
         })
         .await;
     }
