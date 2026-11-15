@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.17.1] - 2026-11-15
+
+### Changed
+
+- **Show Battery Runtime is now one setting for every browser and device.** It used to be remembered separately by each browser, so turning it on in the app left it off on your phone. It's now saved with your other settings — if you turned it on in 1.17.0, turn it on once more in Settings → Panel Controls.
+- **The battery runtime notices when the sun beats the forecast.** On a sunny morning with a dull forecast, the Battery Level card now uses the sunshine you're actually getting for the rest of the hour, so it can give a time instead of nothing.
+- **The SOC line is easier to read.** Battery charge on the History, Battery and Power charts is now a lighter violet that stands out on the dark theme. (#476)
+
+### Fixed
+
+- **The house view shows the battery mode as active.** The mode in the top pill, such as Eco, is now green like On Grid while it's running, instead of grey as if it were off. The grid state is shown by its colour alone. (#476)
+- **The Battery Level card no longer goes blank when it can't give a time.** With Show Battery Runtime on, it now says "Unable to calculate" (with the reason behind the ⓘ) or "Discharge paused" instead of showing nothing.
+- **Settings switches saved to your settings can't end up out of step.** Clicking Show Battery Runtime or Show Car Charging Slots twice quickly, or while the page was still loading, could leave the switch showing one thing and the saved setting another.
+
 ## [1.17.0] - 2026-11-14
 
 ### Added
