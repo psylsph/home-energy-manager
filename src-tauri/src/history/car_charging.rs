@@ -1,10 +1,14 @@
 //! Estimating the car's charging from home power (issue #454).
 //!
 //! In a house where nothing but the car pushes home load past a known level,
-//! any minute above that level is the car charging, drawing a fixed block of
-//! `charger amps × grid voltage`. This module is the single definition of
-//! that rule: History, the Power page, Today, the forecast and the report
-//! endpoints share its SQL, so they agree to the minute. The Telegram `/today`
+//! a load that stays above that level for [`MIN_RUN_MINUTES`] minutes or more
+//! is the car charging, drawing a fixed block of `charger amps × grid
+//! voltage`; a shorter spike is the house. This module is the single definition of
+//! that rule for recorded history: History, the Power page's charts, Today,
+//! the forecast and the report endpoints share its reader, so they agree to
+//! the minute. The live Power and Status tiles estimate from the current
+//! reading alone (`src/lib/carCharging.ts`), so a short spike shows there
+//! for as long as it lasts. The Telegram `/today`
 //! summary and the daily report integrate the same per-row figure with their
 //! own trapezoid and gap rule (`alerts::report`), so their kWh and cost can
 //! differ slightly from the Power page's for the same day.
@@ -92,49 +96,243 @@ pub fn car_power_w(home_w: f64, grid_v: Option<f64>, cfg: &CarChargingConfig) ->
     (cfg.amps * effective_voltage(grid_v)).min(home_w)
 }
 
-/// SQL for one minute's car power, over `readings r` left-joined to
-/// `evc_power_minutes e`: the charger's measured power where it recorded the
-/// minute, else the block. `?3` is the threshold in watts and `?4` the amps.
-/// It is the arithmetic of [`car_power_w`] (a test feeds both the same rows),
-/// clamped to `[0, home_power]` so the house never goes negative. A NULL
-/// `home_power` gives NULL, and the callers drop such rows.
-const CAR_POWER_SQL: &str = "MAX(0, MIN(COALESCE(e.power_w, \
-    CASE WHEN r.home_power > ?3 THEN ?4 * \
-        (CASE WHEN r.grid_voltage BETWEEN 180 AND 280 THEN r.grid_voltage ELSE 230 END) \
-    ELSE 0 END), r.home_power))";
+/// Home power must stay over the threshold for this many wall-clock minutes
+/// running before it is the car, so a few minutes of oven, kettle and shower
+/// together never are. Like the "car charging started" alert's three minutes
+/// (`alerts::car_charging::START_AFTER_SECS`), though judged on whole
+/// minutes' averages rather than from the first poll.
+pub const MIN_RUN_MINUTES: i64 = 3;
 
-/// The per-minute value expression for a derived car field, or `None` for any
-/// other name. Both are constant strings, so no input reaches the SQL.
-fn series_sql(field: &str) -> Option<String> {
-    match field {
-        CAR_POWER_FIELD => Some(CAR_POWER_SQL.to_string()),
-        HOME_EXCL_CAR_POWER_FIELD => Some(format!("(r.home_power - {CAR_POWER_SQL})")),
-        _ => None,
+/// The span, first minute to last, of a run of minutes that has lasted
+/// [`MIN_RUN_MINUTES`] minutes.
+const MIN_RUN_SPAN_SECS: i64 = (MIN_RUN_MINUTES - 1) * 60;
+
+/// How far past each end of a window the car rule reads, so whether a reading
+/// is in a long enough run never depends on the window asked for: a run that
+/// reaches [`MIN_RUN_MINUTES`] from a reading does so within the span plus one
+/// gap (each step between its readings is at most
+/// [`MAX_INTEGRATION_GAP_SECS`]).
+const RUN_PAD_SECS: i64 = MIN_RUN_SPAN_SECS + MAX_INTEGRATION_GAP_SECS;
+
+/// One reading as the car rule reads it, with the columns its callers need.
+#[derive(Debug, Clone, PartialEq)]
+struct Reading {
+    timestamp: i64,
+    home_w: Option<f64>,
+    grid_v: Option<f64>,
+    /// The GivEnergy charger's recorded power for the reading's minute, when
+    /// HEM recorded one.
+    evc_w: Option<f64>,
+    solar_w: Option<f64>,
+    pv1_w: Option<f64>,
+    pv2_w: Option<f64>,
+    battery_w: Option<f64>,
+    /// Positive when exporting.
+    grid_w: Option<f64>,
+    soc: Option<f64>,
+    home_counter_kwh: Option<f64>,
+    import_rate: Option<f64>,
+}
+
+impl Reading {
+    fn minute(&self) -> i64 {
+        self.timestamp - self.timestamp.rem_euclid(60)
+    }
+
+    /// The car's power once the run rule has decided: the charger's measured
+    /// power where it recorded the minute, else the block for a reading over
+    /// the threshold in a long enough run and nothing otherwise, kept within
+    /// `[0, home]` so the house never goes negative. `None` with no home
+    /// power, and the callers drop or pass on such readings.
+    fn car_w(&self, sustained: bool, cfg: &CarChargingConfig) -> Option<f64> {
+        let home = self.home_w?;
+        let raw = match self.evc_w {
+            Some(w) => w,
+            None if sustained => car_power_w(home, self.grid_v, cfg),
+            None => 0.0,
+        };
+        Some(raw.min(home).max(0.0))
     }
 }
 
-/// The daily report's row query with the car's power as a ninth column
-/// (issue #454): `?1`/`?2` the day, `?3`/`?4` the threshold and amps. A row
-/// with no home power has no car figure.
-pub(super) fn report_rows_sql() -> String {
-    format!(
-        "SELECT r.timestamp, r.solar_power, r.pv1_power, r.pv2_power, \
-         r.battery_power, r.grid_power, r.home_power, r.soc, \
-         CASE WHEN r.home_power IS NULL THEN NULL ELSE {CAR_POWER_SQL} END \
-         FROM readings r \
-         LEFT JOIN evc_power_minutes e ON e.timestamp = r.timestamp - (r.timestamp % 60) \
-         WHERE r.timestamp >= ?1 AND r.timestamp < ?2 \
-         ORDER BY r.timestamp"
-    )
+/// Splits readings, oldest first, into wall-clock minutes and runs of minutes
+/// over the threshold, and decides each reading's car power. A minute is over
+/// when its readings' average home power is above the threshold, unless the
+/// GivEnergy charger recorded itself idle in it (it has shown the load was
+/// the house). A run is back-to-back minutes over; a minute that isn't, one
+/// with no home power, or a gap over [`MAX_INTEGRATION_GAP_SECS`] ends it. A
+/// run is the car only once its first and last minutes span
+/// [`MIN_RUN_MINUTES`]; until then its readings wait in `pending`, which a
+/// run that never gets there gives up as the house. Working on minutes keeps
+/// history polled every few seconds to the same rule as the one-row-a-minute
+/// table: a 61-second burst across three minute edges is still one minute
+/// over at most. Readings come out in the order they went in.
+struct RunFilter<'a> {
+    cfg: &'a CarChargingConfig,
+    /// The readings of the minute being gathered.
+    minute: Vec<Reading>,
+    /// The last closed minute and whether it was over.
+    last: Option<(i64, bool)>,
+    /// The current run's first minute and whether it has lasted long enough.
+    run: Option<(i64, bool)>,
+    pending: Vec<Reading>,
+}
+
+impl<'a> RunFilter<'a> {
+    fn new(cfg: &'a CarChargingConfig) -> Self {
+        Self {
+            cfg,
+            minute: Vec::new(),
+            last: None,
+            run: None,
+            pending: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, reading: Reading, emit: &mut impl FnMut(Reading, Option<f64>)) {
+        if self
+            .minute
+            .first()
+            .is_some_and(|r| r.minute() != reading.minute())
+        {
+            self.close_minute(emit);
+        }
+        self.minute.push(reading);
+    }
+
+    /// Ends the input: the last minute is closed and a run still too short is
+    /// the house's.
+    fn finish(&mut self, emit: &mut impl FnMut(Reading, Option<f64>)) {
+        self.close_minute(emit);
+        self.flush(emit);
+    }
+
+    fn close_minute(&mut self, emit: &mut impl FnMut(Reading, Option<f64>)) {
+        let readings = std::mem::take(&mut self.minute);
+        let Some(minute) = readings.first().map(Reading::minute) else {
+            return;
+        };
+        let homes: Vec<f64> = readings.iter().filter_map(|r| r.home_w).collect();
+        let charger_idle = readings
+            .first()
+            .and_then(|r| r.evc_w)
+            .is_some_and(|w| w <= crate::alerts::car_charging::MEASURED_FLOOR_W);
+        let over = !homes.is_empty()
+            && !charger_idle
+            && (homes.iter().sum::<f64>() / homes.len() as f64).partial_cmp(&self.cfg.threshold_w)
+                == Some(std::cmp::Ordering::Greater);
+        let continues = over
+            && self.last.is_some_and(|(prev, was_over)| {
+                was_over && minute - prev <= MAX_INTEGRATION_GAP_SECS
+            });
+        self.last = Some((minute, over));
+        if !continues {
+            self.flush(emit);
+            self.run = over.then_some((minute, false));
+        }
+        match self.run {
+            None => self.emit_all(readings, false, emit),
+            Some((_, true)) => self.emit_all(readings, true, emit),
+            Some((first, false)) => {
+                self.pending.extend(readings);
+                if minute - first >= MIN_RUN_SPAN_SECS {
+                    self.run = Some((first, true));
+                    let pending = std::mem::take(&mut self.pending);
+                    self.emit_all(pending, true, emit);
+                }
+            }
+        }
+    }
+
+    /// Gives up a run that ended short: its readings are the house's.
+    fn flush(&mut self, emit: &mut impl FnMut(Reading, Option<f64>)) {
+        let pending = std::mem::take(&mut self.pending);
+        self.emit_all(pending, false, emit);
+        self.run = None;
+    }
+
+    fn emit_all(
+        &self,
+        readings: Vec<Reading>,
+        sustained: bool,
+        emit: &mut impl FnMut(Reading, Option<f64>),
+    ) {
+        for r in readings {
+            let car = r.car_w(sustained, self.cfg);
+            emit(r, car);
+        }
+    }
+}
+
+/// Every reading in `[from_ts, to_ts)`, oldest first, with the car's power
+/// for it (`None` without a home power). The one place the car rule is
+/// applied, behind History, the energy and cost figures, the forecast's
+/// minutes and the daily report, so they agree to the reading. Reads
+/// [`RUN_PAD_SECS`] beyond each end so a run crossing an edge is judged whole,
+/// and streams, holding back only a run still too short to call.
+fn for_each_car_reading(
+    conn: &Connection,
+    from_ts: i64,
+    to_ts: i64,
+    cfg: &CarChargingConfig,
+    mut f: impl FnMut(Reading, Option<f64>),
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT r.timestamp, r.home_power, r.grid_voltage, e.power_w, \
+                    r.solar_power, r.pv1_power, r.pv2_power, r.battery_power, \
+                    r.grid_power, r.soc, r.home_energy_today_kwh, r.import_rate \
+             FROM readings r \
+             LEFT JOIN evc_power_minutes e ON e.timestamp = r.timestamp - (r.timestamp % 60) \
+             WHERE r.timestamp >= ?1 AND r.timestamp < ?2 \
+             ORDER BY r.timestamp",
+        )
+        .map_err(|e| format!("Failed to prepare car charging query: {e}"))?;
+    let rows = stmt
+        .query_map(
+            params![
+                from_ts.saturating_sub(RUN_PAD_SECS),
+                to_ts.saturating_add(RUN_PAD_SECS)
+            ],
+            |row| {
+                Ok(Reading {
+                    timestamp: row.get(0)?,
+                    home_w: row.get(1)?,
+                    grid_v: row.get(2)?,
+                    evc_w: row.get(3)?,
+                    solar_w: row.get(4)?,
+                    pv1_w: row.get(5)?,
+                    pv2_w: row.get(6)?,
+                    battery_w: row.get(7)?,
+                    grid_w: row.get(8)?,
+                    soc: row.get(9)?,
+                    home_counter_kwh: row.get(10)?,
+                    import_rate: row.get(11)?,
+                })
+            },
+        )
+        .map_err(|e| format!("Car charging query failed: {e}"))?;
+    let mut filter = RunFilter::new(cfg);
+    let mut emit = |r: Reading, car: Option<f64>| {
+        if (from_ts..to_ts).contains(&r.timestamp) {
+            f(r, car);
+        }
+    };
+    for row in rows {
+        let row = row.map_err(|e| format!("Car charging query failed: {e}"))?;
+        filter.push(row, &mut emit);
+    }
+    filter.finish(&mut emit);
+    Ok(())
 }
 
 /// True for the derived car fields.
 pub fn is_car_field(field: &str) -> bool {
-    series_sql(field).is_some()
+    matches!(field, CAR_POWER_FIELD | HOME_EXCL_CAR_POWER_FIELD)
 }
 
-/// One derived car series over `[start_ts, end_ts)`, averaged per bucket.
-/// `None` when `field` isn't a car field.
+/// One derived car series over `[start_ts, end_ts)`, averaged per bucket over
+/// the readings with a home power. `None` when `field` isn't a car field.
 pub(super) fn query_series(
     conn: &Connection,
     field: &str,
@@ -143,29 +341,64 @@ pub(super) fn query_series(
     end_ts: i64,
     cfg: &CarChargingConfig,
 ) -> Option<Result<Vec<TimePoint>, String>> {
-    let expr = series_sql(field)?;
-    let sql = format!(
-        "SELECT ((r.timestamp / {bucket_secs}) * {bucket_secs}) * 1000 AS t_bucket, \
-                AVG({expr}) AS v \
-         FROM readings r \
-         LEFT JOIN evc_power_minutes e ON e.timestamp = r.timestamp - (r.timestamp % 60) \
-         WHERE r.timestamp >= ?1 AND r.timestamp < ?2 AND r.home_power IS NOT NULL \
-         GROUP BY t_bucket ORDER BY t_bucket"
-    );
-    let run = || -> rusqlite::Result<Vec<TimePoint>> {
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            params![start_ts, end_ts, cfg.threshold_w, cfg.amps],
-            |row| {
-                Ok(TimePoint {
-                    t: row.get(0)?,
-                    v: row.get(1)?,
+    if !is_car_field(field) {
+        return None;
+    }
+    let house = field == HOME_EXCL_CAR_POWER_FIELD;
+    // Per bucket: its start, the sum and the count.
+    let mut buckets: Vec<(i64, f64, u32)> = Vec::new();
+    let run = for_each_car_reading(conn, start_ts, end_ts, cfg, |r, car| {
+        let (Some(home), Some(car)) = (r.home_w, car) else {
+            return;
+        };
+        let v = if house { home - car } else { car };
+        let bucket = r.timestamp.div_euclid(bucket_secs) * bucket_secs;
+        match buckets.last_mut() {
+            Some(last) if last.0 == bucket => {
+                last.1 += v;
+                last.2 += 1;
+            }
+            _ => buckets.push((bucket, v, 1)),
+        }
+    });
+    Some(
+        run.map(|()| {
+            buckets
+                .into_iter()
+                .map(|(bucket, sum, n)| TimePoint {
+                    t: bucket * 1000,
+                    v: sum / f64::from(n),
                 })
-            },
-        )?;
-        rows.collect()
-    };
-    Some(run().map_err(|e| format!("Query failed for {field}: {e}")))
+                .collect()
+        })
+        .map_err(|e| format!("Query failed for {field}: {e}")),
+    )
+}
+
+/// The daily report's rows over `[start_ts, end_ts)` with the car's power
+/// (issue #454). A row with no home power has no car figure.
+pub(super) fn report_rows(
+    conn: &Connection,
+    start_ts: i64,
+    end_ts: i64,
+    cfg: &CarChargingConfig,
+) -> Result<Vec<crate::alerts::report::ReadingRow>, String> {
+    let int = |v: Option<f64>| v.map(|v| v as i32);
+    let mut out = Vec::new();
+    for_each_car_reading(conn, start_ts, end_ts, cfg, |r, car| {
+        out.push(crate::alerts::report::ReadingRow {
+            timestamp: r.timestamp,
+            solar_power: int(r.solar_w),
+            pv1_power: int(r.pv1_w),
+            pv2_power: int(r.pv2_w),
+            battery_power: int(r.battery_w),
+            grid_power: int(r.grid_w),
+            home_power: int(r.home_w),
+            soc: r.soc.map(|v| v as f32),
+            car_power: car,
+        });
+    })?;
+    Ok(out)
 }
 
 /// True for the derived car energy fields.
@@ -176,7 +409,7 @@ pub fn is_car_energy_field(field: &str) -> bool {
 /// One minute-table reading with the car's power worked out for it.
 struct CarRow {
     timestamp: i64,
-    /// The car's power, W (`CAR_POWER_SQL`).
+    /// The car's power, W ([`for_each_car_reading`]).
     car_w: f64,
     /// Grid power, W (positive when exporting); 0 when the reading has none.
     grid_w: f64,
@@ -196,40 +429,25 @@ fn credited_secs(prev_ts: i64, ts: i64) -> Option<i64> {
 }
 
 /// Every reading with a home power in `[from_ts, to_ts)`, oldest first, with
-/// the car's power from the charger's own minute where HEM recorded one and
-/// else the estimate. The one query behind the car's energy, cost and series.
+/// the car's power. The one walk behind the car's energy and cost.
 fn car_rows(
     conn: &Connection,
     from_ts: i64,
     to_ts: i64,
     cfg: &CarChargingConfig,
 ) -> Result<Vec<CarRow>, String> {
-    let sql = format!(
-        "SELECT r.timestamp, {CAR_POWER_SQL}, COALESCE(r.grid_power, 0), \
-                r.home_energy_today_kwh, r.import_rate \
-         FROM readings r \
-         LEFT JOIN evc_power_minutes e ON e.timestamp = r.timestamp - (r.timestamp % 60) \
-         WHERE r.timestamp >= ?1 AND r.timestamp < ?2 AND r.home_power IS NOT NULL \
-         ORDER BY r.timestamp"
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("Failed to prepare car energy query: {e}"))?;
-    let rows = stmt
-        .query_map(params![from_ts, to_ts, cfg.threshold_w, cfg.amps], |row| {
-            Ok(CarRow {
-                timestamp: row.get(0)?,
-                car_w: row.get(1)?,
-                grid_w: row.get(2)?,
-                home_counter_kwh: row.get(3)?,
-                import_rate: row
-                    .get::<_, Option<f64>>(4)?
-                    .filter(|r| r.is_finite() && *r >= 0.0),
-            })
-        })
-        .map_err(|e| format!("Car energy query failed: {e}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| format!("Car energy query failed: {e}"))
+    let mut out = Vec::new();
+    for_each_car_reading(conn, from_ts, to_ts, cfg, |r, car| {
+        let Some(car_w) = car else { return };
+        out.push(CarRow {
+            timestamp: r.timestamp,
+            car_w,
+            grid_w: r.grid_w.unwrap_or(0.0),
+            home_counter_kwh: r.home_counter_kwh,
+            import_rate: r.import_rate.filter(|r| r.is_finite() && *r >= 0.0),
+        });
+    })?;
+    Ok(out)
 }
 
 /// A gap between two readings longer than this is not bridged when
@@ -323,8 +541,10 @@ pub(super) fn energy_points(walk: &EnergyWalk, field: &str) -> Option<Vec<TimePo
 impl super::HistoryDb {
     /// The car's energy over a window, in kWh: each interval between two
     /// readings is credited with the earlier one's car power, a gap over five
-    /// minutes or a step back adds nothing, and the window's edges are not
-    /// padded, so the figure covers exactly the readings inside it.
+    /// minutes or a step back adds nothing, and nothing is added at the
+    /// window's edges, so the figure covers only the intervals inside it
+    /// (whether a reading is the car still looks a few minutes past them; see
+    /// [`MIN_RUN_MINUTES`]).
     pub fn car_kwh_in_window(
         &self,
         window: &super::HistoryWindow,
@@ -537,11 +757,11 @@ impl super::HistoryDb {
 
 impl super::HistoryDb {
     /// The estimated car, one entry per wall-clock minute since `since_ts`
-    /// whose home power was over the threshold and which the GivEnergy charger
-    /// did not record (a measured minute uses its own figure): the average of
-    /// the minute's block, in watts, sorted by minute. For the forecast's
-    /// consumption profile (issue #454), which takes the same rule as History
-    /// and the reports.
+    /// whose home power was over the threshold for long enough to be the car
+    /// and which the GivEnergy charger did not record (a measured minute uses
+    /// its own figure): the average of the minute's block, in watts, sorted by
+    /// minute. For the forecast's consumption profile (issue #454), which
+    /// takes the same rule as History and the reports.
     pub fn car_block_minutes_since(
         &self,
         cfg: &CarChargingConfig,
@@ -552,34 +772,31 @@ impl super::HistoryDb {
             .conn
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
-        // Minutes the charger recorded are left out (`e.timestamp IS NULL`),
-        // so `CAR_POWER_SQL`'s measured branch never applies and it is the
-        // block alone. `?2` is the unbounded end.
-        let sql = format!(
-            "SELECT r.timestamp - (r.timestamp % 60) AS minute, AVG({CAR_POWER_SQL}) AS w \
-             FROM readings r \
-             LEFT JOIN evc_power_minutes e ON e.timestamp = r.timestamp - (r.timestamp % 60) \
-             WHERE r.timestamp >= ?1 AND r.timestamp < ?2 \
-               AND e.timestamp IS NULL AND r.home_power IS NOT NULL \
-             GROUP BY minute HAVING w > 0 \
-             ORDER BY minute"
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("Failed to prepare car block query: {e}"))?;
-        let rows = stmt
-            .query_map(
-                params![since_ts, i64::MAX, cfg.threshold_w, cfg.amps],
-                |row| {
-                    Ok(EvPowerMinute {
-                        timestamp: row.get(0)?,
-                        power_w: row.get(1)?,
-                    })
-                },
-            )
-            .map_err(|e| format!("Car block query failed: {e}"))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| format!("Failed to read car block minutes: {e}"))
+        // Per minute: its start, the sum and the count. Minutes the charger
+        // recorded are left out, so it is the block alone.
+        let mut minutes: Vec<(i64, f64, u32)> = Vec::new();
+        for_each_car_reading(&conn, since_ts, i64::MAX, cfg, |r, car| {
+            let Some(car) = car.filter(|_| r.evc_w.is_none()) else {
+                return;
+            };
+            let minute = r.minute();
+            match minutes.last_mut() {
+                Some(last) if last.0 == minute => {
+                    last.1 += car;
+                    last.2 += 1;
+                }
+                _ => minutes.push((minute, car, 1)),
+            }
+        })
+        .map_err(|e| format!("Failed to read car block minutes: {e}"))?;
+        Ok(minutes
+            .into_iter()
+            .map(|(timestamp, sum, n)| EvPowerMinute {
+                timestamp,
+                power_w: sum / f64::from(n),
+            })
+            .filter(|m| m.power_w > 0.0)
+            .collect())
     }
 
     /// [`Self::car_block_minutes_since`] for the forecast, which carries on

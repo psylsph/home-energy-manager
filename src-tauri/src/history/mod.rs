@@ -3998,7 +3998,7 @@ impl HistoryDb {
 
     /// [`Self::get_readings_for_date`] with each row's `car_power` filled in
     /// (issue #454) when a car-charging config is given: a polled charger's
-    /// measured power for the minute, else the estimate, from the same SQL
+    /// measured power for the minute, else the estimate, from the same reader
     /// History uses. `None` leaves `car_power` empty and the query as it was.
     pub fn get_readings_for_date_with_car(
         &self,
@@ -4032,30 +4032,20 @@ impl HistoryDb {
             .lock()
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
-        let sql = match car {
-            None => "SELECT timestamp, solar_power, pv1_power, pv2_power, \
-                 battery_power, grid_power, home_power, soc, NULL \
+        if let Some(cfg) = car {
+            return car_charging::report_rows(&conn, start_ts, end_ts, cfg);
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, solar_power, pv1_power, pv2_power, \
+                 battery_power, grid_power, home_power, soc \
                  FROM readings \
                  WHERE timestamp >= ?1 AND timestamp < ?2 \
-                 ORDER BY timestamp"
-                .to_string(),
-            Some(_) => car_charging::report_rows_sql(),
-        };
-        let mut stmt = conn
-            .prepare(&sql)
+                 ORDER BY timestamp",
+            )
             .map_err(|e| format!("Failed to prepare query: {e}"))?;
-        let query_params: Vec<rusqlite::types::Value> = match car {
-            None => vec![start_ts.into(), end_ts.into()],
-            Some(cfg) => vec![
-                start_ts.into(),
-                end_ts.into(),
-                cfg.threshold_w.into(),
-                cfg.amps.into(),
-            ],
-        };
-
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(query_params), |row| {
+            .query_map(rusqlite::params![start_ts, end_ts], |row| {
                 Ok(crate::alerts::report::ReadingRow {
                     timestamp: row.get(0)?,
                     solar_power: row.get::<_, Option<f64>>(1)?.map(|v| v as i32),
@@ -4065,7 +4055,7 @@ impl HistoryDb {
                     grid_power: row.get::<_, Option<f64>>(5)?.map(|v| v as i32),
                     home_power: row.get::<_, Option<f64>>(6)?.map(|v| v as i32),
                     soc: row.get::<_, Option<f64>>(7)?.map(|v| v as f32),
-                    car_power: row.get::<_, Option<f64>>(8)?,
+                    car_power: None,
                 })
             })
             .map_err(|e| format!("Failed to query readings: {e}"))?;

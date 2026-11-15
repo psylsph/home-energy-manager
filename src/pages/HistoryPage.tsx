@@ -223,7 +223,7 @@ function getCharts(tab: MetricTab, hasStandingCharge: boolean, carEnabled = fals
             title: 'Load Power (W)',
             unit: 'W',
             description: 'Car charging is estimated from your load.',
-            help: 'The car is estimated from the home power above your car charging threshold, as a block of charger current times grid voltage, and taken out of Home. A polled GivEnergy charger\'s measured power is used instead. Changing the threshold or charger current in Settings re-works the past history too.',
+            help: 'The car is estimated from the home power above your car charging threshold for three minutes or more, as a block of charger current times grid voltage, and taken out of Home. A polled GivEnergy charger\'s measured power is used instead. Changing the threshold or charger current in Settings re-works the past history too.',
             fields: [
               { field: '_home_excl_car_power', color: '#14B8A6', label: 'Home (Excl. Car)' },
               { field: '_car_power', color: '#A78BFA', label: 'Car Charging' },

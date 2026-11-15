@@ -128,7 +128,8 @@ function EnergyBalanceBarsInner({ snapshot }: Props) {
           {carKwh != null && (
             <>
               {' '}Car Charging is an estimate taken out of Home Use: the home
-              load above your car charging threshold, as a block of the charger
+              load above your car charging threshold for three minutes or more,
+              as a block of the charger
               current at the grid voltage, or a polled GivEnergy charger's own
               power. The Out total is unchanged.
             </>
