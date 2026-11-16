@@ -9055,7 +9055,8 @@ const BATTERY_RUNTIME_SOC_MOVE: i16 = 2;
 pub struct BatteryRuntimeCache {
     computed_at: i64,
     soc: u8,
-    charging: bool,
+    /// Charging, idle or discharging now, as `battery_direction` says.
+    direction: i8,
     /// The schedule and battery settings it simulated, as text.
     key: String,
     value: Value,
@@ -9097,6 +9098,15 @@ fn battery_runtime_key(
     .to_string()
 }
 
+/// Whether a cached answer names a time (`at`, `earliest`, `latest`) that
+/// has gone by: the card would hide it, so build a fresh one (issue #472).
+fn runtime_time_passed(value: &Value, now_ts: i64) -> bool {
+    ["at", "earliest", "latest"]
+        .iter()
+        .filter_map(|k| value.get(*k).and_then(Value::as_i64))
+        .any(|t| t < now_ts)
+}
+
 fn battery_runtime_unknown(reason: &str, now: i64) -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
@@ -9133,7 +9143,7 @@ pub(crate) async fn get_battery_runtime_at(
     {
         return battery_runtime_unknown("no_battery_capacity", now_ts);
     }
-    let charging = crate::forecast::runtime::is_charging(f64::from(snapshot.battery_power));
+    let direction = crate::forecast::runtime::battery_direction(f64::from(snapshot.battery_power));
     let timed_export = state.timed_export_config.lock().await.clone();
     let te_slots = if timed_export.schedule_enabled {
         timed_export.slots.clone()
@@ -9169,8 +9179,9 @@ pub(crate) async fn get_battery_runtime_at(
         // request, not a clock step.
         if (-BATTERY_RUNTIME_WAIT_SECS..BATTERY_RUNTIME_REUSE_SECS).contains(&age)
             && (i16::from(cached.soc) - i16::from(snapshot.soc)).abs() < BATTERY_RUNTIME_SOC_MOVE
-            && cached.charging == charging
+            && cached.direction == direction
             && cached.key == key
+            && !runtime_time_passed(&cached.value, now_ts)
         {
             return (
                 StatusCode::OK,
@@ -9231,6 +9242,7 @@ pub(crate) async fn get_battery_runtime_at(
             },
             battery_power_w: f64::from(snap.battery_power),
             live_solar_w: f64::from(snap.solar_power),
+            live_home_w: f64::from(snap.home_power),
             discharge_paused,
             profile_days: payload.consumption_days_observed,
             solar_known: !payload.solar.is_empty(),
@@ -9251,7 +9263,7 @@ pub(crate) async fn get_battery_runtime_at(
     *cache = Some(BatteryRuntimeCache {
         computed_at: now_ts,
         soc: snapshot.soc,
-        charging,
+        direction,
         key,
         value: value.clone(),
     });
@@ -22345,6 +22357,67 @@ pub(crate) mod tests {
             let later = now + chrono::Duration::minutes(2);
             let (_, Json(body)) = get_battery_runtime_at(state.clone(), later).await;
             assert_eq!(body["data"]["computed_at"], later.timestamp());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_rebuilds_when_the_battery_changes_direction() {
+        // Issue #472: charging to discharging inside the five minutes must
+        // not keep the charging answer on screen.
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(50, "runtime-direction").await;
+            let now = runtime_now();
+            let set_power = |watts: i32| {
+                let state = state.clone();
+                async move {
+                    state
+                        .latest_snapshot
+                        .lock()
+                        .await
+                        .as_mut()
+                        .unwrap()
+                        .battery_power = watts;
+                }
+            };
+            set_power(-2000).await;
+            let (_, Json(first)) = get_battery_runtime_at(state.clone(), now).await;
+            assert_eq!(first["data"]["computed_at"], now.timestamp());
+            // Still charging: reused.
+            let later = now + chrono::Duration::minutes(1);
+            let (_, Json(same)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(same["data"]["computed_at"], now.timestamp());
+            // Discharging: rebuilt at once.
+            set_power(667).await;
+            let later = now + chrono::Duration::minutes(2);
+            let (_, Json(flipped)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(flipped["data"]["computed_at"], later.timestamp());
+            // Idle: rebuilt again.
+            set_power(0).await;
+            let later = now + chrono::Duration::minutes(3);
+            let (_, Json(idle)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(idle["data"]["computed_at"], later.timestamp());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn battery_runtime_rebuilds_once_the_time_it_gave_has_passed() {
+        // Issue #472: a cached time that has gone by would leave the card
+        // blank until the five minutes ran out.
+        with_isolated_config_dir_async(|| async {
+            let state = runtime_state(50, "runtime-time-passed").await;
+            let now = runtime_now();
+            let (_, Json(first)) = get_battery_runtime_at(state.clone(), now).await;
+            let at = first["data"]["at"].as_i64().expect("a time");
+            // Before it: reused.
+            let before = now + chrono::Duration::seconds(30);
+            assert!(before.timestamp() < at);
+            let (_, Json(same)) = get_battery_runtime_at(state.clone(), before).await;
+            assert_eq!(same["data"]["computed_at"], now.timestamp());
+            // Pass it, still inside the five minutes and the SOC unmoved.
+            assert!(runtime_time_passed(&first["data"], at + 1));
+            assert!(!runtime_time_passed(&first["data"], at));
         })
         .await;
     }

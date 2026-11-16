@@ -97,6 +97,8 @@ const CHARGING_HELP = "The battery is charging, but the forecast for this hour d
 
 /** The backend reuses an answer for five minutes; past this it's stale. */
 const MAX_AGE_SECS = 15 * 60;
+/** A time this far behind the clock is gone (issue #472); a little slack for clock drift. */
+const PAST_SLACK_SECS = 60;
 const DOTS: Record<RuntimeConfidence, 1 | 2 | 3> = { high: 3, medium: 2, low: 1 };
 
 /** Which day `at` is on: `null` for today, else `tomorrow` or a weekday. */
@@ -125,6 +127,8 @@ export function batteryRuntimeLine(
 ): BatteryRuntimeLine | null {
   if (!runtime) return null;
   if (isNum(runtime.computed_at) && now.getTime() / 1000 - runtime.computed_at > MAX_AGE_SECS) return null;
+  // A cached answer can outlive its time: show nothing, not a time that has gone.
+  if ('at' in runtime && isNum(runtime.at) && runtime.at < now.getTime() / 1000 - PAST_SLACK_SECS) return null;
   switch (runtime.outcome) {
     case 'empty_at': {
       const t = (s: number) => format.time(new Date(s * 1000));

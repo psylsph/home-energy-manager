@@ -139,6 +139,16 @@ describe('batteryRuntimeLine (issue #472)', () => {
     expect(line({ outcome: 'unknown' })!.text).toBe('Unable to calculate');
   });
 
+  it('shows no time that has already passed (issue #472)', () => {
+    const past = ts('2026-11-14T17:30:00Z');
+    expect(line({ outcome: 'recharges_first', at: past, by: 'solar' })).toBeNull();
+    expect(line({ outcome: 'empty_at', at: past, earliest: null, latest: null, confidence: 'high' })).toBeNull();
+    expect(line({ outcome: 'full_at', at: past, soc: 100 })).toBeNull();
+    // A minute of slack for the clock; the future is untouched.
+    expect(line({ outcome: 'recharges_first', at: ts('2026-11-14T17:59:30Z'), by: 'solar' })).not.toBeNull();
+    expect(line({ outcome: 'recharges_first', at: ts('2026-11-14T18:30:00Z'), by: 'solar' })!.text).toBe('Lasts until solar at 18:30');
+  });
+
   it('still drops a stale cannot-calculate answer', () => {
     expect(line({ outcome: 'charging', computed_at: ts('2026-11-14T17:44:00Z') })).toBeNull();
   });

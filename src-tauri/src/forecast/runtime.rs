@@ -52,11 +52,30 @@ pub fn reserve_band(soc: f64, reserve: f64) -> i8 {
 const RISE_PCT: f64 = 0.5;
 /// Battery power below this (W, negative = charging) means charging now.
 const CHARGING_W: f64 = -100.0;
+/// Battery power above this (W, positive = discharging) means discharging now.
+const DISCHARGING_W: f64 = 100.0;
 
 /// Whether the battery is charging now, by its power (W, negative =
 /// charging). The endpoint's cache keys on the same test.
 pub fn is_charging(battery_power_w: f64) -> bool {
     battery_power_w.is_finite() && battery_power_w < CHARGING_W
+}
+/// Whether the battery is discharging now, by its power (W, positive =
+/// discharging).
+pub fn is_discharging(battery_power_w: f64) -> bool {
+    battery_power_w.is_finite() && battery_power_w > DISCHARGING_W
+}
+
+/// The battery's direction now: -1 charging, 1 discharging, 0 idle. The
+/// endpoint's cache keys on it, so a flip gets a fresh answer.
+pub fn battery_direction(battery_power_w: f64) -> i8 {
+    if is_charging(battery_power_w) {
+        -1
+    } else if is_discharging(battery_power_w) {
+        1
+    } else {
+        0
+    }
 }
 /// Under this much history the profile's spread can't be trusted.
 const CONFIDENT_PROFILE_DAYS: u32 = 14;
@@ -92,6 +111,9 @@ pub struct RuntimeInputs {
     /// Solar power now, W. Lifts the current hour's median and optimistic
     /// solar when the sun is beating the forecast (issue #476).
     pub live_solar_w: f64,
+    /// House load now, W. Lifts the current hour's load when the house is
+    /// drawing more than the profile for the hour (issue #472).
+    pub live_home_w: f64,
     /// The inverter's own discharge pause (HR 318 mode 2 or 3) covers now.
     pub discharge_paused: bool,
     pub profile_days: u32,
@@ -163,6 +185,18 @@ pub fn round_to_half_hour(ts: i64) -> i64 {
     (ts + ROUND_SECS / 2).div_euclid(ROUND_SECS) * ROUND_SECS
 }
 
+/// Round to the nearest [`ROUND_SECS`], but never back before `now_ts`: a
+/// time that has passed is no answer to "how long", so one that would round
+/// into the past rounds up instead.
+pub fn round_not_before(ts: i64, now_ts: i64) -> i64 {
+    let rounded = round_to_half_hour(ts);
+    if rounded >= now_ts {
+        rounded
+    } else {
+        (ts.max(now_ts) + ROUND_SECS - 1).div_euclid(ROUND_SECS) * ROUND_SECS
+    }
+}
+
 /// The hourly inputs for day `which` (0 pessimistic, 1 median, 2
 /// optimistic), the current hour cut to what's left of it.
 ///
@@ -170,21 +204,53 @@ pub fn round_to_half_hour(ts: i64) -> i64 {
 /// live solar where it beats the forecast (issue #476): a sunny morning on a
 /// dull forecast otherwise can't see the charge it's making. The pessimistic
 /// day keeps the forecast, since the sun may not last the hour.
+///
+/// The live load does the same for the house (issue #472): every day takes
+/// the greater of the profile and the live load for the rest of the hour,
+/// since a heavy load now is the one thing known for sure. And while the
+/// battery is discharging it keeps draining at least at the rate it is
+/// draining now: the sun isn't beating the house, whatever the forecast says.
 fn sim_hours(inputs: &RuntimeInputs, which: usize) -> Vec<SimHourInput> {
     let live_kwh = (which > 0 && inputs.live_solar_w.is_finite() && inputs.live_solar_w > 0.0)
         .then(|| inputs.live_solar_w / 1000.0);
+    // The live load includes a car that's charging, which a planned car
+    // charge adds again from the dispatch overlay: leave it to the overlay.
+    let first_ts = inputs.hours.first().map(|h| h.timestamp);
+    let car_planned_now = inputs
+        .dispatch_hours
+        .iter()
+        .any(|d| Some(d.timestamp) == first_ts && d.ev_kwh > 0.0);
+    let live_load_kwh =
+        (inputs.live_home_w.is_finite() && inputs.live_home_w > 0.0 && !car_planned_now)
+            .then(|| inputs.live_home_w / 1000.0);
+    let discharge_kw =
+        is_discharging(inputs.battery_power_w).then(|| inputs.battery_power_w / 1000.0);
     let mut hours: Vec<SimHourInput> = inputs
         .hours
         .iter()
         .enumerate()
-        .map(|(i, hour)| SimHourInput {
-            timestamp: hour.timestamp,
-            solar_kwh: match live_kwh {
+        .map(|(i, hour)| {
+            let solar_kwh = match live_kwh {
                 Some(live) if i == 0 => hour.solar[which].max(live),
                 _ => hour.solar[which],
-            },
-            consumption_kwh: hour.consumption[which],
-            ..Default::default()
+            };
+            let mut consumption_kwh = hour.consumption[which];
+            if i == 0 {
+                if let Some(live) = live_load_kwh {
+                    consumption_kwh = consumption_kwh.max(live);
+                }
+                // Draining now: at least at the rate it's draining, whatever
+                // the forecast sun says (Force Discharge included).
+                if let Some(kw) = discharge_kw {
+                    consumption_kwh = consumption_kwh.max(solar_kwh + kw);
+                }
+            }
+            SimHourInput {
+                timestamp: hour.timestamp,
+                solar_kwh,
+                consumption_kwh,
+                ..Default::default()
+            }
         })
         .collect();
     apply_dispatch_hours(
@@ -362,7 +428,7 @@ pub fn battery_runtime(inputs: &RuntimeInputs) -> RuntimeOutcome {
             .unwrap_or(100.0);
         if let Some(at) = full_at(inputs, target) {
             return RuntimeOutcome::FullAt {
-                at: round_to_half_hour(at),
+                at: round_not_before(at, inputs.now_ts),
                 soc: target.round() as u8,
             };
         }
@@ -405,7 +471,7 @@ fn empty_outcome(inputs: &RuntimeInputs, topping_up: bool) -> RuntimeOutcome {
     };
     match central {
         Event::Recharge(at, by) => RuntimeOutcome::RechargesFirst {
-            at: round_to_half_hour(at),
+            at: round_not_before(at, inputs.now_ts),
             by,
         },
         Event::Nothing => RuntimeOutcome::LastsBeyond {
@@ -426,9 +492,9 @@ fn empty_outcome(inputs: &RuntimeInputs, topping_up: bool) -> RuntimeOutcome {
                 confidence = Confidence::Medium;
             }
             RuntimeOutcome::EmptyAt {
-                at: round_to_half_hour(at),
-                earliest: earliest.map(round_to_half_hour),
-                latest: latest.map(round_to_half_hour),
+                at: round_not_before(at, inputs.now_ts),
+                earliest: earliest.map(|t| round_not_before(t, inputs.now_ts)),
+                latest: latest.map(|t| round_not_before(t, inputs.now_ts)),
                 confidence,
             }
         }
@@ -513,6 +579,7 @@ mod tests {
             schedule: CurrentSchedule::default(),
             battery_power_w: 500.0,
             live_solar_w: 0.0,
+            live_home_w: 0.0,
             discharge_paused: false,
             profile_days: 30,
             solar_known: true,
@@ -828,6 +895,124 @@ mod tests {
             battery_runtime(&one_hour),
             battery_runtime(&forecast_says_so)
         );
+    }
+
+    #[test]
+    fn a_heavy_load_now_is_not_mistaken_for_solar_refilling_it() {
+        // Issue #472, BrianUK6 on 16 November: 10:43, 71%, discharging
+        // 667 W, 1.3 kW of sun against a 2.0 kW house, on a forecast of
+        // 0.6 kWh for the hour and a profile of 0.8. Counting the live sun
+        // but not the live load said "Lasts until solar at 10:30".
+        let start = T0 + 10 * HOUR_SECS;
+        let now = start + 43 * 60;
+        let mut brian = inputs(now, start, 71.0, [0.8, 0.8, 0.8]);
+        brian.hours[0].solar = [0.6, 0.6, 0.6];
+        brian.battery_power_w = 667.0;
+        brian.live_solar_w = 1300.0;
+        brian.live_home_w = 2000.0;
+        let (at, ..) = empty_at(&battery_runtime(&brian));
+        assert!(at > now + 2 * HOUR_SECS, "{at}");
+    }
+
+    #[test]
+    fn the_current_hour_never_rises_while_the_battery_is_discharging() {
+        // The forecast expects 3 kWh of sun this hour but the battery is
+        // discharging: the sun isn't there, whatever the forecast says.
+        let now = T0 + 1800;
+        let mut i = inputs(now, T0, 50.0, [1.0, 1.0, 1.0]);
+        i.hours[0].solar = [3.0, 3.0, 3.0];
+        i.battery_power_w = 500.0;
+        assert!(matches!(
+            battery_runtime(&i),
+            RuntimeOutcome::EmptyAt { .. }
+        ));
+        // Idle, the forecast stands.
+        i.battery_power_w = 0.0;
+        assert!(matches!(
+            battery_runtime(&i),
+            RuntimeOutcome::RechargesFirst { .. }
+        ));
+    }
+
+    #[test]
+    fn live_load_lifts_only_the_rest_of_this_hour_and_never_lowers_the_profile() {
+        let now = T0 + 1800;
+        let base = inputs(now, T0, 50.0, [1.0, 1.0, 1.0]);
+        let (base_at, ..) = empty_at(&battery_runtime(&base));
+        // A lighter load now than the profile changes nothing.
+        let mut light = base.clone();
+        light.live_home_w = 300.0;
+        assert_eq!(battery_runtime(&light), battery_runtime(&base));
+        // A heavier one empties it sooner, but only by the rest of the hour.
+        let mut heavy = base.clone();
+        heavy.live_home_w = 3000.0;
+        let (heavy_at, ..) = empty_at(&battery_runtime(&heavy));
+        assert!(heavy_at < base_at, "{heavy_at} vs {base_at}");
+        assert!(base_at - heavy_at <= HOUR_SECS, "{heavy_at} vs {base_at}");
+        // Not a power: ignored.
+        for junk in [f64::NAN, f64::INFINITY, -1500.0] {
+            let mut i = base.clone();
+            i.live_home_w = junk;
+            assert_eq!(battery_runtime(&i), battery_runtime(&base), "{junk}");
+        }
+    }
+
+    #[test]
+    fn a_time_given_is_never_in_the_past() {
+        // Sun refilling from this hour's start, asked at 10:44 and 10:14.
+        for minute in [14, 44] {
+            let now = T0 + 10 * HOUR_SECS + minute * 60;
+            let mut i = inputs(now, T0 + 10 * HOUR_SECS, 50.0, [1.0, 1.0, 1.0]);
+            i.hours[0].solar = [3.0, 3.0, 3.0];
+            i.battery_power_w = 0.0;
+            match battery_runtime(&i) {
+                RuntimeOutcome::RechargesFirst { at, .. } => {
+                    assert!(at >= now, "minute {minute}: {at} < {now}");
+                    assert_eq!(at % ROUND_SECS, 0);
+                }
+                other => panic!("expected RechargesFirst, got {other:?}"),
+            }
+        }
+        // An empty a few minutes away rounds up, not back.
+        let now = T0 + 4 * HOUR_SECS + 20 * 60;
+        let mut i = inputs(now, T0 + 4 * HOUR_SECS, 11.0, [1.0, 1.0, 1.0]);
+        i.params.reserve_soc_pct = 10.0;
+        let (at, earliest, latest, _) = empty_at(&battery_runtime(&i));
+        assert!(at >= now, "{at}");
+        assert!(earliest.unwrap() >= now && latest.unwrap() >= now);
+    }
+
+    #[test]
+    fn a_discharging_battery_keeps_draining_at_its_rate_for_the_rest_of_the_hour() {
+        // 3 kWh of forecast sun, a 1 kWh profile, discharging 2 kW: the rest
+        // of the hour drains, it doesn't hold flat.
+        let now = T0;
+        let mut i = inputs(now, T0, 50.0, [1.0, 1.0, 1.0]);
+        i.hours[0].solar = [3.0, 3.0, 3.0];
+        i.battery_power_w = 2000.0;
+        let (with, ..) = empty_at(&battery_runtime(&i));
+        let mut flat = i.clone();
+        flat.hours[0].solar = [0.0; 3];
+        flat.battery_power_w = 0.0;
+        let (without, ..) = empty_at(&battery_runtime(&flat));
+        // The hour drained 2 kWh against the profile's 1: sooner, not later.
+        assert!(with < without, "{with} vs {without}");
+    }
+
+    #[test]
+    fn a_car_charge_in_the_live_load_is_not_counted_twice() {
+        // The dispatch overlay already adds the car for this hour.
+        let now = T0 + 1800;
+        let mut i = inputs(now, T0, 50.0, [1.0, 1.0, 1.0]);
+        i.dispatch_hours = vec![DispatchHour {
+            timestamp: T0,
+            ev_kwh: 3.0,
+            held_fraction: 0.0,
+            charge_to_soc: None,
+        }];
+        let before = battery_runtime(&i);
+        i.live_home_w = 9000.0;
+        assert_eq!(battery_runtime(&i), before);
     }
 
     #[test]
