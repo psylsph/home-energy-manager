@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.17.6] - 2026-11-16
+
+### Fixed
+
+- **Battery runtime no longer says "Lasts until solar" while the battery is draining.** The estimate counted the sun right now but not how much the house was using right now, so a heavy morning load looked like solar refilling the battery. It now counts both for the rest of the hour, and a battery that is discharging is never shown as being topped up.
+- **The runtime line never shows a time that has already passed.** A refill starting now could round back to a half hour that was gone, and the answer stayed on screen for minutes. Times now round forward, and the answer is refreshed as soon as its time goes by or the battery switches between charging and discharging.
+
 ## [1.17.5] - 2026-11-16
 
 ### Changed
