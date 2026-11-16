@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.17.5] - 2026-11-16
+
+### Changed
+
+- **The inverter's own battery calibration is now the normal option.** Control now has a Battery Calibration section on every single-phase low-voltage model, outside developer mode, with Start, Charge Only and Stop. HEM's own calibration cycle moves to developer mode, and a cycle already running still shows its progress and Cancel everywhere.
+
+### Fixed
+
+- **Battery calibration is no longer hidden from Gen 1 and Gen 2 batteries.** HEM hid the button for any battery reporting firmware 3000 or above, but GivEnergy's Gen 1 and Gen 2 batteries use that range, so most of them lost it, and AC-coupled and Gen 3 systems lost it whenever the battery read failed. The warning no longer says a run can't be cancelled.
+- **Calibration refuses to start while something else is using the battery.** Start and Charge Only now wait for Force Charge or Discharge, a pause, a safety limiter, the dispatch hold, a Cosy or Agile slot or a Timed Export window to finish, and for HEM's own cycle.
+
 ## [1.17.4] - 2026-11-16
 
 ### Fixed
