@@ -63,7 +63,7 @@ pub async fn get_calibration(State(state): State<Arc<AppState>>) -> (StatusCode,
 
 /// What already holds the battery, if anything, so the cycle would capture
 /// someone else's temporary state as the settings to restore.
-async fn blocker(
+pub(crate) async fn blocker(
     state: &AppState,
     snap: &crate::inverter::model::InverterSnapshot,
 ) -> Option<&'static str> {
@@ -173,6 +173,12 @@ pub async fn start_calibration(
         return reply(
             StatusCode::CONFLICT,
             "A calibration cycle is already running",
+        );
+    }
+    if snap.supports_battery_calibration && (1..=6).contains(&snap.battery_calibration_stage) {
+        return reply(
+            StatusCode::CONFLICT,
+            "The inverter's own calibration is running; stop it before starting a cycle",
         );
     }
     if let Some(reason) = blocker(&state, &snap).await {
@@ -385,6 +391,109 @@ mod tests {
             // A load limiter pause: its Eco Paused state would be captured.
             let state = state_with(DeviceType::Gen2Hybrid).await;
             *state.load_limiter_state.lock().await = LoadLimiterState::Paused;
+            let (code, body) = start(&state, None).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{body}");
+            assert!(state.calibration_run.lock().await.is_none());
+        })
+        .await;
+    }
+
+    /// Issue #477: the inverter's own calibration is offered to everyone, so
+    /// Start and Charge Only get the same conflict checks as the guided cycle.
+    #[tokio::test]
+    async fn built_in_start_is_refused_while_another_action_holds_the_battery() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .supports_battery_calibration = true;
+            let (code, _) = crate::server::api::force_charge(State(state.clone()), None).await;
+            assert_eq!(code, StatusCode::OK);
+            state.pending_writes.lock().await.clear();
+
+            for stage in [1, 3] {
+                let (code, Json(body)) = crate::server::api::set_calibration(
+                    State(state.clone()),
+                    Json(json!({ "stage": stage })),
+                )
+                .await;
+                assert_eq!(code, StatusCode::CONFLICT, "stage {stage}: {body}");
+                assert_eq!(body["ok"], false);
+            }
+            assert!(state.pending_writes.lock().await.is_empty());
+
+            // Stop is never blocked.
+            let (code, _) = crate::server::api::set_calibration(
+                State(state.clone()),
+                Json(json!({ "stage": 0 })),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK);
+
+            // Other owners: a limiter pause and a running Cosy slot.
+            let state = state_with(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .supports_battery_calibration = true;
+            *state.load_limiter_state.lock().await = LoadLimiterState::Paused;
+            let (code, _) = crate::server::api::set_calibration(
+                State(state.clone()),
+                Json(json!({ "stage": 1 })),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CONFLICT);
+            *state.load_limiter_state.lock().await = LoadLimiterState::Idle;
+            *state.cosy_active.lock().await = true;
+            let (code, _) = crate::server::api::set_calibration(
+                State(state.clone()),
+                Json(json!({ "stage": 1 })),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CONFLICT);
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn built_in_start_is_allowed_when_nothing_holds_the_battery() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .supports_battery_calibration = true;
+            let (code, _) = crate::server::api::set_calibration(
+                State(state.clone()),
+                Json(json!({ "stage": 1 })),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_guided_cycle_is_refused_while_the_built_in_one_runs() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with(DeviceType::Gen2Hybrid).await;
+            {
+                let mut guard = state.latest_snapshot.lock().await;
+                let snap = guard.as_mut().unwrap();
+                snap.supports_battery_calibration = true;
+                snap.battery_calibration_stage = 2;
+            }
             let (code, body) = start(&state, None).await;
             assert_eq!(code, StatusCode::CONFLICT, "{body}");
             assert!(state.calibration_run.lock().await.is_none());

@@ -8856,7 +8856,10 @@ pub async fn set_calibration(
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
     let stage: u16 = match body["stage"].as_u64() {
-        Some(s) => s as u16,
+        Some(s) => match u16::try_from(s) {
+            Ok(s) => s,
+            Err(_) => return error_response("Validation error: calibration control out of range"),
+        },
         None => return error_response("Missing 'stage' field"),
     };
 
@@ -8865,8 +8868,33 @@ pub async fn set_calibration(
         Err(response) => return response,
     };
     if !snapshot.supports_battery_calibration {
-        return error_response("This inverter battery does not support manual calibration");
+        return error_response("This inverter model has no battery calibration");
     }
+    // The inverter's routine would fight anything else that owns the battery:
+    // HEM's guided cycle (writes it re-applies each poll), Force Charge or
+    // Discharge, a pause, a limiter, the dispatch hold, Cosy/Agile or a Timed
+    // Export window. Stop is always allowed. Serialised with Force and pause
+    // starts under the same lock, as the guided cycle's own start is.
+    let _action_guard = if stage != 0 {
+        let guard = state.force_action_lock.lock().await;
+        if crate::server::calibration::calibration_running(&state).await {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    json!({"ok": false, "error": crate::server::calibration::CALIBRATION_RUNNING}),
+                ),
+            );
+        }
+        if let Some(reason) = crate::server::calibration::blocker(&state, &snapshot).await {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"ok": false, "error": reason})),
+            );
+        }
+        Some(guard)
+    } else {
+        None
+    };
 
     let cmd = ControlCommand::SetCalibrationStage { stage };
     match cmd.encode() {
@@ -20792,6 +20820,96 @@ pub(crate) mod tests {
 
             assert_eq!(status, StatusCode::OK);
             assert_eq!(drain_pending_writes(&state).await.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn calibration_accepts_stop_and_charge_only_and_refuses_progress_stages() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .supports_battery_calibration = true;
+
+            for stage in [0, 3] {
+                let (status, _) =
+                    set_calibration(State(state.clone()), Json(json!({ "stage": stage }))).await;
+                assert_eq!(status, StatusCode::OK, "stage {stage}");
+                let writes = drain_pending_writes(&state).await;
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].value, stage);
+            }
+
+            // 5 is the inverter's own "balancing" progress, not a command.
+            let (status, body) =
+                set_calibration(State(state.clone()), Json(json!({ "stage": 5 }))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["ok"], false);
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn calibration_refuses_values_that_wrap_into_a_command() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .supports_battery_calibration = true;
+            for stage in [65536u64, 65537, 65539] {
+                let (status, _) =
+                    set_calibration(State(state.clone()), Json(json!({ "stage": stage }))).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "stage {stage}");
+            }
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn calibration_start_is_refused_during_the_guided_cycle_but_stop_is_not() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            state
+                .latest_snapshot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .supports_battery_calibration = true;
+            let snapshot = InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                inverter_serial: "HEM-TEST-001".into(),
+                battery_mode: crate::inverter::model::BatteryMode::Eco,
+                inverter_time: "2026-08-30 22:00:00".into(),
+                ..Default::default()
+            };
+            let plan = crate::inverter::calibration::build_plan(&snapshot).expect("plan");
+            *state.calibration_run.lock().await = Some(crate::inverter::calibration::new_run(
+                &snapshot, plan, 120, 0,
+            ));
+
+            for stage in [1, 3] {
+                let (status, body) =
+                    set_calibration(State(state.clone()), Json(json!({ "stage": stage }))).await;
+                assert_eq!(status, StatusCode::CONFLICT, "stage {stage}");
+                assert_eq!(body["ok"], false);
+            }
+            assert!(state.pending_writes.lock().await.is_empty());
+
+            let (status, _) =
+                set_calibration(State(state.clone()), Json(json!({ "stage": 0 }))).await;
+            assert_eq!(status, StatusCode::OK);
         })
         .await;
     }

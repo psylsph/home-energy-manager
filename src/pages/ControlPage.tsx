@@ -60,6 +60,7 @@ import {
 
 import { agileRatesUrl } from '../lib/agileRates';
 import BatteryCalibrationCycle from '../components/BatteryCalibrationCycle';
+import BuiltInBatteryCalibration from '../components/BuiltInBatteryCalibration';
 import {
   deriveTimedExportButton,
   deriveEcoState,
@@ -1893,82 +1894,6 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
       >
         {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
       </button>
-    </div>
-  );
-}
-
-/** Battery calibration section — shown when battery BMS firmware indicates Gen1/Gen2 battery. */
-function BatteryCalibrationSection() {
-  const { snapshot } = useInverterStore();
-  const supported = snapshot?.supports_battery_calibration ?? false;
-  const stage = snapshot?.battery_calibration_stage ?? 0;
-  const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
-
-  // Hide when battery auto-calibrates (Gen3+ BMS firmware >= 3000) or no battery present.
-  if (!supported) return null;
-
-  const handleStartCalibration = async () => {
-    if (!confirm('⚠️  BATTERY CALIBRATION\n\nThe inverter will run its own calibration. The battery will discharge, charge and balance over several hours. It cannot be cancelled once started.\n\nContinue?')) return;
-    setSaving(true);
-    setFeedback(null);
-    try {
-      await apiPost('/api/control/calibration', { stage: 1 });
-      setFeedback('saved');
-    } catch {
-      setFeedback('error');
-    }
-    setSaving(false);
-    setTimeout(() => setFeedback(null), 3000);
-  };
-
-  const stageLabels: Record<number, string> = {
-    0: 'Off',
-    1: 'Discharging…',
-    2: 'Setting Lower Limit…',
-    3: 'Charging…',
-    4: 'Setting Upper Limit…',
-    5: 'Balancing…',
-    6: 'Setting Full Capacity…',
-    7: 'Finished',
-  };
-
-  const isActive = stage > 0 && stage < 7;
-
-  return (
-    <div className="space-y-3">
-      <HeadingWithHelp
-        as="h3"
-        className="text-text-primary font-medium text-base"
-        title="Inverter Built-in Calibration"
-        help="Starts the inverter's own calibration routine (a raw register write). HEM only shows its stage and cannot cancel or restore settings. For Gen1/Gen2 batteries only (BMS firmware below 3000); Gen3+ batteries calibrate themselves via BMS OCV."
-      />
-
-      <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-3">
-        <p className="text-text-primary text-xs font-medium">⚠️  WARNING</p>
-        <p className="text-text-secondary text-xs">
-          Discharges, charges and balances the battery over several hours. Once
-          started it cannot be cancelled.
-        </p>
-        <p className="text-amber-300/70 text-xs">
-          Prefer Battery Calibration Cycle above, which HEM runs and can cancel.
-        </p>
-
-        <div className="flex items-center gap-3 pt-3 border-t border-amber-700/20">
-          <button
-            onClick={handleStartCalibration}
-            disabled={saving || isActive}
-            className="flex-1 py-1.5 bg-amber-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
-          >
-            {saving ? 'Sending...' : feedback === 'saved' ? '✓ Sent' : feedback === 'error' ? '✗ Error' : 'Start Built-in Calibration'}
-          </button>
-          <span className="text-text-secondary text-xs shrink-0">
-            Stage: <span className={`font-mono ${isActive ? 'text-amber-400' : 'text-text-primary'}`}>
-              {stageLabels[stage] || `Unknown (${stage})`}
-            </span>
-          </span>
-        </div>
-      </div>
     </div>
   );
 }
@@ -4435,8 +4360,11 @@ export default function ControlPage() {
         <TemperatureLimiterSection refreshKey={loadLimiterRefreshKey} />
         {/* Auto Winter Mode */}
         <AutoWinterSection />
-        {/* Guided battery calibration cycle (issue #418) */}
-        <BatteryCalibrationCycle />
+        {/* The inverter's own calibration, the normal option (issue #477) */}
+        <BuiltInBatteryCalibration />
+        {/* Guided battery calibration cycle (issue #418): developer mode only;
+            a run already under way keeps its progress and Cancel */}
+        <BatteryCalibrationCycle offerStart={developerMode} />
         {/* Developer Controls (dev mode only) */}
         {developerMode && (
           <section className="space-y-4 border-t border-bg-elevated pt-4 mt-4">
@@ -4444,7 +4372,6 @@ export default function ControlPage() {
               <h2 className="text-text-primary font-semibold text-lg">Developer Controls</h2>
               <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
             </div>
-            <BatteryCalibrationSection />
             <DongleWebPageSection />
             <RebootInverterSection />
           </section>

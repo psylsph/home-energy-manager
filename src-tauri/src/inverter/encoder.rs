@@ -231,7 +231,7 @@ pub enum ControlCommand {
     ForceDischarge,
     /// Sync inverter clock to current system time.
     SyncClock,
-    /// Set battery calibration stage (0=off, 5=balance).
+    /// Set the battery calibration control (0=stop, 1=start, 3=charge only).
     SetCalibrationStage { stage: u16 },
     /// Reboot the inverter (write 100 to HR 163).
     RebootInverter,
@@ -746,7 +746,13 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::SetCalibrationStage { stage } => {
-                validate_range(*stage, 0, 7, "calibration stage")?;
+                // The values GivTCP and givenergy-modbus accept; the other
+                // stages are the inverter's own progress, not commands.
+                if !matches!(*stage, 0 | 1 | 3) {
+                    return Err(format!(
+                        "calibration control must be 0 (stop), 1 (start) or 3 (charge only), got {stage}"
+                    ));
+                }
                 vec![rw(HR_BATTERY_CALIBRATION_STAGE, *stage)]
             }
             ControlCommand::RebootInverter => {
@@ -2115,17 +2121,22 @@ mod tests {
 
     #[test]
     fn set_calibration_stage_encodes() {
-        let cmd = ControlCommand::SetCalibrationStage { stage: 5 };
-        let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].address, HR_BATTERY_CALIBRATION_STAGE);
-        assert_eq!(writes[0].value, 5);
+        for stage in [0, 1, 3] {
+            let cmd = ControlCommand::SetCalibrationStage { stage };
+            let writes = cmd.encode().unwrap();
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].address, HR_BATTERY_CALIBRATION_STAGE);
+            assert_eq!(writes[0].value, stage);
+        }
     }
 
     #[test]
     fn set_calibration_stage_validates() {
-        let cmd = ControlCommand::SetCalibrationStage { stage: 8 };
-        assert!(cmd.encode().is_err());
+        // Only stop (0), start (1) and charge only (3) are commands.
+        for stage in [2, 4, 5, 6, 7, 8] {
+            let cmd = ControlCommand::SetCalibrationStage { stage };
+            assert!(cmd.encode().is_err(), "stage {stage} must be refused");
+        }
     }
 
     #[test]

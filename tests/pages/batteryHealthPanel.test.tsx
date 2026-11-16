@@ -282,7 +282,7 @@ describe('BatteryHealthPanel', () => {
     expect(items[1]).toContain('Module #1');
     expect(items[1]).toContain('SOC jumped once');
     // HEM can run the cycle itself; the note points there and still says how by hand.
-    expect(screen.getByText(/Battery Calibration Cycle on the Control page/)).toBeTruthy();
+    expect(screen.getByText(/Battery Calibration on the Control page/)).toBeTruthy();
     expect(screen.getByText(/set the battery reserve to 4%/)).toBeTruthy();
   });
 

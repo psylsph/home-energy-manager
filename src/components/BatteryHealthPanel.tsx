@@ -268,7 +268,7 @@ export default function BatteryHealthPanel() {
                 <HelpTip label="SOC Warnings">
                   Days the battery&apos;s own state of charge jumped in one step or stayed put while energy
                   flowed, the pattern of the GivEnergy BMS SOC bug. A full discharge and charge usually
-                  corrects it. HEM can run one for you from Battery Calibration Cycle on the Control page; by
+                  corrects it. Where the inverter supports it, it can run one for you from Battery Calibration on the Control page; by
                   hand, set the battery reserve to 4%, run Force Discharge until it stops, then Force Charge to
                   100%, and put your reserve back afterwards.
                 </HelpTip>

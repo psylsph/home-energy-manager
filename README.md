@@ -157,7 +157,7 @@ The Planner tab looks three days ahead and tells you whether tonight's cheap-rat
 - **Battery modes** — switch between Eco (automatic self-consumption), Timed Discharge, and Pause Discharge, which holds stored energy while still allowing solar or scheduled grid charging
 - **Force Charge / Force Discharge** — mutually exclusive manual controls with live start/stop confirmation; stop the active action before starting the opposite one
 - **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
-- **Battery calibration** — start calibration from the app when your battery needs it (auto-detected)
+- **Battery calibration** — start, stop or charge-only the inverter's own calibration from the Control page on single-phase low-voltage models
 - **Load Discharge Limiter** — pause battery discharge during high-demand periods with a configurable power threshold and time window
 - **Inverter Temperature Limiter** — pause discharge at a configurable heatsink temperature and restore normal Eco after the inverter cools
 

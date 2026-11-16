@@ -20,9 +20,12 @@ function hours(minutes: number): string {
 /**
  * Control page: the guided battery calibration cycle (issue #418). HEM
  * exports the battery down to the floor, charges it to 100%, holds it there
- * while the cells balance and then puts every setting back.
+ * while the cells balance and then puts every setting back. The inverter's own
+ * calibration is the normal option (issue #477), so a new cycle is offered
+ * (`offerStart`) in developer mode only; a cycle that's already running always shows its progress and
+ * Cancel.
  */
-export default function BatteryCalibrationCycle() {
+export default function BatteryCalibrationCycle({ offerStart }: { offerStart: boolean }) {
   const [status, setStatus] = useState<CalibrationStatus | null>(null);
   /** When `status` arrived, for the time left in the hold. */
   const [fetchedAt, setFetchedAt] = useState(0);
@@ -66,10 +69,12 @@ export default function BatteryCalibrationCycle() {
   }, [running, refresh]);
 
   if (!status) {
-    return loadFailed ? (
+    return loadFailed && offerStart ? (
       <p className="text-text-secondary text-xs">Couldn&apos;t load the battery calibration status.</p>
     ) : null;
   }
+
+  if (!offerStart && !status.running) return null;
 
   const minHours = hours(status.min_hold_minutes);
   const maxHours = hours(status.max_hold_minutes);

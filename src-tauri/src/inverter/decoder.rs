@@ -877,10 +877,11 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     // back to HR 27.
     snap.battery_power_mode = (raw.battery_power_mode & 0x01) as u8;
 
-    // Battery calibration stage: HR(29) — 0=off, 5=balance
-    snap.battery_calibration_stage = get_reg(data, 29) as u8;
-    // supports_battery_calibration is set in the poll loop after battery modules are decoded,
-    // so it can use the actual BMS firmware version rather than inverter device type.
+    // Battery calibration stage: HR(29) — 0=off, 1-6 running, 7=finished
+    // A corrupt value must not wrap into a valid stage (256 -> Off): saturate
+    // so it reads as an unknown stage.
+    snap.battery_calibration_stage = u8::try_from(get_reg(data, 29)).unwrap_or(u8::MAX);
+    // supports_battery_calibration is set in the poll loop from the device type.
 
     // External CT ammeter enabled: HR(7) — bool
     snap.enable_ammeter = get_reg(data, 7) != 0;
@@ -2781,6 +2782,24 @@ mod tests {
             snap.inverter_time, "2026-06-30 00:05:00",
             "inverter_time must be populated from HR(35-40) in holding_0_59"
         );
+    }
+
+    #[test]
+    fn calibration_stage_decodes_and_never_wraps_into_a_valid_stage() {
+        for (raw, expected) in [
+            (0u16, 0u8),
+            (3, 3),
+            (7, 7),
+            (255, 255),
+            (256, 255),
+            (257, 255),
+        ] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[29] = raw;
+            let block = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data);
+            let snap = decode_snapshot(&[block]);
+            assert_eq!(snap.battery_calibration_stage, expected, "raw {raw}");
+        }
     }
 
     #[test]

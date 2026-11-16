@@ -508,16 +508,26 @@ impl DeviceType {
         }
     }
 
-    /// Whether this device type is a legacy model that may need manual calibration via HR(29).
+    /// Whether the inverter's built-in battery calibration (HR 29) is offered.
     ///
-    /// This is used as a **fallback** when battery BMS firmware is unavailable (HV stacks,
-    /// read failures). The primary check uses `bms_firmware < 3000` from the battery module.
-    /// Gen3+ inverters and their derivatives use batteries with BMS-managed OCV auto-calibration.
-    /// Batteryless devices (EMS, Gateway, PV Inverter) return false.
+    /// Every single-phase low-voltage hybrid and AC-coupled model, whatever the
+    /// battery generation or BMS firmware: GivTCP's `setBatteryCalibration` and
+    /// givenergy-modbus's `set_calibrate_battery_soc` write HR 29 with no model
+    /// or firmware check, and GivEnergy numbers Gen 1/2 firmware in the 3000
+    /// series, so a firmware threshold hid it from the batteries that need it
+    /// (issue #477). Three-phase, the HV models (HV Gen3, the All-in-Ones and
+    /// AIO Hybrid) and batteryless or unidentified devices stay without it:
+    /// HEM hasn't seen the write work on them, so it doesn't risk it.
     pub fn supports_manual_battery_calibration(&self) -> bool {
         matches!(
             self,
-            Self::Gen1Hybrid | Self::Gen2Hybrid | Self::PolarHybrid
+            Self::Gen1Hybrid
+                | Self::Gen2Hybrid
+                | Self::Gen3Hybrid
+                | Self::Gen3PlusHybrid
+                | Self::PolarHybrid
+                | Self::ACCoupled
+                | Self::ACCoupledMk2
         )
     }
 
@@ -1426,8 +1436,8 @@ pub struct InverterSnapshot {
     /// Octopus Go smart charge (issue #434).
     #[serde(default)]
     pub dispatch_charge_active: bool,
-    /// Whether this device supports manual battery calibration via HR(29).
-    /// False for Gen3+ (auto-calibrates via BMS) and batteryless devices.
+    /// Whether the inverter's built-in battery calibration (HR 29) is offered:
+    /// single-phase LV models, whatever the BMS firmware (issue #477).
     #[serde(default)]
     pub supports_battery_calibration: bool,
     pub inverter_serial: String,
@@ -2837,6 +2847,45 @@ mod tests {
         // Unknown is intentionally excluded so detection still probes the
         // standard LV BMS at 0x32.
         assert!(!DeviceType::Unknown(0).is_batteryless());
+    }
+
+    /// Issue #477: the built-in calibration is offered on every single-phase
+    /// LV model, not just Gen1/Gen2/Polar (an AC-coupled or Gen3 system with
+    /// 3000-series Gen 2 batteries lost the button).
+    #[test]
+    fn built_in_calibration_is_offered_on_single_phase_lv_models() {
+        for dt in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::Gen3PlusHybrid,
+            DeviceType::PolarHybrid,
+            DeviceType::ACCoupled,
+            DeviceType::ACCoupledMk2,
+        ] {
+            assert!(dt.supports_manual_battery_calibration(), "{dt:?}");
+        }
+    }
+
+    /// Three-phase and HV models, and anything without a battery, don't get it.
+    #[test]
+    fn built_in_calibration_is_not_offered_on_three_phase_hv_or_batteryless_models() {
+        for dt in [
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOne6kW,
+            DeviceType::AllInOne3_6kW,
+            DeviceType::AllInOne5kW,
+            DeviceType::AllInOneHybrid,
+            DeviceType::Gateway,
+            DeviceType::Ems,
+            DeviceType::PvInverter,
+            DeviceType::Gen4Hybrid,
+            DeviceType::Unknown(0),
+        ] {
+            assert!(!dt.supports_manual_battery_calibration(), "{dt:?}");
+        }
     }
 
     // -----------------------------------------------------------------------
