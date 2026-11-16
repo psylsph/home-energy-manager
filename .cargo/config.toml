@@ -5,3 +5,14 @@
 # https://doc.rust-lang.org/cargo/reference/config.html#net
 [net]
 retry = 10
+
+# Keep build artifacts from filling the disk. Cargo's incremental cache had
+# grown to 183G here: it keeps a full session tree per (crate, hash-of-flags)
+# and never evicts trees built with flags it no longer sees, so every `tauri
+# dev` / plain `cargo build` / coverage variant left its own copy behind.
+# incremental = false stops that; debug = "line-tables-only" keeps backtraces
+# readable (file:line) while dropping the bulk of the debug info that made the
+# cache so large. Add `debug = 0` too if you never attach a debugger.
+[profile.dev]
+incremental = false
+debug = "line-tables-only"
