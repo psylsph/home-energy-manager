@@ -1135,59 +1135,6 @@ fn carry_forward_pause_display(snapshot: &mut InverterSnapshot, prev: &InverterS
     snapshot.battery_pause_slot = prev.battery_pause_slot.clone();
 }
 
-/// Whether to probe for external CT clamp meters on this cycle.
-///
-/// The discovery policy is:
-/// - **First scan** (after model detection, before any probe): always runs.
-/// - **If meters were found**: done - no further probing.
-/// - **If no meters found AND `enable_ammeter` or EM115 is configured**:
-///   retry every `METER_RETRY_INTERVAL` cycles, up to `METER_MAX_RETRIES`
-///   times, because the meter may be slow to respond (e.g. LoRA-linked
-///   EM115).
-/// - **If no meters found AND ammeter is not configured**: one-shot scan,
-///   then stop - nothing to find.
-fn should_probe_external_meters(
-    known_device_type: Option<DeviceType>,
-    meter_probe_done: bool,
-    enable_ammeter: bool,
-    meter_type: u8,
-    meter_retry_count: u8,
-    meter_cycle_since_last: u8,
-) -> bool {
-    // Never probe until model is known and three-phase models skip external
-    // meters (they use the inverter's internal grid CT at IR 1079-1082).
-    // Batteryless devices (Gateway / EMS / PvInverter) also skip - the Gateway
-    // has its own built-in grid meter (IR 1609); EMS/PvInverter have no battery
-    // bus to instrument.
-    let dt = match known_device_type {
-        Some(dt) => dt,
-        None => return false,
-    };
-    // Three-phase models use their built-in grid CT. The HV Gen3 (0x81xx) and
-    // the AIO Hybrid (0x82xx) are physically single-phase (issue #432), so they
-    // reach this point and can have an external EM115/CT meter like any other
-    // single-phase inverter.
-    if dt.needs_three_phase_input_blocks() || dt.is_batteryless() {
-        return false;
-    }
-
-    // First scan - always run.
-    if !meter_probe_done {
-        return true;
-    }
-
-    // Ammeter is expected but no meters found yet - retry on cadence.
-    let ammeter_expected = enable_ammeter || meter_type == 1; // EM115 == 1
-    if ammeter_expected
-        && meter_retry_count < METER_MAX_RETRIES
-        && meter_cycle_since_last >= METER_RETRY_INTERVAL
-    {
-        return true;
-    }
-
-    false
-}
-
 fn merge_external_meters(
     decoded_meters: Vec<crate::inverter::model::MeterData>,
     detected_addresses: &[u8],
@@ -1232,13 +1179,21 @@ pub(crate) fn record_external_meter_failure(
     }
 }
 
-/// Maximum number of meter discovery retries after the initial scan fails
-/// to find any meters despite the inverter being configured for an external
-/// ammeter.
+/// Failed reads in a row before a meter's cached reading is dropped. The
+/// meter then counts as missing again and discovery looks for it
+/// (`MeterDiscovery`, issue #473).
 const METER_MAX_RETRIES: u8 = 10;
 
-/// Retry meter discovery every N poll cycles.
-const METER_RETRY_INTERVAL: u8 = 5;
+/// Whether this model can carry an external CT clamp meter at all. Unknown
+/// models wait for identification. Three-phase models use their built-in
+/// grid CT (IR 1079-1082). Batteryless devices (Gateway / EMS / PvInverter)
+/// have their own built-in meter (the Gateway's IR 1609) or no battery bus to
+/// instrument. The HV Gen3 (0x81xx) and the AIO Hybrid (0x82xx) are
+/// physically single-phase (issue #432) and can have an external EM115/CT
+/// meter like any other single-phase inverter.
+fn external_meters_possible(device_type: Option<DeviceType>) -> bool {
+    device_type.is_some_and(|dt| !dt.needs_three_phase_input_blocks() && !dt.is_batteryless())
+}
 
 /// Whether to probe for HV battery BCU stacks (0xA0 / 0x70+) on this cycle.
 ///
@@ -2056,24 +2011,6 @@ fn decide_after_cycle(
         CycleStep::RepollSanitized
     } else {
         CycleStep::WaitForInterval
-    }
-}
-
-/// Advance the external-meter retry cadence after a productive cycle: the
-/// counter ticks while retries remain, and also while the first scan found
-/// nothing, so a configured-but-slow meter is retried every
-/// `METER_RETRY_INTERVAL` cycles.
-fn tick_meter_retry_cadence(
-    meter_cycle_since_last: &mut u8,
-    meter_probe_done: bool,
-    meter_retry_count: u8,
-    no_meters_detected: bool,
-) {
-    if meter_probe_done && meter_retry_count > 0 && meter_retry_count < METER_MAX_RETRIES {
-        *meter_cycle_since_last += 1;
-    }
-    if meter_probe_done && meter_retry_count == 0 && no_meters_detected {
-        *meter_cycle_since_last += 1;
     }
 }
 
@@ -4008,7 +3945,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // instead of every poll cycle (the previous behaviour spammed
                 // INFO on every successful read).
                 let mut known_battery_addrs: Vec<u8> = Vec::new();
-                let mut meter_probe_done = false;
+                let mut meter_discovery =
+                    crate::inverter::meter_discovery::MeterDiscovery::default();
                 // Pacing of the out-of-band HR 318 pause read.
                 let mut pause_probe = PauseProbe::default();
                 // HR 300-359 reads missed in a row, on the models that read
@@ -4020,11 +3958,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 > = std::collections::BTreeMap::new();
                 let mut external_meter_failures: std::collections::BTreeMap<u8, u8> =
                     std::collections::BTreeMap::new();
-                // Meter discovery retry state: when enable_ammeter or EM115 is
-                // configured but the initial scan finds nothing, we retry every
-                // METER_RETRY_INTERVAL cycles up to METER_MAX_RETRIES times.
-                let mut meter_retry_count: u8 = 0;
-                let mut meter_cycle_since_last: u8 = 0;
                 // HV battery stacks discovered via the BMS (0xA0) / BCU (0x70+)
                 // probe. Each entry is (bcu_offset, num_modules). Empty discovery
                 // remains retryable so a transient startup timeout cannot hide the
@@ -4322,129 +4255,75 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     return CycleOutcome::published(true);
                                 }
 
-                                if should_probe_external_meters(
-                                    identity.device_type,
-                                    meter_probe_done,
-                                    snapshot.enable_ammeter,
-                                    snapshot.meter_type,
-                                    meter_retry_count,
-                                    meter_cycle_since_last,
-                                ) {
-                                    // Probe for external CT clamp meters (device addresses 0x01-0x08).
-                                    // Per givenergy-modbus, a meter is present when V_phase_1
-                                    // (IR 60) is non-zero. True three-phase models use the
-                                    // built-in grid CT; single-phase 0x81xx HV hybrids still
-                                    // support an external MID meter and are probed here.
-                                    //
-                                    // Uses a short 3-second timeout with no retries for the
-                                    // initial scan. If the inverter is configured for an
-                                    // external ammeter but no meters are found, discovery is
-                                    // retried on a slow cadence (every 5 cycles, up to 10
-                                    // attempts) to handle LoRA-linked EM115 meters that may
-                                    // be slow to respond.
-                                    let is_retry = meter_probe_done;
-                                    let ammeter_expected = snapshot.enable_ammeter || snapshot.meter_type == 1;
-                                    if is_retry {
-                                        tracing::info!(
-                                            retry = meter_retry_count,
-                                            max = METER_MAX_RETRIES,
-                                            "Retrying external CT meter discovery (ammeter expected)"
+                                // Probe for external CT clamp meters (device addresses
+                                // 0x01-0x08). Per givenergy-modbus a meter is present when
+                                // V_phase_1 (IR 60) is non-zero. Three-phase models use the
+                                // built-in grid CT and batteryless devices have no battery
+                                // bus, so neither is probed; single-phase 0x81xx HV hybrids
+                                // still take an external MID meter.
+                                //
+                                // The first scan of a connection tries every address once
+                                // (3 s each, no retries). After that, one missing address
+                                // is tried per step on `MeterDiscovery`'s schedule, so a
+                                // meter that missed the scan turns up without a restart
+                                // (issue #473).
+                                let probe_plan = {
+                                    let present: std::collections::BTreeSet<u8> =
+                                        cached_external_meters.keys().copied().collect();
+                                    let eligible = external_meters_possible(identity.device_type);
+                                    let expected =
+                                        crate::inverter::meter_discovery::expected_addresses(
+                                            poll_settings.meter_names.keys(),
+                                            poll_settings
+                                                .solar_arrays
+                                                .iter()
+                                                .map(|a| a.meter_address),
+                                            snapshot.enable_ammeter || snapshot.meter_type == 1,
+                                            !present.is_empty(),
                                         );
-                                    } else {
-                                        tracing::info!(
-                                            enable_ammeter = snapshot.enable_ammeter,
-                                            meter_type = snapshot.meter_type,
-                                            device_type = ?snapshot.device_type,
-                                            "Probing for external CT meters..."
-                                        );
-                                    }
-                                    let mut found_meters: Vec<u8> = Vec::new();
-                                    for &addr in crate::modbus::registers::METER_ADDRESSES {
-                                        match client
-                                            .probe_registers_at_slave(
-                                                addr,
-                                                crate::modbus::framer::RegisterType::Input,
-                                                60,
-                                                30,
-                                                Duration::from_secs(3),
-                                            )
-                                            .await
-                                        {
-                                            Ok(data) => {
-                                                let (valid, v1) = crate::inverter::decoder::validate_meter_data(&data);
-                                                if valid {
-                                                    let meter =
-                                                        crate::inverter::decoder::decode_meter_data(
-                                                            &data, addr,
-                                                        );
-                                                    tracing::info!(
-                                                        "Meter detected at addr 0x{addr:02X}: {:.1}V, {:.0}W",
-                                                        meter.v_phase_1,
-                                                        meter.p_active_total
-                                                    );
-                                                    found_meters.push(addr);
-                                                    cached_external_meters.insert(addr, meter.clone());
-                                                    snapshot.meters.push(meter);
-                                                } else if v1 > 0.0 {
-                                                    tracing::debug!(
-                                                        "Meter addr 0x{addr:02X}: responded with implausible voltage ({v1:.1}V) - rejected"
-                                                    );
-                                                } else {
-                                                    tracing::debug!(
-                                                        "Meter addr 0x{addr:02X}: responded with zero voltage - no meter present"
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    "Meter addr 0x{addr:02X}: no response: {e}",
-                                                );
-                                            }
+                                    meter_discovery.next(
+                                        std::time::Instant::now(),
+                                        eligible,
+                                        &present,
+                                        &expected,
+                                    )
+                                };
+                                if let Some(plan) = probe_plan {
+                                    use crate::inverter::meter_discovery::MeterProbePlan;
+                                    let (addresses, first_scan): (Vec<u8>, bool) = match plan {
+                                        MeterProbePlan::Scan => {
+                                            tracing::info!(
+                                                enable_ammeter = snapshot.enable_ammeter,
+                                                meter_type = snapshot.meter_type,
+                                                device_type = ?snapshot.device_type,
+                                                "Probing for external CT meters..."
+                                            );
+                                            (crate::modbus::registers::METER_ADDRESSES.to_vec(), true)
                                         }
-                                    }
-
-                                    if !found_meters.is_empty() {
-                                        // Merge with any previously detected meters.
-                                        for addr in &found_meters {
-                                            if !detected_meters.contains(addr) {
-                                                detected_meters.push(*addr);
-                                            }
+                                        MeterProbePlan::Address(addr) => {
+                                            tracing::debug!(
+                                                "Looking again for an external CT meter at 0x{addr:02X}"
+                                            );
+                                            (vec![addr], false)
                                         }
-                                        meter_probe_done = true;
-                                        meter_retry_count = 0;
+                                    };
+                                    let found = crate::inverter::battery_reads::probe_meters(
+                                        &mut client,
+                                        &addresses,
+                                        first_scan,
+                                        &mut detected_meters,
+                                        &mut cached_external_meters,
+                                        &mut external_meter_failures,
+                                        Duration::ZERO,
+                                    )
+                                    .await;
+                                    if !found.is_empty() {
                                         tracing::info!(
                                             "Detected {} meter(s) at addresses: {:02X?}",
                                             detected_meters.len(), detected_meters
                                         );
-                                    } else if !meter_probe_done {
-                                        // First scan found nothing.
-                                        meter_probe_done = true;
-                                        if ammeter_expected {
-                                            tracing::info!(
-                                                "No external CT meters detected on first scan - will retry (ammeter expected)"
-                                            );
-                                            // Don't increment retry_count yet; the first
-                                            // retry happens after METER_RETRY_INTERVAL cycles.
-                                            meter_cycle_since_last = 0;
-                                        } else {
-                                            tracing::info!("No external CT meters detected");
-                                        }
-                                    } else {
-                                        // Retry scan found nothing.
-                                        meter_retry_count += 1;
-                                        meter_cycle_since_last = 0;
-                                        if meter_retry_count >= METER_MAX_RETRIES {
-                                            tracing::warn!(
-                                                retries = meter_retry_count,
-                                                "Meter discovery exhausted all retries - external ammeter configured but no meter responding"
-                                            );
-                                        } else {
-                                            tracing::info!(
-                                                retry = meter_retry_count,
-                                                max = METER_MAX_RETRIES,
-                                                "No external CT meters found - will retry"
-                                            );
-                                        }
+                                    } else if first_scan {
+                                        tracing::info!("No external CT meters detected");
                                     }
                                 }
 
@@ -6343,12 +6222,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                             continue;
                         }
                         CycleStep::RepollSanitized | CycleStep::WaitForInterval => {
-                            tick_meter_retry_cadence(
-                                &mut meter_cycle_since_last,
-                                meter_probe_done,
-                                meter_retry_count,
-                                detected_meters.is_empty(),
-                            );
                             // Sanitization was applied - corrupted register data
                             // detected. Re-poll immediately instead of waiting
                             // for the next interval, so the frontend gets a
@@ -6851,8 +6724,8 @@ pub(crate) fn apply_ct_solar_authority(
     // labelled as arrays. This is the *expected* meter set for this
     // cycle; `snapshot.meters` only contains meters that were actually
     // read this cycle, so a configured address missing from it means
-    // the meter is absent/unread (dropped, or the probe hasn't retried
-    // yet — retry interval is 5 cycles) — NOT a reading of 0 W.
+    // the meter is absent/unread (dropped, or discovery hasn't found it
+    // yet; it looks again every 2 minutes, issue #473) — NOT a reading of 0 W.
     let configured_addrs: Vec<u8> = settings
         .solar_arrays
         .iter()
@@ -10105,7 +9978,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // decide_after_cycle / tick_meter_retry_cadence
+    // decide_after_cycle
     // -------------------------------------------------------------------
 
     fn fresh_reconnect() -> ReconnectController {
@@ -10271,39 +10144,6 @@ mod tests {
     }
 
     #[test]
-    fn meter_cadence_ticks_while_retries_remain() {
-        let mut ticks = 0u8;
-        tick_meter_retry_cadence(&mut ticks, true, 1, false);
-        assert_eq!(ticks, 1);
-        tick_meter_retry_cadence(&mut ticks, true, METER_MAX_RETRIES - 1, false);
-        assert_eq!(ticks, 2);
-    }
-
-    #[test]
-    fn meter_cadence_stops_ticking_once_retries_are_exhausted() {
-        let mut ticks = 0u8;
-        tick_meter_retry_cadence(&mut ticks, true, METER_MAX_RETRIES, false);
-        assert_eq!(ticks, 0);
-    }
-
-    #[test]
-    fn meter_cadence_starts_after_an_empty_first_scan_only() {
-        let mut ticks = 0u8;
-        tick_meter_retry_cadence(&mut ticks, true, 0, true);
-        assert_eq!(ticks, 1, "first scan found nothing: start the cadence");
-        tick_meter_retry_cadence(&mut ticks, true, 0, false);
-        assert_eq!(ticks, 1, "meters were found: nothing to retry");
-    }
-
-    #[test]
-    fn meter_cadence_does_not_tick_before_the_first_scan() {
-        let mut ticks = 0u8;
-        tick_meter_retry_cadence(&mut ticks, false, 0, true);
-        tick_meter_retry_cadence(&mut ticks, false, 3, false);
-        assert_eq!(ticks, 0);
-    }
-
-    #[test]
     fn detection_observation_first_known_code_is_identified() {
         assert_eq!(
             observe_model_detection(None, DeviceType::Gen3Hybrid, "2001"),
@@ -10445,79 +10285,23 @@ mod tests {
     fn external_meter_probe_runs_after_ac_model_repoll() {
         // AC-coupled models trigger an immediate model-aware re-poll after detection.
         // The CT meter scan must therefore be allowed on the following poll, once
-        // known_device_type is set but no meter probe has completed yet.
-        assert!(should_probe_external_meters(
-            Some(DeviceType::ACCoupled),
-            false, // meter_probe_done
-            false, // enable_ammeter
-            0,     // meter_type
-            0,     // meter_retry_count
-            0,     // meter_cycle_since_last
-        ));
-        assert!(should_probe_external_meters(
-            Some(DeviceType::ACCoupledMk2),
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
+        // the device type is known.
+        assert!(external_meters_possible(Some(DeviceType::ACCoupled)));
+        assert!(external_meters_possible(Some(DeviceType::ACCoupledMk2)));
     }
 
     #[test]
     fn external_meter_probe_skips_batteryless_gateway() {
         // Batteryless devices (Gateway, EMS, PvInverter) should never probe
         // for external CT meters - they have their own built-in metering.
-        // The scan should not run even on the very first cycle after detection.
-        assert!(!should_probe_external_meters(
-            Some(DeviceType::Gateway),
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
-        assert!(!should_probe_external_meters(
-            Some(DeviceType::Ems),
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
-        assert!(!should_probe_external_meters(
-            Some(DeviceType::PvInverter),
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
-    }
-
-    #[test]
-    fn external_meter_probe_is_single_shot_without_ammeter() {
-        // No ammeter configured, first scan already done - no further probing.
-        assert!(!should_probe_external_meters(
-            Some(DeviceType::ACCoupled),
-            true,  // meter_probe_done
-            false, // enable_ammeter
-            0,     // meter_type
-            0,     // meter_retry_count
-            5,     // meter_cycle_since_last
-        ));
+        assert!(!external_meters_possible(Some(DeviceType::Gateway)));
+        assert!(!external_meters_possible(Some(DeviceType::Ems)));
+        assert!(!external_meters_possible(Some(DeviceType::PvInverter)));
     }
 
     #[test]
     fn external_meter_probe_skips_three_phase() {
-        assert!(!should_probe_external_meters(
-            Some(DeviceType::ThreePhase),
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
+        assert!(!external_meters_possible(Some(DeviceType::ThreePhase)));
     }
 
     #[test]
@@ -10543,22 +10327,8 @@ mod tests {
     fn external_meter_probe_runs_for_single_phase_hybrid_hv_gen3() {
         // Every 0x81xx variant is physically single-phase (issue #432), so it
         // probes meter addresses 0x01-0x08 like any other single-phase model.
-        assert!(should_probe_external_meters(
-            Some(DeviceType::HybridHvGen3),
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
-        assert!(should_probe_external_meters(
-            Some(DeviceType::AllInOneHybrid),
-            false,
-            false,
-            0,
-            0,
-            0,
-        ));
+        assert!(external_meters_possible(Some(DeviceType::HybridHvGen3)));
+        assert!(external_meters_possible(Some(DeviceType::AllInOneHybrid)));
     }
 
     #[test]
@@ -10880,7 +10650,7 @@ mod tests {
 
     #[test]
     fn external_meter_probe_skips_unknown_device() {
-        assert!(!should_probe_external_meters(None, false, false, 0, 0, 0,));
+        assert!(!external_meters_possible(None));
     }
 
     #[test]
@@ -10947,62 +10717,10 @@ mod tests {
     }
 
     #[test]
-    fn meter_retry_fires_when_ammeter_expected() {
-        // EM115 configured (meter_type=1), first scan done, no meters found,
-        // enough cycles have passed - should retry.
-        assert!(should_probe_external_meters(
-            Some(DeviceType::Gen3Hybrid),
-            true,                 // meter_probe_done
-            false,                // enable_ammeter
-            1,                    // meter_type = EM115
-            0,                    // meter_retry_count (first retry)
-            METER_RETRY_INTERVAL, // enough cycles elapsed
-        ));
-    }
-
-    #[test]
-    fn meter_retry_respects_cadence() {
-        // EM115 configured but not enough cycles since last attempt - skip.
-        assert!(!should_probe_external_meters(
-            Some(DeviceType::Gen3Hybrid),
-            true,
-            false,
-            1,
-            0,
-            METER_RETRY_INTERVAL - 1,
-        ));
-    }
-
-    #[test]
-    fn meter_retry_stops_after_max_retries() {
-        assert!(!should_probe_external_meters(
-            Some(DeviceType::Gen3Hybrid),
-            true,
-            true, // enable_ammeter
-            0,
-            METER_MAX_RETRIES, // exhausted
-            METER_RETRY_INTERVAL,
-        ));
-    }
-
-    #[test]
     fn timed_export_boundary_uses_fast_confirmation_poll() {
         assert_eq!(next_poll_delay_secs(60, true), 2);
         assert_eq!(next_poll_delay_secs(1, true), 1);
         assert_eq!(next_poll_delay_secs(60, false), 60);
-    }
-
-    #[test]
-    fn meter_retry_enabled_by_enable_ammeter_flag() {
-        // enable_ammeter=true is sufficient even without EM115 meter_type.
-        assert!(should_probe_external_meters(
-            Some(DeviceType::Gen3Hybrid),
-            true,
-            true, // enable_ammeter
-            0,    // meter_type (not EM115)
-            3,    // some retries used
-            METER_RETRY_INTERVAL,
-        ));
     }
 
     #[test]

@@ -4,6 +4,7 @@ import {
   meterLabel,
   meterName,
   meterOptionLabel,
+  unreadMeterAddresses,
   gridMeterCurrentA,
   resolveGridMeter,
   BUILTIN_GRID_CT_ADDRESS,
@@ -172,5 +173,44 @@ describe('meter names (issue #473)', () => {
     expect(meterOptionLabel(1, names, arrays)).toBe('0x01 · Mains In');
     expect(meterOptionLabel(2, names, arrays)).toBe('0x02 · Solar Small Roof');
     expect(meterOptionLabel(5, names, arrays)).toBe('Meter 0x05');
+  });
+});
+
+describe('unreadMeterAddresses (issue #473)', () => {
+  const arrays = [{ meter_address: 3, name: '', rated_kw: 2 }];
+
+  it('lists a named meter the snapshot does not carry', () => {
+    expect(unreadMeterAddresses([meter(1), meter(2)], { '3': 'PV2' }, [])).toEqual([3]);
+  });
+
+  it('lists a solar-array meter even when the array has no name', () => {
+    expect(unreadMeterAddresses([meter(1)], {}, arrays)).toEqual([3]);
+  });
+
+  it('is empty when every named or solar-array meter is being read', () => {
+    expect(unreadMeterAddresses([meter(1), meter(3)], { '1': 'Mains' }, arrays)).toEqual([]);
+  });
+
+  it('ignores blank names, other addresses and the built-in grid CT', () => {
+    expect(
+      unreadMeterAddresses([], { '1': '  ', '0': 'Grid', '9': 'Garage', x: 'Odd' }, [
+        { meter_address: 0, name: 'No', rated_kw: 1 },
+        { meter_address: 12, name: 'No', rated_kw: 1 },
+      ]),
+    ).toEqual([]);
+  });
+
+  it('returns each address once, in address order', () => {
+    expect(
+      unreadMeterAddresses([], { '5': 'E', '2': 'B' }, [
+        { meter_address: 5, name: 'Roof', rated_kw: 1 },
+        { meter_address: 3, name: 'Garage', rated_kw: 1 },
+      ]),
+    ).toEqual([2, 3, 5]);
+  });
+
+  it('copes with nothing loaded yet', () => {
+    expect(unreadMeterAddresses(undefined)).toEqual([]);
+    expect(unreadMeterAddresses(null, {}, [])).toEqual([]);
   });
 });

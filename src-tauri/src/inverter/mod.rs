@@ -18,6 +18,7 @@ pub mod export_once;
 pub(crate) mod forecast_plan;
 #[cfg(test)]
 mod givtcp_contract;
+pub(crate) mod meter_discovery;
 pub mod model;
 pub(crate) mod plan_replan;
 pub mod poll;

@@ -251,6 +251,64 @@ describe('MetersPage', () => {
       expect(addresses).toEqual(['0x01', '0x02']);
     });
 
+    it('keeps a named meter that is not being read as a muted card (issue #473)', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({
+          meters: [externalMeter({ address: 1 }), externalMeter({ address: 4 })],
+        }),
+        connectionState: 'connected',
+        meterLabels: {
+          names: { '1': 'Mains In', '3': 'PV2' },
+          solarArrays: [],
+        },
+      });
+      render(<MetersPage />);
+      // In address order among the cards that are being read.
+      const titles = screen.getAllByTestId('meter-title').map((t) => t.textContent);
+      expect(titles).toEqual(['Mains In', 'PV2', 'Meter 0x04']);
+      const card = screen.getByTestId('meter-not-responding');
+      expect(within(card).getByText('PV2')).toBeDefined();
+      expect(within(card).getByText('0x03')).toBeDefined();
+      expect(within(card).getByText('Not responding')).toBeDefined();
+      // No readings invented for it.
+      expect(within(card).queryByText(/W (Import|Export)/)).toBeNull();
+    });
+
+    it('shows a solar-array meter that is not being read, even unnamed', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ meters: [externalMeter({ address: 1 })] }),
+        connectionState: 'connected',
+        meterLabels: {
+          names: {},
+          solarArrays: [{ meter_address: 2, name: '', rated_kw: 3 }],
+        },
+      });
+      render(<MetersPage />);
+      const card = screen.getByTestId('meter-not-responding');
+      expect(within(card).getByText('Meter 0x02')).toBeDefined();
+    });
+
+    it('shows the not-responding card instead of the empty message when no meter answers', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ meters: [] }),
+        connectionState: 'connected',
+        meterLabels: { names: { '1': 'Mains In' }, solarArrays: [] },
+      });
+      render(<MetersPage />);
+      expect(screen.getByTestId('meter-not-responding')).toBeDefined();
+      expect(screen.queryByText('No external CT meters detected on your system.')).toBeNull();
+    });
+
+    it('adds no not-responding card when every named meter is being read', () => {
+      useInverterStore.setState({
+        snapshot: makeSnapshot({ meters: [externalMeter({ address: 1 })] }),
+        connectionState: 'connected',
+        meterLabels: { names: { '1': 'Mains In' }, solarArrays: [] },
+      });
+      render(<MetersPage />);
+      expect(screen.queryByTestId('meter-not-responding')).toBeNull();
+    });
+
     it('shows per-phase power for a real external clamp', () => {
       useInverterStore.setState({
         snapshot: makeSnapshot({ meters: [externalMeter()] }),

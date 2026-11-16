@@ -1,7 +1,7 @@
 import { useInverterStore } from '../store/useInverterStore';
 import type { InverterSnapshot, MeterData } from '../lib/types';
 import { formatEnergy } from '../lib/format';
-import { meterAddressText, meterLabel, meterName } from '../lib/meters';
+import { meterAddressText, meterLabel, meterName, unreadMeterAddresses } from '../lib/meters';
 import AwaitingConnection from '../components/AwaitingConnection';
 
 /** A phase is "active" if it has a plausible non-zero voltage (>10 V). */
@@ -138,6 +138,34 @@ function MeterCard({ meter }: { meter: MeterData }) {
   );
 }
 
+/**
+ * A clamp the user named or set up as a solar array that HEM isn't reading
+ * right now (issue #473). Discovery keeps looking for it, so this clears by
+ * itself once it answers.
+ */
+function MissingMeterCard({ address }: { address: number }) {
+  const { names, solarArrays } = useInverterStore((s) => s.meterLabels);
+  const named = meterName(address, names, solarArrays) != null;
+  return (
+    <div
+      className="bg-bg-surface rounded-xl p-4 opacity-70 flex items-center justify-between gap-3"
+      data-testid="meter-not-responding"
+    >
+      <div className="flex flex-col min-w-0">
+        <span className="text-text-primary font-medium truncate" data-testid="meter-title">
+          {meterLabel(address, names, solarArrays)}
+        </span>
+        {named && (
+          <span className="text-xs text-text-secondary font-mono" data-testid="meter-address">
+            {meterAddressText(address)}
+          </span>
+        )}
+      </div>
+      <span className="text-sm text-amber-400">Not responding</span>
+    </div>
+  );
+}
+
 function CtConfigCard({ snapshot }: { snapshot: InverterSnapshot }) {
   const meterTypeLabel = (() => {
     switch (snapshot.meter_type) {
@@ -183,6 +211,7 @@ export default function MetersPage() {
   const snapshot = useInverterStore((s) => s.snapshot);
   const connectionState = useInverterStore((s) => s.connectionState);
   const meters = snapshot?.meters;
+  const { names, solarArrays } = useInverterStore((s) => s.meterLabels);
 
   // Same gate as Battery / Solar / Inverter / Control: while the backend
   // has no usable connection, render the shared placeholder instead of a
@@ -193,17 +222,31 @@ export default function MetersPage() {
     return <AwaitingConnection connectionState={connectionState} showFaq />;
   }
 
+  // The meters being read, with a placeholder for each named or solar-array
+  // clamp that isn't, all in address order.
+  const cards = [
+    ...(meters ?? []).map((meter) => ({ address: meter.address, meter })),
+    ...unreadMeterAddresses(meters, names, solarArrays).map((address) => ({
+      address,
+      meter: undefined,
+    })),
+  ].sort((a, b) => a.address - b.address);
+
   return (
     <div className="flex flex-col gap-4 max-w-2xl mx-auto px-4 py-6">
       <h2 className="text-text-primary font-semibold text-lg">External CT Meters</h2>
       <LifetimeTotalsCard snapshot={snapshot} />
       <CtConfigCard snapshot={snapshot} />
 
-      {meters && meters.length > 0 ? (
+      {cards.length > 0 ? (
         <div className="space-y-4">
-          {meters.map((m) => (
-            <MeterCard key={m.address} meter={m} />
-          ))}
+          {cards.map((card) =>
+            card.meter ? (
+              <MeterCard key={card.address} meter={card.meter} />
+            ) : (
+              <MissingMeterCard key={card.address} address={card.address} />
+            ),
+          )}
         </div>
       ) : (
         <div className="bg-bg-surface rounded-xl p-6 text-center">

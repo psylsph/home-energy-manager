@@ -4003,6 +4003,38 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn meter_discovery_probe_reaches_the_meter_through_the_client() {
+        // `probe_meters` goes through `RegisterReader::probe_input`, which
+        // must address the probed slave and leave the client's own slave
+        // alone (issue #473).
+        let responses = vec![MockResponse::ReadResponse {
+            slave: 0x03,
+            function: 0x04,
+            base: 60,
+            data: vec![2330; 30],
+        }];
+        let (_port, _server, mut client) = setup_client_with_server(responses).await;
+
+        let mut detected = Vec::new();
+        let mut cached = std::collections::BTreeMap::new();
+        let mut failures = std::collections::BTreeMap::new();
+        let found = crate::inverter::battery_reads::probe_meters(
+            &mut client,
+            &[0x03],
+            false,
+            &mut detected,
+            &mut cached,
+            &mut failures,
+            Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(found, vec![0x03]);
+        assert!((cached[&0x03].v_phase_1 - 233.0).abs() < 0.01);
+        assert_eq!(client.slave, 0x11);
+    }
+
+    #[tokio::test]
     async fn probe_restores_original_slave_on_success() {
         // Slave should be restored even when the probe succeeds.
         let meter_data: Vec<u16> = vec![2300; 30];

@@ -35,6 +35,19 @@ pub(crate) const DEVICE_READ_PACE: Duration = Duration::from_millis(100);
 #[allow(async_fn_in_trait)]
 pub(crate) trait RegisterReader {
     async fn read_input(&mut self, slave: u8, start: u16, count: u16) -> Result<Vec<u16>, String>;
+
+    /// A single short try at an address that may not exist, so a silent
+    /// address costs `timeout` rather than the full read back-off. Readers
+    /// without their own timeout just read.
+    async fn probe_input(
+        &mut self,
+        slave: u8,
+        start: u16,
+        count: u16,
+        _timeout: Duration,
+    ) -> Result<Vec<u16>, String> {
+        self.read_input(slave, start, count).await
+    }
 }
 
 impl RegisterReader for ModbusClient {
@@ -42,6 +55,18 @@ impl RegisterReader for ModbusClient {
         // Read at the given device address without disturbing the
         // model-specific slave the main poll cycle uses.
         self.read_registers_at_slave(slave, RegisterType::Input, start, count)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn probe_input(
+        &mut self,
+        slave: u8,
+        start: u16,
+        count: u16,
+        timeout: Duration,
+    ) -> Result<Vec<u16>, String> {
+        self.probe_registers_at_slave(slave, RegisterType::Input, start, count, timeout)
             .await
             .map_err(|e| e.to_string())
     }
@@ -427,6 +452,78 @@ pub(crate) async fn read_external_meters<R: RegisterReader>(
             }
         }
         tokio::time::sleep(pace).await;
+    }
+}
+
+/// How long one probe of an address that may not have a meter waits.
+pub(crate) const METER_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Probe each of `addresses` once for an external CT meter (a meter is
+/// present when its phase 1 voltage, IR 60 onwards, is plausible). A meter
+/// that answers joins `detected`/`cached` and its failure count clears;
+/// returns the addresses found. `first_scan` logs every miss at INFO so the
+/// Logs page shows why a meter isn't there; later steps log only at DEBUG
+/// (issue #473).
+pub(crate) async fn probe_meters<R: RegisterReader>(
+    reader: &mut R,
+    addresses: &[u8],
+    first_scan: bool,
+    detected: &mut Vec<u8>,
+    cached: &mut BTreeMap<u8, MeterData>,
+    failures: &mut BTreeMap<u8, u8>,
+    pace: Duration,
+) -> Vec<u8> {
+    let mut found = Vec::new();
+    for &addr in addresses {
+        match reader.probe_input(addr, 60, 30, METER_PROBE_TIMEOUT).await {
+            Ok(data) => {
+                let (valid, v1) = crate::inverter::decoder::validate_meter_data(&data);
+                if valid {
+                    let meter = crate::inverter::decoder::decode_meter_data(&data, addr);
+                    tracing::info!(
+                        "Meter detected at addr 0x{addr:02X}: {:.1}V, {:.0}W",
+                        meter.v_phase_1,
+                        meter.p_active_total
+                    );
+                    if !detected.contains(&addr) {
+                        detected.push(addr);
+                    }
+                    cached.insert(addr, meter);
+                    failures.remove(&addr);
+                    found.push(addr);
+                } else if v1 > 0.0 {
+                    log_meter_miss(
+                        first_scan,
+                        format_args!(
+                            "Meter addr 0x{addr:02X}: responded with implausible voltage ({v1:.1}V) - rejected"
+                        ),
+                    );
+                } else {
+                    log_meter_miss(
+                        first_scan,
+                        format_args!(
+                            "Meter addr 0x{addr:02X}: responded with zero voltage - no meter present"
+                        ),
+                    );
+                }
+            }
+            Err(e) => log_meter_miss(
+                first_scan,
+                format_args!("Meter addr 0x{addr:02X}: no response: {e}"),
+            ),
+        }
+        if addresses.len() > 1 {
+            tokio::time::sleep(pace).await;
+        }
+    }
+    found
+}
+
+fn log_meter_miss(info: bool, message: std::fmt::Arguments<'_>) {
+    if info {
+        tracing::info!("{message}");
+    } else {
+        tracing::debug!("{message}");
     }
 }
 
@@ -1157,6 +1254,102 @@ mod tests {
         let mut d = vec![0u16; 30];
         d[0] = volts_x10;
         d
+    }
+
+    #[tokio::test]
+    async fn a_meter_missed_by_the_first_scan_is_found_by_a_later_probe() {
+        let mut reader = Scripted::default();
+        reader
+            .ok(0x01, 60, meter_block(2300))
+            .ok(0x02, 60, meter_block(2310))
+            .fail(0x03, 60);
+        let (mut detected, mut cached, mut failures) =
+            (Vec::new(), BTreeMap::new(), BTreeMap::new());
+        let found = probe_meters(
+            &mut reader,
+            &[0x01, 0x02, 0x03],
+            true,
+            &mut detected,
+            &mut cached,
+            &mut failures,
+            ZERO,
+        )
+        .await;
+        assert_eq!(found, vec![0x01, 0x02]);
+        assert_eq!(detected, vec![0x01, 0x02]);
+        assert!(!cached.contains_key(&0x03));
+
+        // 0x03 answers on a later step, probing only that address.
+        reader.ok(0x03, 60, meter_block(2330));
+        reader.calls.clear();
+        let found = probe_meters(
+            &mut reader,
+            &[0x03],
+            false,
+            &mut detected,
+            &mut cached,
+            &mut failures,
+            ZERO,
+        )
+        .await;
+        assert_eq!(found, vec![0x03]);
+        assert_eq!(detected, vec![0x01, 0x02, 0x03]);
+        assert!((cached[&0x03].v_phase_1 - 233.0).abs() < 0.01);
+        assert_eq!(reader.calls, vec![(0x03, 60, 30)]);
+    }
+
+    #[tokio::test]
+    async fn a_zero_or_implausible_reply_never_adds_a_meter() {
+        let mut reader = Scripted::default();
+        reader
+            .ok(0x03, 60, meter_block(0))
+            .ok(0x04, 60, meter_block(5001)) // 500.1 V: corruption
+            .ok(0x05, 60, vec![]);
+        let (mut detected, mut cached, mut failures) =
+            (Vec::new(), BTreeMap::new(), BTreeMap::new());
+        let found = probe_meters(
+            &mut reader,
+            &[0x03, 0x04, 0x05],
+            false,
+            &mut detected,
+            &mut cached,
+            &mut failures,
+            ZERO,
+        )
+        .await;
+        assert!(found.is_empty());
+        assert!(detected.is_empty() && cached.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_meter_dropped_after_repeated_failures_is_found_again() {
+        let mut reader = Scripted::default();
+        reader.fail(0x03, 60);
+        let (mut detected, mut cached, mut failures) =
+            (vec![0x03], BTreeMap::new(), BTreeMap::new());
+        cached.insert(
+            0x03,
+            crate::inverter::decoder::decode_meter_data(&meter_block(2330), 0x03),
+        );
+        for _ in 0..30 {
+            read_external_meters(&mut reader, &[0x03], &mut cached, &mut failures, ZERO).await;
+        }
+        assert!(!cached.contains_key(&0x03));
+        reader.ok(0x03, 60, meter_block(2330));
+        let found = probe_meters(
+            &mut reader,
+            &[0x03],
+            false,
+            &mut detected,
+            &mut cached,
+            &mut failures,
+            ZERO,
+        )
+        .await;
+        assert_eq!(found, vec![0x03]);
+        assert_eq!(detected, vec![0x03], "no duplicate address");
+        assert!(cached.contains_key(&0x03));
+        assert!(!failures.contains_key(&0x03));
     }
 
     #[tokio::test]

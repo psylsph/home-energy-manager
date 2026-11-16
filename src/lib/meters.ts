@@ -166,3 +166,28 @@ export function meterOptionLabel(
   const name = meterName(address, names, solarArrays);
   return name ? `${meterAddressText(address)} · ${name}` : meterLabel(address);
 }
+
+/**
+ * External clamps the user says exist but the snapshot isn't carrying
+ * (issue #473): addresses 1-8 with a name in Settings → Meters or a Solar
+ * Arrays entry, that aren't among `meters`. Each once, in address order.
+ * The Meters page shows these as "not responding" instead of letting them
+ * vanish. Mirrors the backend's expected-meter set, which probes them
+ * again every two minutes.
+ */
+export function unreadMeterAddresses(
+  meters: readonly MeterData[] | null | undefined,
+  names: MeterNames = {},
+  solarArrays: readonly SolarArrayConfig[] = [],
+): number[] {
+  const expected = new Set<number>();
+  for (const [key, name] of Object.entries(names)) {
+    const address = Number(key);
+    if (name.trim() && Number.isInteger(address)) expected.add(address);
+  }
+  for (const array of solarArrays) expected.add(array.meter_address);
+  const read = new Set((meters ?? []).map((m) => m.address));
+  return [...expected]
+    .filter((address) => address >= 1 && address <= 8 && !read.has(address))
+    .sort((a, b) => a - b);
+}
