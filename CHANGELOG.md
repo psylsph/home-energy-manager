@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.17.4] - 2026-11-16
+
+### Fixed
+
+- **A CT meter that missed the first check now turns up without a restart.** HEM looked for your meters once when it connected, so one that was slow to answer stayed hidden until the next reconnect, and a solar-array meter going missing made solar fall back to the inverter's own figures. HEM now keeps looking, every couple of minutes for any meter you've named or set up as a solar array, and shows a "Not responding" card on the Meters page for one it can't read instead of letting it vanish.
+
 ## [1.17.3] - 2026-11-15
 
 ### Changed
