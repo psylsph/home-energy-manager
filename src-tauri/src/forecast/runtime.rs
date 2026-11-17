@@ -17,7 +17,9 @@ use chrono::{DateTime, Datelike, Local, Timelike};
 
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
 use crate::forecast::dispatch_load::{apply_dispatch_hours, DispatchHour};
-use crate::forecast::simulate::{simulate_battery, SimHourInput, SimulationParams};
+use crate::forecast::simulate::{
+    modelled_reserve, simulate_battery, SimHourInput, SimulationParams,
+};
 use crate::forecast::time_windows::window_overlap_segments;
 use crate::forecast::{ForecastConsumptionHour, ForecastPayload};
 
@@ -37,12 +39,14 @@ const AT_RESERVE_PCT: f64 = 0.5;
 const BELOW_RESERVE_PCT: f64 = 0.5;
 
 /// Where the SOC sits against the reserve: -1 below it, 0 at it, 1 above.
-/// The endpoint's cache keys on it, so a one-point move across an edge
-/// gets a fresh answer.
+/// "At" runs a point above the reserve, where a cold battery really stops
+/// (issue #479); "below" is measured from the reserve itself. The
+/// endpoint's cache keys on it, so a one-point move across an edge gets a
+/// fresh answer.
 pub fn reserve_band(soc: f64, reserve: f64) -> i8 {
     if soc < reserve - BELOW_RESERVE_PCT {
         -1
-    } else if soc <= reserve + AT_RESERVE_PCT {
+    } else if soc <= modelled_reserve(reserve) + AT_RESERVE_PCT {
         0
     } else {
         1
@@ -104,6 +108,10 @@ pub struct RuntimeInputs {
     pub dispatch_hours: Vec<DispatchHour>,
     pub dispatch_net_of_profile: bool,
     /// Capacity, the live SOC as the start, the reserve, rates, efficiencies.
+    /// Unlike the payload's params, `reserve_soc_pct` here is the inverter's
+    /// own reserve: the pause test and "Below Reserve" read it as it is, and
+    /// the runtime applies `modelled_reserve` itself (issue #479), so don't
+    /// build it from modelled params or the margin is counted twice.
     pub params: SimulationParams,
     pub schedule: CurrentSchedule,
     /// Battery power now, W (negative = charging).
@@ -380,7 +388,8 @@ fn first_event(inputs: &RuntimeInputs, which: usize, topping_up: bool) -> Option
     if series.is_empty() {
         return None;
     }
-    let reserve = inputs.params.reserve_soc_pct;
+    // Where the battery stops: a point above the reserve (issue #479).
+    let reserve = modelled_reserve(inputs.params.reserve_soc_pct);
     let (mut prev_t, mut prev_soc) = (inputs.now_ts, inputs.params.start_soc_pct);
     let mut rising_now = topping_up;
     for (ts, soc) in series {
@@ -616,19 +625,20 @@ mod tests {
         assert_eq!(round_to_half_hour(T0 + 15 * 60), T0 + 1800);
         assert_eq!(round_to_half_hour(T0 + 44 * 60), T0 + 1800);
         assert_eq!(round_to_half_hour(T0 + 46 * 60), T0 + 3600);
-        // 0.8 kWh an hour from 50%: 5 h exactly → 05:00; 0.9: 4 h 27 → 04:30.
+        // To the 11% floor, 0.8 kWh an hour from 50%: 4 h 52 → 05:00; 0.9: 4 h 20 → 04:30.
         let (at, ..) = empty_at(&battery_runtime(&inputs(T0, T0, 50.0, [0.9, 0.9, 0.9])));
         assert_eq!(at, T0 + 4 * HOUR_SECS + 1800);
     }
 
     #[test]
     fn the_spread_of_the_profile_sets_the_confidence() {
-        // p75 1.25 → 3 h 12; p25 0.75 → 5 h 20: over two hours apart.
+        // To the 11% floor (3.9 kWh): p75 1.25 → 3 h 07; median 3 h 54;
+        // p25 0.75 → 5 h 12: two hours apart.
         let (at, earliest, latest, confidence) =
             empty_at(&battery_runtime(&inputs(T0, T0, 50.0, [1.25, 1.0, 0.75])));
         assert_eq!(at, T0 + 4 * HOUR_SECS);
         assert_eq!(earliest, Some(T0 + 3 * HOUR_SECS));
-        assert_eq!(latest, Some(T0 + 5 * HOUR_SECS + 1800));
+        assert_eq!(latest, Some(T0 + 5 * HOUR_SECS));
         assert_eq!(confidence, Confidence::Medium);
         // Far apart: low.
         let (.., confidence) = empty_at(&battery_runtime(&inputs(T0, T0, 50.0, [2.0, 1.0, 0.4])));
@@ -975,7 +985,8 @@ mod tests {
         }
         // An empty a few minutes away rounds up, not back.
         let now = T0 + 4 * HOUR_SECS + 20 * 60;
-        let mut i = inputs(now, T0 + 4 * HOUR_SECS, 11.0, [1.0, 1.0, 1.0]);
+        // (12% against a 10% reserve: the floor is 11%, a point away.)
+        let mut i = inputs(now, T0 + 4 * HOUR_SECS, 12.0, [1.0, 1.0, 1.0]);
         i.params.reserve_soc_pct = 10.0;
         let (at, earliest, latest, _) = empty_at(&battery_runtime(&i));
         assert!(at >= now, "{at}");
@@ -1045,6 +1056,45 @@ mod tests {
         assert_eq!(battery_runtime(&at), RuntimeOutcome::AtReserve);
         assert_eq!(reserve_band(3.0, 4.0), -1);
         assert_eq!(reserve_band(4.0, 4.0), 0);
+    }
+
+    #[test]
+    fn a_point_above_the_reserve_counts_as_the_reserve() {
+        // Issue #479: a cold battery stops a point early, so 5% against a 4%
+        // reserve is "At Reserve"; 6% still has a point to give; a point
+        // under the real reserve is still "Below Reserve".
+        let with_soc = |soc: f64| {
+            let mut i = inputs(T0, T0, soc, [1.0, 1.0, 1.0]);
+            i.params.reserve_soc_pct = 4.0;
+            battery_runtime(&i)
+        };
+        assert_eq!(with_soc(3.0), RuntimeOutcome::BelowReserve);
+        assert_eq!(with_soc(4.0), RuntimeOutcome::AtReserve);
+        assert_eq!(with_soc(5.0), RuntimeOutcome::AtReserve);
+        assert!(matches!(with_soc(6.0), RuntimeOutcome::EmptyAt { .. }));
+        assert_eq!(reserve_band(3.0, 4.0), -1);
+        assert_eq!(reserve_band(5.0, 4.0), 0);
+        assert_eq!(reserve_band(6.0, 4.0), 1);
+    }
+
+    #[test]
+    fn the_empty_time_is_when_it_reaches_the_floor_a_point_up() {
+        // 10 kWh at 50% to the 10% reserve is 4 kWh; at 0.2 kWh an hour that
+        // is 20 h. The floor is 11%, so 3.9 kWh: 19 h 30. (Idle, so the
+        // first hour isn't drained at the live rate.)
+        let mut i = inputs(T0, T0, 50.0, [0.2, 0.2, 0.2]);
+        i.battery_power_w = 0.0;
+        let (at, ..) = empty_at(&battery_runtime(&i));
+        assert_eq!(at, T0 + 19 * HOUR_SECS + 1800);
+    }
+
+    #[test]
+    fn a_reserve_of_99_is_not_read_as_a_pause() {
+        // The margin caps at 100, which must not turn a real reserve of 99
+        // into HEM's reserve-100 pause.
+        let mut near = inputs(T0, T0, 60.0, [1.0, 1.0, 1.0]);
+        near.params.reserve_soc_pct = 99.0;
+        assert_eq!(battery_runtime(&near), RuntimeOutcome::BelowReserve);
     }
 
     #[test]

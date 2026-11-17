@@ -482,7 +482,7 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                 let params = SimulationParams {
                     capacity_kwh: snap.battery_capacity_kwh as f64,
                     start_soc_pct: snap.soc as f64,
-                    reserve_soc_pct: snap.battery_reserve as f64,
+                    reserve_soc_pct: simulate::modelled_reserve(snap.battery_reserve as f64),
                     max_charge_kw: charge_kw,
                     max_discharge_kw: discharge_kw,
                     charge_efficiency: inputs.settings.forecast_charge_efficiency,
@@ -513,7 +513,9 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
                 battery = Some(ForecastBattery {
                     capacity_kwh: params.capacity_kwh,
                     start_soc_pct: params.start_soc_pct,
-                    reserve_soc_pct: params.reserve_soc_pct,
+                    // The inverter's own reserve; the projection floors a
+                    // point above it (issue #479).
+                    reserve_soc_pct: snap.battery_reserve as f64,
                     hours: sim.hours.iter().map(|h| (h.timestamp, h.soc_pct)).collect(),
                     end_soc_pct,
                     with_current_schedule,
@@ -1826,6 +1828,56 @@ pub(crate) mod tests {
         assert_ne!(paid, unpaid, "the export tariff must reach the planner");
     }
 
+    /// Issue #479: the plan models the battery stopping a point above its
+    /// reserve, but still names the inverter's own reserve.
+    #[test]
+    fn the_plan_names_the_inverters_reserve_not_the_modelled_floor() {
+        use crate::forecast::planner::PlanRecommendation;
+        let now = local_dt(2025, 1, 15, 20, 0);
+        let now_ts = now.timestamp();
+        let db = test_db();
+        seed_full_forecast_state(&db, now);
+        // No sun overnight, so the battery runs down to its floor.
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 0.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![slot("00:00", "05:00", 0.07), slot("05:00", "23:59", 0.27)],
+        });
+        settings.forecast_min_soc_pct = 4.0;
+        settings.forecast_plan_strategy = crate::settings::PlanStrategy::MinSoc;
+        let mut snap = battery_snapshot();
+        snap.soc = 25;
+        snap.battery_reserve = 4;
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        let rationale = match crate::server::api::compute_plan_recommendation(
+            &payload,
+            &settings,
+            Some(&snap),
+            now_ts,
+        ) {
+            PlanRecommendation::ChargeAndHold { rationale, .. }
+            | PlanRecommendation::Charge { rationale, .. } => rationale,
+            other => panic!("expected a charge, got {other:?}"),
+        };
+        assert!(rationale.contains("its 4% reserve"), "{rationale}");
+    }
+
     #[test]
     fn payload_builds_full_forecast() {
         let db = test_db();
@@ -2165,6 +2217,72 @@ pub(crate) mod tests {
             "the export drains it: {} vs Eco {}",
             at(with, 19),
             at(&battery.hours, 19)
+        );
+    }
+
+    /// Issue #479: a cold battery stops a point above its reserve, so the
+    /// projections floor at reserve + 1 while the payload still reports the
+    /// inverter's own reserve.
+    #[test]
+    fn projections_floor_one_point_above_the_reserve() {
+        let db = test_db();
+        let now = local_dt(2025, 6, 15, 12, 0);
+        seed_consumption_history(&db, now);
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            let ts = hour_start + h * 3600;
+            let local_hour = chrono::DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local).hour())
+                .unwrap_or(0);
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: ts,
+                variable: "shortwave_radiation".to_string(),
+                value: if (12..=14).contains(&local_hour) {
+                    500.0
+                } else {
+                    0.0
+                },
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        db.set_meta_value(META_FORECAST_PR, "0.8").unwrap();
+        db.set_meta_value(META_FORECAST_PR_DAYS, "12").unwrap();
+        let mut snap = battery_snapshot();
+        snap.battery_reserve = 4;
+        // A late-morning charge, after the evening's drain has reached the floor.
+        snap.enable_charge = true;
+        snap.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: 11,
+            start_minute: 0,
+            end_hour: 11,
+            end_minute: 30,
+            target_soc: 20,
+        };
+        let settings = five_kwp_settings();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        let battery = payload.battery.as_ref().expect("battery projection");
+        assert!((battery.reserve_soc_pct - 4.0).abs() < 1e-9);
+        let lowest =
+            |series: &[(i64, f64)]| series.iter().map(|(_, soc)| *soc).fold(100.0, f64::min);
+        let eco_low = lowest(&battery.hours);
+        assert!(
+            (eco_low - 5.0).abs() < 0.01,
+            "the Eco projection should bottom out at 5%, got {eco_low}"
+        );
+        let schedule_low = lowest(
+            battery
+                .with_current_schedule
+                .as_ref()
+                .expect("schedule line"),
+        );
+        assert!(
+            (schedule_low - 5.0).abs() < 0.01,
+            "the schedule projection should bottom out at 5%, got {schedule_low}"
         );
     }
 

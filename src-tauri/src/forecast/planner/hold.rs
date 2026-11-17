@@ -509,7 +509,14 @@ fn hold_rationale(r: &HoldRationale) -> String {
             "Battery is at {:.0}% now and the forecast has it running empty at its {:.0}% \
              reserve, drawing from the grid, before the next cheap period. Charging to {}% \
              in {}, {}, {} {}.",
-            r.current_soc_pct, r.reserve, r.target, window, hold, outcome, costs,
+            r.current_soc_pct,
+            // The inverter's reserve, not the floor modelled a point above it.
+            crate::forecast::simulate::displayed_reserve(r.reserve),
+            r.target,
+            window,
+            hold,
+            outcome,
+            costs,
         )
     } else if r.reaches_minimum {
         format!(

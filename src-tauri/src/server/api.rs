@@ -9782,6 +9782,10 @@ fn compute_charge_plan_inner<'a>(
         ),
     };
 
+    // The forecasts model the battery stopping a point above its reserve
+    // (issue #479), the same floor the payload's projection used.
+    let reserve_soc = crate::forecast::simulate::modelled_reserve(reserve_soc);
+
     // Minimum SOC across the forward window (planner v2 objective).
     let min_soc_pct = settings.forecast_min_soc_pct.clamp(0.0, 100.0);
 
@@ -22545,11 +22549,16 @@ pub(crate) mod tests {
         // The house view's flash follows the live SOC, so a one-point move
         // across the reserve's edges can't keep the old line for 5 minutes.
         with_isolated_config_dir_async(|| async {
-            let state = runtime_state(11, "runtime-cache-reserve").await;
+            // The reserve is 10%; "at" runs to 11%, where a cold battery
+            // stops (issue #479).
+            let state = runtime_state(12, "runtime-cache-reserve").await;
             let now = runtime_now();
             let (_, Json(first)) = get_battery_runtime_at(state.clone(), now).await;
             assert_ne!(first["data"]["outcome"], "at_reserve");
             let later = now + chrono::Duration::minutes(1);
+            state.latest_snapshot.lock().await.as_mut().unwrap().soc = 11;
+            let (_, Json(above)) = get_battery_runtime_at(state.clone(), later).await;
+            assert_eq!(above["data"]["outcome"], "at_reserve");
             state.latest_snapshot.lock().await.as_mut().unwrap().soc = 10;
             let (_, Json(at)) = get_battery_runtime_at(state.clone(), later).await;
             assert_eq!(at["data"]["outcome"], "at_reserve");

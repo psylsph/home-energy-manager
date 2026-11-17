@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.18.1] - 2026-11-17
+
+### Fixed
+
+- **Battery forecasts now treat one point above your reserve as the reserve.** A cold battery often stops discharging a point early (5% on a 4% reserve), so the Forecast page's projections, the Planner and the battery runtime were all draining it a point further, and a little later, than the inverter really does. They now stop one point above the reserve, and a battery sitting there reads "At Reserve". Nothing HEM writes to the inverter changes, and a reserve of 100 (HEM's discharge pause) is untouched.
+
 ## [1.18.0] - 2026-11-17
 
 ### Added

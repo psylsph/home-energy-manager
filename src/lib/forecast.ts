@@ -640,6 +640,11 @@ export type PlanResponse = {
   cheap_window_count?: number;
 };
 
+/** How far above the inverter's reserve the forecasts floor the battery, where
+ *  a cold one really stops (issue #479). Mirrors `RESERVE_MARGIN_PCT` in
+ *  `forecast/simulate.rs`. */
+export const RESERVE_MARGIN_PCT = 1;
+
 /** Note shown under the Minimum battery level input explaining what a
  *  minimum of 0, or one at or below the inverter's reserve, means to the
  *  planner (issue #360). */
@@ -653,7 +658,7 @@ export function minimumSocNote(
   if (reserveSocPct == null || !Number.isFinite(reserveSocPct) || reserveSocPct >= 100) {
     return null;
   }
-  if (minSocPct > reserveSocPct) return null;
+  if (minSocPct > reserveSocPct + RESERVE_MARGIN_PCT) return null;
   return (
     `Your inverter keeps a ${Math.round(reserveSocPct)}% battery reserve, so at this level the planner only charges ` +
     'when the battery would otherwise run empty and draw from the grid before the next cheap period.'

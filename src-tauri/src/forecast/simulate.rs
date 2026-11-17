@@ -107,6 +107,33 @@ impl SimHourInput {
     }
 }
 
+/// How far above the inverter's reserve a battery really stops (issue #479).
+/// A cold cell's voltage sags under load, so the BMS reaches its cut-off a
+/// point early: a 4% reserve stops discharge at 5%.
+pub const RESERVE_MARGIN_PCT: f64 = 1.0;
+
+/// The floor the forecasts model: the reserve plus [`RESERVE_MARGIN_PCT`],
+/// never above 100. A reserve of 100 or more (HEM's discharge pause) is
+/// returned as it is, and so is anything that isn't a number (the
+/// simulation refuses it). Forecast-only: nothing is ever written to the
+/// inverter from this.
+pub fn modelled_reserve(reserve_pct: f64) -> f64 {
+    if !reserve_pct.is_finite() || reserve_pct >= 100.0 {
+        return reserve_pct;
+    }
+    (reserve_pct + RESERVE_MARGIN_PCT).min(100.0)
+}
+
+/// The inverter's reserve behind a modelled floor, for wording that names
+/// the reserve ("running empty at its 4% reserve"): undoes
+/// [`modelled_reserve`]'s margin.
+pub fn displayed_reserve(floor_pct: f64) -> f64 {
+    if !floor_pct.is_finite() || floor_pct >= 100.0 {
+        return floor_pct;
+    }
+    (floor_pct - RESERVE_MARGIN_PCT).max(0.0)
+}
+
 /// Everything the simulation needs besides the hour series.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimulationParams {
@@ -114,7 +141,9 @@ pub struct SimulationParams {
     pub capacity_kwh: f64,
     /// Starting SOC, %.
     pub start_soc_pct: f64,
-    /// Reserve SOC floor the simulation will not discharge below, %.
+    /// Floor the simulation will not discharge below, %. This is the
+    /// modelled floor ([`modelled_reserve`] of the inverter's reserve), not
+    /// the register value: build it from the snapshot through that, once.
     pub reserve_soc_pct: f64,
     /// Max AC charge power, kW.
     pub max_charge_kw: f64,
@@ -529,6 +558,38 @@ mod tests {
         assert!((h.discharge_kwh - 2.0).abs() < 1e-9);
         assert!((h.soc_pct - (50.0 - 2.0 / 0.95 / 10.0 * 100.0)).abs() < 1e-9);
         assert!((h.import_kwh - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn modelled_reserve_is_one_point_up_and_never_over_100() {
+        // Issue #479.
+        assert_eq!(modelled_reserve(4.0), 5.0);
+        assert_eq!(modelled_reserve(0.0), 1.0);
+        assert_eq!(modelled_reserve(99.0), 100.0);
+        assert_eq!(modelled_reserve(100.0), 100.0);
+        assert_eq!(modelled_reserve(120.0), 120.0);
+        assert!(modelled_reserve(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn displayed_reserve_undoes_the_margin() {
+        assert_eq!(displayed_reserve(modelled_reserve(4.0)), 4.0);
+        assert_eq!(displayed_reserve(modelled_reserve(0.0)), 0.0);
+        assert_eq!(displayed_reserve(100.0), 100.0);
+    }
+
+    #[test]
+    fn a_modelled_floor_stops_the_drain_a_point_early() {
+        // Reserve 4% modelled as 5%: 10 kWh at 50% has 4.5 kWh above the
+        // floor, not 4.6. Need 10 kWh → 4.5 × 0.95 AC delivered, the rest
+        // imported, ending exactly at 5%.
+        let out = simulate_battery(
+            &[hour(0, 0.0, 10.0)],
+            &params(10.0, 50.0, modelled_reserve(4.0)),
+        );
+        let h = &out.hours[0];
+        assert!((h.soc_pct - 5.0).abs() < 1e-9, "soc {}", h.soc_pct);
+        assert!((h.discharge_kwh - 4.5 * 0.95).abs() < 1e-9);
     }
 
     #[test]

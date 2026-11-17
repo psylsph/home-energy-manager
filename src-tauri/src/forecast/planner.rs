@@ -1345,7 +1345,8 @@ pub fn plan_overnight_charge(inputs: &PlanInputs) -> PlanRecommendation {
              period. Charging at 100% for {}{} (about {:.1} kWh) in the {:.1}p \
              window ({}–{}) {} (about £{:.2} per night of grid import).",
             inputs.current_soc_pct,
-            reserve,
+            // The inverter's reserve, not the floor modelled a point above it.
+            crate::forecast::simulate::displayed_reserve(reserve),
             if reaches_minimum { "" } else { "the full " },
             format_duration(duration_min),
             kwh,

@@ -731,9 +731,15 @@ describe('minimumSocNote (issue #360)', () => {
     expect(minimumSocNote(10, 15)).toMatch(/keeps a 15% battery reserve/);
   });
 
+  it('counts the point above the reserve where a cold battery stops (issue #479)', () => {
+    // The forecasts floor at reserve + 1, so a minimum there behaves like one at the reserve.
+    expect(minimumSocNote(5, 4)).toMatch(/keeps a 4% battery reserve/);
+    expect(minimumSocNote(6, 4)).toBeNull();
+  });
+
   it('stays quiet when the minimum is above the reserve', () => {
     expect(minimumSocNote(20, 4)).toBeNull();
-    expect(minimumSocNote(5, 4)).toBeNull();
+    expect(minimumSocNote(6, 4)).toBeNull();
   });
 
   it('stays quiet without a usable reserve or with the battery paused at 100%', () => {

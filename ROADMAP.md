@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 17 November 2026 (v1.18.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 17 November 2026 (v1.18.1). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 Every open issue is either waiting on someone outside (listed in Tier 0) or has a plan, linked in its row. The plans are local working notes in `docs/` (gitignored). The issues raised in the last two days came first (Tier 1, now all built), then the older planned work. Within a tier, cheap items that are ready to build come before ones that still need a decision from Stuart.
 
@@ -31,11 +31,7 @@ Items that have shipped are left off the tables below; Stuart closes the issues 
 
 ## Tier 1: raised in the last two days
 
-All six from the 14 November batch shipped in v1.17.0 (#470 to #475; see Tier 0), #473's follow-up in v1.17.4 and #472's follow-up in v1.17.6. One new issue, raised 16 November, is next; it has no plan in `docs/` yet, so write one first.
-
-| Order | # | Issue | Effort | Why here |
-|---|---|---|---|---|
-| 1 | [479](https://github.com/psylsph/home-energy-manager/issues/479) | Battery forecasts: treat 1% above the reserve as the reserve | S | Happening a lot on Stuart's inverter in the cold: voltage sag under load makes a 4% reserve stop discharge at 5%. The Forecast page's SOC projection and the Planner should floor at reserve + 1 (most noticeable in winter, when the battery reaches the reserve most evenings), and the runtime card should end there and read "At Reserve". "Below Reserve" and the flash stay measured against the real reserve, a reserve of 100 (HEM's pause) is unchanged, and nothing HEM writes to the inverter changes. Follows on from #472. |
+All six from the 14 November batch shipped in v1.17.0 (#470 to #475; see Tier 0), #473's follow-up in v1.17.4 and #472's follow-up in v1.17.6. The one issue raised since, #479 (Stuart's own, 16 November), shipped in v1.18.1: every forecast floors the battery one point above its reserve, where a cold battery really stops, so the Forecast page's projections, the Planner and the battery runtime card agree with the inverter, and a battery at reserve + 1 reads "At Reserve". "Below Reserve" and the flash stay on the real reserve, a reserve of 100 is untouched, and nothing written to the inverter changes. Kept trade-offs: the margin is a fixed point for every battery, warm or cold; a reserve of 99 reads as a battery that can't discharge. Plan in `docs/issue-479-reserve-margin-plan.md`. Nothing is waiting here; #479 is ready for Stuart to close.
 
 To check the car line by hand, `npm run mock:octopus -- --with-hem --slot 23:30-05:30@12 --running 40` serves made-up charges to a throwaway HEM at <http://127.0.0.1:7340> (see CONTRIBUTING.md).
 
