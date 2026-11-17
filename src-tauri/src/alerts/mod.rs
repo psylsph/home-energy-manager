@@ -2531,6 +2531,7 @@ mod tests {
             solar_clipping_ceiling_w: 0,
             cell_spread_alert_enabled: true,
             soc_anomaly_alert_enabled: true,
+            schedule_reset_alert_enabled: true,
             full_charge_alert_enabled: true,
             car_charging_alert_enabled: false,
             full_charge_alert_days: 30,

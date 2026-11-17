@@ -41,6 +41,12 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string; help?: string
     hint: "Notify when a battery's state of charge jumps in one step or stays put while it charges or discharges (the BMS SOC bug)",
   },
   {
+    key: 'schedule_reset_alert_enabled',
+    label: 'Inverter Schedule Reset',
+    hint: 'Notify when the schedule drops to factory defaults after a lost connection',
+    help: "A crashed dongle can reset the inverter to factory defaults, which wipes the charge and discharge schedule. HEM keeps the last schedule it saw and, after a reconnect that finds it gone, sends this and offers a restore on the Control page.",
+  },
+  {
     key: 'full_charge_alert_enabled',
     label: 'Battery Not Fully Charged',
     hint: "Notify when the battery hasn't reached 100% for a while",

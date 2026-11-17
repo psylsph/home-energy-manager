@@ -574,6 +574,9 @@ pub struct AppState {
     pub charge_cap: Arc<Mutex<crate::inverter::charge_cap::ChargeCapShared>>,
     /// Daily full-charge reminder gate (issue #426).
     pub full_charge_check: Arc<Mutex<crate::alerts::full_charge::FullChargeCheck>>,
+    /// Dongle factory-reset detector and the last known schedule (issue
+    /// #397), shared by the poll loop and the restore/dismiss handlers.
+    pub schedule_watch: Arc<Mutex<crate::inverter::schedule_reset::ScheduleWatch>>,
     /// "Car charging started / finished" session and its resend box (issue #454).
     pub car_session: Arc<Mutex<crate::alerts::car_charging::CarSessionRunner>>,
     /// Discharge floor guard configuration (developer mode only).
@@ -822,6 +825,7 @@ impl AppState {
             calibration_run: Arc::new(Mutex::new(None)),
             charge_cap: Arc::new(Mutex::new(Default::default())),
             full_charge_check: Arc::new(Mutex::new(Default::default())),
+            schedule_watch: Arc::new(Mutex::new(Default::default())),
             car_session: Arc::new(Mutex::new(Default::default())),
             discharge_floor_config: Arc::new(Mutex::new({
                 let s = crate::settings::Settings::load();
@@ -2923,6 +2927,14 @@ async fn drain_write_batches(
         .iter()
         .filter_map(|batch| batch.command_id.clone())
         .collect();
+    if !pending.is_empty() {
+        // Whatever HEM is about to write may be the schedule changing on
+        // purpose; a reconnect before it settles isn't a dongle reset.
+        let mut watch = state.schedule_watch.lock().await;
+        for batch in &pending {
+            watch.note_writes(&batch.writes);
+        }
+    }
     if let Err(e) = state.command_ledger.mark_dispatched(&command_ids) {
         tracing::warn!("Command ledger dispatch mark failed: {e}");
     }
@@ -4572,6 +4584,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // machine runs, so the broadcast reflects the
                                     // post-transition value.)
                                     snapshot.cosy_enabled = poll_settings.cosy_enabled;
+                                    // A dongle reset the user hasn't answered yet
+                                    // (issue #397); also loads the watch on first use.
+                                    crate::inverter::schedule_reset::stamp_snapshot(
+                                        &state,
+                                        &poll_settings,
+                                        &mut snapshot,
+                                    )
+                                    .await;
                                     // The Forecast page tailors its plan note to
                                     // whether the nightly slot auto-refresh owns
                                     // charge slot 1.
@@ -6066,6 +6086,26 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         .await;
                                     });
                                 }
+
+                                // ---- Dongle factory reset (issue #397) ----
+                                // Read-only: keeps the last known schedule and flags
+                                // one that dropped to defaults across a reconnect.
+                                crate::inverter::schedule_reset::run_watch(
+                                    &state,
+                                    &snapshot,
+                                    health_now.timestamp(),
+                                    readings_since_connect > GRACE_READINGS,
+                                    poll_settings.poll_interval,
+                                    |config, text| async move {
+                                        crate::alerts::dispatch_alert_text(
+                                            &config,
+                                            &text,
+                                            "schedule reset",
+                                        )
+                                        .await
+                                    },
+                                )
+                                .await;
 
                                 // ---- Full-charge reminder (issue #426) ----
                                 if crate::alerts::full_charge::check_pending(&state, health_now).await {
@@ -13280,6 +13320,92 @@ mod tests {
 
         assert_eq!(rx.await.unwrap(), WriteOutcome::Ok);
         assert_eq!(landed.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn draining_writes_marks_the_schedule_watch_but_an_empty_drain_does_not() {
+        // Issue #397: a HEM write may be the user's own schedule change, so a
+        // reconnect before it settles must not read as a dongle reset.
+        use crate::inverter::encoder::RegisterWrite;
+        use crate::inverter::poll::PendingWriteBatch;
+        use crate::inverter::schedule_reset::{KnownSchedule, WatchAction};
+        use crate::modbus::client::tests::{setup_client_with_server, MockResponse};
+
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let mut stored = InverterSnapshot {
+                device_type: DeviceType::Gen3Hybrid,
+                device_type_code: "2201".into(),
+                battery_power_mode: 1,
+                ..Default::default()
+            };
+            stored.charge_slots[0].enabled = true;
+            stored.charge_slots[0].end_hour = 5;
+            let mut empty = stored.clone();
+            empty.charge_slots[0].enabled = false;
+            empty.charge_slots[0].end_hour = 0;
+            let after_reset_reads = |state: &Arc<AppState>| {
+                let state = state.clone();
+                let empty = empty.clone();
+                async move {
+                    let mut watch = state.schedule_watch.lock().await;
+                    let mut actions = Vec::new();
+                    for i in 0..3 {
+                        actions.extend(watch.observe(&empty, 2_000 + i * 10, true, 10));
+                    }
+                    actions
+                }
+            };
+            let seed = |state: &Arc<AppState>| {
+                let state = state.clone();
+                let stored = stored.clone();
+                async move {
+                    let mut watch = state.schedule_watch.lock().await;
+                    watch.ensure_loaded(Some(&KnownSchedule::from_snapshot(&stored, 1)), None);
+                    watch.observe(&stored, 1_000, true, 10);
+                }
+            };
+
+            let (_port, _server, mut client) = setup_client_with_server(vec![]).await;
+            // Nothing queued: the drain doesn't count as a write.
+            seed(&state).await;
+            drain_write_batches(&state, &mut client, Vec::new(), Duration::from_millis(1)).await;
+            let actions = after_reset_reads(&state).await;
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, WatchAction::Detected(_))),
+                "{actions:?}"
+            );
+
+            // A queued write: the same reconnect is the user's change.
+            let state = Arc::new(AppState::new());
+            seed(&state).await;
+            let write = RegisterWrite {
+                address: 27,
+                value: 1,
+            };
+            let (_port, _server, mut client) = setup_client_with_server(vec![MockResponse::Raw(
+                write_ack_frame(write.address, write.value),
+            )])
+            .await;
+            let batch = PendingWriteBatch {
+                command_id: None,
+                writes: vec![write],
+                completion: None,
+                policy: Default::default(),
+                owner: None,
+            };
+            drain_write_batches(&state, &mut client, vec![batch], Duration::from_millis(1)).await;
+            let actions = after_reset_reads(&state).await;
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, WatchAction::Detected(_))),
+                "{actions:?}"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

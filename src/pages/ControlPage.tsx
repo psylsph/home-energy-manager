@@ -34,6 +34,7 @@ import {
 } from '../lib/adaptiveCharge';
 import AwaitingConnection from '../components/AwaitingConnection';
 import CosyBlockedNotice from '../components/CosyBlockedNotice';
+import ScheduleResetBanner from '../components/ScheduleResetBanner';
 import AgileBlockedNotice from '../components/AgileBlockedNotice';
 import ExportOnceCard from '../components/ExportOnceCard';
 import ChargeCapSection from '../components/ChargeCapSection';
@@ -3638,6 +3639,7 @@ export default function ControlPage() {
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto px-4 py-6">
+      <ScheduleResetBanner />
       {/* Section 1: Quick Actions */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Quick Actions</h2>

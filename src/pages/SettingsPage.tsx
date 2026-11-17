@@ -11,6 +11,7 @@ import MetersSection from '../components/settings/MetersSection';
 import NotificationsSection from '../components/settings/NotificationsSection';
 import OctopusSection from '../components/settings/OctopusSection';
 import PanelControlsSection from '../components/settings/PanelControlsSection';
+import DongleSecuritySection from '../components/settings/DongleSecuritySection';
 import RemoteAccessSection from '../components/settings/RemoteAccessSection';
 import SolarArraysSection from '../components/settings/SolarArraysSection';
 import TariffsSection from '../components/settings/TariffsSection';
@@ -110,6 +111,7 @@ export default function SettingsPage() {
           initial={initial}
         />
         <RemoteAccessSection id={S.remoteAccess} flash={flash} initial={initial} />
+        <DongleSecuritySection id={S.dongleSecurity} />
 
         {/* Energy & cost */}
         <OctopusSection id={S.octopus} flash={flash} initial={initial} onConfiguredChange={setOctopusOn} />

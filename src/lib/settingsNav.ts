@@ -10,6 +10,7 @@ export const SETTINGS_SECTION = {
   connection: 'settings-connection',
   evCharger: 'settings-ev-charger',
   remoteAccess: 'settings-remote-access',
+  dongleSecurity: 'settings-dongle-security',
   octopus: 'settings-octopus',
   tariffs: 'settings-tariffs',
   solarArrays: 'settings-solar-arrays',
@@ -33,6 +34,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
       { id: S.connection, label: 'Inverter' },
       { id: S.evCharger, label: 'EV Charger' },
       { id: S.remoteAccess, label: 'Remote & API Access' },
+      { id: S.dongleSecurity, label: 'Dongle Security' },
     ],
   },
   {

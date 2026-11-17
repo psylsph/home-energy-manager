@@ -1725,6 +1725,15 @@ pub struct Settings {
     #[serde(default)]
     pub discharge_slots_backup: Option<Vec<DischargeSlotBackup>>,
 
+    /// The schedule the inverter held when HEM last saw it settle, kept so a
+    /// dongle factory reset can be spotted and undone (issue #397).
+    #[serde(default)]
+    pub last_known_schedule: Option<crate::inverter::schedule_reset::KnownSchedule>,
+    /// Set when a reset was confirmed and the user hasn't restored or
+    /// dismissed it (issue #397); survives a restart so the banner does.
+    #[serde(default)]
+    pub schedule_reset_notice: Option<crate::inverter::schedule_reset::ScheduleResetNotice>,
+
     // -- Timed Export schedule (issue #289) --
     /// Whether the user's Timed Export schedule is enabled. When true, the
     /// poll loop manages HR27/HR59 transitions at export window boundaries:
@@ -2122,6 +2131,11 @@ pub struct AlertsConfig {
     /// flows (issue #393, the BMS 3007-3022 SOC bug). On by default.
     #[serde(default = "default_true")]
     pub soc_anomaly_alert_enabled: bool,
+    /// Notify when the inverter's schedule drops back to factory defaults
+    /// after a connection gap, as a dongle reset does (issue #397). On by
+    /// default.
+    #[serde(default = "default_true")]
+    pub schedule_reset_alert_enabled: bool,
     /// Notify when the battery hasn't reached 100% for
     /// `full_charge_alert_days` (issue #426: the cells balance at full
     /// charge). Checked once a day; on by default.
@@ -2224,6 +2238,7 @@ impl Default for AlertsConfig {
             solar_clipping_ceiling_w: 0,
             cell_spread_alert_enabled: true,
             soc_anomaly_alert_enabled: true,
+            schedule_reset_alert_enabled: true,
             full_charge_alert_enabled: true,
             car_charging_alert_enabled: false,
             full_charge_alert_days: default_full_charge_alert_days(),
@@ -2334,6 +2349,8 @@ impl Default for Settings {
             api_allowed_origins: None,
             api_trusted_proxies: Vec::new(),
             discharge_slots_backup: None,
+            last_known_schedule: None,
+            schedule_reset_notice: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,
@@ -3077,6 +3094,8 @@ mod tests {
             api_bind_address: None,
             api_allowed_origins: None,
             api_trusted_proxies: Vec::new(),
+            last_known_schedule: None,
+            schedule_reset_notice: None,
             discharge_slots_backup: Some(vec![
                 DischargeSlotBackup {
                     enabled: true,
@@ -3283,6 +3302,65 @@ mod tests {
         // Battery health alerts (issue #393) default on for existing users.
         assert!(decoded.cell_spread_alert_enabled);
         assert!(decoded.soc_anomaly_alert_enabled);
+    }
+
+    #[test]
+    fn schedule_reset_state_defaults_off_and_round_trips() {
+        // Files from before issue #397 carry neither field.
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("last_known_schedule");
+        object.remove("schedule_reset_notice");
+        object
+            .get_mut("alerts_config")
+            .and_then(|v| v.as_object_mut())
+            .unwrap()
+            .remove("schedule_reset_alert_enabled");
+        let legacy: Settings = serde_json::from_value(json).unwrap();
+        assert!(legacy.last_known_schedule.is_none());
+        assert!(legacy.schedule_reset_notice.is_none());
+        assert!(legacy.alerts_config.schedule_reset_alert_enabled);
+
+        let settings = Settings {
+            last_known_schedule: Some(crate::inverter::schedule_reset::KnownSchedule {
+                saved_at: 1_700_000_000,
+                device_type_code: "2201".to_string(),
+                charge_slots: vec![DischargeSlotBackup {
+                    enabled: true,
+                    start_hour: 0,
+                    start_minute: 30,
+                    end_hour: 5,
+                    end_minute: 30,
+                    target_soc: 100,
+                }],
+                discharge_slots: Vec::new(),
+                enable_charge: true,
+                enable_discharge: false,
+                battery_power_mode: 1,
+            }),
+            schedule_reset_notice: Some(crate::inverter::schedule_reset::ScheduleResetNotice {
+                detected_at: 1_700_000_500,
+            }),
+            ..Settings::default()
+        };
+        let decoded: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(decoded.last_known_schedule, settings.last_known_schedule);
+        assert_eq!(
+            decoded.schedule_reset_notice,
+            settings.schedule_reset_notice
+        );
+    }
+
+    #[test]
+    fn schedule_reset_alert_toggle_round_trips_when_off() {
+        let cfg = AlertsConfig {
+            schedule_reset_alert_enabled: false,
+            ..AlertsConfig::default()
+        };
+        let decoded: AlertsConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(!decoded.schedule_reset_alert_enabled);
     }
 
     #[test]
@@ -3888,6 +3966,8 @@ mod tests {
             api_allowed_origins: None,
             api_trusted_proxies: Vec::new(),
             discharge_slots_backup: None,
+            last_known_schedule: None,
+            schedule_reset_notice: None,
             timed_export_schedule_enabled: false,
             timed_export_slots: Vec::new(),
             timed_export_slots_require_clear: false,

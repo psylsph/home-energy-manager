@@ -17,6 +17,7 @@ pub mod external_snapshot;
 pub mod logs;
 pub mod mini;
 pub mod ratelimit;
+pub mod schedule_reset;
 pub mod ws;
 
 use std::sync::Arc;
@@ -90,6 +91,7 @@ const BATTERY_CONTROL_PATHS: &[&str] = &[
     "/api/control/force-discharge",
     "/api/control/force-discharge/stop",
     "/api/control/calibration",
+    "/api/control/schedule-reset/restore",
     "/api/battery/calibration",
     "/api/export-once",
 ];
@@ -271,6 +273,16 @@ fn create_router_at(
         .route("/api/control/sync-clock", post(api::sync_clock))
         .route("/api/control/calibration", post(api::set_calibration))
         .route("/api/control/reboot", post(api::reboot_inverter))
+        // Dongle factory-reset notice (issue #397): put the last known
+        // schedule back, or accept the inverter's as it is.
+        .route(
+            "/api/control/schedule-reset/restore",
+            post(schedule_reset::restore),
+        )
+        .route(
+            "/api/control/schedule-reset/dismiss",
+            post(schedule_reset::dismiss),
+        )
         // E2E-harness-only state reset (answers 404 without --e2e-admin).
         .route("/api/test/reset", post(api::test_reset))
         // Auto winter mode

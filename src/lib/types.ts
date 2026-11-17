@@ -1,5 +1,6 @@
 import type { ChargeCapStateName } from './chargeCap';
 import type { PlanStrategy } from './forecast';
+import type { ScheduleResetInfo } from './scheduleReset';
 
 export interface InverterSnapshot {
   timestamp: number;
@@ -116,6 +117,8 @@ export interface InverterSnapshot {
   dispatch_hold_active?: boolean;
   /** HEM is topping the battery up during a smart charge (issue #434). */
   dispatch_charge_active?: boolean;
+  /** Set while a dongle factory reset is flagged and not yet restored or dismissed (issue #397). */
+  schedule_reset?: ScheduleResetInfo | null;
   cosy_active: boolean;
   cosy_enabled: boolean;
   /** Why Cosy is not running: 'pause', 'force', 'calibration', 'dispatch_hold' or 'safety'; empty or absent when nothing blocks it. */

@@ -292,7 +292,7 @@ pub(crate) fn charge_slot_command_for_device(
     }
 }
 
-fn discharge_slot_command_for_device(
+pub(crate) fn discharge_slot_command_for_device(
     device_type: DeviceType,
     slot: u8,
     enabled: bool,
@@ -912,7 +912,7 @@ async fn queue_writes_with_command_policy(
 /// 1.5 s inter-write pacing, so a user action queued behind an eco
 /// slot-clear batch would otherwise spuriously time out (and roll back)
 /// even though its registers are still progressing normally.
-async fn queue_writes_with_completion_budget(
+pub(crate) async fn queue_writes_with_completion_budget(
     state: &Arc<AppState>,
     writes: Vec<RegisterWrite>,
     policy: WriteBatchPolicy,
@@ -7594,6 +7594,12 @@ pub async fn set_alerts(
         .and_then(|v| v.as_bool())
     {
         candidate.soc_anomaly_alert_enabled = v;
+    }
+    if let Some(v) = body
+        .get("schedule_reset_alert_enabled")
+        .and_then(|v| v.as_bool())
+    {
+        candidate.schedule_reset_alert_enabled = v;
     }
     if let Some(v) = body
         .get("car_charging_alert_enabled")
@@ -21324,6 +21330,28 @@ pub(crate) mod tests {
                 !cfg.cell_spread_alert_enabled,
                 "an omitted field is left alone"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_alerts_persists_the_schedule_reset_toggle() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            assert!(state.alert_config.lock().await.schedule_reset_alert_enabled);
+            let body = serde_json::json!({ "schedule_reset_alert_enabled": false });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!state.alert_config.lock().await.schedule_reset_alert_enabled);
+            assert!(
+                !crate::settings::Settings::load()
+                    .alerts_config
+                    .schedule_reset_alert_enabled
+            );
+            // An omitted field leaves it alone.
+            let (status, _) = set_alerts(State(state.clone()), Json(serde_json::json!({}))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!state.alert_config.lock().await.schedule_reset_alert_enabled);
         })
         .await;
     }

@@ -16,6 +16,7 @@ export interface AlertsConfig {
   battery_connection_lost_enabled: boolean;
   cell_spread_alert_enabled: boolean;
   soc_anomaly_alert_enabled: boolean;
+  schedule_reset_alert_enabled: boolean;
   full_charge_alert_enabled: boolean;
   car_charging_alert_enabled: boolean;
   full_charge_alert_days: number;
@@ -43,6 +44,7 @@ export const DEFAULT_ALERTS_CONFIG: AlertsConfig = {
   battery_connection_lost_enabled: true,
   cell_spread_alert_enabled: true,
   soc_anomaly_alert_enabled: true,
+  schedule_reset_alert_enabled: true,
   full_charge_alert_enabled: true,
   car_charging_alert_enabled: false,
   full_charge_alert_days: 30,

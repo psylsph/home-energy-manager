@@ -1436,6 +1436,11 @@ pub struct InverterSnapshot {
     /// Octopus Go smart charge (issue #434).
     #[serde(default)]
     pub dispatch_charge_active: bool,
+    /// Set while a dongle factory reset is flagged and neither restored nor
+    /// dismissed (issue #397): when it was confirmed and when the schedule
+    /// to restore was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_reset: Option<crate::inverter::schedule_reset::ScheduleResetInfo>,
     /// Whether the inverter's built-in battery calibration (HR 29) is offered:
     /// single-phase LV models, whatever the BMS firmware (issue #477).
     #[serde(default)]
@@ -1681,6 +1686,7 @@ impl InverterSnapshot {
             cosy_active: false,
             cosy_blocked_by: String::new(),
             cosy_slot_at_risk: false,
+            schedule_reset: None,
             agile_blocked_by: String::new(),
             cosy_enabled: false,
             agile_active: false,
