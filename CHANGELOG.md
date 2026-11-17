@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.18.0] - 2026-11-17
+
+### Added
+
+- **HEM now spots a dongle factory reset and offers to put your schedule back.** A crashed dongle can reset the inverter to factory defaults and silently wipe the charge and discharge schedule. HEM keeps the last schedule it saw, and if the connection drops and comes back with that schedule gone, it tells you (a banner on Control, plus a notification) and restores it when you press Restore Schedule. It never changes anything on its own, and the new Inverter Schedule Reset alert can be switched off in Notifications.
+- **A Dongle Security section in Settings.** A short checklist for the Wi-Fi dongle: change its Wi-Fi password and web login, put the inverter on its own network, and don't port-scan it. HEM only ever talks to the inverter's normal port and never probes the dongle's others.
+
 ## [1.17.6] - 2026-11-16
 
 ### Fixed

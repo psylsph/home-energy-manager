@@ -1,6 +1,6 @@
 # Roadmap
 
-Priority order for the open GitHub issues, as of 16 November 2026 (v1.17.6). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
+Priority order for the open GitHub issues, as of 17 November 2026 (v1.18.0). Effort is a rough guide: **S** is a day or less, **M** a few days, **L** a week or more.
 
 Every open issue is either waiting on someone outside (listed in Tier 0) or has a plan, linked in its row. The plans are local working notes in `docs/` (gitignored). The issues raised in the last two days came first (Tier 1, now all built), then the older planned work. Within a tier, cheap items that are ready to build come before ones that still need a decision from Stuart.
 
@@ -31,15 +31,17 @@ Items that have shipped are left off the tables below; Stuart closes the issues 
 
 ## Tier 1: raised in the last two days
 
-All six shipped in v1.17.0 (#470 to #475; see Tier 0), and #473's follow-up shipped in v1.17.4. Nothing new is waiting here.
+All six from the 14 November batch shipped in v1.17.0 (#470 to #475; see Tier 0), #473's follow-up in v1.17.4 and #472's follow-up in v1.17.6. One new issue, raised 16 November, is next; it has no plan in `docs/` yet, so write one first.
+
+| Order | # | Issue | Effort | Why here |
+|---|---|---|---|---|
+| 1 | [479](https://github.com/psylsph/home-energy-manager/issues/479) | Battery forecasts: treat 1% above the reserve as the reserve | S | Happening a lot on Stuart's inverter in the cold: voltage sag under load makes a 4% reserve stop discharge at 5%. The Forecast page's SOC projection and the Planner should floor at reserve + 1 (most noticeable in winter, when the battery reaches the reserve most evenings), and the runtime card should end there and read "At Reserve". "Below Reserve" and the flash stay measured against the real reserve, a reserve of 100 (HEM's pause) is unchanged, and nothing HEM writes to the inverter changes. Follows on from #472. |
 
 To check the car line by hand, `npm run mock:octopus -- --with-hem --slot 23:30-05:30@12 --running 40` serves made-up charges to a throwaway HEM at <http://127.0.0.1:7340> (see CONTRIBUTING.md).
 
 ## Tier 2: protecting users
 
-| Order | # | Issue | Effort | Why here |
-|---|---|---|---|---|
-| 1 | [397](https://github.com/psylsph/home-energy-manager/issues/397) | Detect a dongle factory reset, add a security checklist | M | With GivEnergy in administration, no firmware fix is coming, and a reset wipes the schedule silently. HEM keeps the last known schedule. On reconnect it flags a schedule that has dropped to factory defaults (confirmed over 3 reads and never from a corrupt poll), alerts, and offers a one-button restore. A passive checklist covers the dongle's passwords and network. HEM never probes the dongle's other ports. Decisions agreed: the single last known schedule is the restore source, the checklist gets its own section after Remote Access, and any gap of 30 s or more without a good read counts as a reconnect. Plan in `docs/issue-397-dongle-reset-plan.md`. |
+Issue #397 (dongle factory-reset detection and the security checklist) shipped in v1.18.0. Nothing else is waiting here.
 
 ## Tier 3: Planner export advice
 
