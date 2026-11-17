@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.19.0] - 2026-11-17
+
+### Added
+
+- **Exports now keep enough in the battery for the house.** Whatever the forecast says, an export (the Planner's advice, Export Once and Saving Sessions) stops where a busy evening would still be covered until the next cheap import window, with a margin on top (larger while HEM has little consumption history). An export booked with a lower floor is raised when it starts, and skipped if the battery is already at or below that level; the notification says why. If HEM can't work it out, your own floor stands.
+
 ## [1.18.1] - 2026-11-17
 
 ### Fixed
