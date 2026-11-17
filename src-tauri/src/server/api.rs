@@ -9568,6 +9568,8 @@ pub(crate) fn compute_full_plan(
         params,
         import_tariff,
         floor_pct: min_soc_pct,
+        backstop_hours,
+        backstop_margin_pct,
     }) = export_ctx
     else {
         return (charge, None);
@@ -9617,8 +9619,43 @@ pub(crate) fn compute_full_plan(
         floor_pct: min_soc_pct,
         now_ts,
         every_cheap_window: settings.forecast_plan_every_cheap_window,
+        backstop: Some(crate::forecast::planner::ExportBackstop {
+            hours: &backstop_hours,
+            margin_pct: backstop_margin_pct,
+        }),
     });
     (charge, Some(export))
+}
+
+/// The back-stop floor (issue #407) for an export ending at `export_end_ts`:
+/// the SOC (%) the battery must still hold then to cover the house, on a busy
+/// day (p75 load, low solar), until the next cheap import window. Built from
+/// the same context as the Planner's export advice, so a booked export and the
+/// advice can't disagree. `None` when the forecast can't say: it's stale, there's
+/// no battery projection or import tariff, or the export ends beyond it.
+pub(crate) fn export_backstop_floor(
+    forecast: &crate::forecast::ForecastPayload,
+    settings: &crate::settings::Settings,
+    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
+    now_ts: i64,
+    export_end_ts: i64,
+) -> Option<f64> {
+    let (_, ctx) = compute_charge_plan_inner(forecast, settings, snapshot, now_ts, None);
+    let ctx = ctx?;
+    let until = crate::forecast::planner::next_cheap_window_start(
+        &ctx.sim_hours,
+        ctx.import_tariff,
+        export_end_ts,
+        settings.forecast_plan_every_cheap_window,
+    )?;
+    Some(crate::forecast::export_floor::export_floor_soc(
+        &ctx.backstop_hours,
+        &ctx.params,
+        export_end_ts,
+        until,
+        ctx.floor_pct,
+        ctx.backstop_margin_pct,
+    ))
 }
 
 /// Compute the typed plan recommendation from a forecast payload. Shared
@@ -9658,6 +9695,15 @@ pub(crate) enum SolarBand {
     Low,
 }
 
+/// Which consumption estimate [`forecast_sim_hours_banded`] builds the series from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadBand {
+    /// The profile's median hour.
+    Median,
+    /// The busy end of the profile (p75), never below the median.
+    P75,
+}
+
 /// Rebuild the planner's hourly inputs from the forecast payload: its solar
 /// series paired with the weekday/weekend consumption profile for each
 /// hour. Re-running the simulation on these is how the planner sizes a
@@ -9665,6 +9711,16 @@ pub(crate) enum SolarBand {
 pub(crate) fn forecast_sim_hours(
     forecast: &crate::forecast::ForecastPayload,
     band: SolarBand,
+) -> Vec<crate::forecast::simulate::SimHourInput> {
+    forecast_sim_hours_banded(forecast, band, LoadBand::Median)
+}
+
+/// [`forecast_sim_hours`] with a choice of consumption estimate too: the
+/// export back-stop holds its floor against p75 load and low solar (issue #407).
+pub(crate) fn forecast_sim_hours_banded(
+    forecast: &crate::forecast::ForecastPayload,
+    band: SolarBand,
+    load: LoadBand,
 ) -> Vec<crate::forecast::simulate::SimHourInput> {
     use chrono::{Datelike, Timelike};
     let mut hours: Vec<crate::forecast::simulate::SimHourInput> = forecast
@@ -9682,7 +9738,13 @@ pub(crate) fn forecast_sim_hours(
             } else {
                 &forecast.consumption_weekday
             };
-            let consumption_kwh = profile.get(local_hour).map(|c| c.kwh).unwrap_or(0.0);
+            let consumption_kwh = profile
+                .get(local_hour)
+                .map(|c| match load {
+                    LoadBand::Median => c.kwh,
+                    LoadBand::P75 => c.p75.max(c.kwh),
+                })
+                .unwrap_or(0.0);
             crate::forecast::simulate::SimHourInput {
                 timestamp: s.timestamp,
                 solar_kwh: match band {
@@ -9712,6 +9774,9 @@ struct ExportContext<'a> {
     params: crate::forecast::simulate::SimulationParams,
     import_tariff: &'a crate::settings::TariffConfig,
     floor_pct: f64,
+    /// The pessimistic day exports are held against (issue #407).
+    backstop_hours: Vec<crate::forecast::simulate::SimHourInput>,
+    backstop_margin_pct: f64,
 }
 
 /// The charge-plan computation proper, returning the context the export
@@ -9883,11 +9948,21 @@ fn compute_charge_plan_inner<'a>(
     // The export advice rides the same trajectory: hand over the hourly
     // inputs, params, tariff, and floor. `None` when there is no import
     // tariff — the charge planner has already NoPlan'd on that gate.
+    // The back-stop day: p75 load and the low solar band, with the wider
+    // margin while the profile is still thin (issue #407).
+    let backstop_hours = forecast_sim_hours_banded(forecast, SolarBand::Low, LoadBand::P75);
+    let backstop_margin_pct = if forecast.consumption_sufficient {
+        crate::forecast::export_floor::BACKSTOP_MARGIN_PCT
+    } else {
+        crate::forecast::export_floor::THIN_HISTORY_MARGIN_PCT
+    };
     let ctx = import_tariff.map(|t| ExportContext {
         sim_hours,
         params,
         import_tariff: t,
         floor_pct: min_soc_pct,
+        backstop_hours,
+        backstop_margin_pct,
     });
     (charge, ctx)
 }
@@ -28143,6 +28218,34 @@ pub(crate) mod tests {
             assert!((hours[1].ev_kwh - (3.5 - house)).abs() < 1e-9, "{band:?}");
             assert_eq!(hours[1].held_fraction, 0.5);
         }
+    }
+
+    #[test]
+    fn the_back_stop_hours_use_p75_load_and_low_solar() {
+        // Issue #407: the pessimistic day the export floor is held against.
+        let forecast = forecast_with_bands(&[(2.0, 1.2, 2.8), (1.0, 1.4, 1.6)]);
+        let hours = forecast_sim_hours_banded(&forecast, SolarBand::Low, LoadBand::P75);
+        assert_eq!(
+            hours.iter().map(|h| h.solar_kwh).collect::<Vec<_>>(),
+            vec![1.2, 1.0]
+        );
+        assert!(hours.iter().all(|h| (h.consumption_kwh - 0.6).abs() < 1e-9));
+        // The plain builder still uses the median load.
+        let median = forecast_sim_hours(&forecast, SolarBand::Low);
+        assert!(median
+            .iter()
+            .all(|h| (h.consumption_kwh - 0.5).abs() < 1e-9));
+        // A malformed p75 below the median never lowers the load.
+        let mut odd = forecast.clone();
+        for c in odd
+            .consumption_weekday
+            .iter_mut()
+            .chain(odd.consumption_weekend.iter_mut())
+        {
+            c.p75 = 0.1;
+        }
+        let hours = forecast_sim_hours_banded(&odd, SolarBand::Low, LoadBand::P75);
+        assert!(hours.iter().all(|h| (h.consumption_kwh - 0.5).abs() < 1e-9));
     }
 
     #[test]

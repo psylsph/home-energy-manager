@@ -458,6 +458,7 @@ fn the_export_advice_ends_its_cycle_at_the_window_the_plan_picks() {
             floor_pct: 20.0,
             now_ts: local_ts(0, 10, 0),
             every_cheap_window: every,
+            backstop: None,
         })
     };
     let beyond = |a: &ExportAdvice| matches!(a, ExportAdvice::NoExport { reason } if reason.contains("beyond this charge cycle"));

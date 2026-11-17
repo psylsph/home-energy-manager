@@ -14,6 +14,7 @@ pub mod calibration;
 pub mod consumption;
 pub mod current_schedule;
 pub mod dispatch_load;
+pub mod export_floor;
 pub mod planner;
 pub mod refresh;
 pub mod runtime;
@@ -1745,6 +1746,68 @@ pub(crate) mod tests {
                 other => panic!("{strategy:?}: expected an overlap refusal, got {other:?}"),
             }
         }
+    }
+
+    /// Issue #407: the floor a booked export is held to comes from the same
+    /// context as the Planner's advice, and says nothing when the forecast
+    /// can't.
+    #[test]
+    fn the_export_back_stop_floor_covers_the_house_to_the_cheap_window() {
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        seed_full_forecast_state(&db, now);
+        let now_ts = now.timestamp();
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.forecast_min_soc_pct = 20.0;
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![slot("00:00", "05:00", 0.07), slot("05:00", "23:59", 0.27)],
+        });
+        let snap = battery_snapshot();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        let end_ts = now_ts + 2 * 3600;
+        let floor = |payload: &ForecastPayload, settings: &crate::settings::Settings, end| {
+            crate::server::api::export_backstop_floor(payload, settings, Some(&snap), now_ts, end)
+        };
+        // The planner minimum only ever lifts the floor.
+        let with_minimum = floor(&payload, &settings, end_ts).expect("a floor");
+        settings.forecast_min_soc_pct = 0.0;
+        let sufficient = floor(&payload, &settings, end_ts).expect("a floor");
+        assert_eq!(with_minimum, sufficient.max(20.0));
+        // With no minimum to hide it, the floor is the 1 point reserve margin
+        // plus what the evening needs plus the margin: above the bare reserve.
+        let reserve = simulate::modelled_reserve(f64::from(snap.battery_reserve));
+        assert!(
+            sufficient >= reserve + export_floor::BACKSTOP_MARGIN_PCT && sufficient < 90.0,
+            "{sufficient}"
+        );
+        // A thin profile keeps back exactly the wider margin on top.
+        let mut thin = payload.clone();
+        thin.consumption_sufficient = false;
+        let thin_floor = floor(&thin, &settings, end_ts).expect("a floor");
+        let wider = export_floor::THIN_HISTORY_MARGIN_PCT - export_floor::BACKSTOP_MARGIN_PCT;
+        assert!(
+            (thin_floor - sufficient - wider).abs() < 1e-9,
+            "{thin_floor} vs {sufficient}"
+        );
+        // An export ending later has less of the evening left to cover.
+        let later = floor(&payload, &settings, now_ts + 3 * 3600).expect("a floor");
+        assert!(later <= sufficient + 1e-9, "{later} vs {sufficient}");
+        // Beyond the forecast nothing is known.
+        assert_eq!(floor(&payload, &settings, now_ts + 400 * 3600), None);
+        // No import tariff, no cheap window to hold the house to.
+        let mut no_tariff = settings.clone();
+        no_tariff.import_tariff_config = None;
+        assert_eq!(floor(&payload, &no_tariff, end_ts), None);
+        // A stale forecast says nothing either.
+        let mut stale = payload.clone();
+        stale.status.push("forecast_stale".to_string());
+        assert_eq!(floor(&stale, &settings, end_ts), None);
     }
 
     /// Issue #359: the cheapest strategy is fed the forecast's low solar band

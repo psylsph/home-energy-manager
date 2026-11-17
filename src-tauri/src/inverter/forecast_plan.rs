@@ -515,6 +515,29 @@ async fn compute_plan(
     .await
 }
 
+/// The back-stop floor (issue #407) for an export that ends at `export_end`:
+/// the SOC the battery must still hold then, from a fresh forecast. `None`
+/// when there is no live snapshot or the forecast can't say. A failed forecast
+/// worker counts as not knowing.
+pub(crate) async fn export_backstop_floor(
+    state: &Arc<AppState>,
+    export_end: DateTime<Local>,
+) -> Option<f64> {
+    let snapshot = state.latest_snapshot.lock().await.clone()?;
+    let settings = Settings::load_async().await;
+    let now = Local::now();
+    let plan = compute_plan(state, &settings, &snapshot, now, None)
+        .await
+        .ok()?;
+    crate::server::api::export_backstop_floor(
+        &plan.forecast,
+        &settings,
+        Some(&snapshot),
+        now.timestamp(),
+        export_end.timestamp(),
+    )
+}
+
 /// A freshly computed plan with the export advice and forecast behind it.
 struct ComputedPlan {
     rec: PlanRecommendation,

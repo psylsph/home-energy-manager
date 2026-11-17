@@ -395,6 +395,35 @@ pub fn plan_window(tariff: &TariffConfig, now_min: u16, every: bool) -> Option<C
     }
 }
 
+/// When the next cheap import window starts after `from_ts` (issue #407): the
+/// instant an export ending at `from_ts` must hold the house until. With no
+/// cheap window inside the forecast it is the end of the series, the same
+/// horizon the export advice uses. `None` when `from_ts` isn't inside the
+/// series at all, since nothing is known about the hours after it.
+pub fn next_cheap_window_start(
+    sim_hours: &[SimHourInput],
+    import_tariff: &TariffConfig,
+    from_ts: i64,
+    every_cheap_window: bool,
+) -> Option<i64> {
+    let series_end = sim_hours.last()?.timestamp + 3600;
+    if from_ts >= series_end {
+        return None;
+    }
+    let local = chrono::DateTime::from_timestamp(from_ts, 0)?.with_timezone(&chrono::Local);
+    let from_min = local.hour() as u16 * 60 + local.minute() as u16;
+    Some(
+        plan_window(import_tariff, from_min, every_cheap_window)
+            .and_then(|window| {
+                window_occurrences(sim_hours, &window)
+                    .into_iter()
+                    .map(|occurrence| occurrence.start_ts)
+                    .find(|start| *start >= from_ts)
+            })
+            .unwrap_or(series_end),
+    )
+}
+
 /// Whether a plan made at `now` needs the forecast's current hour: the
 /// cheap window it picks starts later within this hour. The forecast's
 /// hours otherwise start at the next full hour, so the plan couldn't see
@@ -1497,6 +1526,20 @@ pub struct ExportPlanInputs<'a> {
     /// Whether the charge plan plans every cheap window (issue #453), so
     /// the cycle ends where that plan's window starts.
     pub every_cheap_window: bool,
+    /// The pessimistic day exports are held against; `None` skips the check.
+    pub backstop: Option<ExportBackstop<'a>>,
+}
+
+/// The back-stop an export is held against (issue #407): the same hours on a
+/// pessimistic day (p75 load, low solar). Whatever the median forecast says,
+/// an export may not leave the battery below what this day needs to reach
+/// the next cheap window plus `margin_pct`.
+#[derive(Debug, Clone, Copy)]
+pub struct ExportBackstop<'a> {
+    /// One entry per `ExportPlanInputs::sim_hours` hour, same timestamps.
+    pub hours: &'a [SimHourInput],
+    /// Points kept on top of what that day needs.
+    pub margin_pct: f64,
 }
 
 /// Compute the export advice. See [`ExportAdvice`] for the cases.
@@ -1654,6 +1697,65 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
         let (first, end) = after_range(run);
         floor_held(series, inputs.sim_hours, inputs.params, first, end, floor)
     };
+    // The back-stop (issue #407): the same export on the pessimistic day must
+    // still leave the battery what that day needs until the cheap window.
+    // It always wins. Hours that don't line up with the projection can't be
+    // trusted, so they hold nothing back.
+    //
+    // Every hour end from the export's first hour to the horizon is held to
+    // what the house needs from there. That need depends only on the hour, and
+    // a longer export only lowers each later SOC, so the check can only get
+    // harder with duration, which is what the search below relies on.
+    let backstop_aligned = inputs.backstop.as_ref().is_some_and(|backstop| {
+        backstop.hours.len() == inputs.sim_hours.len()
+            && backstop
+                .hours
+                .iter()
+                .zip(inputs.sim_hours)
+                .all(|(b, h)| b.timestamp == h.timestamp)
+    });
+    let backstop_needs: Vec<f64> = match (&inputs.backstop, backstop_aligned) {
+        (Some(backstop), true) => backstop
+            .hours
+            .iter()
+            .map(|hour| {
+                crate::forecast::export_floor::export_floor_soc(
+                    backstop.hours,
+                    inputs.params,
+                    hour.timestamp + 3600,
+                    horizon_ts,
+                    floor,
+                    backstop.margin_pct,
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let backstop_held =
+        |probe_window: &ChargeWindow, probe_run: &[usize], charge_run: Option<&[usize]>| {
+            let Some(backstop) = &inputs.backstop else {
+                return true;
+            };
+            if !backstop_aligned {
+                return false;
+            }
+            let Some(&first) = probe_run.first() else {
+                return true;
+            };
+            let Some(sim) = simulate_planner_hours(
+                backstop.hours,
+                inputs.params,
+                charge_run,
+                inputs.charge_window,
+                Some(probe_run),
+                Some(probe_window),
+                max_export_kw,
+            ) else {
+                return false;
+            };
+            let end = post_end.min(sim.series.len());
+            (first..end).all(|i| sim.series[i].soc_pct >= backstop_needs[i])
+        };
     let duration_min = {
         let mut lo = 0u16; // known-good
         let mut hi = max_duration_min; // good or bad, the loop handles both
@@ -1678,7 +1780,9 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
                 hi = mid;
                 continue;
             };
-            if held_after(&probe.series, &probe_run) {
+            if held_after(&probe.series, &probe_run)
+                && backstop_held(&probe_window, &probe_run, charge_run.as_deref())
+            {
                 lo = mid;
             } else {
                 hi = mid;
@@ -1716,14 +1820,22 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
     let final_run = window_runs_for_window(&window, inputs.sim_hours, &selected);
     let kwh = final_sim.export_kwh;
     let after_min_soc_pct = trough_after(&final_sim.series, &final_run);
-    if kwh < EXPORT_MIN_KWH || !held_after(&final_sim.series, &final_run) {
+    if kwh < EXPORT_MIN_KWH
+        || !held_after(&final_sim.series, &final_run)
+        || !backstop_held(&window, &final_run, charge_run.as_deref())
+    {
         return ExportAdvice::NoExport {
             reason: format!(
-                "only about {:.1} kWh spare above your {:.0}% floor during \
+                "only about {:.1} kWh spare above your {:.0}% floor{} during \
                  the {} window — under the {:.1} kWh threshold worth \
                  scheduling",
                 kwh.max(0.0),
                 floor,
+                if inputs.backstop.is_some() {
+                    " and what a busy evening needs until the cheap window"
+                } else {
+                    ""
+                },
                 hhmm(base_window.start_min),
                 EXPORT_MIN_KWH,
             ),
@@ -1746,6 +1858,14 @@ pub fn plan_export_window(inputs: &ExportPlanInputs) -> ExportAdvice {
         replacement_rate * 100.0,
         replace_cost,
     );
+    let rationale = match &inputs.backstop {
+        Some(backstop) => format!(
+            "{rationale} It also keeps what a busy evening needs until the next cheap \
+             window, plus {:.0} points.",
+            backstop.margin_pct
+        ),
+        None => rationale,
+    };
     ExportAdvice::Export {
         window,
         kwh,
@@ -3688,6 +3808,7 @@ mod tests {
             floor_pct: 20.0,
             now_ts,
             every_cheap_window: false,
+            backstop: None,
         }
     }
 
@@ -4365,6 +4486,153 @@ mod tests {
         assert_eq!(min_soc_pct, 10.0);
         assert_eq!(window.start_min, 16 * 60);
         assert_eq!(window.end_min, 16 * 60 + 99);
+    }
+
+    #[test]
+    fn next_cheap_window_start_is_the_next_occurrence_after_the_export() {
+        // Issue #407. Flux's cheap window starts at 02:00.
+        let mut hours = idle_day_hours(0);
+        hours.extend(idle_day_hours(1));
+        let t = flux_tariff();
+        assert_eq!(
+            next_cheap_window_start(&hours, &t, hour_ts(18, 0), false),
+            Some(hour_ts(2, 1))
+        );
+        // Inside the window the next one is beyond the series: its end.
+        assert_eq!(
+            next_cheap_window_start(&hours, &t, hour_ts(3, 1), false),
+            Some(hour_ts(0, 2))
+        );
+        // An empty tariff has no window: the end of the series again.
+        assert_eq!(
+            next_cheap_window_start(&hours, &tariff(&[]), hour_ts(18, 0), false),
+            Some(hour_ts(0, 2))
+        );
+        // Outside the series nothing is known.
+        assert_eq!(
+            next_cheap_window_start(&hours, &t, hour_ts(0, 2), false),
+            None
+        );
+        assert_eq!(
+            next_cheap_window_start(&[], &t, hour_ts(18, 0), false),
+            None
+        );
+    }
+
+    /// The evening fixture: 0.5 kWh/h of house load 21:00–02:00 after the
+    /// 16:00–21:00 export window, at 80% with a 10% floor.
+    fn backstop_day(evening_kwh: f64) -> Vec<SimHourInput> {
+        let mut hours = idle_day_hours(0);
+        hours.extend(idle_day_hours(1));
+        for h in [21, 22, 23, 24, 25] {
+            hours[h].consumption_kwh = evening_kwh;
+        }
+        hours
+    }
+
+    fn backstop_advice(
+        median: &[SimHourInput],
+        busy: &[SimHourInput],
+        margin_pct: f64,
+        start_soc_pct: f64,
+    ) -> ExportAdvice {
+        let p = SimulationParams {
+            start_soc_pct,
+            ..params()
+        };
+        let now = pinned_now_ts(median, 0, 12 * 60);
+        plan_export_window(&ExportPlanInputs {
+            floor_pct: 10.0,
+            backstop: Some(ExportBackstop {
+                hours: busy,
+                margin_pct,
+            }),
+            ..export_inputs(median, &p, &flux_tariff(), &flux_tariff(), None, now)
+        })
+    }
+
+    #[test]
+    fn export_backstop_with_no_margin_and_the_same_day_changes_nothing() {
+        // Issue #407: the median day already holds back 2.5 kWh AC; a
+        // back-stop that agrees with it and asks no margin sells the same 99
+        // minutes.
+        let hours = backstop_day(0.5);
+        let ExportAdvice::Export { window, .. } = backstop_advice(&hours, &hours, 0.0, 80.0) else {
+            panic!("expected an export");
+        };
+        assert_eq!(window.end_min, 16 * 60 + 99);
+    }
+
+    #[test]
+    fn export_backstop_margin_shortens_the_export() {
+        // 5 points more kept: 80 − 0.4386/min ≥ 10 + 26.32 + 5 → 88 minutes.
+        let hours = backstop_day(0.5);
+        let ExportAdvice::Export { window, .. } = backstop_advice(&hours, &hours, 5.0, 80.0) else {
+            panic!("expected an export");
+        };
+        assert_eq!(window.end_min, 16 * 60 + 88);
+    }
+
+    #[test]
+    fn export_backstop_a_busy_evening_wins_over_the_median_forecast() {
+        // The median says 0.5 kWh/h, the busy day 0.8: 4 kWh AC (42.1 points)
+        // plus 10 plus the 5 point margin must stay → 52 minutes.
+        let median = backstop_day(0.5);
+        let busy = backstop_day(0.8);
+        let ExportAdvice::Export {
+            window, rationale, ..
+        } = backstop_advice(&median, &busy, 5.0, 80.0)
+        else {
+            panic!("expected an export");
+        };
+        assert_eq!(window.end_min, 16 * 60 + 52);
+        // The card says why the export is shorter than the median allows.
+        assert!(
+            rationale.contains("busy evening") && rationale.contains("5 points"),
+            "{rationale}"
+        );
+    }
+
+    #[test]
+    fn export_backstop_stands_down_when_nothing_is_spare_on_the_busy_day() {
+        let median = backstop_day(0.5);
+        let busy = backstop_day(0.8);
+        let advice = backstop_advice(&median, &busy, 5.0, 40.0);
+        let ExportAdvice::NoExport { reason } = advice else {
+            panic!("expected no export, got {advice:?}");
+        };
+        assert!(reason.contains("busy evening"), "{reason}");
+    }
+
+    #[test]
+    fn export_backstop_never_lengthens_an_export_over_the_median_rule() {
+        // A quiet back-stop day (less than the median) cannot sell more than
+        // the median rule allows.
+        let median = backstop_day(0.5);
+        let quiet = backstop_day(0.1);
+        let ExportAdvice::Export { window, .. } = backstop_advice(&median, &quiet, 0.0, 80.0)
+        else {
+            panic!("expected an export");
+        };
+        assert!(window.end_min <= 16 * 60 + 99, "{}", window.end_min);
+    }
+
+    #[test]
+    fn export_backstop_hours_that_do_not_line_up_hold_the_export_back() {
+        // A pessimistic series that doesn't match the projection hour for
+        // hour can't be trusted: no export rather than a guessed one.
+        let median = backstop_day(0.5);
+        let short = &median[..median.len() - 1];
+        assert!(matches!(
+            backstop_advice(&median, short, 5.0, 80.0),
+            ExportAdvice::NoExport { .. }
+        ));
+        let mut shifted = median.clone();
+        shifted[3].timestamp += 60;
+        assert!(matches!(
+            backstop_advice(&median, &shifted, 5.0, 80.0),
+            ExportAdvice::NoExport { .. }
+        ));
     }
 
     // ----------------------------------------------------------------

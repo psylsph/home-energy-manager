@@ -860,14 +860,154 @@ async fn note_attempt(state: &Arc<AppState>, id: &str, now: NaiveDateTime, succe
     }
 }
 
+/// The booked floor after the back-stop (issue #407): never lowered, and
+/// never above the 99% a slot can hold. A figure that isn't a number counts
+/// as no figure.
+fn backstopped_target(booked: u8, backstop: Option<f64>) -> u8 {
+    match backstop {
+        Some(floor) if floor.is_finite() => booked.max(floor.ceil().clamp(0.0, 99.0) as u8),
+        _ => booked,
+    }
+}
+
+/// What the back-stop (issue #407) says about an export that is about to start.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Backstop {
+    /// Not in use: this is no fresh start, or there is no import tariff, so
+    /// there is no cheap window to hold the house to.
+    Off,
+    /// In use, but the forecast couldn't say what the house needs.
+    Unknown,
+    /// The SOC (%) the battery must still hold when the export ends.
+    Floor(f64),
+}
+
+/// How long the forecast may take before the export starts without it. A slow
+/// history read must not hold up an export that has to begin on time.
+const BACKSTOP_FORECAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The back-stop for an event that is about to start, from a fresh forecast.
+async fn backstop_at_start(state: &Arc<AppState>, id: &str) -> Backstop {
+    let Some(event) = load_event(id).await else {
+        return Backstop::Off;
+    };
+    if event.state != ExportOnceState::Pending {
+        return Backstop::Off;
+    }
+    if Settings::load_async().await.import_tariff_config.is_none() {
+        return Backstop::Off;
+    }
+    let Some(end_at) = event.end_at() else {
+        return Backstop::Unknown;
+    };
+    // The end is on the inverter's clock, which may not be the host's: count
+    // the time left on the inverter's clock and add it to the host's now.
+    let left = end_at - inverter_now(state).await;
+    let end = chrono::Local::now() + left;
+    match tokio::time::timeout(
+        BACKSTOP_FORECAST_TIMEOUT,
+        crate::inverter::forecast_plan::export_backstop_floor(state, end),
+    )
+    .await
+    {
+        Ok(Some(floor)) if floor.is_finite() => Backstop::Floor(floor),
+        _ => Backstop::Unknown,
+    }
+}
+
+/// How a starting export goes on after the back-stop.
+enum BackstopStep {
+    /// Start it, with this event and a note for the start notification.
+    Run(ExportOnceEvent, Option<String>),
+    /// Don't start it: the battery is already at or below what the house needs.
+    Skip(String),
+    /// The event is gone.
+    Gone,
+}
+
+/// Raise a starting export's floor to the back-stop. Only a pending event is
+/// touched: one already under way keeps the floor it started with. A floor at
+/// or above the battery's own level means there is nothing to sell, and a
+/// raised Minimum SOC would only keep the house on the grid, so the export is
+/// skipped instead.
+async fn raise_to_backstop(
+    id: &str,
+    event: ExportOnceEvent,
+    backstop: Backstop,
+    soc: Option<u8>,
+) -> BackstopStep {
+    if event.state != ExportOnceState::Pending {
+        return BackstopStep::Run(event, None);
+    }
+    let booked = event.target_soc;
+    let floor = match backstop {
+        Backstop::Off => return BackstopStep::Run(event, None),
+        Backstop::Unknown => {
+            let note = format!(
+                "The forecast couldn't say what the house needs until the next cheap window, so \
+                 the floor stays at {booked}%"
+            );
+            tracing::info!("Export Once: {id}: {note}");
+            return BackstopStep::Run(event, Some(note));
+        }
+        Backstop::Floor(floor) => floor,
+    };
+    let target = backstopped_target(booked, Some(floor));
+    if target == booked {
+        return BackstopStep::Run(event, None);
+    }
+    if let Some(soc) = soc.filter(|soc| *soc <= target) {
+        let note = format!(
+            "The battery is at {soc}%, at or below the {target}% the house needs to reach the \
+             next cheap window, so the export was skipped"
+        );
+        tracing::info!("Export Once: {id}: {note}");
+        return BackstopStep::Skip(note);
+    }
+    let note = format!(
+        "Floor raised from {booked}% to {target}% to keep the house covered until the next \
+         cheap window"
+    );
+    tracing::info!("Export Once: {id}: {note}");
+    update_event(id, move |e| e.target_soc = target).await;
+    match load_event(id).await {
+        Some(event) => BackstopStep::Run(event, Some(note)),
+        None => BackstopStep::Gone,
+    }
+}
+
 /// Write an event's window into its slot, capturing the slot's previous
 /// content first. Runs under the action lock so the Timed Export machine
 /// never sees a half-applied slot. Returns false when the inverter refused
 /// the change and another attempt is due.
 async fn apply_event(state: &Arc<AppState>, id: &str) -> bool {
+    // Asked before the action lock is taken: building the forecast is slow.
+    let backstop = backstop_at_start(state, id).await;
+    apply_event_with(state, id, backstop).await
+}
+
+/// [`apply_event`] with the back-stop (issue #407) already worked out.
+async fn apply_event_with(state: &Arc<AppState>, id: &str, backstop: Backstop) -> bool {
     let _guard = state.timed_export_action_lock.lock().await;
     let Some(event) = load_event(id).await else {
         return true;
+    };
+    let soc = state
+        .latest_snapshot
+        .lock()
+        .await
+        .as_ref()
+        .map(|snapshot| snapshot.soc);
+    let (event, backstop_note) = match raise_to_backstop(id, event, backstop, soc).await {
+        BackstopStep::Run(event, note) => (event, note),
+        BackstopStep::Skip(note) => {
+            if let Some(event) = load_event(id).await {
+                finish(id, ExportOnceState::Failed, Some(note.clone())).await;
+                notify_session_export(state, &event, "Saving Session export did not run", note);
+            }
+            return true;
+        }
+        BackstopStep::Gone => return true,
     };
     let Some(window) = event_slot(&event) else {
         let note = "The export's times could not be read".to_string();
@@ -932,6 +1072,10 @@ async fn apply_event(state: &Arc<AppState>, id: &str) -> bool {
             event.target_soc,
         );
         let mut detail = export_started_detail(&event, stop_soc);
+        if let Some(note) = backstop_note {
+            detail.push('\n');
+            detail.push_str(&note);
+        }
         if let Some(note) = floor_note {
             detail.push('\n');
             detail.push_str(&note);
@@ -1724,6 +1868,176 @@ mod tests {
             assert_eq!(slot.target_soc, 20);
             // The other slot is untouched.
             assert_eq!(desired_slot(&state, 0).await.start_hour, 6);
+        })
+        .await;
+    }
+
+    // ---- The back-stop floor (issue #407) ----
+
+    #[test]
+    fn the_back_stop_only_ever_raises_the_booked_floor() {
+        assert_eq!(backstopped_target(20, Some(47.2)), 48);
+        assert_eq!(backstopped_target(20, Some(47.0)), 47);
+        assert_eq!(backstopped_target(60, Some(47.2)), 60, "never lowered");
+        assert_eq!(backstopped_target(20, Some(100.0)), 99, "a slot holds 99");
+        assert_eq!(backstopped_target(20, None), 20);
+        assert_eq!(backstopped_target(20, Some(f64::NAN)), 20);
+        assert_eq!(backstopped_target(20, Some(-5.0)), 20);
+    }
+
+    /// Start `e1` (booked at 20%, battery at `soc`%) with the given back-stop
+    /// and return it as stored, with the slot it left and whether it applied.
+    async fn start_with_backstop(
+        backstop: Backstop,
+        soc: u8,
+    ) -> (ExportOnceEvent, ScheduleSlot, Arc<AppState>) {
+        let state = make_state().await;
+        state.latest_snapshot.lock().await.as_mut().unwrap().soc = soc;
+        seed_schedule(
+            &state,
+            true,
+            vec![sched(6, 0, 7, 0, 40), sched(22, 0, 23, 0, 30)],
+        )
+        .await;
+        store(vec![event("e1", 2, "2026-10-17 18:00", "2026-10-17 19:00")]);
+        set_clock(&state, "2026-10-17 17:55").await;
+        let s = state.clone();
+        drive(
+            &state,
+            async move { apply_event_with(&s, "e1", backstop).await },
+            WriteOutcome::Ok,
+        )
+        .await;
+        (stored("e1"), desired_slot(&state, 1).await, state)
+    }
+
+    #[tokio::test]
+    async fn a_starting_export_is_raised_to_the_back_stop() {
+        with_isolated_config_dir_async(|| async {
+            let (ev, slot, _) = start_with_backstop(Backstop::Floor(47.2), 90).await;
+            assert_eq!(ev.state, ExportOnceState::Active);
+            assert!(ev.applied);
+            assert_eq!(ev.target_soc, 48, "the stored floor is the one in force");
+            assert_eq!(slot.target_soc, 48);
+            assert!(slot_matches_event(&slot, &ev));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_back_stop_below_the_booked_floor_changes_nothing() {
+        with_isolated_config_dir_async(|| async {
+            let (ev, slot, _) = start_with_backstop(Backstop::Floor(12.0), 90).await;
+            assert_eq!(ev.state, ExportOnceState::Active);
+            assert_eq!(ev.target_soc, 20);
+            assert_eq!(slot.target_soc, 20);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn without_a_forecast_the_booked_floor_stands_and_the_export_still_starts() {
+        with_isolated_config_dir_async(|| async {
+            let (ev, slot, _) = start_with_backstop(Backstop::Unknown, 90).await;
+            assert_eq!(ev.state, ExportOnceState::Active);
+            assert!(ev.applied);
+            assert_eq!(ev.target_soc, 20);
+            assert_eq!(slot.target_soc, 20);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn without_an_import_tariff_the_back_stop_is_off() {
+        with_isolated_config_dir_async(|| async {
+            let state = make_state().await;
+            store(vec![event("e1", 2, "2026-10-17 18:00", "2026-10-17 19:00")]);
+            set_clock(&state, "2026-10-17 17:55").await;
+            assert!(Settings::load().import_tariff_config.is_none());
+            assert_eq!(backstop_at_start(&state, "e1").await, Backstop::Off);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_full_battery_back_stop_holds_the_floor_at_99() {
+        with_isolated_config_dir_async(|| async {
+            let (ev, slot, _) = start_with_backstop(Backstop::Floor(100.0), 100).await;
+            // At 100% the battery is not below 99, so the export runs to it.
+            assert_eq!(ev.target_soc, 99);
+            assert_eq!(slot.target_soc, 99);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_export_is_skipped_when_the_battery_is_already_at_the_back_stop() {
+        // Raising Minimum SOC above the battery's own level would only keep
+        // the house on the grid, so the export doesn't run.
+        with_isolated_config_dir_async(|| async {
+            for soc in [55, 70] {
+                let (ev, slot, state) = start_with_backstop(Backstop::Floor(70.0), soc).await;
+                assert_eq!(ev.state, ExportOnceState::Failed, "soc {soc}");
+                assert!(!ev.applied);
+                assert_eq!(ev.target_soc, 20, "the booked floor is left as booked");
+                let note = ev.note.expect("says why");
+                assert!(note.contains("skipped") && note.contains("70%"), "{note}");
+                // Nothing was written: the slot is as it was.
+                assert_eq!(slot.start_hour, 22);
+                assert_eq!(slot.target_soc, 30);
+                assert!(state.pending_writes.lock().await.is_empty());
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_export_starts_when_the_battery_is_one_point_above_the_back_stop() {
+        with_isolated_config_dir_async(|| async {
+            let (ev, slot, _) = start_with_backstop(Backstop::Floor(70.0), 71).await;
+            assert_eq!(ev.state, ExportOnceState::Active);
+            assert_eq!(ev.target_soc, 70);
+            assert_eq!(slot.target_soc, 70);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_booked_floor_above_the_battery_is_not_the_back_stops_to_skip() {
+        // The user's own floor is theirs: only a back-stop-driven raise skips.
+        with_isolated_config_dir_async(|| async {
+            let (ev, _, _) = start_with_backstop(Backstop::Floor(10.0), 15).await;
+            assert_eq!(ev.state, ExportOnceState::Active);
+            assert_eq!(ev.target_soc, 20);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_retry_keeps_the_floor_the_export_started_with() {
+        // A failed first write leaves the event Active and unapplied; the
+        // retry must not recompute, even with a different back-stop.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state().await;
+            seed_schedule(
+                &state,
+                true,
+                vec![sched(6, 0, 7, 0, 40), sched(22, 0, 23, 0, 30)],
+            )
+            .await;
+            let mut ev = event("e1", 2, "2026-10-17 18:00", "2026-10-17 19:00");
+            ev.state = ExportOnceState::Active;
+            ev.target_soc = 33;
+            store(vec![ev]);
+            set_clock(&state, "2026-10-17 17:55").await;
+            let s = state.clone();
+            drive(
+                &state,
+                async move { apply_event_with(&s, "e1", Backstop::Floor(80.0)).await },
+                WriteOutcome::Ok,
+            )
+            .await;
+            assert_eq!(stored("e1").target_soc, 33);
         })
         .await;
     }
