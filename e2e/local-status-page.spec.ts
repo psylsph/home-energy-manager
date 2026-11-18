@@ -10,24 +10,34 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { test, expect } from './local-fixture.js';
 
-// The two longest lines the Battery Level card can show (issues #476, #472),
-// so each fit check below covers both: charging faster than the forecast
-// (the longest text), and a busy day running out before tomorrow's charge
-// (with its dots and ⓘ).
-type RuntimeKind = 'charging' | 'risk';
-const RUNTIME_KINDS: readonly RuntimeKind[] = ['charging', 'risk'];
+// The longest lines the Battery Level card can show (issues #476, #472),
+// so each fit check below covers them: charging faster than the forecast,
+// a busy day running out before tomorrow's charge (with its dots and ⓘ),
+// and the same before tomorrow's solar, the longest text ("Empty tonight
+// at 21:30 or later, solar tomorrow at about 09:00").
+type RuntimeKind = 'charging' | 'risk' | 'solar-risk';
+const RUNTIME_KINDS: readonly RuntimeKind[] = ['charging', 'risk', 'solar-risk'];
+const tomorrowAt9 = (now: number) => {
+  const d = new Date(now);
+  d.setDate(d.getDate() + 1);
+  d.setHours(9, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+};
 const runtimeAnswer = (kind: RuntimeKind, now: number) => ({
   ok: true,
   data: kind === 'charging'
     ? { outcome: 'charging', computed_at: Math.floor(now / 1000) }
     : {
-      outcome: 'recharges_first', by: 'charge', at: Math.floor(now / 1000) + 5 * 3600, risk: Math.floor(now / 1000) + 3600,
+      outcome: 'recharges_first', by: kind === 'risk' ? 'charge' : 'solar',
+      // Solar comes back at 09:00 tomorrow, so its line says "tomorrow".
+      at: kind === 'risk' ? Math.floor(now / 1000) + 5 * 3600 : tomorrowAt9(now), risk: Math.floor(now / 1000) + 3600,
       confidence: 'medium', computed_at: Math.floor(now / 1000),
     },
 });
 const runtimeText = (kind: RuntimeKind) => (kind === 'charging'
   ? 'Unable to calculate: charging faster than forecast'
-  : /^Empty .* or later, charge .*\d\d:\d\d$/);
+  : kind === 'risk' ? /^Empty .* or later, charge .*\d\d:\d\d$/
+    : /^Empty .* or later, solar .*at about \d\d:\d\d$/);
 
 test.describe('Status Page - Loading', () => {
   test('should show data after initial load', async ({ page }) => {
@@ -229,7 +239,7 @@ test.describe('Status Page - House View (issue #422)', () => {
     }, theme);
   };
 
-  for (const [theme, kind] of [['dark', 'charging'], ['light', 'risk'], ['dark', 'risk'], ['light', 'charging']] as const) {
+  for (const [theme, kind] of [['dark', 'charging'], ['light', 'risk'], ['dark', 'risk'], ['light', 'charging'], ['dark', 'solar-risk'], ['light', 'solar-risk']] as const) {
     test(`fits an iPhone 12 Pro screen without scrolling (${theme}, ${kind} runtime line)`, async ({ page }) => {
       // 844 px tall minus the ~47 px / ~34 px safe areas Chromium doesn't emulate.
       // The house view starts with the Today statistics hidden, so this is its

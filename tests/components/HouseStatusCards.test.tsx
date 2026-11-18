@@ -552,7 +552,7 @@ describe('<HouseStatusCards/> battery runtime line (issue #472)', () => {
     expect(tid('house-battery-card').contains(line)).toBe(true);
     // A range, not an exact time: the busy day's start to the quiet day's end.
     expect(tid('house-runtime-text').textContent).toMatch(
-      new RegExp(`^Empty (tonight |tomorrow )?${local('2026-11-01T18:00:00Z')}–${local('2026-11-01T19:30:00Z')}$`),
+      new RegExp(`^Empty (tonight |tomorrow )?between ${local('2026-11-01T18:00:00Z')} and ${local('2026-11-01T19:30:00Z')}$`),
     );
     const dots = [...line.querySelectorAll('[data-testid="house-runtime-dot"]')];
     expect(dots).toHaveLength(3);
@@ -582,7 +582,7 @@ describe('<HouseStatusCards/> battery runtime line (issue #472)', () => {
     };
     render(<HouseStatusCards snapshot={snap()} now={NOW} />);
     expect(tid('house-runtime-text').textContent).toMatch(
-      new RegExp(`^Empty (tonight |tomorrow )?${local('2026-11-01T21:30:00Z')} or later, charge (tomorrow )?${local('2026-11-01T23:30:00Z')}$`),
+      new RegExp(`^Empty (tonight |tomorrow )?at ${local('2026-11-01T21:30:00Z')} or later, charge (tomorrow )?at ${local('2026-11-01T23:30:00Z')}$`),
     );
     const dots = [...tid('house-battery-runtime').querySelectorAll('[data-testid="house-runtime-dot"]')];
     expect(dots.filter((d) => d.getAttribute('data-lit') === 'true')).toHaveLength(2);

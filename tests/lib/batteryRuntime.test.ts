@@ -43,7 +43,7 @@ describe('batteryRuntimeLine (issue #472)', () => {
       earliest: ts('2026-11-14T21:30:00Z'), latest: ts('2026-11-14T23:00:00Z'), confidence: 'medium',
     })!;
     // 18:00 or later today is "tonight".
-    expect(l.text).toBe('Empty tonight 21:30–23:00');
+    expect(l.text).toBe('Empty tonight between 21:30 and 23:00');
     expect(l.confidence).toBe('medium');
     expect(l.dots).toBe(2);
     expect(l.title).toBe('Most likely 22:30 · between 21:30 and 23:00 · medium confidence');
@@ -54,21 +54,21 @@ describe('batteryRuntimeLine (issue #472)', () => {
       outcome: 'empty_at', at: ts('2026-11-14T22:00:00Z'),
       earliest: ts('2026-11-14T22:00:00Z'), latest: ts('2026-11-14T22:30:00Z'), confidence: 'high',
     })!;
-    expect(l.text).toBe('Empty tonight about 22:00');
+    expect(l.text).toBe('Empty tonight at about 22:00');
     expect(l.dots).toBe(3);
     const same = line({
       outcome: 'empty_at', at: ts('2026-11-14T22:00:00Z'),
       earliest: ts('2026-11-14T22:00:00Z'), latest: ts('2026-11-14T22:00:00Z'), confidence: 'high',
     })!;
-    expect(same.text).toBe('Empty tonight about 22:00');
+    expect(same.text).toBe('Empty tonight at about 22:00');
     // Without a range at all, still a prediction.
     expect(line({ outcome: 'empty_at', at: ts('2026-11-14T22:00:00Z'), earliest: null, latest: null, confidence: 'low' })!.text)
-      .toBe('Empty tonight about 22:00');
+      .toBe('Empty tonight at about 22:00');
   });
 
   it('says "or later" when the quiet day never empties', () => {
     const l = line({ outcome: 'empty_at', at: ts('2026-11-14T22:30:00Z'), earliest: ts('2026-11-14T21:30:00Z'), latest: null, confidence: 'low' })!;
-    expect(l.text).toBe('Empty tonight 21:30 or later');
+    expect(l.text).toBe('Empty tonight at 21:30 or later');
     expect(l.title).toBe('Most likely 22:30 · not before about 21:30 · low confidence');
     expect(l.dots).toBe(1);
   });
@@ -93,13 +93,13 @@ describe('batteryRuntimeLine (issue #472)', () => {
 
   it('names tomorrow, and a later day by its weekday, from the range start', () => {
     expect(line({ outcome: 'empty_at', at: ts('2026-11-15T06:00:00Z'), earliest: null, latest: null, confidence: 'low' })!.text)
-      .toBe('Empty tomorrow about 06:00');
+      .toBe('Empty tomorrow at about 06:00');
     expect(line({ outcome: 'empty_at', at: ts('2026-11-16T06:00:00Z'), earliest: null, latest: null, confidence: 'low' })!.text)
-      .toBe('Empty Mon about 06:00');
+      .toBe('Empty Mon at about 06:00');
     expect(line({
       outcome: 'empty_at', at: ts('2026-11-15T06:00:00Z'),
       earliest: ts('2026-11-15T05:00:00Z'), latest: ts('2026-11-15T07:30:00Z'), confidence: 'medium',
-    })!.text).toBe('Empty tomorrow 05:00–07:30');
+    })!.text).toBe('Empty tomorrow between 05:00 and 07:30');
   });
 
   it('names the day from the range start, and a range may run over midnight', () => {
@@ -107,14 +107,14 @@ describe('batteryRuntimeLine (issue #472)', () => {
     expect(line({
       outcome: 'empty_at', at: ts('2026-11-14T23:30:00Z'),
       earliest: ts('2026-11-14T22:30:00Z'), latest: ts('2026-11-15T01:00:00Z'), confidence: 'medium',
-    })!.text).toBe('Empty tonight 22:30–01:00');
+    })!.text).toBe('Empty tonight between 22:30 and 01:00');
     // A start before 18:00 today has no day word.
     const day = new Date('2026-11-14T08:00:00Z');
     const early = batteryRuntimeLine(readBatteryRuntime({ ok: true, data: {
       outcome: 'empty_at', at: ts('2026-11-14T15:00:00Z'),
       earliest: ts('2026-11-14T14:00:00Z'), latest: ts('2026-11-14T16:00:00Z'), confidence: 'medium',
     } }), day, UTC)!;
-    expect(early.text).toBe('Empty 14:00–16:00');
+    expect(early.text).toBe('Empty between 14:00 and 16:00');
   });
 
   it('says only the likely time when the start of the range has already passed', () => {
@@ -122,14 +122,14 @@ describe('batteryRuntimeLine (issue #472)', () => {
       outcome: 'empty_at', at: ts('2026-11-14T18:30:00Z'),
       earliest: ts('2026-11-14T17:30:00Z'), latest: ts('2026-11-14T20:00:00Z'), confidence: 'medium',
     })!;
-    expect(l.text).toBe('Empty tonight about 18:30');
+    expect(l.text).toBe('Empty tonight at about 18:30');
   });
 
   it('says what refills it first', () => {
     expect(line({ outcome: 'recharges_first', at: ts('2026-11-14T23:30:00Z'), by: 'charge' })!.text)
       .toBe('Lasts until the 23:30 charge');
     expect(line({ outcome: 'recharges_first', at: ts('2026-11-15T09:00:00Z'), by: 'solar' })!.text)
-      .toBe('Lasts until solar tomorrow, about 09:00');
+      .toBe('Lasts until solar tomorrow at about 09:00');
     expect(line({ outcome: 'recharges_first', at: ts('2026-11-15T09:00:00Z'), by: 'solar' })!.dots).toBeNull();
   });
 
@@ -145,7 +145,7 @@ describe('batteryRuntimeLine (issue #472)', () => {
       outcome: 'recharges_first', at: ts('2026-11-14T23:30:00Z'), by: 'charge',
       risk: ts('2026-11-14T21:30:00Z'), confidence: 'medium',
     })!;
-    expect(l.text).toBe('Empty tonight 21:30 or later, charge 23:30');
+    expect(l.text).toBe('Empty tonight at 21:30 or later, charge at 23:30');
     expect(l.dots).toBe(2);
     expect(l.confidence).toBe('medium');
     expect(l.title).toBe(
@@ -161,12 +161,12 @@ describe('batteryRuntimeLine (issue #472)', () => {
     expect(line({
       outcome: 'recharges_first', at: ts('2026-11-15T00:10:00Z'), by: 'charge',
       risk: ts('2026-11-14T22:30:00Z'), confidence: 'high',
-    })!.text).toBe('Empty tonight 22:30 or later, charge tomorrow 00:10');
+    })!.text).toBe('Empty tonight at 22:30 or later, charge tomorrow at 00:10');
     // Both tomorrow: said once.
     expect(line({
       outcome: 'recharges_first', at: ts('2026-11-15T05:00:00Z'), by: 'charge',
       risk: ts('2026-11-15T03:00:00Z'), confidence: 'low',
-    })!.text).toBe('Empty tomorrow 03:00 or later, charge 05:00');
+    })!.text).toBe('Empty tomorrow at 03:00 or later, charge at 05:00');
   });
 
   it('warns the same way when solar is the refill', () => {
@@ -174,10 +174,10 @@ describe('batteryRuntimeLine (issue #472)', () => {
       outcome: 'recharges_first', at: ts('2026-11-15T09:00:00Z'), by: 'solar',
       risk: ts('2026-11-15T02:00:00Z'), confidence: 'low',
     })!;
-    expect(l.text).toBe('Empty tomorrow 02:00 or later, solar about 09:00');
+    expect(l.text).toBe('Empty tomorrow at 02:00 or later, solar at about 09:00');
     expect(l.dots).toBe(1);
-    expect(l.help).toMatch(/Most likely it lasts until solar, about 09:00, but/);
-    expect(l.help).toMatch(/One dot: a busier day would run out more than three hours before the charge/);
+    expect(l.help).toMatch(/Most likely it lasts until solar at about 09:00, but/);
+    expect(l.help).toMatch(/One dot: a busier day would run out more than three hours before solar takes over/);
   });
 
   it('keeps the plain line when the busy day lasts too, or the backend is older', () => {
@@ -201,7 +201,7 @@ describe('batteryRuntimeLine (issue #472)', () => {
     expect(line({
       outcome: 'recharges_first', at: ts('2026-11-15T09:00:00Z'), by: 'solar',
       risk: ts('2026-11-14T17:30:00Z'), confidence: 'low',
-    })!.text).toBe('May run out before solar tomorrow about 09:00');
+    })!.text).toBe('May run out before solar tomorrow at about 09:00');
   });
 
   it('tells an evening from the hour, not from how the time is written', () => {
@@ -210,14 +210,14 @@ describe('batteryRuntimeLine (issue #472)', () => {
     const l = batteryRuntimeLine(readBatteryRuntime({ ok: true, data: {
       outcome: 'empty_at', at: ts('2026-11-14T22:30:00Z'), earliest: null, latest: null, confidence: 'low',
     } }), NOW, twelve)!;
-    expect(l.text).toBe('Empty tonight about 10:30 PM');
+    expect(l.text).toBe('Empty tonight at about 10:30 PM');
   });
 
   it('says when a charging battery is full, or reaches its slot target', () => {
     const full = line({ outcome: 'full_at', at: ts('2026-11-14T20:30:00Z'), soc: 100 })!;
-    expect(full.text).toBe('Full about 20:30');
+    expect(full.text).toBe('Full at about 20:30');
     expect(full.dots).toBeNull();
-    expect(line({ outcome: 'full_at', at: ts('2026-11-15T04:00:00Z'), soc: 80 })!.text).toBe('80% tomorrow about 04:00');
+    expect(line({ outcome: 'full_at', at: ts('2026-11-15T04:00:00Z'), soc: 80 })!.text).toBe('80% tomorrow at about 04:00');
   });
 
   // Issue #476: with the toggle on, a blank card looked broken, so a pause
@@ -228,6 +228,7 @@ describe('batteryRuntimeLine (issue #472)', () => {
     expect(l.dots).toBeNull();
     expect(l.confidence).toBeNull();
     expect(l.help).toMatch(/won't discharge until the pause ends/);
+    expect(l.help).toMatch(/HEM can't tell when that will be, so there's no time to give\./);
   });
 
   it('covers the rest', () => {
@@ -273,7 +274,7 @@ describe('batteryRuntimeLine (issue #472)', () => {
     expect(line({ outcome: 'full_at', at: past, soc: 100 })).toBeNull();
     // A minute of slack for the clock; the future is untouched.
     expect(line({ outcome: 'recharges_first', at: ts('2026-11-14T17:59:30Z'), by: 'solar' })).not.toBeNull();
-    expect(line({ outcome: 'recharges_first', at: ts('2026-11-14T18:30:00Z'), by: 'solar' })!.text).toBe('Lasts until solar, about 18:30');
+    expect(line({ outcome: 'recharges_first', at: ts('2026-11-14T18:30:00Z'), by: 'solar' })!.text).toBe('Lasts until solar at about 18:30');
   });
 
   it('still drops a stale cannot-calculate answer', () => {
