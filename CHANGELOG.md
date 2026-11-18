@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.20.1] - 2026-11-18
+
+### Changed
+
+- **The battery runtime line reads more naturally.** "Empty tonight about 19:00" now says "Empty tonight at about 19:00", a range reads "Empty tonight between 21:30 and 23:00", and a busy evening "Empty tonight at 21:30 or later, charge at 23:30"; "Full" and "Lasts until solar" say "at about" too. The ⓘ for a busy evening before solar no longer talks about a charge, and the pause explanation reads properly.
+
+### Fixed
+
+- **The Agile price summary compares against your own tariff.** On the Control page, "Earns …p/kWh vs Standard Export", "Saves …p/kWh vs Standard Rate" and the estimated daily saving used a 15p export and 28.5p import default for anyone who typed their rates into Settings; they now use your saved rates, at each half-hour's own price on a time-of-day tariff (#485).
+
 ## [1.20.0] - 2026-11-18
 
 ### Added
