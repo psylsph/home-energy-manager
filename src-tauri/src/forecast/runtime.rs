@@ -16,7 +16,7 @@
 use chrono::{DateTime, Datelike, Local, Timelike};
 
 use crate::forecast::current_schedule::{simulate_current_schedule, CurrentSchedule};
-use crate::forecast::dispatch_load::{apply_dispatch_hours, DispatchHour};
+use crate::forecast::dispatch_load::{apply_dispatch_hours, DispatchHour, DispatchWindow};
 use crate::forecast::simulate::{
     modelled_reserve, simulate_battery, SimHourInput, SimulationParams,
 };
@@ -106,6 +106,9 @@ pub struct RuntimeInputs {
     pub hours: Vec<RuntimeHour>,
     /// Planned car charging and dispatch holds, by hour start.
     pub dispatch_hours: Vec<DispatchHour>,
+    /// The planned charges themselves, so a top-up is said to start when its
+    /// dispatch does, not at the start of the hour it falls in.
+    pub dispatch_windows: Vec<DispatchWindow>,
     pub dispatch_net_of_profile: bool,
     /// Capacity, the live SOC as the start, the reserve, rates, efficiencies.
     /// Unlike the payload's params, `reserve_soc_pct` here is the inverter's
@@ -142,8 +145,18 @@ pub enum RuntimeOutcome {
         latest: Option<i64>,
         confidence: Confidence,
     },
-    /// Refilled before it empties: by a charge slot or by solar, from `at`.
-    RechargesFirst { at: i64, by: RechargeSource },
+    /// Refilled before it empties: by a charge slot or by solar, from `at`
+    /// (a charge's own start, exact; solar's, rounded). `risk` is when a
+    /// busy day (p75 load, low sun) would run out first, when it would
+    /// (issue #472), with its own `confidence`.
+    RechargesFirst {
+        at: i64,
+        by: RechargeSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        risk: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        confidence: Option<Confidence>,
+    },
     /// Neither empties nor refills within the horizon.
     LastsBeyond { hours: i64 },
     /// Already at the reserve.
@@ -273,13 +286,52 @@ fn sim_hours(inputs: &RuntimeInputs, which: usize) -> Vec<SimHourInput> {
     hours
 }
 
-/// When a charge slot starts refilling within the hour at `ts`, if one does.
-fn charge_start_in_hour(schedule: &CurrentSchedule, ts: i64) -> Option<i64> {
-    schedule
-        .charge_windows
+/// When the charge slot that refills the battery in the hour at `ts` started:
+/// within that hour, or, when it already ran into it from earlier hours
+/// that didn't lift the battery (ten minutes of a 23:50 slot don't), the
+/// start of that run. `None` when no slot overlaps the hour. `floor_ts` is
+/// as far back as to look (the hour now is in).
+fn charge_start_for_hour(schedule: &CurrentSchedule, ts: i64, floor_ts: i64) -> Option<i64> {
+    let mut best: Option<i64> = None;
+    for w in &schedule.charge_windows {
+        let segments = |hour: i64| window_overlap_segments(hour, w.start_min, w.end_min, &Local);
+        let Some(mut start) = segments(ts)
+            .into_iter()
+            .map(|(start, _)| (ts, start))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+        else {
+            continue;
+        };
+        // Started at the top of the hour: it may have been running already.
+        let mut hour = ts;
+        while start.1 <= 0.0 && hour > floor_ts {
+            let prev = hour - HOUR_SECS;
+            match segments(prev)
+                .into_iter()
+                .filter(|(_, end)| *end >= 1.0)
+                .map(|(s, _)| s)
+                .min_by(f64::total_cmp)
+            {
+                Some(s) => {
+                    start = (prev, s);
+                    hour = prev;
+                }
+                None => break,
+            }
+        }
+        let at = start.0 + (start.1 * HOUR_SECS as f64).round() as i64;
+        best = Some(best.map_or(at, |b| b.min(at)));
+    }
+    best
+}
+
+/// When a held smart dispatch starts inside the hour at `ts`, which is when
+/// a #434 top-up starts charging; `None` when the windows don't say.
+fn dispatch_hold_start_in_hour(windows: &[DispatchWindow], ts: i64) -> Option<i64> {
+    windows
         .iter()
-        .flat_map(|w| window_overlap_segments(ts, w.start_min, w.end_min, &Local))
-        .map(|(start, _)| ts + (start * HOUR_SECS as f64).round() as i64)
+        .filter(|w| w.held && w.end > ts && w.start < ts + HOUR_SECS)
+        .map(|w| w.start.max(ts))
         .min()
 }
 
@@ -416,9 +468,15 @@ fn first_event(inputs: &RuntimeInputs, which: usize, topping_up: bool) -> Option
                 .dispatch_hours
                 .iter()
                 .any(|d| d.timestamp == ts && d.charge_to_soc.is_some() && d.held_fraction > 0.0);
-            return Some(match charge_start_in_hour(&inputs.schedule, ts) {
+            let floor = inputs.now_ts - inputs.now_ts.rem_euclid(HOUR_SECS);
+            return Some(match charge_start_for_hour(&inputs.schedule, ts, floor) {
                 Some(at) => Event::Recharge(at.max(inputs.now_ts), RechargeSource::Charge),
-                None if top_up => Event::Recharge(ts.max(inputs.now_ts), RechargeSource::Charge),
+                None if top_up => Event::Recharge(
+                    dispatch_hold_start_in_hour(&inputs.dispatch_windows, ts)
+                        .unwrap_or(ts)
+                        .max(inputs.now_ts),
+                    RechargeSource::Charge,
+                ),
                 None => Event::Recharge(ts.max(inputs.now_ts), RechargeSource::Solar),
             });
         }
@@ -479,10 +537,24 @@ fn empty_outcome(inputs: &RuntimeInputs, topping_up: bool) -> RuntimeOutcome {
         return RuntimeOutcome::Unknown;
     };
     match central {
-        Event::Recharge(at, by) => RuntimeOutcome::RechargesFirst {
-            at: round_not_before(at, inputs.now_ts),
-            by,
-        },
+        Event::Recharge(at, by) => {
+            // A charge's start is a fact of the schedule, said as it is; a
+            // solar refill is a prediction, rounded.
+            let at = match by {
+                RechargeSource::Charge => at.max(inputs.now_ts),
+                RechargeSource::Solar => round_not_before(at, inputs.now_ts),
+            };
+            // The median day reaches the charge, but a busy one may not.
+            let risk = empty(first_event(inputs, 0, topping_up))
+                .map(|t| round_not_before(t, inputs.now_ts))
+                .filter(|risk| *risk < at);
+            RuntimeOutcome::RechargesFirst {
+                at,
+                by,
+                risk,
+                confidence: risk.map(|risk| confidence_for(Some(at - risk), inputs)),
+            }
+        }
         Event::Nothing => RuntimeOutcome::LastsBeyond {
             hours: RUNTIME_HORIZON_HOURS,
         },
@@ -490,24 +562,41 @@ fn empty_outcome(inputs: &RuntimeInputs, topping_up: bool) -> RuntimeOutcome {
             let earliest = empty(first_event(inputs, 0, topping_up));
             let latest = empty(first_event(inputs, 2, topping_up));
             let spread = earliest.zip(latest).map(|(e, l)| (l - e).abs());
-            let mut confidence = match spread {
-                Some(s) if s <= HIGH_SPREAD_SECS => Confidence::High,
-                Some(s) if s <= MEDIUM_SPREAD_SECS => Confidence::Medium,
-                _ => Confidence::Low,
-            };
-            if inputs.profile_days < CONFIDENT_PROFILE_DAYS {
-                confidence = Confidence::Low;
-            } else if !inputs.solar_known && confidence == Confidence::High {
-                confidence = Confidence::Medium;
-            }
+            let earliest = earliest.map(|t| round_not_before(t, inputs.now_ts));
+            let latest = latest.map(|t| round_not_before(t, inputs.now_ts));
             RuntimeOutcome::EmptyAt {
-                at: round_not_before(at, inputs.now_ts),
-                earliest: earliest.map(|t| round_not_before(t, inputs.now_ts)),
-                latest: latest.map(|t| round_not_before(t, inputs.now_ts)),
-                confidence,
+                at: clamp_into_range(round_not_before(at, inputs.now_ts), earliest, latest),
+                earliest,
+                latest,
+                confidence: confidence_for(spread, inputs),
             }
         }
     }
+}
+
+/// The confidence for a spread (seconds): between a busy and a quiet day's
+/// empty times, or between a busy day's and the refill that comes first.
+/// `None` (one of the days never empties) is low.
+fn confidence_for(spread: Option<i64>, inputs: &RuntimeInputs) -> Confidence {
+    let mut confidence = match spread {
+        Some(s) if s <= HIGH_SPREAD_SECS => Confidence::High,
+        Some(s) if s <= MEDIUM_SPREAD_SECS => Confidence::Medium,
+        _ => Confidence::Low,
+    };
+    if inputs.profile_days < CONFIDENT_PROFILE_DAYS {
+        confidence = Confidence::Low;
+    } else if !inputs.solar_known && confidence == Confidence::High {
+        confidence = Confidence::Medium;
+    }
+    confidence
+}
+
+/// The most likely time kept inside its own range, so the line never says
+/// "most likely 22:00" for a range that starts at 22:30. A missing end (that
+/// day doesn't empty in the horizon) leaves that side open.
+pub(crate) fn clamp_into_range(at: i64, earliest: Option<i64>, latest: Option<i64>) -> i64 {
+    let at = earliest.map_or(at, |e| at.max(e));
+    latest.map_or(at, |l| at.min(l.max(earliest.unwrap_or(l))))
 }
 
 fn band_for(series: &[ForecastConsumptionHour], hour: u32) -> Option<&ForecastConsumptionHour> {
@@ -583,6 +672,7 @@ mod tests {
                 })
                 .collect(),
             dispatch_hours: Vec::new(),
+            dispatch_windows: Vec::new(),
             dispatch_net_of_profile: false,
             params: params(start_soc),
             schedule: CurrentSchedule::default(),
@@ -678,9 +768,209 @@ mod tests {
             battery_runtime(&i),
             RuntimeOutcome::RechargesFirst {
                 at: T0 + HOUR_SECS,
-                by: RechargeSource::Solar
+                by: RechargeSource::Solar,
+                risk: None,
+                confidence: None,
             }
         );
+    }
+
+    /// Local 20:00 on a Monday, with a 23:30 charge slot: the evening the
+    /// "may run out first" tests ask about.
+    fn evening_with_a_slot(load: [f64; 3]) -> (RuntimeInputs, i64) {
+        let at = |h, m| {
+            Local
+                .with_ymd_and_hms(2025, 11, 10, h, m, 0)
+                .earliest()
+                .unwrap()
+                .timestamp()
+        };
+        let start = at(20, 0);
+        let mut i = inputs(start, start, 50.0, load);
+        i.schedule = CurrentSchedule {
+            charge_windows: vec![ScheduledWindow {
+                start_min: 23 * 60 + 30,
+                end_min: 5 * 60 + 30,
+                rate_kw: 3.0,
+                target_soc_pct: 100.0,
+            }],
+            discharge_windows: Vec::new(),
+        };
+        (i, at(23, 30))
+    }
+
+    #[test]
+    fn a_busy_evening_that_runs_out_before_the_charge_is_flagged() {
+        // Issue #472, Brian's 17 November: the median day reaches the 23:30
+        // charge, but to the 11% floor (3.9 kWh) a 1.5 kWh-an-hour evening
+        // is empty 2 h 36 in, 22:36 → 22:30, and the line said "Lasts until
+        // the charge" with no doubt.
+        let (i, slot) = evening_with_a_slot([1.5, 1.0, 0.8]);
+        match battery_runtime(&i) {
+            RuntimeOutcome::RechargesFirst {
+                at,
+                by: RechargeSource::Charge,
+                risk: Some(risk),
+                confidence: Some(confidence),
+            } => {
+                assert_eq!(at, slot);
+                assert_eq!(risk, slot - HOUR_SECS);
+                // An hour before the charge: high.
+                assert_eq!(confidence, Confidence::High);
+            }
+            other => panic!("expected a flagged RechargesFirst, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_busy_evening_that_lasts_to_the_charge_too_is_not_flagged() {
+        // p75 3.9/1.05 = 3 h 43 → past 23:30, so nothing to warn about.
+        let (i, slot) = evening_with_a_slot([1.05, 1.0, 0.8]);
+        assert_eq!(
+            battery_runtime(&i),
+            RuntimeOutcome::RechargesFirst {
+                at: slot,
+                by: RechargeSource::Charge,
+                risk: None,
+                confidence: None,
+            }
+        );
+    }
+
+    #[test]
+    fn the_risk_confidence_follows_the_gap_to_the_charge_and_the_history() {
+        // Empty 20:00 + 3.9/3.0 h = 21:18 → 21:30; the charge is 2 h later: medium.
+        let (i, slot) = evening_with_a_slot([3.0, 1.0, 0.8]);
+        match battery_runtime(&i) {
+            RuntimeOutcome::RechargesFirst {
+                risk: Some(risk),
+                confidence: Some(Confidence::Medium),
+                ..
+            } => assert_eq!(slot - risk, 2 * HOUR_SECS),
+            other => panic!("{other:?}"),
+        }
+        // Far away: low; a thin history: always low.
+        // (A battery already a point off its floor, so a busy evening empties
+        // it at once, three and a half hours before the charge.)
+        let (mut i, _) = evening_with_a_slot([8.0, 0.01, 0.01]);
+        i.params.start_soc_pct = 12.0;
+        i.battery_power_w = 0.0;
+        assert!(matches!(
+            battery_runtime(&i),
+            RuntimeOutcome::RechargesFirst {
+                confidence: Some(Confidence::Low),
+                ..
+            }
+        ));
+        let (mut thin, _) = evening_with_a_slot([1.5, 1.0, 0.8]);
+        thin.profile_days = 5;
+        assert!(matches!(
+            battery_runtime(&thin),
+            RuntimeOutcome::RechargesFirst {
+                confidence: Some(Confidence::Low),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_risk_that_rounds_onto_the_charge_is_not_flagged() {
+        // Empty at 23:20 rounds to 23:30, the charge itself: no warning.
+        let (i, _) = evening_with_a_slot([1.13, 1.0, 0.8]);
+        match battery_runtime(&i) {
+            RuntimeOutcome::RechargesFirst { risk, .. } => assert_eq!(risk, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_top_up_is_said_to_start_with_its_dispatch_not_its_hour() {
+        // A held dispatch starting 25 minutes into the hour charges from
+        // then; a charge's start is said as it is, not rounded to the hour
+        // it falls in or to the half hour.
+        let mut i = inputs(T0, T0, 50.0, [1.0, 1.0, 1.0]);
+        let hour = T0 + 2 * HOUR_SECS;
+        i.dispatch_hours = vec![DispatchHour {
+            timestamp: hour,
+            ev_kwh: 0.0,
+            held_fraction: 0.6,
+            charge_to_soc: Some(100.0),
+        }];
+        i.dispatch_windows = vec![DispatchWindow {
+            start: hour + 25 * 60,
+            end: hour + HOUR_SECS + 25 * 60,
+            held: true,
+            smart: true,
+            kwh: None,
+        }];
+        match battery_runtime(&i) {
+            RuntimeOutcome::RechargesFirst {
+                at,
+                by: RechargeSource::Charge,
+                ..
+            } => assert_eq!(at, hour + 25 * 60),
+            other => panic!("{other:?}"),
+        }
+        // A dispatch that began earlier, or no window to go on: the hour.
+        i.dispatch_windows[0].start = hour - 10 * 60;
+        assert!(matches!(
+            battery_runtime(&i),
+            RuntimeOutcome::RechargesFirst { at, .. } if at == hour
+        ));
+        i.dispatch_windows.clear();
+        assert!(matches!(
+            battery_runtime(&i),
+            RuntimeOutcome::RechargesFirst { at, .. } if at == hour
+        ));
+    }
+
+    #[test]
+    fn a_charge_slot_starting_off_the_half_hour_is_said_as_it_is() {
+        let (mut i, _) = evening_with_a_slot([1.0, 1.0, 1.0]);
+        i.schedule.charge_windows[0].start_min = 23 * 60 + 15;
+        let start = i.now_ts;
+        let at = Local
+            .with_ymd_and_hms(2025, 11, 10, 23, 15, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        assert!(at > start);
+        assert!(matches!(
+            battery_runtime(&i),
+            RuntimeOutcome::RechargesFirst { at: got, .. } if got == at
+        ));
+    }
+
+    #[test]
+    fn a_charge_slot_starting_late_in_an_hour_is_said_at_its_start() {
+        // A 23:50 slot whose ten minutes don't lift the 23:00 hour (the load
+        // takes more than they give) is first seen rising in the 00:00 hour,
+        // but it started at 23:50.
+        let (mut i, _) = evening_with_a_slot([0.6, 0.6, 0.6]);
+        i.battery_power_w = 0.0;
+        i.schedule.charge_windows[0].start_min = 23 * 60 + 50;
+        let at = Local
+            .with_ymd_and_hms(2025, 11, 10, 23, 50, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        match battery_runtime(&i) {
+            RuntimeOutcome::RechargesFirst { at: got, .. } => assert_eq!(got, at),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_most_likely_time_stays_inside_its_range() {
+        assert_eq!(clamp_into_range(100, Some(90), Some(120)), 100);
+        assert_eq!(clamp_into_range(80, Some(90), Some(120)), 90);
+        assert_eq!(clamp_into_range(130, Some(90), Some(120)), 120);
+        // An end that never gets there leaves that side open.
+        assert_eq!(clamp_into_range(130, Some(90), None), 130);
+        assert_eq!(clamp_into_range(80, None, Some(120)), 80);
+        assert_eq!(clamp_into_range(80, None, None), 80);
+        // Crossed ends: the earlier bound wins rather than panicking.
+        assert_eq!(clamp_into_range(100, Some(120), Some(90)), 120);
     }
 
     #[test]
@@ -710,7 +1000,9 @@ mod tests {
             battery_runtime(&i),
             RuntimeOutcome::RechargesFirst {
                 at: slot,
-                by: RechargeSource::Charge
+                by: RechargeSource::Charge,
+                risk: None,
+                confidence: None,
             }
         );
     }
@@ -730,7 +1022,9 @@ mod tests {
             battery_runtime(&i),
             RuntimeOutcome::RechargesFirst {
                 at: T0 + 2 * HOUR_SECS,
-                by: RechargeSource::Charge
+                by: RechargeSource::Charge,
+                risk: None,
+                confidence: None,
             }
         );
     }
@@ -1177,11 +1471,24 @@ mod tests {
         let json = serde_json::to_value(RuntimeOutcome::RechargesFirst {
             at: 5,
             by: RechargeSource::Charge,
+            risk: None,
+            confidence: None,
         })
         .unwrap();
         assert_eq!(
             json,
             serde_json::json!({ "outcome": "recharges_first", "at": 5, "by": "charge" })
+        );
+        let json = serde_json::to_value(RuntimeOutcome::RechargesFirst {
+            at: 5,
+            by: RechargeSource::Charge,
+            risk: Some(3),
+            confidence: Some(Confidence::Low),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "outcome": "recharges_first", "at": 5, "by": "charge", "risk": 3, "confidence": "low" })
         );
     }
 }

@@ -445,11 +445,14 @@ describe('<HouseStatusCards/> battery runtime line (issue #472)', () => {
     render(<HouseStatusCards snapshot={snap()} now={NOW} />);
     const line = tid('house-battery-runtime');
     expect(tid('house-battery-card').contains(line)).toBe(true);
-    expect(tid('house-runtime-text').textContent).toMatch(new RegExp(`^Empty (at|tomorrow at) ${local('2026-11-01T18:30:00Z')}$`));
+    // A range, not an exact time: the busy day's start to the quiet day's end.
+    expect(tid('house-runtime-text').textContent).toMatch(
+      new RegExp(`^Empty (tonight |tomorrow )?${local('2026-11-01T18:00:00Z')}–${local('2026-11-01T19:30:00Z')}$`),
+    );
     const dots = [...line.querySelectorAll('[data-testid="house-runtime-dot"]')];
     expect(dots).toHaveLength(3);
     expect(dots.filter((d) => d.getAttribute('data-lit') === 'true')).toHaveLength(2);
-    expect(line.getAttribute('title')).toMatch(/medium confidence$/);
+    expect(line.getAttribute('title')).toMatch(new RegExp(`^Most likely ${local('2026-11-01T18:30:00Z')} · .* · medium confidence$`));
     // The dots aren't the only signal, and an ⓘ says what they mean.
     expect(tid('house-runtime-dots').getAttribute('aria-label')).toBe('Medium confidence');
     const info = screen.getByRole('button', { name: 'More about Battery Runtime' });
@@ -463,6 +466,21 @@ describe('<HouseStatusCards/> battery runtime line (issue #472)', () => {
     render(<HouseStatusCards snapshot={snap()} now={NOW} />);
     expect(tid('house-runtime-text').textContent).toBe('Unable to calculate: charging faster than forecast');
     expect(screen.queryByTestId('house-runtime-dots')).toBeNull();
+    expect(tid('house-battery-runtime').contains(screen.getByRole('button', { name: 'More about Battery Runtime' }))).toBe(true);
+  });
+
+  it('warns with dots when a busy evening could run out before the charge', () => {
+    const at = Date.parse('2026-11-01T23:30:00Z') / 1000;
+    runtime.value = {
+      outcome: 'recharges_first', at, by: 'charge', risk: at - 2 * 3600, confidence: 'medium',
+      computed_at: Date.parse('2026-11-01T17:58:00Z') / 1000,
+    };
+    render(<HouseStatusCards snapshot={snap()} now={NOW} />);
+    expect(tid('house-runtime-text').textContent).toMatch(
+      new RegExp(`^Empty (tonight |tomorrow )?${local('2026-11-01T21:30:00Z')} or later, charge (tomorrow )?${local('2026-11-01T23:30:00Z')}$`),
+    );
+    const dots = [...tid('house-battery-runtime').querySelectorAll('[data-testid="house-runtime-dot"]')];
+    expect(dots.filter((d) => d.getAttribute('data-lit') === 'true')).toHaveLength(2);
     expect(tid('house-battery-runtime').contains(screen.getByRole('button', { name: 'More about Battery Runtime' }))).toBe(true);
   });
 

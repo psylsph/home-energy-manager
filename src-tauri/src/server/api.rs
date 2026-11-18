@@ -9225,6 +9225,7 @@ pub(crate) async fn get_battery_runtime_at(
             now_ts: now.timestamp(),
             hours: runtime_hours(&payload, now),
             dispatch_hours: payload.ev_dispatch_hours.clone(),
+            dispatch_windows: payload.ev_dispatch_windows.clone(),
             dispatch_net_of_profile: payload.ev_dispatch_net_of_profile,
             params: crate::forecast::simulate::SimulationParams {
                 capacity_kwh: f64::from(snap.battery_capacity_kwh),

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.19.1] - 2026-11-18
+
+### Changed
+
+- **The battery runtime line gives a range when it isn't sure.** "Empty tonight 21:30–23:00" when a busy and a quiet evening disagree, "Empty tonight about 22:00" when they agree, and "Empty 21:30 or later" when a quiet day wouldn't empty it at all. Predicted times no longer say "at", and "Full" now reads "Full about 04:00".
+
+### Fixed
+
+- **"Lasts until the 23:30 charge" no longer hides a busy evening that would run out first.** When a heavier evening than usual (more use, less sun) would empty the battery before the charge, the line now says so, "Empty tonight 21:30 or later, charge 23:30", with dots for how close a call it is.
+- **A smart-charge top-up shows when it really starts.** The runtime line used to give the start of the hour the dispatch falls in (a 00:20 charge read as 00:00); a charge now shows its own start time.
+
 ## [1.19.0] - 2026-11-17
 
 ### Added

@@ -10,6 +10,25 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { test, expect } from './local-fixture.js';
 
+// The two longest lines the Battery Level card can show (issues #476, #472),
+// so each fit check below covers both: charging faster than the forecast
+// (the longest text), and a busy day running out before tomorrow's charge
+// (with its dots and ⓘ).
+type RuntimeKind = 'charging' | 'risk';
+const RUNTIME_KINDS: readonly RuntimeKind[] = ['charging', 'risk'];
+const runtimeAnswer = (kind: RuntimeKind, now: number) => ({
+  ok: true,
+  data: kind === 'charging'
+    ? { outcome: 'charging', computed_at: Math.floor(now / 1000) }
+    : {
+      outcome: 'recharges_first', by: 'charge', at: Math.floor(now / 1000) + 5 * 3600, risk: Math.floor(now / 1000) + 3600,
+      confidence: 'medium', computed_at: Math.floor(now / 1000),
+    },
+});
+const runtimeText = (kind: RuntimeKind) => (kind === 'charging'
+  ? 'Unable to calculate: charging faster than forecast'
+  : /^Empty .* or later, charge .*\d\d:\d\d$/);
+
 test.describe('Status Page - Loading', () => {
   test('should show data after initial load', async ({ page }) => {
     await page.goto('/');
@@ -210,8 +229,8 @@ test.describe('Status Page - House View (issue #422)', () => {
     }, theme);
   };
 
-  for (const theme of ['dark', 'light'] as const) {
-    test(`fits an iPhone 12 Pro screen without scrolling (${theme})`, async ({ page }) => {
+  for (const [theme, kind] of [['dark', 'charging'], ['light', 'risk'], ['dark', 'risk'], ['light', 'charging']] as const) {
+    test(`fits an iPhone 12 Pro screen without scrolling (${theme}, ${kind} runtime line)`, async ({ page }) => {
       // 844 px tall minus the ~47 px / ~34 px safe areas Chromium doesn't emulate.
       // The house view starts with the Today statistics hidden, so this is its
       // untouched default.
@@ -245,11 +264,7 @@ test.describe('Status Page - House View (issue #422)', () => {
         holding: false, hold_failing: false, stale_after_minutes: 15,
         dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'BOOST', energy_added_kwh: 7, smart: false }],
       } }));
-      // The longest line the card can show (issue #476), so the fit below
-      // covers it.
-      await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
-        outcome: 'charging', computed_at: Math.floor(now / 1000),
-      } } }));
+      await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: runtimeAnswer(kind, now) }));
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
       await expect(page.getByTestId('house-sky')).toBeVisible();
@@ -262,7 +277,7 @@ test.describe('Status Page - House View (issue #422)', () => {
       await expect(page.getByTestId('house-car-charge')).toBeVisible();
       await expect(page.getByTestId('house-car-charge')).toContainText('· Boost');
       await expect(page.getByTestId('house-battery-card')).toBeVisible();
-      await expect(page.getByTestId('house-runtime-text')).toHaveText('Unable to calculate: charging faster than forecast');
+      await expect(page.getByTestId('house-runtime-text')).toHaveText(runtimeText(kind));
       // Hidden without ever touching the toggle: the house view's default.
       await expect(page.getByTestId('today-balance')).toHaveCount(0);
       await expect(page.locator('nav.sticky')).toHaveCount(0);
@@ -424,7 +439,7 @@ test.describe('Status Page - Today Balance on a phone (issue #429)', () => {
 });
 
 test.describe('Status Page - Orbit battery runtime on a phone (issue #472)', () => {
-  test('fits 390×763 unscrolled with the runtime line under the orbit', async ({ page }) => {
+  for (const kind of RUNTIME_KINDS) test(`fits 390×763 unscrolled with the runtime line under the orbit (${kind})`, async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 763 });
     const now = Date.now();
     await page.route('**/api/latest-version', async (r) => {
@@ -442,13 +457,11 @@ test.describe('Status Page - Orbit battery runtime on a phone (issue #472)', () 
       const j = await res.json();
       await r.fulfill({ response: res, json: { ...j, data: { ...j.data, status_show_battery_runtime: true } } });
     });
-    // The longest line (issue #476), so it has to wrap at this width.
-    await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
-      outcome: 'charging', computed_at: Math.floor(now / 1000),
-    } } }));
+    // The longest lines, so they have to wrap at this width.
+    await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: runtimeAnswer(kind, now) }));
     await page.goto('/');
     await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
-    await expect(page.getByTestId('orbit-runtime-text')).toHaveText('Unable to calculate: charging faster than forecast');
+    await expect(page.getByTestId('orbit-runtime-text')).toHaveText(runtimeText(kind));
     await expect(page.getByTestId('orbit-battery-runtime').getByRole('button', { name: 'More about Battery Runtime' })).toBeVisible();
     const dims = await page.evaluate(() => {
       const main = document.querySelector('main') as HTMLElement;
@@ -472,8 +485,12 @@ test.describe('Status Page - the desktop app\'s default window', () => {
   const { width, height } = (JSON.parse(
     fs.readFileSync(path.join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'),
   ) as { app: { windows: { width: number; height: number }[] } }).app.windows[0];
-  for (const [view, lines] of [['orbit', false], ['orbit', true], ['house', false], ['house', true]] as const) {
-    test(`fits the default window with Today shown (${view}${lines ? ', runtime and car lines on' : ''})`, async ({ page }) => {
+  const windowCases: (readonly ['orbit' | 'house', RuntimeKind | null])[] = [
+    ['orbit', null], ['house', null],
+    ...(['orbit', 'house'] as const).flatMap((view) => RUNTIME_KINDS.map((kind) => [view, kind] as const)),
+  ];
+  for (const [view, lines] of windowCases) {
+    test(`fits the default window with Today shown (${view}${lines ? `, ${lines} runtime and car lines on` : ''})`, async ({ page }) => {
       await page.setViewportSize({ width, height });
       const now = Date.now();
       // No "new version available" banner: whether the backend has seen a
@@ -502,10 +519,7 @@ test.describe('Status Page - the desktop app\'s default window', () => {
           holding: false, hold_failing: false, stale_after_minutes: 15,
           dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'SMART', energy_added_kwh: 7, smart: true }],
         } }));
-        // The longest runtime line (issue #476).
-        await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: { ok: true, data: {
-          outcome: 'charging', computed_at: Math.floor(now / 1000),
-        } } }));
+        await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: runtimeAnswer(lines, now) }));
       }
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });

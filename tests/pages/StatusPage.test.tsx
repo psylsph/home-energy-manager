@@ -273,7 +273,7 @@ describe('StatusPage', () => {
         // an icon on screen, the word for screen readers.
         expect(line.textContent).toMatch(/^Battery: /);
         expect(line.querySelector('[data-testid="orbit-runtime-icon"]')).not.toBeNull();
-        expect(tid('orbit-runtime-text').textContent).toMatch(/^Empty (at|tomorrow at|\w+ at) \d\d:\d\d$/);
+        expect(tid('orbit-runtime-text').textContent).toMatch(/^Empty (tonight |tomorrow |\w{3} )?\d\d:\d\d–\d\d:\d\d$/);
         const dots = [...line.querySelectorAll('[data-testid="orbit-runtime-dot"]')];
         expect(dots.filter((d) => d.getAttribute('data-lit') === 'true')).toHaveLength(3);
         expect(tid('orbit-runtime-dots').getAttribute('aria-label')).toBe('High confidence');

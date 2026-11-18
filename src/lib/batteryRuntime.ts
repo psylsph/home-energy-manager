@@ -9,7 +9,11 @@ export type RuntimeConfidence = 'high' | 'medium' | 'low';
 
 export type BatteryRuntime =
   | { outcome: 'empty_at'; at: number; earliest: number | null; latest: number | null; confidence: RuntimeConfidence; computed_at?: number }
-  | { outcome: 'recharges_first'; at: number; by: 'charge' | 'solar'; computed_at?: number }
+  | {
+    outcome: 'recharges_first'; at: number; by: 'charge' | 'solar';
+    /** When a busy day would run out first, and how sure; absent from an older backend. */
+    risk?: number; confidence?: RuntimeConfidence; computed_at?: number;
+  }
   | { outcome: 'lasts_beyond'; hours: number; computed_at?: number }
   | { outcome: 'at_reserve'; computed_at?: number }
   | { outcome: 'below_reserve'; computed_at?: number }
@@ -32,8 +36,13 @@ export function readBatteryRuntime(value: unknown): BatteryRuntime | null {
       return isNum(data.at) && isNumOrNull(data.earliest) && isNumOrNull(data.latest)
         && CONFIDENCES.includes(data.confidence as RuntimeConfidence)
         ? (data as BatteryRuntime) : null;
-    case 'recharges_first':
-      return isNum(data.at) && (data.by === 'charge' || data.by === 'solar') ? (data as BatteryRuntime) : null;
+    case 'recharges_first': {
+      if (!isNum(data.at) || (data.by !== 'charge' && data.by !== 'solar')) return null;
+      // A risk travels with its confidence; half of that pair is no answer.
+      const hasRisk = data.risk !== undefined || data.confidence !== undefined;
+      if (hasRisk && !(isNum(data.risk) && CONFIDENCES.includes(data.confidence as RuntimeConfidence))) return null;
+      return data as BatteryRuntime;
+    }
     case 'lasts_beyond':
       return isNum(data.hours) ? (data as BatteryRuntime) : null;
     case 'full_at':
@@ -52,6 +61,8 @@ export function readBatteryRuntime(value: unknown): BatteryRuntime | null {
 /** How times and days are written; local time by default. */
 export interface RuntimeFormat {
   time: (date: Date) => string;
+  /** The hour of day (0–23), to tell an evening from earlier today. */
+  hour: (date: Date) => number;
   /** A key for the calendar day, to tell today from tomorrow. */
   day: (date: Date) => string;
   weekday: (date: Date) => string;
@@ -61,6 +72,7 @@ const pad = (n: number) => String(n).padStart(2, '0');
 
 export const LOCAL_RUNTIME_FORMAT: RuntimeFormat = {
   time: (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+  hour: (d) => d.getHours(),
   day: (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
   weekday: (d) => d.toLocaleDateString('en-GB', { weekday: 'short' }),
 };
@@ -80,6 +92,12 @@ const DOT_WORDS: Record<RuntimeConfidence, string> = {
   high: 'High confidence (three dots): a busy and a quiet day are within an hour of each other.',
   medium: 'Medium confidence (two dots): a busy and a quiet day are within three hours of each other.',
   low: "Low confidence (one dot): a busy and a quiet day are more than three hours apart, or there's under two weeks of history.",
+};
+
+const RISK_DOT_WORDS: Record<RuntimeConfidence, string> = {
+  high: 'Three dots: a busier day would run out within an hour of the charge, a close call.',
+  medium: 'Two dots: a busier day would run out up to three hours before the charge.',
+  low: "One dot: a busier day would run out more than three hours before the charge, or there's under two weeks of history.",
 };
 
 /** Why an `unknown` answer had no time, for the ⓘ (issue #476). */
@@ -112,12 +130,31 @@ function dayWord(at: number, now: Date, f: RuntimeFormat): string | null {
   return f.weekday(date);
 }
 
-/** `at 22:30`, `tomorrow at 06:00` or `Mon at 06:00`, relative to `now`. */
-function when(at: number, now: Date, f: RuntimeFormat): string {
+/** From this hour, a time later today is "tonight". */
+const EVENING_HOUR = 18;
+
+/** `tonight` for an evening still to come today, else the day word (`null` for earlier today). */
+function whenWord(at: number, now: Date, f: RuntimeFormat): string | null {
   const day = dayWord(at, now, f);
-  const time = f.time(new Date(at * 1000));
-  return day ? `${day} at ${time}` : `at ${time}`;
+  if (day) return day;
+  return f.hour(new Date(at * 1000)) >= EVENING_HOUR ? 'tonight' : null;
 }
+
+/** `tonight 22:30`, `tomorrow 06:00`, `Mon 06:00`, or just `22:30` earlier today. */
+function whenTime(at: number, now: Date, f: RuntimeFormat): string {
+  const word = whenWord(at, now, f);
+  const time = f.time(new Date(at * 1000));
+  return word ? `${word} ${time}` : time;
+}
+
+/** `about 22:00` with its day in front: `tonight about 22:00`, `tomorrow about 06:00`. */
+function aboutTime(at: number, now: Date, f: RuntimeFormat): string {
+  const word = whenWord(at, now, f);
+  return `${word ? `${word} ` : ''}about ${f.time(new Date(at * 1000))}`;
+}
+
+/** The ends of a range closer than this are one time, said "about". */
+const SAME_TIME_SECS = 30 * 60;
 
 /** The card's line, or `null` to show none (stale, or an outcome this build doesn't know). */
 export function batteryRuntimeLine(
@@ -129,30 +166,68 @@ export function batteryRuntimeLine(
   if (isNum(runtime.computed_at) && now.getTime() / 1000 - runtime.computed_at > MAX_AGE_SECS) return null;
   // A cached answer can outlive its time: show nothing, not a time that has gone.
   if ('at' in runtime && isNum(runtime.at) && runtime.at < now.getTime() / 1000 - PAST_SLACK_SECS) return null;
+  const t = (secs: number) => format.time(new Date(secs * 1000));
   switch (runtime.outcome) {
     case 'empty_at': {
-      const t = (s: number) => format.time(new Date(s * 1000));
-      const range = runtime.earliest != null && runtime.latest != null
-        ? `Likely between ${t(runtime.earliest)} and ${t(runtime.latest)}`
-        : runtime.earliest != null ? `Not before about ${t(runtime.earliest)}` : null;
+      const { earliest, latest } = runtime;
+      // A range start that has gone is no start: say the likely time.
+      const started = earliest != null && earliest < now.getTime() / 1000 - PAST_SLACK_SECS;
+      const wide = earliest != null && latest != null && latest - earliest > SAME_TIME_SECS;
+      let text: string;
+      let range: string | null = null;
+      if (wide && !started) {
+        text = `Empty ${whenTime(earliest, now, format)}–${t(latest)}`;
+        range = `between ${t(earliest)} and ${t(latest)}`;
+      } else if (earliest != null && latest == null && !started) {
+        text = `Empty ${whenTime(earliest, now, format)} or later`;
+        range = `not before about ${t(earliest)}`;
+      } else {
+        text = `Empty ${aboutTime(runtime.at, now, format)}`;
+        if (wide) range = `between ${t(earliest)} and ${t(latest)}`;
+      }
+      const most = `Most likely ${t(runtime.at)}`;
       return {
-        text: `Empty ${when(runtime.at, now, format)}`,
+        text,
         dots: DOTS[runtime.confidence],
         confidence: runtime.confidence,
-        title: range ? `${range} · ${runtime.confidence} confidence` : `${runtime.confidence[0]!.toUpperCase()}${runtime.confidence.slice(1)} confidence`,
+        title: [most, range, `${runtime.confidence} confidence`].filter(Boolean).join(' · '),
         help: [
-          range ? `${range}.` : null,
-          'This is when the battery reaches its reserve, from your usage history and the solar forecast, to the nearest half hour.',
+          `${most}${range ? `, ${range}` : ''}.`,
+          'This is when the battery reaches its reserve, from your usage history and the solar forecast. A busier day could empty it sooner, a quiet one later.',
           DOT_WORDS[runtime.confidence],
-        ].filter(Boolean).join(' '),
+        ].join(' '),
       };
     }
     case 'recharges_first': {
+      const charge = runtime.by === 'charge';
+      if (runtime.risk != null && runtime.confidence) {
+        // A busy evening could run out first: the line says so, with dots.
+        const { risk, at, confidence } = runtime;
+        const riskDay = dayWord(risk, now, format);
+        const atDay = dayWord(at, now, format);
+        const where = atDay && atDay !== riskDay ? ` ${atDay}` : '';
+        const refill = charge ? `charge${where} ${t(at)}` : `solar${where} about ${t(at)}`;
+        // A start that has gone is no start (a cached answer outliving it).
+        const gone = risk < now.getTime() / 1000 - PAST_SLACK_SECS;
+        const text = gone
+          ? `May run out before ${charge ? `${atDay ? `${atDay}'s` : 'the'} ${t(at)} charge` : `solar${atDay ? ` ${atDay}` : ''} about ${t(at)}`}`
+          : `Empty ${whenTime(risk, now, format)} or later, ${refill}`;
+        const most = charge
+          ? `Most likely it lasts until the ${t(at)} charge`
+          : `Most likely it lasts until solar, about ${t(at)}`;
+        const busy = `a busier day than usual (more use, less sun) could empty it from ${t(risk)}`;
+        return {
+          text,
+          dots: DOTS[confidence],
+          confidence,
+          title: `${most}, but ${busy} · ${confidence} confidence`,
+          help: `${most}, but ${busy}. ${RISK_DOT_WORDS[confidence]}`,
+        };
+      }
       const day = dayWord(runtime.at, now, format);
-      const time = format.time(new Date(runtime.at * 1000));
-      const text = runtime.by === 'charge'
-        ? `Lasts until ${day ? `${day}'s` : 'the'} ${time} charge`
-        : `Lasts until solar ${when(runtime.at, now, format)}`;
+      const text = charge
+        ? `Lasts until ${day ? `${day}'s` : 'the'} ${t(runtime.at)} charge`
+        : `Lasts until solar${day ? ` ${day}` : ''}, about ${t(runtime.at)}`;
       return { text, dots: null, confidence: null, title: text, help: null };
     }
     case 'lasts_beyond':
@@ -162,7 +237,8 @@ export function batteryRuntimeLine(
     case 'below_reserve':
       return { text: 'Below Reserve', dots: null, confidence: null, title: '', help: null };
     case 'full_at': {
-      const text = `${runtime.soc >= 100 ? 'Full' : `${Math.round(runtime.soc)}%`} ${when(runtime.at, now, format)}`;
+      const day = dayWord(runtime.at, now, format);
+      const text = `${runtime.soc >= 100 ? 'Full' : `${Math.round(runtime.soc)}%`}${day ? ` ${day}` : ''} about ${t(runtime.at)}`;
       return { text, dots: null, confidence: null, title: '', help: null };
     }
     // With the toggle on, a blank card looks broken: say why there's no time.
