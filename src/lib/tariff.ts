@@ -93,6 +93,23 @@ export function flatTariffConfig(rate: number): TariffConfig {
 }
 
 /**
+ * The tariff in force: the saved time-of-day tariff, else a flat rate from the
+ * legacy single-rate field, else `fallbackRate`, as the backend's
+ * `*_tariff_config.unwrap_or(TariffConfig::flat(*_tariff))` does. The backend
+ * refuses to save a tariff with no slots; one in a hand-edited file falls back
+ * here rather than pricing at nothing.
+ */
+export function savedTariff(
+  cfg: TariffConfig | null | undefined,
+  legacy: number | null | undefined,
+  fallbackRate: number,
+): TariffConfig {
+  if (cfg && cfg.slots.length > 0) return cfg;
+  if (legacy != null && Number.isFinite(legacy)) return flatTariffConfig(legacy);
+  return flatTariffConfig(fallbackRate);
+}
+
+/**
  * Generate a list of half-hour time options from 00:00 to 23:30 plus the
  * final option "23:59" (used for the last slot's inclusive end).
  * Used to populate <select> dropdowns for slot start/end times.

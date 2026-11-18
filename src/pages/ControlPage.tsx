@@ -21,7 +21,9 @@ import { describeLiveReadout, liveReadout } from '../lib/liveReadback';
 import { describeChargeSlotLimit, type ChargeSlotLimitContext } from '../lib/chargeSlotLimit';
 import { formatPowerLimitLabel, percentToRawLimit, percentToWatts, rawLimitToPercent, resolveLimitDraft, snapLimitPercent } from '../lib/powerLimit';
 import type { LimitDraft, LimitScale } from '../lib/powerLimit';
-import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
+import type { InverterSnapshot, PollSettings, ScheduleSlot } from '../lib/types';
+import { savedTariff } from '../lib/tariff';
+import { agilePriceSummary } from '../lib/agilePriceSummary';
 import { fillScheduleSlots } from '../lib/scheduleSlots';
 import { unwrapTimedExportSchedule } from '../lib/timedExportSchedule';
 import {
@@ -1350,82 +1352,69 @@ function PriceSummary({ prices, decisionForPrice }: {
   decisionForPrice: (p: number) => 'charge' | 'discharge' | 'nothing';
 }) {
   const { snapshot } = useInverterStore();
-  const [importTariff, setImportTariff] = useState(0.285);
-  const [exportTariff, setExportTariff] = useState(0.15);
+  // The saved tariffs (issue #485); the legacy single rates only fill in
+  // when no tariff has been saved, as on the backend.
+  const [tariffs, setTariffs] = useState(() => ({
+    importTariff: savedTariff(null, null, 0.285),
+    exportTariff: savedTariff(null, null, 0.15),
+  }));
 
   // Load tariff config from backend
   useEffect(() => {
     (async () => {
       try {
-        const res = await apiGet<{ ok: boolean; data: { import_tariff: number; export_tariff: number; import_tariff_config: unknown } }>('/api/settings');
+        const res = await apiGet<{ ok: boolean; data: Pick<PollSettings, 'import_tariff' | 'export_tariff' | 'import_tariff_config' | 'export_tariff_config'> }>('/api/settings');
         if (res.ok) {
-          setImportTariff(res.data.import_tariff);
-          setExportTariff(res.data.export_tariff);
+          setTariffs({
+            importTariff: savedTariff(res.data.import_tariff_config, res.data.import_tariff, 0.285),
+            exportTariff: savedTariff(res.data.export_tariff_config, res.data.export_tariff, 0.15),
+          });
         }
       } catch { /* use defaults */ }
     })();
   }, []);
 
-  const now = new Date();
-  const upcoming = prices.filter(s => s.validTo > now);
-  const chargeSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'charge');
-  const dischargeSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'discharge');
-  const idleSlots = upcoming.filter(s => decisionForPrice(s.pence) === 'nothing');
-
-  const avgChargePrice = chargeSlots.length
-    ? chargeSlots.reduce((a, s) => a + s.pence, 0) / chargeSlots.length
-    : 0;
-  const avgDischargePrice = dischargeSlots.length
-    ? dischargeSlots.reduce((a, s) => a + s.pence, 0) / dischargeSlots.length
-    : 0;
-  const minPrice = upcoming.length ? Math.min(...upcoming.map(s => s.pence)) : 0;
-  const maxPrice = upcoming.length ? Math.max(...upcoming.map(s => s.pence)) : 0;
-
-  // Rough daily saving estimate
-  // Assume each 30-min slot can charge/discharge at 1/48 of daily battery throughput.
-  // Typical: one full charge cycle per day at battery capacity.
+  // Rough daily saving estimate: one battery's throughput spread over the
+  // day's 48 half-hours.
   const battKwh = snapshot?.battery_capacity_kwh ?? 5;
-  const chargeSaving = chargeSlots.length
-    ? (chargeSlots.length / 48) * battKwh * Math.max(0, importTariff - avgChargePrice / 100)
-    : 0;
-  const dischargeSaving = dischargeSlots.length
-    ? (dischargeSlots.length / 48) * battKwh * Math.max(0, avgDischargePrice / 100 - (exportTariff))
-    : 0;
-  const totalSaving = chargeSaving + dischargeSaving;
+  const {
+    chargeCount, dischargeCount, idleCount, avgChargePrice, avgDischargePrice,
+    minPrice, maxPrice, chargeGainP, dischargeGainP, standardImportP, totalSaving,
+  } = agilePriceSummary(prices, decisionForPrice, { ...tariffs, batteryKwh: battKwh, now: new Date() });
 
   return (
     <div className="bg-bg-surface rounded-lg p-2.5 space-y-1.5">
       <div className="flex items-center gap-3 text-xs text-text-secondary flex-wrap">
         <span className="flex items-center gap-1">
           <span className="inline-block w-2 h-2 rounded-full bg-battery" />
-          {chargeSlots.length} charge
+          {chargeCount} charge
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block w-2 h-2 rounded-full bg-orange-500" />
-          {dischargeSlots.length} discharge
+          {dischargeCount} discharge
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block w-2 h-2 rounded-full bg-text-secondary/30" />
-          {idleSlots.length} hold
+          {idleCount} hold
         </span>
         <span className="text-text-secondary/50">·</span>
         <span>Min {minPrice.toFixed(3)}p</span>
         <span className="text-text-secondary/50">·</span>
         <span>Max {maxPrice.toFixed(3)}p</span>
       </div>
-      {chargeSlots.length > 0 && (
+      {chargeCount > 0 && (
         <div className="text-xs text-text-secondary">
           Avg charge price: <span className="font-mono text-battery">{avgChargePrice.toFixed(3)}p</span>
-          {avgChargePrice < importTariff * 100 && (
-            <> — Saves <span className="font-mono text-battery">{(importTariff * 100 - avgChargePrice).toFixed(3)}p</span>/kWh vs Standard Rate</>
+          {chargeGainP != null && chargeGainP > 0 && (
+            <> — Saves <span className="font-mono text-battery">{chargeGainP.toFixed(3)}p</span>/kWh vs Standard Rate</>
           )}
         </div>
       )}
-      {dischargeSlots.length > 0 && (
+      {dischargeCount > 0 && (
         <div className="text-xs text-text-secondary">
           Avg discharge price: <span className="font-mono text-orange-400">{avgDischargePrice.toFixed(3)}p</span>
-          {avgDischargePrice > exportTariff * 100 && (
-            <> — Earns <span className="font-mono text-orange-400">{(avgDischargePrice - exportTariff * 100).toFixed(3)}p</span>/kWh vs Standard Export</>
+          {dischargeGainP != null && dischargeGainP > 0 && (
+            <> — Earns <span className="font-mono text-orange-400">{dischargeGainP.toFixed(3)}p</span>/kWh vs Standard Export</>
           )}
         </div>
       )}
@@ -1434,7 +1423,7 @@ function PriceSummary({ prices, decisionForPrice }: {
           Estimated daily saving:{' '}
           <span className="font-mono text-battery">£{totalSaving.toFixed(2)}</span>
           {battKwh > 0 && (
-            <span className="text-text-secondary"> ({(battKwh).toFixed(1)}kWh battery, {(importTariff * 100).toFixed(3)}p import)</span>
+            <span className="text-text-secondary"> ({(battKwh).toFixed(1)}kWh battery{standardImportP != null && <>, {standardImportP.toFixed(3)}p import</>})</span>
           )}
         </div>
       )}
