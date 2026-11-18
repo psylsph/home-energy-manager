@@ -15,6 +15,20 @@ const carSlots = vi.hoisted(() => ({
 vi.mock('../../src/hooks/useCarChargeSlots', () => ({
   useCarChargeSlots: () => ({ response: carSlots.value, loaded: carSlots.loaded }),
 }));
+// When the Planner next writes the charge slot (issue #481); `null` when
+// nothing is coming.
+const planned = vi.hoisted(() => ({
+  value: null as null | Record<string, unknown>,
+  fetchedAt: 0,
+  loaded: true,
+  enabledArg: undefined as boolean | undefined,
+}));
+vi.mock('../../src/hooks/usePlannedCharge', () => ({
+  usePlannedCharge: (enabled: boolean) => {
+    planned.enabledArg = enabled;
+    return { upcoming: planned.value, fetchedAt: planned.fetchedAt, loaded: planned.loaded };
+  },
+}));
 // How long the battery lasts (issue #472); `null` while off or unknown.
 const runtime = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }));
 vi.mock('../../src/hooks/useBatteryRuntime', () => ({
@@ -70,6 +84,10 @@ describe('<HouseStatusCards/>', () => {
     carSlots.value = null;
     carSlots.loaded = true;
     runtime.value = null;
+    planned.value = null;
+    planned.fetchedAt = Date.now();
+    planned.loaded = true;
+    planned.enabledArg = undefined;
     useInverterStore.setState({ visualNoiseThreshold: 20 });
   });
   afterEach(cleanup);
@@ -93,6 +111,93 @@ describe('<HouseStatusCards/>', () => {
     expect(screen.getByText('Next Charge')).toBeDefined();
     expect(tid('house-charge-window').textContent).toBe('23:30–05:30');
     expect(tid('house-charge-icon').getAttribute('data-pulsing')).toBe('false');
+  });
+
+  it('says Tomorrow when the next window starts after midnight (issue #481)', () => {
+    // 17:06 with a 13:00–16:00 slot: the next run is tomorrow afternoon.
+    render(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-17 17:06:00', charge_slots: [slot(13, 0, 16, 0)] })} />);
+    expect(tid('house-charge-card').getAttribute('data-state')).toBe('next');
+    expect(tid('house-charge-card').textContent).toContain('Next Charge');
+    expect(tid('house-charge-day').textContent).toBe('Tomorrow');
+    // The window itself stays as the inverter holds it, so it keeps its width.
+    expect(tid('house-charge-window').textContent).toBe('13:00–16:00');
+  });
+
+  it('names no day for a window later today, one running, or a whole-day one', () => {
+    const { rerender } = render(<HouseStatusCards snapshot={snap()} />);
+    expect(screen.queryByTestId('house-charge-day')).toBeNull();
+    rerender(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-01 01:00:00' })} />);
+    expect(tid('house-charge-card').getAttribute('data-state')).toBe('active');
+    expect(screen.queryByTestId('house-charge-day')).toBeNull();
+    rerender(<HouseStatusCards snapshot={snap({ charge_slots: [slot(0, 0, 12, 0), slot(12, 0, 0, 0)] })} />);
+    expect(screen.queryByTestId('house-charge-day')).toBeNull();
+  });
+
+  it('says Tomorrow for a Timed Export schedule window that starts after midnight', () => {
+    timedExport.value = { schedule_enabled: true, slots: [slot(7, 0, 9, 0)] };
+    render(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-17 17:06:00', enable_charge: false })} />);
+    expect(screen.getByText('Next Export')).toBeDefined();
+    expect(tid('house-charge-day').textContent).toBe('Tomorrow');
+  });
+
+  describe('the Planner line (issue #481)', () => {
+    const upcoming = (extra: Record<string, unknown> = {}) => ({
+      trigger: 'auto_apply', cheapStart: '22:00', cheapEnd: '23:59', appliesAt: '21:30',
+      appliesInMinutes: 264, appliesDay: 0, running: false, ...extra,
+    });
+
+    it('says when the Planner will change the slot, under the window, without touching the window', () => {
+      planned.value = upcoming();
+      render(<HouseStatusCards snapshot={snap({ inverter_time: '2026-11-17 17:06:00', charge_slots: [slot(13, 0, 16, 0)] })} />);
+      expect(tid('house-planned-charge').textContent).toBe('Planner updates at 21:30');
+      expect(tid('house-planned-charge').getAttribute('title')).toContain('22:00–23:59');
+      // The card's own window is still what the inverter holds.
+      expect(tid('house-charge-window').textContent).toBe('13:00–16:00');
+    });
+
+    it('shows nothing when nothing is coming', () => {
+      render(<HouseStatusCards snapshot={snap()} />);
+      expect(screen.queryByTestId('house-planned-charge')).toBeNull();
+    });
+
+    it('goes once the write time has passed, and when its answer is stale', () => {
+      planned.value = upcoming({ appliesInMinutes: 3 });
+      const { rerender } = render(<HouseStatusCards snapshot={snap()} now={new Date(planned.fetchedAt + 2 * 60_000)} />);
+      expect(screen.queryByTestId('house-planned-charge')).not.toBeNull();
+      rerender(<HouseStatusCards snapshot={snap()} now={new Date(planned.fetchedAt + 3 * 60_000)} />);
+      expect(screen.queryByTestId('house-planned-charge')).toBeNull();
+      planned.value = upcoming();
+      rerender(<HouseStatusCards snapshot={snap()} now={new Date(planned.fetchedAt + 10 * 60_000)} />);
+      expect(screen.queryByTestId('house-planned-charge')).toBeNull();
+    });
+
+    it('sits under the car line, beside the runtime line, without changing the event', () => {
+      planned.value = upcoming();
+      carSlots.value = {
+        ok: true, enabled: false, configured: true, checked_at: new Date().toISOString(), error: null, devices: 1,
+        holding: false, hold_failing: false, stale_after_minutes: 15,
+        dispatches: [{ start: new Date(Date.now() + 3_600_000).toISOString(), end: new Date(Date.now() + 7_200_000).toISOString(), type: 'SMART', energy_added_kwh: 7, smart: true }],
+      };
+      render(<HouseStatusCards snapshot={snap()} />);
+      const card = tid('house-charge-card');
+      const children = [...card.children].map((c) => c.getAttribute('data-testid'));
+      expect(children.indexOf('house-planned-charge')).toBeGreaterThan(children.indexOf('house-car-charge'));
+      expect(tid('house-charge-window').textContent).toBe('23:30–05:30');
+    });
+
+    it('is not fetched on a Gateway, where the controls are off, and says nothing there', () => {
+      planned.value = upcoming();
+      render(<HouseStatusCards snapshot={snap({ device_type_code: '7001' })} />);
+      expect(planned.enabledArg).toBe(false);
+      expect(screen.queryByTestId('house-planned-charge')).toBeNull();
+    });
+
+    it('waits for its first answer, like the car line, so the card does not jump', () => {
+      planned.value = upcoming();
+      planned.loaded = false;
+      render(<HouseStatusCards snapshot={snap()} />);
+      expect(tid('house-charge-card').getAttribute('data-state')).toBe('loading');
+    });
   });
 
   it('pulses the battery while a slot is running and the battery is charging', () => {

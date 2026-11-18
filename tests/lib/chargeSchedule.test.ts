@@ -26,7 +26,7 @@ describe('chargeWindow', () => {
   const overnight = [slot(23, 30, 5, 30)];
 
   it('shows the next slot before it starts', () => {
-    expect(chargeWindow(overnight, true, at(18))).toEqual({ state: 'next', start: '23:30', end: '05:30' });
+    expect(chargeWindow(overnight, true, at(18))).toEqual({ state: 'next', tomorrow: false, start: '23:30', end: '05:30' });
   });
 
   it('is active from the start minute, across midnight, until the end minute', () => {
@@ -40,19 +40,19 @@ describe('chargeWindow', () => {
     const day = [slot(13, 0, 16, 0)];
     expect(chargeWindow(day, true, at(12, 59))?.state).toBe('next');
     expect(chargeWindow(day, true, at(13))?.state).toBe('active');
-    expect(chargeWindow(day, true, at(16))).toEqual({ state: 'next', start: '13:00', end: '16:00' });
+    expect(chargeWindow(day, true, at(16))).toEqual({ state: 'next', tomorrow: true, start: '13:00', end: '16:00' });
   });
 
   it('merges overlapping and adjacent slots into one window', () => {
     // 16:00–17:00 + 17:00–18:00 is one export to 18:00, as the Control page says.
-    expect(chargeWindow([slot(16, 0, 17, 0), slot(17, 0, 18, 0)], true, at(16, 30))).toEqual({ state: 'active', start: '16:00', end: '18:00' });
-    expect(chargeWindow([slot(2, 0, 4, 0), slot(1, 0, 3, 0)], true, at(2, 30))).toEqual({ state: 'active', start: '01:00', end: '04:00' });
+    expect(chargeWindow([slot(16, 0, 17, 0), slot(17, 0, 18, 0)], true, at(16, 30))).toEqual({ state: 'active', tomorrow: false, start: '16:00', end: '18:00' });
+    expect(chargeWindow([slot(2, 0, 4, 0), slot(1, 0, 3, 0)], true, at(2, 30))).toEqual({ state: 'active', tomorrow: false, start: '01:00', end: '04:00' });
     // Merging across midnight keeps the real end.
-    expect(chargeWindow([slot(22, 0, 0, 0), slot(0, 0, 2, 0)], true, at(23))).toEqual({ state: 'active', start: '22:00', end: '02:00' });
+    expect(chargeWindow([slot(22, 0, 0, 0), slot(0, 0, 2, 0)], true, at(23))).toEqual({ state: 'active', tomorrow: false, start: '22:00', end: '02:00' });
   });
 
   it('shows a whole-day schedule as running', () => {
-    expect(chargeWindow([slot(0, 0, 12, 0), slot(12, 0, 0, 0)], true, at(9))).toEqual({ state: 'active', start: '00:00', end: '00:00' });
+    expect(chargeWindow([slot(0, 0, 12, 0), slot(12, 0, 0, 0)], true, at(9))).toEqual({ state: 'active', tomorrow: false, start: '00:00', end: '00:00' });
   });
 
   it('picks the soonest slot to start, wrapping past midnight', () => {
@@ -72,6 +72,47 @@ describe('chargeWindow', () => {
   });
 });
 
+describe('tomorrow', () => {
+  const tomorrow = (slots: ScheduleSlot[], nowMinute: number) => chargeWindow(slots, true, nowMinute)?.tomorrow;
+  const day = [slot(13, 0, 16, 0)];
+
+  it('is false for a window later today', () => {
+    expect(tomorrow(day, at(9))).toBe(false);
+    expect(tomorrow(day, at(12, 59))).toBe(false);
+  });
+
+  it('is true once the window has already run today (issue #481: 13:00 seen at 17:06)', () => {
+    expect(tomorrow(day, at(17, 6))).toBe(true);
+    expect(tomorrow(day, at(16))).toBe(true);
+  });
+
+  it('is true for a window starting just after midnight, seen at 23:50', () => {
+    expect(tomorrow([slot(0, 10, 2, 0)], at(23, 50))).toBe(true);
+    expect(tomorrow([slot(0, 10, 2, 0)], at(0, 5))).toBe(false);
+  });
+
+  it('is false while a window runs, including one crossing midnight', () => {
+    const overnight = [slot(23, 30, 5, 30)];
+    expect(tomorrow(overnight, at(23, 30))).toBe(false);
+    expect(tomorrow(overnight, at(23, 59))).toBe(false);
+    expect(tomorrow(overnight, at(1))).toBe(false);
+    expect(tomorrow(day, at(13))).toBe(false);
+  });
+
+  it('is false for a whole-day window', () => {
+    expect(tomorrow([slot(0, 0, 12, 0), slot(12, 0, 0, 0)], at(9))).toBe(false);
+  });
+
+  it('is false for an evening window still to come, true after it has started and ended', () => {
+    expect(tomorrow([slot(23, 30, 5, 30)], at(18))).toBe(false);
+    expect(tomorrow([slot(22, 0, 23, 0)], at(23, 30))).toBe(true);
+  });
+
+  it('follows the soonest window: a later-today slot beats one that has run', () => {
+    expect(tomorrow([slot(13, 0, 16, 0), slot(22, 0, 23, 59)], at(17, 6))).toBe(false);
+  });
+});
+
 describe('batteryEvent', () => {
   const charge = [slot(23, 30, 5, 30)];
   const exp = [slot(16, 0, 19, 0)];
@@ -86,16 +127,25 @@ describe('batteryEvent', () => {
   const managed = (slots = exp, enabled = true) => ({ schedule_enabled: enabled, slots });
 
   it('shows a managed Timed Export that starts first, even with the inverter in Eco and its slots cleared', () => {
-    expect(batteryEvent(snap(), managed(), at(12))).toEqual({ kind: 'export', state: 'next', start: '16:00', end: '19:00' });
+    expect(batteryEvent(snap(), managed(), at(12))).toEqual({ kind: 'export', state: 'next', tomorrow: false, start: '16:00', end: '19:00' });
   });
 
   it('shows the charge when it starts first', () => {
-    expect(batteryEvent(snap(), managed(), at(20))).toEqual({ kind: 'charge', state: 'next', start: '23:30', end: '05:30' });
+    expect(batteryEvent(snap(), managed(), at(20))).toEqual({ kind: 'charge', state: 'next', tomorrow: false, start: '23:30', end: '05:30' });
   });
 
   it('shows a running export over a charge still to come, and the reverse', () => {
     expect(batteryEvent(snap(), managed(), at(17))).toMatchObject({ kind: 'export', state: 'active' });
     expect(batteryEvent(snap(), managed(), at(1))).toMatchObject({ kind: 'charge', state: 'active' });
+  });
+
+  it('marks a managed Timed Export window that starts after midnight as tomorrow', () => {
+    const managed = { schedule_enabled: true, slots: [slot(7, 0, 9, 0)] };
+    const event = batteryEvent({
+      charge_slots: [], enable_charge: false, discharge_slots: [], enable_discharge: false,
+      battery_mode: 'eco', max_charge_slots: 0, max_discharge_slots: 0,
+    }, managed, at(17, 6));
+    expect(event).toMatchObject({ kind: 'export', state: 'next', tomorrow: true });
   });
 
   it('prefers the charge on a tie', () => {
@@ -142,7 +192,7 @@ describe('batteryEvent', () => {
       charge_slots: [], enable_charge: false,
       battery_pause_mode: 2, battery_pause_slot: slot(3, 0, 4, 0),
     } as Partial<Snap>);
-    expect(batteryEvent(s, null, at(2))).toEqual({ kind: 'discharge', state: 'next', start: '03:00', end: '04:00' });
+    expect(batteryEvent(s, null, at(2))).toEqual({ kind: 'discharge', state: 'next', tomorrow: false, start: '03:00', end: '04:00' });
     expect(batteryEvent(s, null, at(3, 30))).toMatchObject({ kind: 'discharge', state: 'active' });
     // Not armed (pause mode 0/1/3), or no window: nothing.
     expect(batteryEvent({ ...s, battery_pause_mode: 1 } as Snap, null, at(2))).toBeNull();
@@ -152,7 +202,7 @@ describe('batteryEvent', () => {
   it('shows a manual export running now even while the Timed Export schedule waits for later', () => {
     // Force Discharge (or calibration / Agile) arms a discharge slot from now.
     const s = snap({ discharge_slots: [slot(10, 0, 11, 0)], enable_discharge: true, battery_mode: 'timed_export' });
-    expect(batteryEvent(s, managed(), at(10, 15))).toEqual({ kind: 'export', state: 'active', start: '10:00', end: '11:00' });
+    expect(batteryEvent(s, managed(), at(10, 15))).toEqual({ kind: 'export', state: 'active', tomorrow: false, start: '10:00', end: '11:00' });
   });
 
   it('ignores disarmed physical slots and a disarmed charge', () => {

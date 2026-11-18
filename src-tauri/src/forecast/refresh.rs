@@ -110,22 +110,6 @@ pub fn plan_refresh_due(
     active && elapsed <= PLAN_REFRESH_CATCH_UP_MINUTES
 }
 
-/// The poll loop's full gate: the refresh fires only when the plan is due
-/// AND Adaptive Charge does not own the charge rate. Adaptive Charge and
-/// the auto-refresh both write the charge-limit register; when Adaptive
-/// owns it, the refresh must not clobber its writes (CODE_REVIEW.md
-/// Major 3). Kept as a separate pure helper so the interaction is
-/// testable — `plan_refresh_due` itself is deliberately unaware of
-/// Adaptive Charge.
-pub fn plan_refresh_due_with_adaptive(
-    now: DateTime<Local>,
-    last_refresh_date: Option<NaiveDate>,
-    tariff: Option<&TariffConfig>,
-    adaptive_owns_rate: bool,
-) -> bool {
-    !adaptive_owns_rate && plan_refresh_due(now, last_refresh_date, tariff)
-}
-
 /// Hard upper bound for the user-configured auto-apply lead time,
 /// enforced by `POST /api/settings`. Two hours comfortably covers any
 /// sane "warn me before the cheap window" preference without letting a
@@ -186,46 +170,6 @@ pub fn plan_auto_apply_due(
             reason: "outside the lead window",
         }
     }
-}
-
-/// The poll loop's full auto-apply gate: the same composition as
-/// [`plan_refresh_due_with_adaptive`] — Adaptive Charge owning the
-/// charge-limit register suppresses the apply (both write the charge
-/// rate), with a distinct reason so the poll loop can warn/notify about
-/// it once per day.
-pub fn plan_auto_apply_decision_with_adaptive(
-    now: DateTime<Local>,
-    last_apply_date: Option<NaiveDate>,
-    tariff: Option<&TariffConfig>,
-    lead_minutes: u16,
-    adaptive_owns_rate: bool,
-) -> PlanApplyDecision {
-    if adaptive_owns_rate {
-        return PlanApplyDecision::NotDue {
-            reason: "Adaptive Charge owns the charge rate",
-        };
-    }
-    plan_auto_apply_due(now, last_apply_date, tariff, lead_minutes)
-}
-
-/// Whether the poll loop should emit the once-per-day "Adaptive Charge
-/// owns the charge rate" warning for the auto-apply: only when the apply
-/// would actually be due — not already applied today, a tariff configured,
-/// and inside the lead window. Pure helper so the poll loop's warning gate
-/// is testable, mirroring how the auto-refresh block gates its equivalent
-/// warning on [`plan_refresh_due`]. Without the would-be-due check the
-/// warning would fire daily even with no cheap window near (or no tariff
-/// at all), training users to ignore the channel.
-pub fn plan_auto_apply_adaptive_warning_due(
-    now: DateTime<Local>,
-    last_apply_date: Option<NaiveDate>,
-    tariff: Option<&TariffConfig>,
-    lead_minutes: u16,
-) -> bool {
-    matches!(
-        plan_auto_apply_due(now, last_apply_date, tariff, lead_minutes),
-        PlanApplyDecision::Due { .. }
-    )
 }
 
 /// One occurrence of a cheap window: the local date it opens and its start
@@ -356,6 +300,152 @@ pub fn every_window_due(
     } else {
         EveryWindowDue::NotDue
     }
+}
+
+/// Which daily write a gate is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DailyTrigger {
+    /// The fixed nightly auto-refresh, with [`PLAN_REFRESH_LEAD_MINUTES`].
+    Refresh,
+    /// The user-configured auto-apply and its lead.
+    AutoApply,
+}
+
+/// What the once-a-day gate decided this poll, Adaptive Charge aside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnceADayGate {
+    /// Write now, latching this window occurrence.
+    Due(Option<WindowKey>),
+    /// This window occurrence was planned already (the date moves on at
+    /// midnight, the window doesn't).
+    AlreadyPlanned,
+    NotDue(&'static str),
+}
+
+/// The once-a-day gate shared by the poll loop's two daily writes and the
+/// upcoming-write preview ([`upcoming_write`]), so the preview can never
+/// promise a write the poll loop wouldn't make. `last_date` is the date the
+/// write last fired and `last_window` the window occurrence it last planned.
+pub fn once_a_day_gate(
+    trigger: DailyTrigger,
+    now: DateTime<Local>,
+    last_date: Option<NaiveDate>,
+    last_window: Option<WindowKey>,
+    tariff: Option<&TariffConfig>,
+    lead_minutes: u16,
+) -> OnceADayGate {
+    let key = tariff.and_then(|tariff| once_a_day_window_key(tariff, now, lead_minutes));
+    if key.is_some() && key == last_window {
+        return OnceADayGate::AlreadyPlanned;
+    }
+    match trigger {
+        DailyTrigger::Refresh => {
+            if plan_refresh_due(now, last_date, tariff) {
+                OnceADayGate::Due(key)
+            } else {
+                OnceADayGate::NotDue("not due")
+            }
+        }
+        DailyTrigger::AutoApply => {
+            match plan_auto_apply_due(now, last_date, tariff, lead_minutes) {
+                PlanApplyDecision::Due { .. } => OnceADayGate::Due(key),
+                PlanApplyDecision::NotDue { reason } => OnceADayGate::NotDue(reason),
+            }
+        }
+    }
+}
+
+/// How far ahead [`upcoming_write`] looks: a whole day for the once-a-day
+/// write that already ran today, and the lead.
+pub const UPCOMING_HORIZON_MINUTES: i64 = 36 * 60;
+
+/// The next automatic charge-slot write: which cheap period it plans and when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpcomingWrite {
+    pub trigger: DailyTrigger,
+    /// The cheap period (the tariff's, on the local clock) the write plans.
+    /// The plan may write a shorter slot inside it.
+    pub cheap_start_min: u16,
+    pub cheap_end_min: u16,
+    /// When the poll loop writes: the first poll the gate fires, `now` when
+    /// it would fire already. Whole minutes on the local clock.
+    pub applies_at: DateTime<Local>,
+    /// The cheap period is already under way when it is planned.
+    pub running: bool,
+}
+
+/// What the gate's latches hold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpcomingLatches {
+    /// Last date the once-a-day write fired.
+    pub last_date: Option<NaiveDate>,
+    /// Last cheap-window occurrence planned.
+    pub last_window: Option<WindowKey>,
+}
+
+/// When the poll loop's daily write next fires and for which cheap period,
+/// from its latches. Runs the real gates ([`once_a_day_gate`],
+/// [`every_window_due`]) forward a minute at a time, so the tariff side
+/// agrees with the poll loop by construction; cheap tariff arithmetic only,
+/// no plan is computed. It can't see what the poll loop checks beyond the
+/// gates: a failed plan, a smart-charge top-up sitting the write out, or a
+/// window start the clock skipped. Those only delay or drop the write, and
+/// the caller hides the answer once its time has passed. `None` when nothing
+/// is due within [`UPCOMING_HORIZON_MINUTES`] (no tariff, nothing left to
+/// plan, the window already planned).
+pub fn upcoming_write(
+    now: DateTime<Local>,
+    trigger: DailyTrigger,
+    tariff: Option<&TariffConfig>,
+    lead_minutes: u16,
+    every_cheap_window: bool,
+    latches: UpcomingLatches,
+) -> Option<UpcomingWrite> {
+    let tariff = tariff?;
+    let mut at = now.with_second(0)?.with_nanosecond(0)?;
+    let mut last_window = latches.last_window;
+    for _ in 0..=UPCOMING_HORIZON_MINUTES {
+        let now_min = at.hour() as u16 * 60 + at.minute() as u16;
+        let due = if every_cheap_window {
+            match every_window_due(at, last_window, Some(tariff), lead_minutes) {
+                EveryWindowDue::Due(key) => Some((key, false)),
+                EveryWindowDue::DueRunning(key) => Some((key, true)),
+                EveryWindowDue::Missed(key) => {
+                    // Latched without a plan, as the poll loop does.
+                    last_window = Some(key);
+                    None
+                }
+                EveryWindowDue::NotDue => None,
+            }
+        } else {
+            match once_a_day_gate(
+                trigger,
+                at,
+                latches.last_date,
+                last_window,
+                Some(tariff),
+                lead_minutes,
+            ) {
+                OnceADayGate::Due(Some(key)) => Some((key, false)),
+                _ => None,
+            }
+        };
+        if let Some((key, running)) = due {
+            let window = crate::forecast::planner::cheap_import_windows(tariff, now_min, 30)
+                .into_iter()
+                .find(|w| w.start_min == key.1)
+                .or_else(|| crate::forecast::planner::plan_window(tariff, now_min, false))?;
+            return Some(UpcomingWrite {
+                trigger,
+                cheap_start_min: window.start_min,
+                cheap_end_min: window.end_min,
+                applies_at: at,
+                running: running || window_active(&window, now_min),
+            });
+        }
+        at += chrono::Duration::minutes(1);
+    }
+    None
 }
 
 /// Map a freshly computed plan to the refresh action. The window's
@@ -518,91 +608,6 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_owns_rate_suppresses_the_refresh() {
-        let flux = flux_tariff();
-        let day = local_dt(2026, 8, 31, 1, 40); // 20 min before 02:00
-                                                // Due without Adaptive: fires.
-        assert!(plan_refresh_due_with_adaptive(
-            day,
-            None,
-            Some(&flux),
-            false
-        ));
-        // Same moment with Adaptive owning the rate: suppressed.
-        assert!(!plan_refresh_due_with_adaptive(
-            day,
-            None,
-            Some(&flux),
-            true
-        ));
-        // Adaptive alone never makes an otherwise-undue refresh fire.
-        let afternoon = local_dt(2026, 8, 31, 15, 0);
-        assert!(!plan_refresh_due_with_adaptive(
-            afternoon,
-            None,
-            Some(&flux),
-            false
-        ));
-        assert!(!plan_refresh_due_with_adaptive(
-            afternoon,
-            None,
-            Some(&flux),
-            true
-        ));
-    }
-
-    #[test]
-    fn adaptive_warning_only_when_the_apply_would_actually_be_due() {
-        let flux = flux_tariff();
-        let day = local_dt(2026, 8, 31, 1, 40); // 20 min before 02:00
-                                                // Inside the lead window and not applied yet: the warning fires...
-        assert!(plan_auto_apply_adaptive_warning_due(
-            day,
-            None,
-            Some(&flux),
-            30
-        ));
-        // ...but not once today's apply has already happened — nothing is
-        // being skipped, so a warning would be noise.
-        assert!(!plan_auto_apply_adaptive_warning_due(
-            day,
-            Some(day.date_naive()),
-            Some(&flux),
-            30
-        ));
-        // Mid-afternoon with no cheap window near: no daily false alarm.
-        let afternoon = local_dt(2026, 8, 31, 15, 0);
-        assert!(!plan_auto_apply_adaptive_warning_due(
-            afternoon,
-            None,
-            Some(&flux),
-            30
-        ));
-        // No tariff configured: nothing to warn about either.
-        assert!(!plan_auto_apply_adaptive_warning_due(day, None, None, 30));
-    }
-
-    #[test]
-    fn adaptive_warning_respects_the_configured_lead_time() {
-        let flux = flux_tariff();
-        // 90 min before the 02:00 window: outside a 30-minute lead, inside
-        // a 120-minute one — the gate must follow the user's setting.
-        let early = local_dt(2026, 8, 31, 0, 30);
-        assert!(!plan_auto_apply_adaptive_warning_due(
-            early,
-            None,
-            Some(&flux),
-            30
-        ));
-        assert!(plan_auto_apply_adaptive_warning_due(
-            early,
-            None,
-            Some(&flux),
-            120
-        ));
-    }
-
-    #[test]
     fn auto_apply_due_only_inside_the_configured_lead_window() {
         let flux = flux_tariff();
         // 20 min before the 02:00 cheap window: due with the default lead.
@@ -699,63 +704,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_apply_decision_suppressed_when_adaptive_owns_the_rate() {
-        let flux = flux_tariff();
-        let day = local_dt(2026, 8, 31, 1, 40); // would be due
-        assert_eq!(
-            plan_auto_apply_decision_with_adaptive(day, None, Some(&flux), 30, true),
-            PlanApplyDecision::NotDue {
-                reason: "Adaptive Charge owns the charge rate"
-            }
-        );
-        // Without Adaptive, the same moment is due.
-        assert!(matches!(
-            plan_auto_apply_decision_with_adaptive(day, None, Some(&flux), 30, false),
-            PlanApplyDecision::Due { .. }
-        ));
-        // Adaptive suppression short-circuits before the due arithmetic, so
-        // the poll loop must consult `plan_auto_apply_adaptive_warning_due`
-        // before warning — an out-of-lead-window moment reports the adaptive
-        // reason while the warning gate correctly says not to warn.
-        let afternoon = local_dt(2026, 8, 31, 15, 0);
-        assert_eq!(
-            plan_auto_apply_decision_with_adaptive(afternoon, None, Some(&flux), 30, true),
-            PlanApplyDecision::NotDue {
-                reason: "Adaptive Charge owns the charge rate"
-            }
-        );
-        assert!(!plan_auto_apply_adaptive_warning_due(
-            afternoon,
-            None,
-            Some(&flux),
-            30
-        ));
-    }
-
-    #[test]
-    fn plan_refresh_due_itself_is_unaware_of_adaptive() {
-        // The Adaptive gate lives in `plan_refresh_due_with_adaptive`, not
-        // in `plan_refresh_due` — the poll loop composes them. This pins
-        // that separation so a future refactor can't silently move the
-        // gate into the helper and change the poll-loop behaviour.
-        let flux = flux_tariff();
-        let day = local_dt(2026, 8, 31, 1, 40);
-        assert!(plan_refresh_due(day, None, Some(&flux)));
-    }
-
-    #[test]
     fn refresh_due_with_no_prior_refresh_fires_in_the_lead_window() {
         // `last = None` (fresh start inside the lead window) must fire —
         // the idempotent-rewrite case after a restart.
         let flux = flux_tariff();
         let day = local_dt(2026, 8, 31, 1, 40);
         assert!(plan_refresh_due(day, None, Some(&flux)));
-        assert!(plan_refresh_due_with_adaptive(
-            day,
-            None,
-            Some(&flux),
-            false
-        ));
     }
 
     #[test]
@@ -1355,5 +1309,352 @@ mod tests {
             None,
             Some(&cosy)
         ));
+    }
+
+    // ----- upcoming_write: the preview of the next automatic write -----
+
+    fn date(d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 1, d).unwrap()
+    }
+
+    fn upcoming(
+        now: DateTime<Local>,
+        trigger: DailyTrigger,
+        tariff: &TariffConfig,
+        lead: u16,
+        every: bool,
+        latches: UpcomingLatches,
+    ) -> Option<UpcomingWrite> {
+        upcoming_write(now, trigger, Some(tariff), lead, every, latches)
+    }
+
+    fn at_of(write: &Option<UpcomingWrite>) -> Option<String> {
+        write
+            .as_ref()
+            .map(|w| w.applies_at.format("%d %H:%M").to_string())
+    }
+
+    #[test]
+    fn auto_apply_at_17_06_plans_the_22_00_window_at_21_30() {
+        // Issue #481: the Planner's night, written half an hour before.
+        let write = upcoming(
+            local_dt(2026, 1, 12, 17, 6),
+            DailyTrigger::AutoApply,
+            &cosy_tariff(),
+            30,
+            true,
+            UpcomingLatches::default(),
+        )
+        .expect("a write is coming");
+        assert_eq!(
+            (write.cheap_start_min, write.cheap_end_min, write.running),
+            (22 * 60, 23 * 60 + 59, false)
+        );
+        assert_eq!(write.applies_at.format("%d %H:%M").to_string(), "12 21:30");
+    }
+
+    #[test]
+    fn once_a_day_picks_the_cheapest_window_not_the_next_one() {
+        // Flux has one cheap window; its write is the next night's 01:30.
+        let write = upcoming(
+            local_dt(2026, 1, 12, 17, 6),
+            DailyTrigger::AutoApply,
+            &flux_tariff(),
+            30,
+            false,
+            UpcomingLatches::default(),
+        );
+        assert_eq!(at_of(&write).as_deref(), Some("13 01:30"));
+        assert_eq!(write.unwrap().cheap_start_min, 2 * 60);
+    }
+
+    #[test]
+    fn the_lead_moves_the_write_and_zero_lead_writes_at_the_start() {
+        let flux = flux_tariff();
+        let now = local_dt(2026, 1, 12, 17, 6);
+        let none = UpcomingLatches::default();
+        let at = |lead, every| {
+            at_of(&upcoming(
+                now,
+                DailyTrigger::AutoApply,
+                &flux,
+                lead,
+                every,
+                none,
+            ))
+        };
+        assert_eq!(at(120, false).as_deref(), Some("13 00:00"));
+        assert_eq!(at(0, false).as_deref(), Some("13 02:00"));
+        assert_eq!(at(0, true).as_deref(), Some("13 02:00"));
+        let zero = upcoming(now, DailyTrigger::AutoApply, &flux, 0, true, none).unwrap();
+        assert!(zero.running, "a zero lead plans the window as it starts");
+    }
+
+    #[test]
+    fn inside_the_lead_the_write_is_now() {
+        let now = local_dt(2026, 1, 12, 21, 45);
+        let write = upcoming(
+            now,
+            DailyTrigger::AutoApply,
+            &cosy_tariff(),
+            30,
+            true,
+            UpcomingLatches::default(),
+        );
+        assert_eq!(at_of(&write).as_deref(), Some("12 21:45"));
+    }
+
+    #[test]
+    fn the_refresh_uses_its_own_lead() {
+        let write = upcoming(
+            local_dt(2026, 1, 12, 17, 6),
+            DailyTrigger::Refresh,
+            &cosy_tariff(),
+            PLAN_REFRESH_LEAD_MINUTES,
+            false,
+            UpcomingLatches::default(),
+        );
+        // Once a day: the cheapest window that starts today, Cosy's 22:00
+        // (the three cheap windows tie on rate, and tonight's isn't tomorrow's).
+        assert_eq!(at_of(&write).as_deref(), Some("12 21:30"));
+    }
+
+    #[test]
+    fn nothing_without_a_tariff() {
+        assert_eq!(
+            upcoming_write(
+                local_dt(2026, 1, 12, 17, 6),
+                DailyTrigger::AutoApply,
+                None,
+                30,
+                true,
+                UpcomingLatches::default(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_planned_window_is_not_promised_again() {
+        let cosy = cosy_tariff();
+        // 22:00 planned at 21:30; at 21:40 the next write is 04:00 tomorrow.
+        let write = upcoming(
+            local_dt(2026, 1, 12, 21, 40),
+            DailyTrigger::AutoApply,
+            &cosy,
+            30,
+            true,
+            UpcomingLatches {
+                last_date: None,
+                last_window: Some((date(12), 22 * 60)),
+            },
+        );
+        assert_eq!(at_of(&write).as_deref(), Some("13 03:30"));
+        assert_eq!(write.unwrap().cheap_start_min, 4 * 60);
+    }
+
+    #[test]
+    fn every_window_after_the_13_00_plan_waits_for_the_window_to_pass() {
+        // 13:00 planned at 12:30. The gate looks at the 22:00 window only
+        // once the 13:00 one has started and finished.
+        let write = upcoming(
+            local_dt(2026, 1, 12, 12, 45),
+            DailyTrigger::AutoApply,
+            &cosy_tariff(),
+            30,
+            true,
+            UpcomingLatches {
+                last_date: None,
+                last_window: Some((date(12), 13 * 60)),
+            },
+        );
+        assert_eq!(at_of(&write).as_deref(), Some("12 21:30"));
+    }
+
+    #[test]
+    fn a_window_missed_while_asleep_gives_way_to_the_next() {
+        let write = upcoming(
+            local_dt(2026, 1, 12, 22, 30),
+            DailyTrigger::AutoApply,
+            &cosy_tariff(),
+            30,
+            true,
+            UpcomingLatches::default(),
+        );
+        assert_eq!(at_of(&write).as_deref(), Some("13 03:30"));
+        assert_eq!(write.unwrap().cheap_start_min, 4 * 60);
+    }
+
+    #[test]
+    fn a_window_running_in_its_first_minutes_is_planned_now() {
+        // 22:02, no plan yet: planned as a window under way (early in the hour).
+        let write = upcoming(
+            local_dt(2026, 1, 12, 22, 2),
+            DailyTrigger::AutoApply,
+            &cosy_tariff(),
+            30,
+            true,
+            UpcomingLatches::default(),
+        )
+        .unwrap();
+        assert!(write.running);
+        assert_eq!(write.applies_at, local_dt(2026, 1, 12, 22, 2));
+    }
+
+    #[test]
+    fn once_a_day_already_applied_today_waits_for_tomorrow() {
+        let write = upcoming(
+            local_dt(2026, 1, 12, 17, 6),
+            DailyTrigger::AutoApply,
+            &flux_tariff(),
+            30,
+            false,
+            UpcomingLatches {
+                last_date: Some(date(12)),
+                last_window: Some((date(12), 2 * 60)),
+            },
+        );
+        assert_eq!(at_of(&write).as_deref(), Some("13 01:30"));
+    }
+
+    #[test]
+    fn a_window_planned_before_midnight_is_not_promised_after_it() {
+        // Flux 02:00 planned at 01:30 on the 12th; the date has since moved
+        // on but the window is the same occurrence.
+        let write = upcoming(
+            local_dt(2026, 1, 12, 1, 45),
+            DailyTrigger::AutoApply,
+            &flux_tariff(),
+            30,
+            false,
+            UpcomingLatches {
+                last_date: None,
+                last_window: Some((date(12), 2 * 60)),
+            },
+        );
+        assert_eq!(at_of(&write).as_deref(), Some("13 01:30"));
+    }
+
+    /// Run the real gates minute by minute from `from`, latching as the poll
+    /// loop does: the latches at the start of each minute, and the minutes
+    /// a write fired.
+    fn walk_gates(
+        tariff: &TariffConfig,
+        trigger: DailyTrigger,
+        lead: u16,
+        every: bool,
+        from: DateTime<Local>,
+        minutes: i64,
+    ) -> (Vec<UpcomingLatches>, Vec<i64>) {
+        let mut states = Vec::new();
+        let mut fires = Vec::new();
+        let mut latches = UpcomingLatches::default();
+        for m in 0..minutes {
+            let now = from + chrono::Duration::minutes(m);
+            states.push(latches);
+            if every {
+                match every_window_due(now, latches.last_window, Some(tariff), lead) {
+                    EveryWindowDue::Due(key) | EveryWindowDue::DueRunning(key) => {
+                        latches.last_window = Some(key);
+                        fires.push(m);
+                    }
+                    EveryWindowDue::Missed(key) => latches.last_window = Some(key),
+                    EveryWindowDue::NotDue => {}
+                }
+            } else if let OnceADayGate::Due(key) = once_a_day_gate(
+                trigger,
+                now,
+                latches.last_date,
+                latches.last_window,
+                Some(tariff),
+                lead,
+            ) {
+                latches = UpcomingLatches {
+                    last_date: Some(now.date_naive()),
+                    last_window: key,
+                };
+                fires.push(m);
+            }
+        }
+        (states, fires)
+    }
+
+    #[test]
+    fn the_preview_agrees_with_the_gate_across_two_days() {
+        let start = local_dt(2026, 1, 12, 0, 0);
+        let minutes = 4 * 1440;
+        let checked = 2 * 1440;
+        for (name, tariff) in [("cosy", cosy_tariff()), ("flux", flux_tariff())] {
+            for (trigger, lead) in [
+                (DailyTrigger::AutoApply, 30),
+                (DailyTrigger::AutoApply, 0),
+                (DailyTrigger::AutoApply, 90),
+                (DailyTrigger::Refresh, PLAN_REFRESH_LEAD_MINUTES),
+            ] {
+                for every in [false, true] {
+                    let (states, fires) = walk_gates(&tariff, trigger, lead, every, start, minutes);
+                    // A sweep of the two days, and every minute around each
+                    // write, which is where a preview would be wrong.
+                    let mut probes: Vec<i64> = (0..checked).step_by(37).collect();
+                    for fire in fires.iter().copied().filter(|f| *f < checked) {
+                        probes.extend((fire - 2..=fire + 2).filter(|m| *m >= 0));
+                    }
+                    for m in probes {
+                        let now = start + chrono::Duration::minutes(m);
+                        let expected = fires
+                            .iter()
+                            .copied()
+                            .find(|fire| *fire >= m)
+                            .map(|fire| start + chrono::Duration::minutes(fire));
+                        let got = upcoming_write(
+                            now,
+                            trigger,
+                            Some(&tariff),
+                            lead,
+                            every,
+                            states[m as usize],
+                        )
+                        .map(|w| w.applies_at);
+                        assert_eq!(
+                            got, expected,
+                            "{name} {trigger:?} lead {lead} every {every} at {now}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_once_a_day_gate_is_due_exactly_when_the_write_would_be() {
+        // What the Adaptive warning relies on (the poll loop warns only when
+        // the gate says Due): inside the lead and not yet applied; never once
+        // today's apply has happened, mid-afternoon, or without a tariff.
+        let flux = flux_tariff();
+        let day = local_dt(2026, 8, 31, 1, 40); // 20 min before 02:00
+        let afternoon = local_dt(2026, 8, 31, 15, 0);
+        let early = local_dt(2026, 8, 31, 0, 30);
+        let due = |trigger, now, last_date, tariff: Option<&TariffConfig>, lead| {
+            matches!(
+                once_a_day_gate(trigger, now, last_date, None, tariff, lead),
+                OnceADayGate::Due(_)
+            )
+        };
+        for trigger in [DailyTrigger::AutoApply, DailyTrigger::Refresh] {
+            assert!(due(trigger, day, None, Some(&flux), 30), "{trigger:?}");
+            assert!(
+                !due(trigger, day, Some(day.date_naive()), Some(&flux), 30),
+                "{trigger:?}: already applied today"
+            );
+            assert!(
+                !due(trigger, afternoon, None, Some(&flux), 30),
+                "{trigger:?}"
+            );
+            assert!(!due(trigger, day, None, None, 30), "{trigger:?}: no tariff");
+        }
+        // The auto-apply follows the user's lead; the refresh has its own.
+        assert!(!due(DailyTrigger::AutoApply, early, None, Some(&flux), 30));
+        assert!(due(DailyTrigger::AutoApply, early, None, Some(&flux), 120));
+        assert!(!due(DailyTrigger::Refresh, early, None, Some(&flux), 120));
     }
 }

@@ -29,9 +29,8 @@ use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
 
 use crate::forecast::planner::PlanRecommendation;
 use crate::forecast::refresh::{
-    plan_auto_apply_adaptive_warning_due, plan_auto_apply_decision_with_adaptive,
-    plan_refresh_action, plan_refresh_due, plan_refresh_due_with_adaptive, PlanApplyDecision,
-    PlanRefreshAction, PLAN_CHARGE_RATE_PERCENT, SLOT_TARGET_SOC_NONE,
+    once_a_day_gate, plan_refresh_action, DailyTrigger, OnceADayGate, PlanRefreshAction,
+    PLAN_CHARGE_RATE_PERCENT, SLOT_TARGET_SOC_NONE,
 };
 use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::InverterSnapshot;
@@ -600,15 +599,57 @@ fn adaptive_owns_rate(settings: &Settings) -> bool {
     settings.adaptive_charge_enabled || settings.adaptive_charge_saved_limit.is_some()
 }
 
-/// The window a once-a-day write at `now` is for (see
-/// [`crate::forecast::refresh::once_a_day_window_key`]).
-fn planned_window_key(
+/// The next automatic charge-slot write the Status page can announce
+/// (issue #481): the cheap period the daily write will plan, and when. Which
+/// write it is follows the poll loop: auto-apply when it is on, else the
+/// nightly auto-refresh, else nothing. Nothing either on a model whose
+/// battery controls don't reach the battery (a Gateway), while Adaptive
+/// Charge owns the charge rate (the write would stand down), with no tariff,
+/// or with no inverter reading to plan from. Tariff arithmetic and latch
+/// reads only: no plan is computed.
+pub(crate) async fn upcoming_plan_write(
+    state: &Arc<AppState>,
     settings: &Settings,
+    snapshot: Option<&InverterSnapshot>,
     now: DateTime<Local>,
-    lead_minutes: u16,
-) -> Option<crate::forecast::refresh::WindowKey> {
-    let tariff = settings.import_tariff_config.as_ref()?;
-    crate::forecast::refresh::once_a_day_window_key(tariff, now, lead_minutes)
+) -> Option<crate::forecast::refresh::UpcomingWrite> {
+    use crate::forecast::refresh::{upcoming_write, UpcomingLatches};
+    if !snapshot?.device_type.battery_controls_reach_battery() || adaptive_owns_rate(settings) {
+        return None;
+    }
+    let (trigger, lead, last_date, last_window) = if settings.forecast_plan_auto_apply_enabled {
+        (
+            DailyTrigger::AutoApply,
+            settings.forecast_plan_auto_apply_lead_minutes,
+            state.forecast_plan_apply_date.clone(),
+            state.forecast_plan_apply_window.clone(),
+        )
+    } else if settings.forecast_plan_auto_refresh {
+        (
+            DailyTrigger::Refresh,
+            crate::forecast::refresh::PLAN_REFRESH_LEAD_MINUTES,
+            state.forecast_plan_refresh_date.clone(),
+            state.forecast_plan_refresh_window.clone(),
+        )
+    } else {
+        return None;
+    };
+    // Window first, then the date: the poll loop sets them in the other
+    // order, so a read between the two writes sees at least one latch and
+    // never promises the write that is being made.
+    let last_window = *last_window.lock().await;
+    let last_date = *last_date.lock().await;
+    upcoming_write(
+        now,
+        trigger,
+        settings.import_tariff_config.as_ref(),
+        lead,
+        settings.forecast_plan_every_cheap_window,
+        UpcomingLatches {
+            last_date,
+            last_window,
+        },
+    )
 }
 
 /// Log a cheap window that started before HEM could plan it (issue #453).
@@ -711,17 +752,13 @@ pub(crate) async fn run_plan_refresh(
         )
     } else {
         let last = *state.forecast_plan_refresh_date.lock().await;
-        let key = planned_window_key(settings, now, lead);
+        let window = *state.forecast_plan_refresh_window.lock().await;
         // The date moves on at midnight, but not the window: one planned
         // before midnight (or by every-window planning) isn't planned again.
-        if key.is_some() && key == *state.forecast_plan_refresh_window.lock().await {
-            DailyDue::NotDue
-        } else if plan_refresh_due_with_adaptive(now, last, tariff, adaptive_owns_rate) {
-            DailyDue::Due { key, running: None }
-        } else if adaptive_owns_rate && plan_refresh_due(now, last, tariff) {
-            DailyDue::AdaptiveOwnsRate
-        } else {
-            DailyDue::NotDue
+        match once_a_day_gate(DailyTrigger::Refresh, now, last, window, tariff, lead) {
+            OnceADayGate::Due(_) if adaptive_owns_rate => DailyDue::AdaptiveOwnsRate,
+            OnceADayGate::Due(key) => DailyDue::Due { key, running: None },
+            OnceADayGate::AlreadyPlanned | OnceADayGate::NotDue(_) => DailyDue::NotDue,
         }
     };
     match due {
@@ -795,24 +832,17 @@ pub(crate) async fn run_plan_auto_apply(
         )
     } else {
         let last = *state.forecast_plan_apply_date.lock().await;
-        let key = planned_window_key(settings, now, lead);
-        let planned_already =
-            key.is_some() && key == *state.forecast_plan_apply_window.lock().await;
-        match plan_auto_apply_decision_with_adaptive(now, last, tariff, lead, adaptive_owns_rate) {
-            // The date moves on at midnight, but not the window: one planned
-            // before midnight (or by every-window planning) isn't planned again.
-            _ if planned_already => DailyDue::NotDue,
-            PlanApplyDecision::Due { .. } => DailyDue::Due { key, running: None },
-            // Would-be-due but Adaptive Charge owns the charge-limit register.
-            // Gated on the apply actually being due, or an Adaptive user with
-            // no cheap window near would get a false alarm every single day.
-            PlanApplyDecision::NotDue { .. }
-                if adaptive_owns_rate
-                    && plan_auto_apply_adaptive_warning_due(now, last, tariff, lead) =>
-            {
-                DailyDue::AdaptiveOwnsRate
-            }
-            PlanApplyDecision::NotDue { reason } => {
+        let window = *state.forecast_plan_apply_window.lock().await;
+        // The date moves on at midnight, but not the window: one planned
+        // before midnight (or by every-window planning) isn't planned again.
+        match once_a_day_gate(DailyTrigger::AutoApply, now, last, window, tariff, lead) {
+            // Would be due but Adaptive Charge owns the charge-limit
+            // register. Gated on the apply actually being due, or an Adaptive
+            // user with no cheap window near would get a false alarm daily.
+            OnceADayGate::Due(_) if adaptive_owns_rate => DailyDue::AdaptiveOwnsRate,
+            OnceADayGate::Due(key) => DailyDue::Due { key, running: None },
+            OnceADayGate::AlreadyPlanned => DailyDue::NotDue,
+            OnceADayGate::NotDue(reason) => {
                 tracing::debug!(reason, "Forecast plan auto-apply standing down");
                 DailyDue::NotDue
             }

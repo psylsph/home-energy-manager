@@ -182,6 +182,13 @@ fn create_router_at(
         None => get(api::get_forecast_plan),
     };
 
+    let forecast_plan_upcoming_route = match forecast_now {
+        Some(now) => get(move |State(state): State<Arc<AppState>>| async move {
+            api::get_forecast_plan_upcoming_at(state, now).await
+        }),
+        None => get(api::get_forecast_plan_upcoming),
+    };
+
     Router::new()
         // Data endpoints
         .route("/api/snapshot", get(api::get_snapshot))
@@ -396,6 +403,8 @@ fn create_router_at(
         .route("/api/weather/backfill", post(api::backfill_weather))
         .route("/api/forecast", forecast_route)
         .route("/api/forecast/plan", forecast_plan_route)
+        // Issue #481: when the Planner next writes charge slot 1 on its own.
+        .route("/api/forecast/plan/upcoming", forecast_plan_upcoming_route)
         // Issue #472: when the battery reaches its reserve.
         .route("/api/battery/runtime", get(api::get_battery_runtime))
         .route("/api/forecast/plan-history", get(api::get_plan_history))

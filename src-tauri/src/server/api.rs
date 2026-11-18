@@ -9512,6 +9512,66 @@ pub(crate) async fn get_forecast_plan_at(
     (StatusCode::OK, Json(json!({ "ok": true, "data": data })))
 }
 
+/// How long until the write, and how many calendar days ahead it falls, for
+/// `GET /api/forecast/plan/upcoming`. The minutes are real elapsed time, not
+/// a difference of clock readings, so a clock change between now and the write
+/// doesn't move it by an hour; the client says "tomorrow" from the day count
+/// rather than working it out.
+fn upcoming_wait<Tz: chrono::TimeZone>(
+    applies_at: &chrono::DateTime<Tz>,
+    now: &chrono::DateTime<Tz>,
+) -> (i64, i64) {
+    (
+        (applies_at.clone() - now.clone()).num_minutes().max(0),
+        (applies_at.date_naive() - now.date_naive())
+            .num_days()
+            .max(0),
+    )
+}
+
+/// GET /api/forecast/plan/upcoming — when the Planner will next write charge
+/// slot 1 on its own, and for which cheap period (issue #481). `data` is
+/// `null` when nothing is coming (no automatic write on, a Gateway, Adaptive
+/// Charge owning the rate, no tariff, or the next period already planned).
+/// Cheap: tariff arithmetic and latch reads, never a plan.
+pub async fn get_forecast_plan_upcoming(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<Value>) {
+    get_forecast_plan_upcoming_at(state, chrono::Local::now()).await
+}
+
+pub(crate) async fn get_forecast_plan_upcoming_at(
+    state: Arc<AppState>,
+    now: chrono::DateTime<chrono::Local>,
+) -> (StatusCode, Json<Value>) {
+    let snapshot = state.latest_snapshot.lock().await.clone();
+    let settings = crate::settings::Settings::load_async().await;
+    let upcoming = crate::inverter::forecast_plan::upcoming_plan_write(
+        &state,
+        &settings,
+        snapshot.as_ref(),
+        now,
+    )
+    .await;
+    let data = upcoming.map(|write| {
+        let hhmm = |min: u16| format!("{:02}:{:02}", min / 60, min % 60);
+        let (applies_in, applies_day) = upcoming_wait(&write.applies_at, &now);
+        json!({
+            "trigger": match write.trigger {
+                crate::forecast::refresh::DailyTrigger::AutoApply => "auto_apply",
+                crate::forecast::refresh::DailyTrigger::Refresh => "refresh",
+            },
+            "cheap_start": hhmm(write.cheap_start_min),
+            "cheap_end": hhmm(write.cheap_end_min),
+            "applies_at": write.applies_at.format("%H:%M").to_string(),
+            "applies_in_minutes": applies_in,
+            "applies_day": applies_day,
+            "running": write.running,
+        })
+    });
+    (StatusCode::OK, Json(json!({ "ok": true, "data": data })))
+}
+
 /// The `data` block of `GET /api/forecast/plan`: the recommendation, its
 /// Apply payload and the export advice. Also what the plan history stores
 /// (issue #361), so a past night reads exactly as it was shown.
@@ -28270,5 +28330,39 @@ pub(crate) mod tests {
                 (l.timestamp, l.consumption_kwh)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod upcoming_wait_tests {
+    use super::upcoming_wait;
+    use chrono::TimeZone;
+    use chrono_tz::Europe::London;
+
+    #[test]
+    fn a_write_after_the_clocks_go_forward_is_an_hour_nearer_than_the_clock_says() {
+        // Issue #481 review: 17:06 on 28 March 2026, write at 02:30 BST on the
+        // 29th. The clock reads 9 h 24 min apart; 1 h of it doesn't exist.
+        let now = London.with_ymd_and_hms(2026, 3, 28, 17, 6, 0).unwrap();
+        let write = London.with_ymd_and_hms(2026, 3, 29, 2, 30, 0).unwrap();
+        assert_eq!(upcoming_wait(&write, &now), (504, 1));
+    }
+
+    #[test]
+    fn a_write_after_the_clocks_go_back_is_an_hour_further_than_the_clock_says() {
+        let now = London.with_ymd_and_hms(2026, 10, 24, 17, 6, 0).unwrap();
+        let write = London.with_ymd_and_hms(2026, 10, 25, 3, 30, 0).unwrap();
+        // 17:06 BST to 03:30 GMT: 10 h 24 min on the clock, 11 h 24 min real.
+        assert_eq!(upcoming_wait(&write, &now), (684, 1));
+    }
+
+    #[test]
+    fn the_wait_is_never_negative_and_counts_days() {
+        let now = London.with_ymd_and_hms(2026, 1, 12, 17, 6, 0).unwrap();
+        assert_eq!(upcoming_wait(&now, &now), (0, 0));
+        let past = London.with_ymd_and_hms(2026, 1, 12, 17, 0, 0).unwrap();
+        assert_eq!(upcoming_wait(&past, &now), (0, 0));
+        let later = London.with_ymd_and_hms(2026, 1, 14, 1, 30, 0).unwrap();
+        assert_eq!(upcoming_wait(&later, &now).1, 2);
     }
 }

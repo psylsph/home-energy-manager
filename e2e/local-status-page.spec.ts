@@ -264,6 +264,11 @@ test.describe('Status Page - House View (issue #422)', () => {
         holding: false, hold_failing: false, stale_after_minutes: 15,
         dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'BOOST', energy_added_kwh: 7, smart: false }],
       } }));
+      // And the Planner's coming change to the slot (issue #481), the longest wording.
+      await page.route('**/api/forecast/plan/upcoming', (r) => r.fulfill({ json: {
+        ok: true, data: { trigger: 'auto_apply', cheap_start: '02:00', cheap_end: '05:00', applies_at: '01:30',
+          applies_in_minutes: 504, applies_day: 1, running: false },
+      } }));
       await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: runtimeAnswer(kind, now) }));
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
@@ -276,6 +281,7 @@ test.describe('Status Page - House View (issue #422)', () => {
       await expect(page.getByTestId('house-charge-card')).toBeVisible();
       await expect(page.getByTestId('house-car-charge')).toBeVisible();
       await expect(page.getByTestId('house-car-charge')).toContainText('· Boost');
+      await expect(page.getByTestId('house-planned-charge')).toHaveText('Planner updates tomorrow at 01:30');
       await expect(page.getByTestId('house-battery-card')).toBeVisible();
       await expect(page.getByTestId('house-runtime-text')).toHaveText(runtimeText(kind));
       // Hidden without ever touching the toggle: the house view's default.
@@ -519,12 +525,17 @@ test.describe('Status Page - the desktop app\'s default window', () => {
           holding: false, hold_failing: false, stale_after_minutes: 15,
           dispatches: [{ start: new Date(now + 3_600_000).toISOString(), end: new Date(now + 7_200_000).toISOString(), type: 'SMART', energy_added_kwh: 7, smart: true }],
         } }));
+        await page.route('**/api/forecast/plan/upcoming', (r) => r.fulfill({ json: {
+          ok: true, data: { trigger: 'auto_apply', cheap_start: '02:00', cheap_end: '05:00', applies_at: '01:30',
+            applies_in_minutes: 504, applies_day: 1, running: false },
+        } }));
         await page.route('**/api/battery/runtime', (r) => r.fulfill({ json: runtimeAnswer(lines, now) }));
       }
       await page.goto('/');
       await expect(page.locator('text=Waiting for data')).toBeHidden({ timeout: 20_000 });
       await expect(page.getByTestId('today-balance')).toBeVisible();
       if (lines && view === 'house') await expect(page.getByTestId('house-car-charge')).toBeVisible();
+      if (lines && view === 'house') await expect(page.getByTestId('house-planned-charge')).toBeVisible();
       if (lines) await expect(page.getByTestId(`${view}-battery-runtime`)).toBeVisible();
       const dims = await page.evaluate(() => ({
         doc: document.documentElement.scrollHeight,

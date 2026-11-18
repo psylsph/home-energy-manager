@@ -2832,3 +2832,263 @@ async fn charge_cap_round_trips_through_the_router() {
         "a rejected save changes nothing"
     );
 }
+
+// ====================================================================
+// GET /api/forecast/plan/upcoming — issue #481
+// ====================================================================
+
+/// 17:06 on a fixed day, the moment of the report.
+fn upcoming_now() -> chrono::DateTime<chrono::Local> {
+    use chrono::TimeZone;
+    chrono::Local
+        .with_ymd_and_hms(2026, 1, 12, 17, 6, 0)
+        .earliest()
+        .expect("valid fixed local instant")
+}
+
+/// A seeded state and router at `upcoming_now`: a Gen2 snapshot, the Flux-like
+/// tariff and the given automatic-write settings saved into the temp config dir.
+async fn upcoming_router(config: &Value) -> (Arc<AppState>, axum::Router, impl Drop) {
+    use givenergy_local::inverter::model::InverterSnapshot;
+    use givenergy_local::server::create_router_with_forecast_now;
+
+    let guard = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        device_type: givenergy_local::inverter::model::DeviceType::Gen2Hybrid,
+        ..Default::default()
+    });
+    let router = create_router_with_forecast_now(state.clone(), upcoming_now());
+    let mut body = json!({
+        "import_tariff_config": {
+            "slots": [
+                { "start": "00:00", "end": "02:00", "rate": 0.26 },
+                { "start": "02:00", "end": "05:00", "rate": 0.09 },
+                { "start": "05:00", "end": "16:00", "rate": 0.26 },
+                { "start": "16:00", "end": "21:00", "rate": 0.35 },
+                { "start": "21:00", "end": "23:59", "rate": 0.26 }
+            ]
+        }
+    });
+    for (key, value) in config.as_object().expect("settings object") {
+        body[key] = value.clone();
+    }
+    let (status, reply) = post_json(&router, "/api/settings", &body).await;
+    assert_eq!(status, StatusCode::OK, "settings save failed: {reply}");
+    (state, router, guard)
+}
+
+#[tokio::test]
+async fn upcoming_write_announces_the_next_auto_apply() {
+    let (_state, router, _guard) = upcoming_router(&json!({
+        "forecast_plan_auto_apply_enabled": true,
+        "forecast_plan_auto_apply_lead_minutes": 30
+    }))
+    .await;
+    let (status, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], json!(true));
+    let data = &body["data"];
+    assert_eq!(data["trigger"], json!("auto_apply"));
+    assert_eq!(data["cheap_start"], json!("02:00"));
+    assert_eq!(data["cheap_end"], json!("05:00"));
+    assert_eq!(data["applies_at"], json!("01:30"));
+    // 17:06 to 01:30 is 8 h 24 min; the period opens 30 min after that.
+    assert_eq!(data["applies_in_minutes"], json!(504));
+    // The write is on the next calendar day.
+    assert_eq!(data["applies_day"], json!(1));
+    assert_eq!(data["running"], json!(false));
+}
+
+#[tokio::test]
+async fn upcoming_write_follows_the_nightly_refresh_when_auto_apply_is_off() {
+    let (_state, router, _guard) = upcoming_router(&json!({
+        "forecast_plan_auto_apply_enabled": false,
+        "forecast_plan_auto_refresh": true
+    }))
+    .await;
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert_eq!(body["data"]["trigger"], json!("refresh"));
+    assert_eq!(body["data"]["applies_at"], json!("01:30"));
+}
+
+#[tokio::test]
+async fn upcoming_write_is_null_when_nothing_writes_by_itself() {
+    // Both automatic writes off: only Apply on the Planner changes the slot.
+    let (_state, router, _guard) = upcoming_router(&json!({
+        "forecast_plan_auto_apply_enabled": false,
+        "forecast_plan_auto_refresh": false
+    }))
+    .await;
+    let (status, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], json!(true));
+    assert!(body["data"].is_null(), "{body}");
+}
+
+#[tokio::test]
+async fn upcoming_write_is_null_without_a_tariff_or_a_reading() {
+    use givenergy_local::server::create_router_with_forecast_now;
+    let _guard = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    let router = create_router_with_forecast_now(state.clone(), upcoming_now());
+    let (status, _) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "forecast_plan_auto_apply_enabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // No reading yet, and no tariff.
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert!(body["data"].is_null(), "{body}");
+    *state.latest_snapshot.lock().await =
+        Some(givenergy_local::inverter::model::InverterSnapshot {
+            device_type: givenergy_local::inverter::model::DeviceType::Gen2Hybrid,
+            ..Default::default()
+        });
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert!(body["data"].is_null(), "no tariff: {body}");
+}
+
+#[tokio::test]
+async fn upcoming_write_is_null_on_a_gateway_and_under_adaptive_charge() {
+    use givenergy_local::inverter::model::{DeviceType, InverterSnapshot};
+    let (state, router, _guard) = upcoming_router(&json!({
+        "forecast_plan_auto_apply_enabled": true
+    }))
+    .await;
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert!(body["data"].is_object(), "control: {body}");
+
+    // A Gateway doesn't pass the slot on to the AIO (issue #428).
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        device_type: DeviceType::Gateway,
+        ..Default::default()
+    });
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert!(body["data"].is_null(), "gateway: {body}");
+
+    // Adaptive Charge owns the charge rate, so the write stands down.
+    *state.latest_snapshot.lock().await = Some(InverterSnapshot {
+        device_type: DeviceType::Gen2Hybrid,
+        ..Default::default()
+    });
+    let mut settings = givenergy_local::settings::Settings::load();
+    settings.adaptive_charge_enabled = true;
+    settings.save().expect("save settings");
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert!(body["data"].is_null(), "adaptive: {body}");
+}
+
+#[tokio::test]
+async fn upcoming_write_moves_on_once_the_window_is_planned() {
+    let (state, router, _guard) = upcoming_router(&json!({
+        "forecast_plan_auto_apply_enabled": true,
+        "forecast_plan_every_cheap_window": true
+    }))
+    .await;
+    let day = upcoming_now().date_naive().succ_opt().unwrap();
+    // 02:00 tomorrow is the next window; once the apply has latched it, the
+    // preview doesn't promise it again, only the occurrence after.
+    *state.forecast_plan_apply_window.lock().await = Some((day, 2 * 60));
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert!(
+        body["data"].is_null() || body["data"]["applies_in_minutes"].as_i64().unwrap() > 504,
+        "{body}"
+    );
+}
+
+/// The endpoint racing the poll loop's write: once the latches are set, no
+/// reader that starts afterwards may be promised the window again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upcoming_write_never_reappears_after_the_apply_latches() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (state, _router, _guard) = upcoming_router(&json!({
+        "forecast_plan_auto_apply_enabled": true
+    }))
+    .await;
+    // Inside the lead, so the write is due now until it latches.
+    let inside = {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(2026, 1, 13, 1, 40, 0)
+            .earliest()
+            .unwrap()
+    };
+    let router = givenergy_local::server::create_router_with_forecast_now(state.clone(), inside);
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert_eq!(body["data"]["applies_in_minutes"], json!(0), "{body}");
+
+    let latched = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let state = state.clone();
+        let latched = latched.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            // The poll loop's order: the date, then the window.
+            *state.forecast_plan_apply_date.lock().await = Some(inside.date_naive());
+            *state.forecast_plan_apply_window.lock().await = Some((inside.date_naive(), 2 * 60));
+            latched.store(true, Ordering::SeqCst);
+        })
+    };
+    let mut readers = Vec::new();
+    for _ in 0..4 {
+        let router = router.clone();
+        let latched = latched.clone();
+        readers.push(tokio::spawn(async move {
+            for _ in 0..50 {
+                let after = latched.load(Ordering::SeqCst);
+                let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+                if after {
+                    let minutes = body["data"]["applies_in_minutes"].as_i64();
+                    assert!(
+                        minutes.is_none_or(|m| m > 0),
+                        "promised the latched window again: {body}"
+                    );
+                }
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+    writer.await.unwrap();
+    for reader in readers {
+        reader.await.unwrap();
+    }
+}
+
+/// Either latch alone is enough to stop the promise, so a read between the
+/// poll loop's two writes (the date, then the window) never promises the write
+/// that is being made. Pinned deterministically: each half-written state.
+#[tokio::test]
+async fn upcoming_write_is_not_promised_from_a_half_written_latch() {
+    use chrono::TimeZone;
+    let (state, _router, _guard) = upcoming_router(&json!({
+        "forecast_plan_auto_apply_enabled": true
+    }))
+    .await;
+    let inside = chrono::Local
+        .with_ymd_and_hms(2026, 1, 13, 1, 40, 0)
+        .earliest()
+        .unwrap();
+    let router = givenergy_local::server::create_router_with_forecast_now(state.clone(), inside);
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert_eq!(
+        body["data"]["applies_in_minutes"],
+        json!(0),
+        "control: {body}"
+    );
+
+    // Date written, window not yet.
+    *state.forecast_plan_apply_date.lock().await = Some(inside.date_naive());
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert_eq!(body["data"]["applies_day"], json!(1), "date only: {body}");
+
+    // Window written, date not (a restart-free torn read the other way).
+    *state.forecast_plan_apply_date.lock().await = None;
+    *state.forecast_plan_apply_window.lock().await = Some((inside.date_naive(), 2 * 60));
+    let (_, body) = get_json(&router, "/api/forecast/plan/upcoming").await;
+    assert_eq!(body["data"]["applies_day"], json!(1), "window only: {body}");
+    // From 01:40 to 01:30 the next day.
+    assert_eq!(body["data"]["applies_in_minutes"], json!(1430), "{body}");
+}

@@ -12,6 +12,11 @@ import { formatHHMM, isInMergedWindow, mergeScheduleWindows, telemetryConfirmsEx
 export interface ChargeWindow {
   /** `active`: now is inside the window; `next`: the soonest window to start. */
   state: 'active' | 'next';
+  /**
+   * The next window starts after midnight, so "13:00–16:00" seen at 17:06
+   * means tomorrow's (issue #481). Never true for a running window.
+   */
+  tomorrow: boolean;
   /** e.g. `"23:30"`. */
   start: string;
   /** e.g. `"05:30"`; equal to `start` only for a window covering the whole day. */
@@ -37,7 +42,15 @@ function nextWindow(slots: ScheduleSlot[], armed: boolean, nowMinute: number): R
   for (const w of mergeScheduleWindows(slots)) {
     const wait = isInMergedWindow([w], nowMinute) ? -1 : (w.start - nowMinute + MINUTES_PER_DAY) % MINUTES_PER_DAY;
     if (best === null || wait < best.wait) {
-      best = { wait, window: { state: wait < 0 ? 'active' : 'next', start: formatHHMM(w.start), end: formatHHMM(w.end) } };
+      best = {
+        wait,
+        window: {
+          state: wait < 0 ? 'active' : 'next',
+          tomorrow: wait >= 0 && nowMinute + wait >= MINUTES_PER_DAY,
+          start: formatHHMM(w.start),
+          end: formatHHMM(w.end),
+        },
+      };
     }
   }
   return best;

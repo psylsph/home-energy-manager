@@ -9,6 +9,8 @@ import type { InverterSnapshot } from '../../lib/types';
 import { batteryEvent, batteryStoredKwh, doingIt, holdWindow, type BatteryEventKind, type TimedExportSchedule } from '../../lib/chargeSchedule';
 import { useTimedExportSchedule } from '../../hooks/useTimedExportSchedule';
 import { useCarChargeSlots } from '../../hooks/useCarChargeSlots';
+import { usePlannedCharge } from '../../hooks/usePlannedCharge';
+import { plannedChargeLine, type PlannedChargeLine } from '../../lib/plannedCharge';
 import { carChargeLine, type CarChargeLine } from '../../lib/carChargeSlots';
 import BatteryRuntimeRow from '../BatteryRuntimeRow';
 import { inverterMinuteOfDay } from '../../lib/ecoTimedExport';
@@ -73,6 +75,34 @@ function CarChargeRow({ car }: { car: CarChargeLine | null }) {
   );
 }
 
+/** A small clock: the Planner's coming change to the slot (issue #481). */
+function ClockGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true" className="shrink-0">
+      <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M10 5.8V10l2.8 1.8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/**
+ * That the Planner is about to rewrite the slot, under the car line (issue
+ * #481). The window above stays what the inverter holds.
+ */
+function PlannedChargeRow({ planned }: { planned: PlannedChargeLine | null }) {
+  if (!planned) return null;
+  return (
+    <span
+      className="flex items-center gap-1 min-w-0 text-[11px] text-text-secondary"
+      data-testid="house-planned-charge"
+      title={planned.title}
+    >
+      <ClockGlyph />
+      <span className="truncate">{planned.text}</span>
+    </span>
+  );
+}
+
 const LABELS = {
   charge: { next: 'Next Charge', doing: 'Charging Now', window: 'Charge Window' },
   export: { next: 'Next Export', doing: 'Exporting Now', window: 'Export Window' },
@@ -80,11 +110,12 @@ const LABELS = {
 } as const;
 
 /** The charge or export slot running now, or the next to start. */
-function ScheduleCard({ snapshot, timedExport, nowMinute, car }: {
+function ScheduleCard({ snapshot, timedExport, nowMinute, car, planned }: {
   snapshot: InverterSnapshot;
   timedExport: TimedExportSchedule | null;
   nowMinute: number;
   car: CarChargeLine | null;
+  planned: PlannedChargeLine | null;
 }) {
   const noise = useInverterStore((s) => s.visualNoiseThreshold);
   const event = batteryEvent(snapshot, timedExport, nowMinute);
@@ -104,7 +135,17 @@ function ScheduleCard({ snapshot, timedExport, nowMinute, car }: {
   return (
     <section className={CARD} data-testid="house-charge-card" data-kind={event?.kind ?? 'none'} data-state={event?.state ?? 'none'}>
       <BatteryGlyph kind={kind} pulsing={doing} />
-      <span className={LABEL}>{label}</span>
+      <span className={LABEL}>
+        <span>{label}</span>
+        {/* Said on the label: the window is a fixed-width figure that has no
+            room for a day word at phone width (issue #481). */}
+        {event?.tomorrow && (
+          <>
+            <span aria-hidden="true"> · </span>
+            <span data-testid="house-charge-day">Tomorrow</span>
+          </>
+        )}
+      </span>
       {event ? (
         <span className="font-mono text-base font-semibold text-text-primary whitespace-nowrap" data-testid="house-charge-window">
           {/* Merged slots can cover the whole day (00:00–00:00). */}
@@ -114,6 +155,7 @@ function ScheduleCard({ snapshot, timedExport, nowMinute, car }: {
         <span className="text-sm text-text-secondary" data-testid="house-charge-window">None scheduled</span>
       )}
       <CarChargeRow car={car} />
+      <PlannedChargeRow planned={planned} />
     </section>
   );
 }
@@ -200,11 +242,13 @@ function ScheduleCardLoading() {
 }
 
 /** The schedule card once the Timed Export schedule is fetched (not on a Gateway, where it isn't shown). */
-function LiveScheduleCard({ snapshot, now, car, carLoaded }: {
+function LiveScheduleCard({ snapshot, now, car, planned, ready }: {
   snapshot: InverterSnapshot;
   now: Date;
   car: CarChargeLine | null;
-  carLoaded: boolean;
+  planned: PlannedChargeLine | null;
+  /** The car check and the Planner check have both answered. */
+  ready: boolean;
 }) {
   const { schedule, loaded } = useTimedExportSchedule();
   // Slots are in inverter local time and HEM may run in a UTC container, so
@@ -213,9 +257,9 @@ function LiveScheduleCard({ snapshot, now, car, carLoaded }: {
   // backend), where it's all we have — windows may be off if the two
   // disagree.
   const nowMinute = inverterMinuteOfDay(snapshot) ?? now.getHours() * 60 + now.getMinutes();
-  // Wait for the car check too, so its line doesn't make the card jump.
-  return loaded && carLoaded
-    ? <ScheduleCard snapshot={snapshot} timedExport={schedule} nowMinute={nowMinute} car={car} />
+  // Wait for the car and Planner checks too, so their lines don't make the card jump.
+  return loaded && ready
+    ? <ScheduleCard snapshot={snapshot} timedExport={schedule} nowMinute={nowMinute} car={car} planned={planned} />
     : <ScheduleCardLoading />;
 }
 
@@ -225,10 +269,14 @@ export default function HouseStatusCards({ snapshot, now: pinnedNow }: { snapsho
   // Octopus page, not on the inverter's clock.
   const { response, loaded: carLoaded } = useCarChargeSlots();
   const car = carChargeLine(response, now);
+  // A Gateway's schedule isn't the battery's, so nothing is planned for it.
+  const hasControls = deviceHasBatteryControls(snapshot.device_type_code);
+  const plannedState = usePlannedCharge(hasControls);
+  const planned = plannedChargeLine(plannedState.upcoming, plannedState.fetchedAt, now.getTime());
   return (
     <div className="grid grid-cols-2 gap-3" data-testid="house-status-cards">
-      {deviceHasBatteryControls(snapshot.device_type_code)
-        ? <LiveScheduleCard snapshot={snapshot} now={now} car={car} carLoaded={carLoaded} />
+      {hasControls
+        ? <LiveScheduleCard snapshot={snapshot} now={now} car={car} planned={planned} ready={carLoaded && plannedState.loaded} />
         : <ScheduleCardUnavailable car={carLoaded ? car : null} />}
       {/* The runtime row keeps its own clock unless one is pinned. */}
       <BatteryCard snapshot={snapshot} now={pinnedNow} />
