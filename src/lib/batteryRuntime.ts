@@ -94,11 +94,16 @@ const DOT_WORDS: Record<RuntimeConfidence, string> = {
   low: "Low confidence (one dot): a busy and a quiet day are more than three hours apart, or there's under two weeks of history.",
 };
 
-const RISK_DOT_WORDS: Record<RuntimeConfidence, string> = {
-  high: 'Three dots: a busier day would run out within an hour of the charge, a close call.',
-  medium: 'Two dots: a busier day would run out up to three hours before the charge.',
-  low: "One dot: a busier day would run out more than three hours before the charge, or there's under two weeks of history.",
-};
+/** What the ⓘ says the dots mean when a busy day could run out before `refill`. */
+function riskDotWords(confidence: RuntimeConfidence, refill: 'charge' | 'solar'): string {
+  const before = refill === 'charge' ? 'the charge' : 'solar takes over';
+  const within = refill === 'charge' ? 'the charge' : 'solar taking over';
+  switch (confidence) {
+    case 'high': return `Three dots: a busier day would run out within an hour of ${within}, a close call.`;
+    case 'medium': return `Two dots: a busier day would run out up to three hours before ${before}.`;
+    case 'low': return `One dot: a busier day would run out more than three hours before ${before}, or there's under two weeks of history.`;
+  }
+}
 
 /** Why an `unknown` answer had no time, for the ⓘ (issue #476). */
 const UNKNOWN_REASONS = new Map<string, string>([
@@ -109,7 +114,7 @@ const UNKNOWN_REASONS = new Map<string, string>([
 ]);
 const UNKNOWN_FALLBACK = "The forecast couldn't be run from the current readings.";
 
-const PAUSED_HELP = "The battery won't discharge until the pause ends (the Pause button, a limiter, the Octopus hold or the inverter's own pause), and when that is isn't known, so there's no time to give.";
+const PAUSED_HELP = "The battery won't discharge until the pause ends (the Pause button, a limiter, the Octopus hold or the inverter's own pause). HEM can't tell when that will be, so there's no time to give.";
 
 const CHARGING_HELP = "The battery is charging, but the forecast for this hour doesn't predict it: a sunnier day than forecast, or a Force Charge, which the forecast doesn't model. A time returns once the charge stops or the forecast catches up.";
 
@@ -140,17 +145,20 @@ function whenWord(at: number, now: Date, f: RuntimeFormat): string | null {
   return f.hour(new Date(at * 1000)) >= EVENING_HOUR ? 'tonight' : null;
 }
 
-/** `tonight 22:30`, `tomorrow 06:00`, `Mon 06:00`, or just `22:30` earlier today. */
-function whenTime(at: number, now: Date, f: RuntimeFormat): string {
+/** The day word with a space after it (`tonight `, `tomorrow `, `Mon `), or nothing earlier today. */
+function whenPrefix(at: number, now: Date, f: RuntimeFormat): string {
   const word = whenWord(at, now, f);
-  const time = f.time(new Date(at * 1000));
-  return word ? `${word} ${time}` : time;
+  return word ? `${word} ` : '';
 }
 
-/** `about 22:00` with its day in front: `tonight about 22:00`, `tomorrow about 06:00`. */
+/** `tonight at 22:30`, `tomorrow at 06:00`, `Mon at 06:00`, or just `at 22:30` earlier today. */
+function atTime(at: number, now: Date, f: RuntimeFormat): string {
+  return `${whenPrefix(at, now, f)}at ${f.time(new Date(at * 1000))}`;
+}
+
+/** `at about 22:00` with its day in front: `tonight at about 22:00`, `tomorrow at about 06:00`. */
 function aboutTime(at: number, now: Date, f: RuntimeFormat): string {
-  const word = whenWord(at, now, f);
-  return `${word ? `${word} ` : ''}about ${f.time(new Date(at * 1000))}`;
+  return `${whenPrefix(at, now, f)}at about ${f.time(new Date(at * 1000))}`;
 }
 
 /** The ends of a range closer than this are one time, said "about". */
@@ -176,10 +184,10 @@ export function batteryRuntimeLine(
       let text: string;
       let range: string | null = null;
       if (wide && !started) {
-        text = `Empty ${whenTime(earliest, now, format)}–${t(latest)}`;
+        text = `Empty ${whenPrefix(earliest, now, format)}between ${t(earliest)} and ${t(latest)}`;
         range = `between ${t(earliest)} and ${t(latest)}`;
       } else if (earliest != null && latest == null && !started) {
-        text = `Empty ${whenTime(earliest, now, format)} or later`;
+        text = `Empty ${atTime(earliest, now, format)} or later`;
         range = `not before about ${t(earliest)}`;
       } else {
         text = `Empty ${aboutTime(runtime.at, now, format)}`;
@@ -206,28 +214,28 @@ export function batteryRuntimeLine(
         const riskDay = dayWord(risk, now, format);
         const atDay = dayWord(at, now, format);
         const where = atDay && atDay !== riskDay ? ` ${atDay}` : '';
-        const refill = charge ? `charge${where} ${t(at)}` : `solar${where} about ${t(at)}`;
+        const refill = charge ? `charge${where} at ${t(at)}` : `solar${where} at about ${t(at)}`;
         // A start that has gone is no start (a cached answer outliving it).
         const gone = risk < now.getTime() / 1000 - PAST_SLACK_SECS;
         const text = gone
-          ? `May run out before ${charge ? `${atDay ? `${atDay}'s` : 'the'} ${t(at)} charge` : `solar${atDay ? ` ${atDay}` : ''} about ${t(at)}`}`
-          : `Empty ${whenTime(risk, now, format)} or later, ${refill}`;
+          ? `May run out before ${charge ? `${atDay ? `${atDay}'s` : 'the'} ${t(at)} charge` : `solar${atDay ? ` ${atDay}` : ''} at about ${t(at)}`}`
+          : `Empty ${atTime(risk, now, format)} or later, ${refill}`;
         const most = charge
           ? `Most likely it lasts until the ${t(at)} charge`
-          : `Most likely it lasts until solar, about ${t(at)}`;
+          : `Most likely it lasts until solar at about ${t(at)}`;
         const busy = `a busier day than usual (more use, less sun) could empty it from ${t(risk)}`;
         return {
           text,
           dots: DOTS[confidence],
           confidence,
           title: `${most}, but ${busy} · ${confidence} confidence`,
-          help: `${most}, but ${busy}. ${RISK_DOT_WORDS[confidence]}`,
+          help: `${most}, but ${busy}. ${riskDotWords(confidence, runtime.by)}`,
         };
       }
       const day = dayWord(runtime.at, now, format);
       const text = charge
         ? `Lasts until ${day ? `${day}'s` : 'the'} ${t(runtime.at)} charge`
-        : `Lasts until solar${day ? ` ${day}` : ''}, about ${t(runtime.at)}`;
+        : `Lasts until solar${day ? ` ${day}` : ''} at about ${t(runtime.at)}`;
       return { text, dots: null, confidence: null, title: text, help: null };
     }
     case 'lasts_beyond':
@@ -238,7 +246,7 @@ export function batteryRuntimeLine(
       return { text: 'Below Reserve', dots: null, confidence: null, title: '', help: null };
     case 'full_at': {
       const day = dayWord(runtime.at, now, format);
-      const text = `${runtime.soc >= 100 ? 'Full' : `${Math.round(runtime.soc)}%`}${day ? ` ${day}` : ''} about ${t(runtime.at)}`;
+      const text = `${runtime.soc >= 100 ? 'Full' : `${Math.round(runtime.soc)}%`}${day ? ` ${day}` : ''} at about ${t(runtime.at)}`;
       return { text, dots: null, confidence: null, title: '', help: null };
     }
     // With the toggle on, a blank card looks broken: say why there's no time.
