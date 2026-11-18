@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.20.0] - 2026-11-18
+
+### Added
+
+- **The Next Charge card says when the Planner is about to change the slot.** A line under the card, "Planner updates at 21:30" (or "tomorrow at 01:30"), shows when auto-apply or the nightly refresh will rewrite charge slot 1 for the next cheap period, and hovering it names the period. The card's own window is still what the inverter holds; the line goes once the write has run.
+
+### Changed
+
+- **The Next Charge card says "Tomorrow" when the next window starts after midnight.** At five past five, "13:00–16:00" used to look like it should say tonight's 22:00; it now reads "Next Charge · Tomorrow", the same for exports and discharges.
+
 ## [1.19.1] - 2026-11-18
 
 ### Changed
