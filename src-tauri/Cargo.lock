@@ -4419,9 +4419,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-log"
-version = "2.10.1"
+version = "2.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d83980f6765feb86cf2224959246be28b0488e14a23204a719f7f9deecfc64c9"
+checksum = "a9d089b339ceba1861450f12c1e43bd270c2a3e6c35a6d700fe8e64f7793c1a6"
 dependencies = [
  "android_logger",
  "fern",
