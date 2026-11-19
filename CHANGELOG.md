@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.20.2] - 2026-11-19
+
+### Added
+
+- **A guide to opening HEM over HTTPS with Tailscale.** INSTALL.md now walks through giving HEM a proper `https://` address on your tailnet, for the desktop app, headless, Docker and Proxmox installs, including keeping it working after a restart. The README's Tailscale Funnel note has moved there, with a clearer warning that Funnel puts HEM on the public internet with no login.
+
+### Changed
+
+- **Updated libraries.** The desktop shell, database, web and build libraries are on their latest releases. Nothing should look or behave differently.
+
 ## [1.20.1] - 2026-11-18
 
 ### Changed
