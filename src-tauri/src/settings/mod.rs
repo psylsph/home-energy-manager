@@ -1585,6 +1585,12 @@ pub struct Settings {
     /// one plan a day as before.
     #[serde(default)]
     pub forecast_plan_every_cheap_window: bool,
+    /// Spread the planned charge across the cheap window at a lower rate
+    /// (issue #483). Advice only for now: the Planner shows the rate it
+    /// would use, but every write still charges at full power. Off by
+    /// default.
+    #[serde(default)]
+    pub forecast_plan_spread_charge: bool,
     /// The charge target a hold plan last armed on the inverter (issue
     /// #359), so the planner can undo that target, and only that one, when
     /// a later plan charges to full or clears the slot. `None` when the
@@ -2325,6 +2331,7 @@ impl Default for Settings {
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_every_cheap_window: false,
+            forecast_plan_spread_charge: false,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
             car_charger_current_a: default_car_charger_current_a(),
@@ -3061,6 +3068,7 @@ mod tests {
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_every_cheap_window: false,
+            forecast_plan_spread_charge: false,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
             car_charger_current_a: default_car_charger_current_a(),
@@ -3519,6 +3527,23 @@ mod tests {
     }
 
     #[test]
+    fn plan_spread_charge_defaults_off_and_round_trips() {
+        // Issue #483: an older settings.json loads with it off.
+        let legacy = r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
+            "poll_interval": 60, "auto_connect": true}"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(!decoded.forecast_plan_spread_charge);
+        assert!(!Settings::default().forecast_plan_spread_charge);
+        let original = Settings {
+            forecast_plan_spread_charge: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(decoded.forecast_plan_spread_charge);
+    }
+
+    #[test]
     fn planner_armed_target_defaults_to_none_and_round_trips() {
         let legacy = r#"{"host": "192.168.1.50", "port": 8899, "serial": "",
             "poll_interval": 60, "auto_connect": true}"#;
@@ -3944,6 +3969,7 @@ mod tests {
             forecast_plan_auto_apply_lead_minutes: default_forecast_plan_auto_apply_lead_minutes(),
             forecast_plan_strategy: PlanStrategy::MinSoc,
             forecast_plan_every_cheap_window: false,
+            forecast_plan_spread_charge: false,
             forecast_plan_armed_target_pct: None,
             forecast_exclude_load_above_kw: None,
             car_charger_current_a: default_car_charger_current_a(),

@@ -631,6 +631,38 @@ export type ExportAdvice =
     }
   | { kind: 'no_export'; reason: string };
 
+/** What the Planner would do with the charge limit if it spread the charge
+ *  across the cheap window (issue #483). Advice only: Apply still charges at
+ *  full power. Absent with the setting off, also in plan history rows. */
+export type SpreadAdvice =
+  | {
+      kind: 'spread';
+      /** The limit, % of the inverter's maximum battery power. */
+      rate_percent: number;
+      rate_kw: number;
+      target_soc_pct: number;
+      kwh: number;
+      /** When the charge should reach its target, HH:MM. */
+      finish: string;
+      /** When the same charge ends at full power, HH:MM. */
+      full_rate_finish: string;
+      full_rate_minutes: number;
+      window_minutes: number;
+      after_min_soc_pct: number;
+      summary: string;
+    }
+  | {
+      kind: 'full_rate';
+      reason:
+        | 'window_too_short'
+        | 'not_worthwhile'
+        | 'needs_full_rate'
+        | 'adaptive_charge'
+        | 'needs_pack_size'
+        | 'worse_trough';
+      summary: string;
+    };
+
 export type PlanResponse = {
   recommendation: PlanRecommendation;
   apply: PlanApply;
@@ -638,6 +670,7 @@ export type PlanResponse = {
   /** How many cheap periods the import tariff has (issue #453); absent
    *  in plan history rows. */
   cheap_window_count?: number;
+  spread?: SpreadAdvice;
 };
 
 /** How far above the inverter's reserve the forecasts floor the battery, where

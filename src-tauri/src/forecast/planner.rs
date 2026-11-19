@@ -464,7 +464,9 @@ pub fn best_export_window(
     candidates.into_iter().next()
 }
 
-fn hhmm(minutes: u16) -> String {
+/// A minute of the day as `HH:MM`, wrapping past midnight.
+pub(crate) fn hhmm(minutes: u16) -> String {
+    let minutes = minutes % 1440;
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
@@ -1440,8 +1442,10 @@ mod cost;
 #[cfg(test)]
 mod every_window_tests;
 mod hold;
+mod spread;
 pub use cost::{plan_cheapest_overall, CostInputs};
 pub use hold::{hold_charging_window, plan_hold_through_window};
+pub use spread::{spread_charge_advice, SpreadAdvice, SpreadSkip};
 
 /// Compute the recommendation for the user's chosen strategy (issue
 /// #359). [`PlanStrategy::MinSoc`] is exactly [`plan_overnight_charge`].

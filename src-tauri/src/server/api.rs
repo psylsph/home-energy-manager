@@ -1918,6 +1918,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "forecast_plan_strategy": settings.forecast_plan_strategy,
             // Plan before every cheap period, not just the cheapest (#453).
             "forecast_plan_every_cheap_window": settings.forecast_plan_every_cheap_window,
+            // Spread the charge across the window, advice only (#483).
+            "forecast_plan_spread_charge": settings.forecast_plan_spread_charge,
         }
         })),
     )
@@ -2382,6 +2384,12 @@ pub async fn update_settings(
         {
             persist.forecast_plan_every_cheap_window = v;
         }
+        if let Some(v) = body
+            .get("forecast_plan_spread_charge")
+            .and_then(|v| v.as_bool())
+        {
+            persist.forecast_plan_spread_charge = v;
+        }
         if let Some(v) = body.get("forecast_plan_strategy") {
             persist.forecast_plan_strategy = serde_json::from_value(v.clone()).map_err(|_| {
                 "Unknown planner strategy — expected \"min_soc\", \"hold_window\" or \"cheapest\"".to_string()
@@ -2838,6 +2846,12 @@ fn settings_log_fields(
         out.push(format!(
             "forecast_plan_every_cheap_window={}",
             persist.forecast_plan_every_cheap_window
+        ));
+    }
+    if is_present("forecast_plan_spread_charge") {
+        out.push(format!(
+            "forecast_plan_spread_charge={}",
+            persist.forecast_plan_spread_charge
         ));
     }
     out
@@ -9482,7 +9496,7 @@ pub(crate) async fn get_forecast_plan_at(
         crate::forecast::planner::cheap_import_windows(tariff, 0, 30).len()
     });
     let timed_export = timed_export_slots(&state).await;
-    let (charge, export_advice) = match tokio::task::spawn_blocking(move || {
+    let (charge, export_advice, spread) = match tokio::task::spawn_blocking(move || {
         let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
             db: history.as_deref(),
             settings: &settings,
@@ -9499,15 +9513,14 @@ pub(crate) async fn get_forecast_plan_at(
             ),
             timed_export_slots: &timed_export,
         });
-        compute_full_plan(&forecast, &settings, snapshot.as_ref(), now.timestamp())
+        compute_full_plan_advice(&forecast, &settings, snapshot.as_ref(), now.timestamp())
     })
     .await
     {
         Ok(plan) => plan,
         Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
     };
-    // Outside `plan_response_json`, so plan history rows stay as they were.
-    let mut data = plan_response_json(&charge, export_advice.as_ref());
+    let mut data = plan_response_json(&charge, export_advice.as_ref(), spread.as_ref());
     data["cheap_window_count"] = json!(cheap_window_count);
     (StatusCode::OK, Json(json!({ "ok": true, "data": data })))
 }
@@ -9578,6 +9591,7 @@ pub(crate) async fn get_forecast_plan_upcoming_at(
 pub(crate) fn plan_response_json(
     charge: &crate::forecast::planner::PlanRecommendation,
     export_advice: Option<&crate::forecast::planner::ExportAdvice>,
+    spread: Option<&crate::forecast::planner::SpreadAdvice>,
 ) -> Value {
     let rec_value = plan_to_json_value(charge);
     let apply = rec_value.get("apply").cloned().unwrap_or(Value::Null);
@@ -9592,11 +9606,16 @@ pub(crate) fn plan_response_json(
     let export = export_advice
         .map(export_advice_to_json)
         .unwrap_or(Value::Null);
-    json!({
+    let mut data = json!({
         "recommendation": recommendation,
         "apply": apply,
         "export": export,
-    })
+    });
+    // Spread-charge advice (issue #483): absent with the setting off.
+    if let Some(spread) = spread {
+        data["spread"] = spread_advice_to_json(spread);
+    }
+    data
 }
 
 /// Compute the typed plan recommendation from a forecast payload, plus
@@ -9607,6 +9626,7 @@ pub(crate) fn plan_response_json(
 /// different computations. The export half is `None` exactly when the
 /// charge half is `NoPlan` — the same gates (projection, history,
 /// import tariff) underpin both.
+#[cfg(test)]
 pub(crate) fn compute_full_plan(
     forecast: &crate::forecast::ForecastPayload,
     settings: &crate::settings::Settings,
@@ -9616,13 +9636,32 @@ pub(crate) fn compute_full_plan(
     crate::forecast::planner::PlanRecommendation,
     Option<crate::forecast::planner::ExportAdvice>,
 ) {
+    let (charge, export, _) = compute_full_plan_advice(forecast, settings, snapshot, now_ts);
+    (charge, export)
+}
+
+/// [`compute_full_plan`] plus the spread-charge advice (issue #483): what
+/// the Planner would do with the charge limit if it spread the charge across
+/// the window. `None` unless the setting is on and there is a charge to
+/// spread. Advice only: the plan and its Apply payload are the same either
+/// way. The Planner card and plan history show it; nothing acts on it.
+pub(crate) fn compute_full_plan_advice(
+    forecast: &crate::forecast::ForecastPayload,
+    settings: &crate::settings::Settings,
+    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
+    now_ts: i64,
+) -> (
+    crate::forecast::planner::PlanRecommendation,
+    Option<crate::forecast::planner::ExportAdvice>,
+    Option<crate::forecast::planner::SpreadAdvice>,
+) {
     use crate::forecast::planner::{ExportAdvice, ExportPlanInputs, PlanRecommendation};
-    let (charge, export_ctx) =
+    let (charge, export_ctx, spread) =
         compute_charge_plan_inner(forecast, settings, snapshot, now_ts, None);
     // NoPlan means one of the shared gates failed (projection, history,
     // import tariff) — the export advice stands down with them.
     if matches!(charge, PlanRecommendation::NoPlan { .. }) {
-        return (charge, None);
+        return (charge, None, None);
     }
     let Some(ExportContext {
         sim_hours,
@@ -9633,7 +9672,7 @@ pub(crate) fn compute_full_plan(
         backstop_margin_pct,
     }) = export_ctx
     else {
-        return (charge, None);
+        return (charge, None, spread);
     };
     // Without an export tariff there is no window to sell into — say so
     // rather than hiding the card, so the user knows what to configure.
@@ -9643,6 +9682,7 @@ pub(crate) fn compute_full_plan(
             Some(ExportAdvice::NoExport {
                 reason: "no export tariff configured — set your export rates in Settings so the planner can find your best window".to_string(),
             }),
+            spread,
         );
     };
     // A hold plan charges at full rate from the window's start until it
@@ -9685,7 +9725,7 @@ pub(crate) fn compute_full_plan(
             margin_pct: backstop_margin_pct,
         }),
     });
-    (charge, Some(export))
+    (charge, Some(export), spread)
 }
 
 /// The back-stop floor (issue #407) for an export ending at `export_end_ts`:
@@ -9701,7 +9741,7 @@ pub(crate) fn export_backstop_floor(
     now_ts: i64,
     export_end_ts: i64,
 ) -> Option<f64> {
-    let (_, ctx) = compute_charge_plan_inner(forecast, settings, snapshot, now_ts, None);
+    let (_, ctx, _) = compute_charge_plan_inner(forecast, settings, snapshot, now_ts, None);
     let ctx = ctx?;
     let until = crate::forecast::planner::next_cheap_window_start(
         &ctx.sim_hours,
@@ -9843,7 +9883,8 @@ struct ExportContext<'a> {
 /// The charge-plan computation proper, returning the context the export
 /// advice needs to ride the same trajectory. `None` when the charge
 /// gates failed (no projection / no import tariff) — the export advice
-/// stands down with them.
+/// stands down with them. The spread advice (issue #483) is worked out only
+/// with its setting on.
 fn compute_charge_plan_inner<'a>(
     forecast: &crate::forecast::ForecastPayload,
     settings: &'a crate::settings::Settings,
@@ -9853,6 +9894,7 @@ fn compute_charge_plan_inner<'a>(
 ) -> (
     crate::forecast::planner::PlanRecommendation,
     Option<ExportContext<'a>>,
+    Option<crate::forecast::planner::SpreadAdvice>,
 ) {
     use crate::forecast::simulate::{SimHourResult, SimulationOutput, SimulationParams};
     let import_tariff = settings.import_tariff_config.as_ref();
@@ -9879,6 +9921,7 @@ fn compute_charge_plan_inner<'a>(
         return (
             crate::forecast::planner::PlanRecommendation::NoPlan { reason },
             None,
+            None,
         );
     }
 
@@ -9888,6 +9931,7 @@ fn compute_charge_plan_inner<'a>(
             crate::forecast::planner::PlanRecommendation::NoPlan {
             reason: "no battery projection available — connect to the inverter and wait for forecast data".to_string(),
         },
+            None,
             None,
         );
     };
@@ -10006,6 +10050,7 @@ fn compute_charge_plan_inner<'a>(
             smart_charges: Some(&smart_charges),
         },
     );
+    let spread = spread_advice(settings, snapshot, &inputs, &charge);
     // The export advice rides the same trajectory: hand over the hourly
     // inputs, params, tariff, and floor. `None` when there is no import
     // tariff — the charge planner has already NoPlan'd on that gate.
@@ -10025,7 +10070,37 @@ fn compute_charge_plan_inner<'a>(
         backstop_hours,
         backstop_margin_pct,
     });
-    (charge, ctx)
+    (charge, ctx, spread)
+}
+
+/// The spread-charge advice (issue #483) for `charge`, when the setting is
+/// on and the limit can be written and converted on this inverter: not a
+/// Gateway (its battery writes don't reach the battery), and a live
+/// snapshot to size the register's steps from.
+fn spread_advice(
+    settings: &crate::settings::Settings,
+    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
+    inputs: &crate::forecast::planner::PlanInputs,
+    charge: &crate::forecast::planner::PlanRecommendation,
+) -> Option<crate::forecast::planner::SpreadAdvice> {
+    if !settings.forecast_plan_spread_charge {
+        return None;
+    }
+    let snapshot = snapshot
+        .filter(|s| s.device_type.battery_controls_reach_battery() && s.max_battery_power_w > 0)?;
+    // Adaptive Charge owns the limit register; the Planner never fights it.
+    if crate::inverter::forecast_plan::adaptive_owns_rate(settings) {
+        return Some(crate::forecast::planner::SpreadAdvice::FullRate(
+            crate::forecast::planner::SpreadSkip::AdaptiveCharge,
+        ));
+    }
+    let scale = crate::inverter::power_limit::PowerLimitScale::from_snapshot(snapshot);
+    crate::forecast::planner::spread_charge_advice(inputs, charge, |percent| {
+        scale.can_convert(percent).then(|| {
+            let raw = scale.percent_to_raw(percent);
+            (scale.raw_to_percent(raw), scale.raw_to_watts(raw) / 1000.0)
+        })
+    })
 }
 
 /// Serialise a `PlanRecommendation` into the JSON shape the UI/Apply
@@ -10159,6 +10234,91 @@ pub(crate) fn plan_to_json_value(
             "reason": reason,
             "apply": null,
         }),
+    }
+}
+
+/// Serialise the spread-charge advice (issue #483) for the Planner card:
+/// the numbers, plus a one-line `summary` in the rationale's voice.
+fn spread_advice_to_json(advice: &crate::forecast::planner::SpreadAdvice) -> Value {
+    use crate::forecast::planner::{hhmm, SpreadAdvice, SpreadSkip};
+    match advice {
+        SpreadAdvice::Spread {
+            rate_percent,
+            rate_kw,
+            target_soc_pct,
+            kwh,
+            finish_min,
+            full_rate_finish_min,
+            full_rate_minutes,
+            window_minutes,
+            after_min_soc_pct,
+        } => {
+            let full_finish = hhmm(*full_rate_finish_min);
+            let summary = format!(
+                "Would charge at {rate_kw:.2} kW ({rate_percent}%) to {target_soc_pct}%, \
+                 finishing about {} instead of {full_finish} at full power. Advice only: the \
+                 plan still charges at full power.",
+                hhmm(*finish_min),
+            );
+            json!({
+                "kind": "spread",
+                "rate_percent": rate_percent,
+                "rate_kw": rate_kw,
+                "target_soc_pct": target_soc_pct,
+                "kwh": kwh,
+                "finish": hhmm(*finish_min),
+                "full_rate_finish": full_finish,
+                "full_rate_minutes": full_rate_minutes,
+                "window_minutes": window_minutes,
+                "after_min_soc_pct": after_min_soc_pct,
+                "summary": summary,
+            })
+        }
+        SpreadAdvice::FullRate(skip) => {
+            let (reason, summary) = match skip {
+                SpreadSkip::WindowTooShort { window_minutes } => (
+                    "window_too_short",
+                    format!(
+                        "Full power: the {}-minute cheap window is too short to spread.",
+                        window_minutes
+                    ),
+                ),
+                SpreadSkip::NotWorthwhile {
+                    full_rate_minutes,
+                    window_minutes,
+                } => (
+                    "not_worthwhile",
+                    format!(
+                        "Full power: it already fills {:.0}% of the cheap window, so a lower \
+                         rate gains little.",
+                        f64::from(*full_rate_minutes) / f64::from((*window_minutes).max(1)) * 100.0
+                    ),
+                ),
+                SpreadSkip::NeedsFullRate => (
+                    "needs_full_rate",
+                    "Full power: a lower rate wouldn't fit the charge in the window.".to_string(),
+                ),
+                SpreadSkip::AdaptiveCharge => (
+                    "adaptive_charge",
+                    "Full power: Adaptive Charge sets the charge limit, so the Planner leaves it \
+                     alone."
+                        .to_string(),
+                ),
+                SpreadSkip::NeedsPackSize => (
+                    "needs_pack_size",
+                    "Full power: a lower limit needs the battery's capacity, which isn't known \
+                     yet."
+                        .to_string(),
+                ),
+                SpreadSkip::WorseTrough => (
+                    "worse_trough",
+                    "Full power: a lower limit would leave the battery lower before the next \
+                     cheap period."
+                        .to_string(),
+                ),
+            };
+            json!({ "kind": "full_rate", "reason": reason, "summary": summary })
+        }
     }
 }
 
@@ -22918,6 +23078,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn plan_spread_charge_saves_and_reads_back() {
+        // Issue #483: Spread Charge Across Window, through the handlers.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_spread_charge"], false);
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_spread_charge": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(crate::settings::Settings::load().forecast_plan_spread_charge);
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_spread_charge"], true);
+            // Anything but a boolean, or a save without the field, leaves it.
+            for body in [
+                json!({ "forecast_plan_spread_charge": "false" }),
+                json!({ "forecast_plan_strategy": "cheapest" }),
+            ] {
+                let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::OK);
+                assert!(crate::settings::Settings::load().forecast_plan_spread_charge);
+            }
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_spread_charge": false })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!crate::settings::Settings::load().forecast_plan_spread_charge);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn the_plan_says_how_many_cheap_windows_the_tariff_has() {
         // Issue #453: Cosy has three, Flux one, no tariff none.
         with_isolated_config_dir_async(|| async {
@@ -28123,12 +28319,86 @@ pub(crate) mod tests {
         let advice = ExportAdvice::NoExport {
             reason: "none".to_string(),
         };
-        let data = plan_response_json(&rec, Some(&advice));
+        let data = plan_response_json(&rec, Some(&advice), None);
         assert_eq!(data["recommendation"]["kind"], "no_charge_needed");
         assert!(data["recommendation"].get("apply").is_none());
         assert_eq!(data["apply"], Value::Null);
         assert_eq!(data["export"], export_advice_to_json(&advice));
-        assert_eq!(plan_response_json(&rec, None)["export"], Value::Null);
+        // No spread key at all with the setting off (issue #483).
+        assert!(data.get("spread").is_none(), "{data}");
+        assert_eq!(plan_response_json(&rec, None, None)["export"], Value::Null);
+        // With advice, the page and plan history both carry it.
+        let spread = crate::forecast::planner::SpreadAdvice::FullRate(
+            crate::forecast::planner::SpreadSkip::WorseTrough,
+        );
+        let data = plan_response_json(&rec, Some(&advice), Some(&spread));
+        assert_eq!(data["spread"], spread_advice_to_json(&spread));
+        assert_eq!(data["spread"]["reason"], "worse_trough");
+    }
+
+    /// Issue #483: the spread advice block, both kinds, with times on the
+    /// window's own clock (across midnight too) and one-line summaries.
+    #[test]
+    fn spread_advice_json_has_the_numbers_and_a_summary() {
+        use crate::forecast::planner::{SpreadAdvice, SpreadSkip};
+        let spread = SpreadAdvice::Spread {
+            rate_percent: 35,
+            rate_kw: 1.75,
+            target_soc_pct: 65,
+            kwh: 4.2,
+            finish_min: 2 * 60 + 54,
+            full_rate_finish_min: 20,
+            full_rate_minutes: 50,
+            window_minutes: 360,
+            after_min_soc_pct: 25.0,
+        };
+        let json = spread_advice_to_json(&spread);
+        assert_eq!(json["kind"], "spread");
+        assert_eq!(json["rate_percent"], 35);
+        assert_eq!(json["target_soc_pct"], 65);
+        assert_eq!(json["finish"], "02:54");
+        assert_eq!(json["full_rate_finish"], "00:20");
+        assert_eq!(
+            json["summary"],
+            "Would charge at 1.75 kW (35%) to 65%, finishing about 02:54 instead of 00:20 \
+             at full power. Advice only: the plan still charges at full power."
+        );
+
+        let cases = [
+            (
+                SpreadSkip::WindowTooShort { window_minutes: 90 },
+                "window_too_short",
+                "90-minute",
+            ),
+            (
+                SpreadSkip::NotWorthwhile {
+                    full_rate_minutes: 135,
+                    window_minutes: 180,
+                },
+                "not_worthwhile",
+                "fills 75% of",
+            ),
+            (
+                SpreadSkip::NeedsFullRate,
+                "needs_full_rate",
+                "wouldn't fit the charge",
+            ),
+            (
+                SpreadSkip::AdaptiveCharge,
+                "adaptive_charge",
+                "Adaptive Charge",
+            ),
+            (SpreadSkip::NeedsPackSize, "needs_pack_size", "capacity"),
+            (SpreadSkip::WorseTrough, "worse_trough", "lower before"),
+        ];
+        for (skip, reason, words) in cases {
+            let json = spread_advice_to_json(&SpreadAdvice::FullRate(skip));
+            assert_eq!(json["kind"], "full_rate");
+            assert_eq!(json["reason"], reason);
+            let summary = json["summary"].as_str().unwrap();
+            assert!(summary.starts_with("Full power: "), "{summary}");
+            assert!(summary.contains(words), "{summary}");
+        }
     }
 
     // ---- cheapest-overall inputs (issue #359) ----------------------------

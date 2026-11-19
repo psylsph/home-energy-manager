@@ -486,7 +486,9 @@ async fn compute_plan(
             include_current_hour,
             timed_export_slots: &timed_export,
         });
-        let (rec, export) = match running_window_start {
+        // The spread advice (issue #483) rides along for plan history only:
+        // nothing here acts on it. None inside a running window.
+        let (rec, export, spread) = match running_window_start {
             Some(start) => (
                 crate::server::api::compute_running_window_plan(
                     &forecast,
@@ -496,8 +498,9 @@ async fn compute_plan(
                     start,
                 ),
                 None,
+                None,
             ),
-            None => crate::server::api::compute_full_plan(
+            None => crate::server::api::compute_full_plan_advice(
                 &forecast,
                 &settings,
                 Some(&live_snapshot),
@@ -507,6 +510,7 @@ async fn compute_plan(
         ComputedPlan {
             rec,
             export,
+            spread,
             forecast,
             dispatch_revision,
         }
@@ -541,6 +545,8 @@ pub(crate) async fn export_backstop_floor(
 struct ComputedPlan {
     rec: PlanRecommendation,
     export: Option<crate::forecast::planner::ExportAdvice>,
+    /// What spreading the charge would do (issue #483), for plan history.
+    spread: Option<crate::forecast::planner::SpreadAdvice>,
     forecast: crate::forecast::ForecastPayload,
     /// The dispatch list revision the plan was made with (issue #404); none
     /// when it had no fresh list.
@@ -575,9 +581,13 @@ async fn record_plan_snapshot(
             .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_default(),
         // Exactly what GET /api/forecast/plan served: the recommendation,
-        // its Apply payload and the export advice.
-        plan_json: crate::server::api::plan_response_json(&plan.rec, plan.export.as_ref())
-            .to_string(),
+        // its Apply payload, the export advice and any spread advice.
+        plan_json: crate::server::api::plan_response_json(
+            &plan.rec,
+            plan.export.as_ref(),
+            plan.spread.as_ref(),
+        )
+        .to_string(),
         forecast_json,
     };
     let cutoff = now.timestamp() - crate::history::PLAN_SNAPSHOT_RETENTION_DAYS * 24 * 3600;
@@ -595,7 +605,7 @@ async fn record_plan_snapshot(
 
 /// Whether Adaptive Charge currently owns the charge-limit register (the plan
 /// writes it too, so the two must not fight).
-fn adaptive_owns_rate(settings: &Settings) -> bool {
+pub(crate) fn adaptive_owns_rate(settings: &Settings) -> bool {
     settings.adaptive_charge_enabled || settings.adaptive_charge_saved_limit.is_some()
 }
 
@@ -2244,6 +2254,36 @@ mod tests {
             forecast_plan_strategy: crate::settings::PlanStrategy::HoldWindow,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn plan_history_keeps_the_spread_advice_and_leaves_it_out_when_off() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let now = local_dt(2026, 8, 31, 1, 50);
+            let rec = PlanRecommendation::NoPlan { reason: "x".into() };
+            let mut plan = computed(rec.clone()).await;
+            plan.spread = None;
+            record_plan_snapshot(&state, &snapshot_settings(), "refresh", &plan, now).await;
+            let spread = crate::forecast::planner::SpreadAdvice::FullRate(
+                crate::forecast::planner::SpreadSkip::NeedsPackSize,
+            );
+            plan.spread = Some(spread.clone());
+            let later = now + chrono::Duration::minutes(1);
+            record_plan_snapshot(&state, &snapshot_settings(), "refresh", &plan, later).await;
+            let rows = recorded(&state).await;
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            let off: serde_json::Value = serde_json::from_str(&rows[0].plan_json).unwrap();
+            assert!(off.get("spread").is_none(), "{off}");
+            let on: serde_json::Value = serde_json::from_str(&rows[1].plan_json).unwrap();
+            // The same block GET /api/forecast/plan serves.
+            assert_eq!(
+                on,
+                crate::server::api::plan_response_json(&rec, plan.export.as_ref(), Some(&spread))
+            );
+            assert_eq!(on["spread"]["reason"], "needs_pack_size");
+        })
+        .await;
     }
 
     #[tokio::test]

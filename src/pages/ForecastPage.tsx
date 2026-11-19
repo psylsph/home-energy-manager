@@ -348,6 +348,31 @@ function isValidEfficiencyPct(n: number): boolean {
   return Number.isInteger(n) && n >= 50 && n <= 100;
 }
 
+/**
+ * Saving for a Plan Settings field that saves on its own: posts
+ * `{ [key]: next }`, then shows `next` through `show` and runs `after` (the
+ * plan refetch). The field keeps the saved value until the save succeeds, so
+ * a rejected save never shows a setting the planner isn't using.
+ */
+function usePlanSetting<T>(key: string, show: (value: T) => void) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async (next: T, after: () => Promise<unknown>) => {
+    setError(null);
+    setSaving(true);
+    try {
+      await apiPost('/api/settings', { [key]: next });
+      show(next);
+      await after();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return { saving, error, save };
+}
+
 export default function ForecastPage() {
   const [data, setData] = useState<ForecastData | null>(null);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -366,12 +391,15 @@ export default function ForecastPage() {
   // The car-charging threshold, shown read-only; it is set in Settings.
   const [loadAboveKw, setLoadAboveKw] = useState<number | null>(null);
   const [planStrategy, setPlanStrategy] = useState<PlanStrategy>('min_soc');
-  const [planStrategySaving, setPlanStrategySaving] = useState(false);
-  const [planStrategyError, setPlanStrategyError] = useState<string | null>(null);
+  const strategySetting = usePlanSetting('forecast_plan_strategy', setPlanStrategy);
+  const { saving: planStrategySaving, error: planStrategyError } = strategySetting;
   const [planAutoRefresh, setPlanAutoRefresh] = useState<boolean>(false);
   const [planEveryWindow, setPlanEveryWindow] = useState(false);
-  const [planEveryWindowSaving, setPlanEveryWindowSaving] = useState(false);
-  const [planEveryWindowError, setPlanEveryWindowError] = useState<string | null>(null);
+  const everyWindowSetting = usePlanSetting('forecast_plan_every_cheap_window', setPlanEveryWindow);
+  const { saving: planEveryWindowSaving, error: planEveryWindowError } = everyWindowSetting;
+  const [planSpread, setPlanSpread] = useState(false);
+  const spreadSetting = usePlanSetting('forecast_plan_spread_charge', setPlanSpread);
+  const { saving: planSpreadSaving, error: planSpreadError } = spreadSetting;
   const [planAutoApply, setPlanAutoApply] = useState<boolean>(false);
   const [planAutoApplyLeadInput, setPlanAutoApplyLeadInput] = useState<string>('30');
   // True while the checkbox's own save is in flight. The lead field is
@@ -459,6 +487,7 @@ export default function ForecastPage() {
             forecast_plan_auto_apply_lead_minutes?: number;
             forecast_plan_strategy?: PlanStrategy;
             forecast_plan_every_cheap_window?: boolean;
+            forecast_plan_spread_charge?: boolean;
             forecast_charge_efficiency?: number;
             forecast_discharge_efficiency?: number;
             forecast_exclude_load_above_kw?: number | null;
@@ -481,6 +510,7 @@ export default function ForecastPage() {
           : 'min_soc',
       );
       setPlanEveryWindow(settingsRes.data.forecast_plan_every_cheap_window === true);
+      setPlanSpread(settingsRes.data.forecast_plan_spread_charge === true);
       setLoadAboveKw(settingsRes.data.forecast_exclude_load_above_kw ?? null);
       if (syncForm) {
         if (settingsRes.data.forecast_min_soc_pct != null) {
@@ -614,40 +644,11 @@ export default function ForecastPage() {
     }
   };
 
-  // Persist the planner strategy (issue #359). The select stays on the
-  // saved value until the save succeeds, so a rejected save never shows a
-  // strategy the planner isn't using.
-  const savePlanStrategy = async (next: PlanStrategy) => {
-    setPlanStrategyError(null);
-    setPlanStrategySaving(true);
-    try {
-      await apiPost('/api/settings', { forecast_plan_strategy: next });
-      setPlanStrategy(next);
-      // Refetch — the plan is recomputed with the new strategy.
-      await load(false);
-    } catch (e) {
-      setPlanStrategyError(e instanceof Error ? e.message : 'Save failed');
-    } finally {
-      setPlanStrategySaving(false);
-    }
-  };
-
-  // Persist "plan every cheap window" (issue #453). Like the strategy, the
-  // toggle shows the saved value until the save succeeds.
-  const savePlanEveryWindow = async (next: boolean) => {
-    setPlanEveryWindowError(null);
-    setPlanEveryWindowSaving(true);
-    try {
-      await apiPost('/api/settings', { forecast_plan_every_cheap_window: next });
-      setPlanEveryWindow(next);
-      // Refetch — the plan is for the next cheap window now.
-      await load(false);
-    } catch (e) {
-      setPlanEveryWindowError(e instanceof Error ? e.message : 'Save failed');
-    } finally {
-      setPlanEveryWindowSaving(false);
-    }
-  };
+  // The strategy (issue #359), "plan every cheap window" (#453) and
+  // "spread the charge" (#483) each change the plan, so each refetches it.
+  const savePlanStrategy = (next: PlanStrategy) => strategySetting.save(next, () => load(false));
+  const savePlanEveryWindow = (next: boolean) => everyWindowSetting.save(next, () => load(false));
+  const savePlanSpread = (next: boolean) => spreadSetting.save(next, () => load(false));
 
   // Persist the merged automatic-handling control. The next enabled state
   // is explicit — the checkbox toggle and the lead field's blur handler
@@ -1215,6 +1216,12 @@ export default function ForecastPage() {
               {carNote}
             </p>
           )}
+          {plan.spread && plan.recommendation.kind === 'charge' && (
+            <p data-testid="forecast-plan-spread" className="text-xs text-text-secondary">
+              <span className="font-medium text-text-primary">Spread Charge:</span>{' '}
+              {plan.spread.summary}
+            </p>
+          )}
           {batteryControls && plan.apply && plan.recommendation.kind === 'charge' && (
             <ReadOnlyHidden>
             <div className="flex items-center gap-2">
@@ -1309,6 +1316,44 @@ export default function ForecastPage() {
               <HelpTip label="Charging Strategy">{STRATEGY_HELP[planStrategy].detail}</HelpTip>
             </p>
           </div>
+          {/* Spread the charge across the window (issue #483): advice only for
+              now, so the numbers can be checked before HEM writes a lower limit.
+              Not on a Gateway, whose charge limit never reaches the battery. */}
+          {batteryControls && (
+          <div className="pt-3 flex flex-col gap-1" data-testid="forecast-plan-spread-setting">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-text-primary text-xs font-sans font-medium">
+                Spread Charge Across Window
+              </span>
+              <Toggle
+                ariaLabel="Spread Charge Across Window"
+                checked={planSpread}
+                onChange={(next) => void savePlanSpread(next)}
+                disabled={!data || planSpreadSaving}
+                testId="forecast-plan-spread-toggle"
+              />
+              {planSpreadError && (
+                <span data-testid="forecast-plan-spread-error" className="text-xs text-red-400">
+                  {planSpreadError}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-text-secondary font-sans">
+              Shows the slower rate that would fill the battery near the window's end.{' '}
+              <HelpTip label="Spread Charge Across Window">
+                The plan charges at full power from the start of the cheap period, then stops. With
+                this on, the plan also shows the lower rate that would deliver the same charge and
+                finish about 80% of the way through the window, as one slot across the whole window
+                with a target, so it can't overshoot. For now this is advice only: Apply and the
+                automatic plan still charge at full power. Short windows, and charges that already
+                fill 65% or more of the window at full power, stay at full power. The charge limit
+                also caps solar charging, so a daytime window keeps full power when a lower limit
+                would leave the battery lower later. Nothing is suggested while Adaptive Charge sets
+                the limit.
+              </HelpTip>
+            </p>
+          </div>
+          )}
           {/* Plan every cheap window (issue #453): only worth offering on a
               tariff with more than one cheap period, such as Cosy, but kept
               visible while on so it can always be switched off. */}

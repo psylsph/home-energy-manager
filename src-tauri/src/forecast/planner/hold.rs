@@ -29,7 +29,7 @@ use crate::settings::PlanStrategy;
 
 /// Lowest target the slot is ever given. HR 116 decodes 4 as "unset" and
 /// the Control endpoints only treat 5–99 as an unambiguous target.
-const MIN_TARGET_PCT: u8 = 5;
+pub(super) const MIN_TARGET_PCT: u8 = 5;
 
 /// The forward simulation with the selected window occurrence run as a
 /// hold slot.
@@ -47,6 +47,9 @@ pub(super) struct HoldOutcome {
     /// by hour, so it can be priced at the window's rate even when the
     /// window opens or closes part-way through an hour.
     pub(super) window_grid: Vec<f64>,
+    /// Minutes into the slot when the battery first reaches the target,
+    /// `None` when it never does.
+    pub(super) target_reached_min: Option<f64>,
     /// The hours the minimum is judged across (see [`post_range`]).
     post: (usize, usize),
     /// Hour index where the next cheap-window occurrence begins.
@@ -73,7 +76,7 @@ impl HoldOutcome {
     }
 
     /// Lowest SOC across the judged hours, %.
-    fn trough_pct(&self) -> f64 {
+    pub(super) fn trough_pct(&self) -> f64 {
         self.series[self.post.0..self.post.1.min(self.series.len())]
             .iter()
             .map(|h| h.soc_pct)
@@ -108,13 +111,18 @@ pub(super) fn simulate_hold(
         last,
         next_occurrence_start,
         target_pct,
+        None,
     )
 }
 
 /// Simulate the hold for an occurrence already found: `run` is the hours
 /// the slot is active (empty for plain Eco), `last_of_run` the occurrence's
 /// last hour, from which the minimum is judged, and `next_occurrence_start`
-/// where the following one begins.
+/// where the following one begins. `window_charge_kw`, when set, is the
+/// charge limit inside the slot (issue #483): it caps the grid charge and
+/// the solar charge alike, as the inverter's single limit does, while the
+/// hours outside the slot keep `params.max_charge_kw`.
+#[allow(clippy::too_many_arguments)]
 fn simulate_hold_run(
     sim_hours: &[SimHourInput],
     params: &SimulationParams,
@@ -123,14 +131,18 @@ fn simulate_hold_run(
     last_of_run: usize,
     next_occurrence_start: Option<usize>,
     target_pct: u8,
+    window_charge_kw: Option<f64>,
 ) -> Option<HoldOutcome> {
     let eta_c = params.charge_efficiency.clamp(0.01, 1.0);
+    let slot_charge_kw = window_charge_kw.unwrap_or(params.max_charge_kw);
     let target = f64::from(target_pct.min(100));
     let mut soc = params.start_soc_pct;
     let mut series = Vec::with_capacity(sim_hours.len());
     let mut window_grid = Vec::with_capacity(sim_hours.len());
     let mut charge_kwh = 0.0;
     let mut grid_kwh = 0.0;
+    let mut slot_minutes = 0.0;
+    let mut target_reached_min = None;
 
     for (index, hour) in sim_hours.iter().copied().enumerate() {
         let mut hour_drawn = 0.0;
@@ -153,6 +165,11 @@ fn simulate_hold_run(
             for (mut segment_hour, fraction) in hour.held_parts(end - start) {
                 let segment_params = SimulationParams {
                     start_soc_pct: soc,
+                    max_charge_kw: if inside {
+                        slot_charge_kw
+                    } else {
+                        params.max_charge_kw
+                    },
                     ..*params
                 };
                 let mut drawn = 0.0;
@@ -161,7 +178,7 @@ fn simulate_hold_run(
                     // what is left of the room to the target and of the rate.
                     let surplus = hour.surplus_kwh() * fraction;
                     let room_ac = (target - soc).max(0.0) / 100.0 * params.capacity_kwh / eta_c;
-                    let charge_ac = (params.max_charge_kw * fraction - surplus)
+                    let charge_ac = (slot_charge_kw * fraction - surplus)
                         .min(room_ac - surplus)
                         .max(0.0);
                     let unmet_load = hour.net_load_kwh() * fraction;
@@ -170,6 +187,18 @@ fn simulate_hold_run(
                     drawn = charge_ac + unmet_load;
                 }
                 let res = simulate_battery_segment(segment_hour, &segment_params, fraction)?;
+                if inside {
+                    // The battery takes the slot's rate, sun and grid together,
+                    // until the target; sun can lift it further afterwards.
+                    if target_reached_min.is_none() && res.soc_pct >= target - 1e-6 {
+                        let to_target_ac =
+                            (target - soc).max(0.0) / 100.0 * params.capacity_kwh / eta_c;
+                        let minutes =
+                            (to_target_ac / slot_charge_kw.max(1e-9) * 60.0).min(fraction * 60.0);
+                        target_reached_min = Some(slot_minutes + minutes);
+                    }
+                    slot_minutes += fraction * 60.0;
+                }
                 soc = res.soc_pct;
                 grid_kwh += drawn;
                 hour_drawn += drawn;
@@ -193,6 +222,7 @@ fn simulate_hold_run(
         charge_kwh,
         grid_kwh,
         window_grid,
+        target_reached_min,
         post,
         next_occurrence_start,
     })
@@ -246,15 +276,18 @@ impl HoldContext<'_> {
         params: &SimulationParams,
         target: u8,
     ) -> Option<HoldOutcome> {
-        simulate_hold_run(
-            hours,
-            params,
-            &self.window,
-            &self.run,
-            self.last,
-            self.next_occurrence_start,
-            target,
-        )
+        self.run_on(hours, params, &self.run, target, None)
+    }
+
+    /// [`Self::simulate`] with the charge limit inside the slot lowered to
+    /// `charge_kw` (issue #483).
+    pub(super) fn simulate_at_rate(
+        &self,
+        params: &SimulationParams,
+        target: u8,
+        charge_kw: f64,
+    ) -> Option<HoldOutcome> {
+        self.run_on(self.sim_hours, params, &self.run, target, Some(charge_kw))
     }
 
     /// The same hours with no slot at all: plain Eco, the battery running
@@ -264,14 +297,28 @@ impl HoldContext<'_> {
         hours: &[SimHourInput],
         params: &SimulationParams,
     ) -> Option<HoldOutcome> {
+        self.run_on(hours, params, &[], 100, None)
+    }
+
+    /// [`simulate_hold_run`] over this occurrence, with the slot active
+    /// in `run`.
+    fn run_on(
+        &self,
+        hours: &[SimHourInput],
+        params: &SimulationParams,
+        run: &[usize],
+        target: u8,
+        window_charge_kw: Option<f64>,
+    ) -> Option<HoldOutcome> {
         simulate_hold_run(
             hours,
             params,
             &self.window,
-            &[],
+            run,
             self.last,
             self.next_occurrence_start,
-            100,
+            target,
+            window_charge_kw,
         )
     }
 }
@@ -302,6 +349,7 @@ pub(super) fn prepare_hold<'a>(inputs: &PlanInputs<'a>) -> Option<HoldContext<'a
             last,
             next_occurrence_start,
             target,
+            None,
         )
     };
     let full = simulate(100)?;

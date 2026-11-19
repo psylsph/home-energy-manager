@@ -1573,6 +1573,113 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'false');
   });
 
+  // Issue #483: spread the charge across the window, advice only.
+  const withSpread = (plan: { ok: true; data: unknown }, spread: unknown) => ({
+    ok: true as const,
+    data: { ...(plan.data as Record<string, unknown>), spread },
+  });
+
+  it('saves Spread Charge Across Window and refetches the plan', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-plan-spread-setting');
+    expect(row.textContent).toMatch(/Spread Charge Across Window/);
+    expect(
+      within(row).getByRole('button', { name: 'More about Spread Charge Across Window' }),
+    ).toBeTruthy();
+    const toggle = within(row).getByRole('switch', { name: 'Spread Charge Across Window' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-disabled', 'false'));
+    apiPostMocked.mockClear();
+    apiGetMock.mockClear();
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(apiPostMocked).toHaveBeenCalledWith('/api/settings', {
+        forecast_plan_spread_charge: true,
+      });
+    });
+    await waitFor(() => {
+      expect(apiGetMock.mock.calls.some((c) => c[0] === '/api/forecast/plan')).toBe(true);
+    });
+  });
+
+  it('reports a failed Spread Charge Across Window save and stays off', async () => {
+    mockPage(planPayload('charge'));
+    apiPostMocked.mockRejectedValueOnce(new Error('Save refused'));
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-plan-spread-setting');
+    const toggle = within(row).getByRole('switch', { name: 'Spread Charge Across Window' });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-disabled', 'false'));
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByTestId('forecast-plan-spread-error')).toHaveTextContent(/save refused/i);
+    });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('hides Spread Charge Across Window on a Gateway, where it can never apply', async () => {
+    // The Gateway doesn't pass a charge limit on to the AIO (issue #428), so
+    // the backend never gives spread advice there.
+    onTestFinished(() => useInverterStore.setState({ snapshot: null } as never));
+    useInverterStore.setState({
+      snapshot: { soc: 50, max_battery_power_w: 5000, device_type_code: '7001' },
+    } as never);
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-plan-strategy')).toBeTruthy();
+    expect(screen.queryByTestId('forecast-plan-spread-setting')).toBeNull();
+  });
+
+  it('shows the spread advice on the plan card, and nothing without it', async () => {
+    const summary =
+      'Would charge at 1.75 kW (35%) to 65%, finishing about 04:24 instead of 02:50 at full power. Advice only: the plan still charges at full power.';
+    mockPage(
+      withSpread(planPayload('charge'), {
+        kind: 'spread',
+        rate_percent: 35,
+        rate_kw: 1.75,
+        target_soc_pct: 65,
+        kwh: 4.2,
+        finish: '04:24',
+        full_rate_finish: '02:50',
+        full_rate_minutes: 50,
+        window_minutes: 180,
+        after_min_soc_pct: 25,
+        summary,
+      }),
+      { forecast_min_soc_pct: 20, forecast_plan_spread_charge: true },
+    );
+    const { unmount } = render(<ForecastPage />);
+    const line = await screen.findByTestId('forecast-plan-spread');
+    expect(line).toHaveTextContent(`Spread Charge: ${summary}`);
+    // Advice only: Apply still sends the plan's own full-rate slot.
+    fireEvent.click(screen.getByTestId('forecast-plan-apply'));
+    await waitFor(() => {
+      const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');
+      expect(slotCall?.[1]).toMatchObject({ charge_rate_percent: 100 });
+    });
+    unmount();
+
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-kwh');
+    expect(screen.queryByTestId('forecast-plan-spread')).toBeNull();
+  });
+
+  it('says why a charge stays at full power', async () => {
+    mockPage(
+      withSpread(planPayload('charge'), {
+        kind: 'full_rate',
+        reason: 'not_worthwhile',
+        summary: 'Full power: it already fills 72% of the cheap window, so a lower rate gains little.',
+      }),
+    );
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-plan-spread')).toHaveTextContent(
+      /Full power: it already fills 72%/,
+    );
+  });
+
   it('reports a failed strategy save and keeps the previous choice', async () => {
     mockPage(planPayload('charge'));
     apiPostMocked.mockRejectedValueOnce(new Error('Unknown planner strategy'));

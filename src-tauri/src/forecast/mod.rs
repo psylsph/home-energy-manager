@@ -1690,6 +1690,97 @@ pub(crate) mod tests {
         );
     }
 
+    /// Issue #483: the spread advice is only worked out with the setting on,
+    /// never changes the plan or its export advice, and stands down where the
+    /// limit can't reach the battery.
+    #[test]
+    fn spread_advice_rides_the_plan_only_when_switched_on() {
+        use crate::forecast::planner::SpreadAdvice;
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        seed_full_forecast_state(&db, now);
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 0.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![slot("00:00", "05:00", 0.07), slot("05:00", "23:59", 0.27)],
+        });
+        let snap = battery_snapshot();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+
+        let off =
+            crate::server::api::compute_full_plan_advice(&payload, &settings, Some(&snap), now_ts);
+        assert!(off.2.is_none(), "{:?}", off.2);
+
+        settings.forecast_plan_spread_charge = true;
+        let on =
+            crate::server::api::compute_full_plan_advice(&payload, &settings, Some(&snap), now_ts);
+        assert_eq!(format!("{:?}", on.0), format!("{:?}", off.0));
+        assert_eq!(format!("{:?}", on.1), format!("{:?}", off.1));
+        // Overcast all day: the plan asks for more than the battery holds,
+        // so its slot spans the window, but full power fills the battery in
+        // about an hour and a half of it, so a gentler charge to 100% fits.
+        assert!(
+            matches!(
+                on.2,
+                Some(SpreadAdvice::Spread {
+                    target_soc_pct: 100,
+                    ..
+                })
+            ),
+            "{:?}",
+            on.2
+        );
+        // While Adaptive Charge owns the limit, the advice says so.
+        settings.adaptive_charge_enabled = true;
+        let adaptive =
+            crate::server::api::compute_full_plan_advice(&payload, &settings, Some(&snap), now_ts);
+        assert_eq!(format!("{:?}", adaptive.0), format!("{:?}", off.0));
+        assert_eq!(
+            adaptive.2,
+            Some(SpreadAdvice::FullRate(
+                crate::forecast::planner::SpreadSkip::AdaptiveCharge
+            ))
+        );
+        settings.adaptive_charge_enabled = false;
+        // The entry point without the advice gives the same plan.
+        let (plain, _) =
+            crate::server::api::compute_full_plan(&payload, &settings, Some(&snap), now_ts);
+        assert_eq!(format!("{plain:?}"), format!("{:?}", off.0));
+
+        // A Gateway's battery writes don't reach the battery: no advice.
+        let gateway = InverterSnapshot {
+            device_type: crate::inverter::model::DeviceType::Gateway,
+            ..battery_snapshot()
+        };
+        let gw = crate::server::api::compute_full_plan_advice(
+            &payload,
+            &settings,
+            Some(&gateway),
+            now_ts,
+        );
+        assert!(gw.2.is_none(), "{:?}", gw.2);
+        // Nor without a live snapshot to size the register's steps from.
+        let none = crate::server::api::compute_full_plan_advice(&payload, &settings, None, now_ts);
+        assert!(none.2.is_none(), "{:?}", none.2);
+    }
+
     /// Issue #359 review: the export advice must see a hold plan's charge,
     /// or it can sell into the very hours the battery is being charged.
     #[test]
