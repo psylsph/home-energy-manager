@@ -56,7 +56,7 @@
   },
   "dependencies": {
     "@tauri-apps/plugin-autostart": "~2.7.0",
-    "@tauri-apps/plugin-opener": "~2.7.0",
+    "@tauri-apps/plugin-opener": "~2.7.3",
     "jspdf": "^4.2.1",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
