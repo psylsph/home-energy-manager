@@ -344,6 +344,8 @@ Home Energy Manager has a built-in web server, so you can access it from your ph
 
 Tailscale encrypts everything end-to-end, so your inverter data stays private.
 
+For an `https://` address instead of the IP and port, which some phones need to install it as a home-screen app, see [**HTTPS over Tailscale**](./INSTALL.md#https-over-tailscale). It covers every way of running HEM: the desktop app, headless, Docker and Proxmox.
+
 <details>
 <summary><b>📋 Detailed instructions</b></summary>
 
@@ -363,20 +365,6 @@ Then on your phone:
 4. Tap **Share → Add to Home Screen** for a native-app-like experience
 
 > 💡 **Tip**: Set Home Energy Manager to run on boot so it's always available.
-
-</details>
-
-<details>
-<summary><b>🔧 Alternative: Tailscale Funnel (no app needed on phone)</b></summary>
-
-If you don't want Tailscale on your phone, you can expose the web UI via a public `.ts.net` URL:
-
-```bash
-sudo tailscale serve --bg --https 443 127.0.0.1:7337
-sudo tailscale funnel --bg 443
-```
-
-Your app will be available at `https://<machine-name>.<tailnet-name>.ts.net`. Tailscale handles HTTPS. Note: Funnel is a paid Tailscale feature.
 
 </details>
 

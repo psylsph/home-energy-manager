@@ -49,6 +49,8 @@ The dashboard runs a local web server on port **7337**. To access it from anothe
 3. If it doesn't load, check your firewall settings (see above).
 4. Make sure both devices are on the same network.
 
+To reach it away from home, or over `https://`, see [HTTPS over Tailscale](./INSTALL.md#https-over-tailscale).
+
 ---
 
 ### I updated the app, but Settings still shows the old version

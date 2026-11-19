@@ -100,7 +100,7 @@ The Apple Watch itself can't run Tailscale, but your iPhone can — and the watc
 4. Bookmark it on the iPhone, then in the Watch app on the iPhone add the bookmark to the watch's Safari (or just type the URL on the watch)
 5. The iPhone needs to be on and connected to Tailscale for the watch to fetch a fresh reading. If the iPhone is on home Wi-Fi, the plain LAN IP also works — use whichever is closer
 
-This is exactly the same setup as the main README's **"📱 Using on Your Phone Away From Home"** section, just with `/mini` on the end of the URL. The full Tailscale walk-through (Funnel, ACLs, etc.) lives there.
+This is exactly the same setup as the main README's **"📱 Using on Your Phone Away From Home"** section, just with `/mini` on the end of the URL. For an `https://` address instead of the IP and port, see [HTTPS over Tailscale](#https-over-tailscale).
 
 <details>
 <summary><b>Power-user option: build a custom Shortcut from the raw JSON</b></summary>
@@ -140,11 +140,11 @@ Because the iPhone does the fetching (not the watch), this works on a GPS-only w
 
 **Phone says "this site is not secure" or shows a warning:**
 
-- That's normal and expected. The app talks to your inverter over your local network, so it uses plain `http://` (no `s`). Your data never leaves your house — it's only your phone talking to your PC. You can safely tap "Proceed" or "Visit this website".
+- That's normal and expected. The app talks to your inverter over your local network, so it uses plain `http://` (no `s`). Your data never leaves your house — it's only your phone talking to your PC. You can safely tap "Proceed" or "Visit this website". If you'd rather have a proper `https://` address, see [HTTPS over Tailscale](#https-over-tailscale).
 
 **It works at home but not when I'm out:**
 
-- That's expected! When you're out and about, your phone isn't on your home Wi-Fi anymore, so it can't reach the PC. To use the app away from home you'd need to set up a VPN back to your house, or expose the app to the internet (which is more advanced and outside the scope of this guide). The easy and safe option is just to use it on your home Wi-Fi.
+- That's expected! When you're out and about, your phone isn't on your home Wi-Fi anymore, so it can't reach the PC. The safe way to use it away from home is Tailscale, a free private network between your own devices: see [HTTPS over Tailscale](#https-over-tailscale), which also gives you an `https://` address.
 
 **Tip for an always-reliable setup:** Set your PC to **never sleep** while plugged in (**Settings → System → Power → Screen and sleep → When plugged in, PC goes to sleep after → Never**) and turn on the **Startup** toggle for the app (see Step 1). That way the dashboard is always reachable from your phone whenever you're home. For a truly hands-off setup that runs 24/7 without your PC being on, see the [Raspberry Pi (headless server)](#raspberry-pi-headless-server) section below.
 
@@ -321,7 +321,7 @@ rm -rf ~/.givenergy-local
 
 ## Running Headless (as a Background Service)
 
-You can run Home Energy Manager without a desktop window — it serves the full web UI to any browser on your network. This is ideal for a Raspberry Pi or always-on server.
+You can run Home Energy Manager without a desktop window — it serves the full web UI to any browser on your network. This is ideal for a Raspberry Pi or always-on server. To reach it over HTTPS, from home or away, see [HTTPS over Tailscale](#https-over-tailscale).
 
 ### Option 1: Native
 
@@ -454,7 +454,9 @@ The Home Energy Manager web interface and control API do not provide their own
 login screen. Put the LXC only on a trusted LAN or restrict access to port 7337
 with the Proxmox firewall. The container must be able to reach the inverter or
 data adapter on TCP port 8899 and GitHub over HTTPS for installation and
-updates.
+updates. To reach the dashboard over HTTPS, see
+[HTTPS over Tailscale](#https-over-tailscale), which covers the container's
+TUN device.
 
 To remove the complete installation, first confirm the printed container ID,
 then stop and destroy that LXC using the normal Proxmox UI or `pct`. Destroying
@@ -600,6 +602,7 @@ A few important points:
 - The Pi must stay powered on and HEM must be running. Tailscale only provides the network path; it does not replace HEM.
 - Tailscale uses Android/iOS's VPN slot. If another VPN is active, disable it or check its routing if the connection does not work.
 - You do not need port forwarding, Tailscale Funnel, or a subnet router for this setup.
+- For an `https://` address instead of `http://100.x.y.z:7337`, see [HTTPS over Tailscale](#https-over-tailscale).
 - If the URL does not open, first confirm that Tailscale shows both devices as connected, then try the Pi's Tailscale IP from the Pi itself with `curl http://127.0.0.1:7337/api/status`.
 
 #### Blank window, flicker, or the app fails to open on Raspberry Pi
@@ -651,7 +654,7 @@ Then start it:
 docker run -d --name givenergy-local --restart unless-stopped -p 7337:7337 -v home-energy-manager-data:/root/.givenergy-local psylsph/home-energy-manager:latest
 ```
 
-Open `http://localhost:7337` on the Docker host, or `http://<server-ip>:7337` from another device on your network.
+Open `http://localhost:7337` on the Docker host, or `http://<server-ip>:7337` from another device on your network. For an HTTPS address, put Tailscale on the Docker host as in [HTTPS over Tailscale](#https-over-tailscale); the container doesn't change.
 
 > **Note:** The container is named `givenergy-local` to match the Compose and unRAID setups
 > below. If you originally followed an earlier version of this guide, your container may be
@@ -816,6 +819,129 @@ docker run -d \
 ```
 
 Your settings and history are preserved — only the app binary is replaced.
+
+---
+
+## HTTPS over Tailscale
+
+Home Energy Manager serves its web page over plain HTTP on port 7337. That's fine at home, but a few things want HTTPS: some phones only install a web page properly as a home-screen app over HTTPS, some browsers warn about HTTP pages, and a script sending a key to the [authenticated API](./REMOTE_CONTROL.md) shouldn't send it in the clear.
+
+The simplest way to get a real HTTPS address, with no certificates to buy or renew, is [Tailscale](https://tailscale.com) on the machine that runs Home Energy Manager. Its `serve` command gives you an address like `https://hem-pi.tail1234.ts.net` that forwards to port 7337. Only devices signed in to your own Tailscale network (your *tailnet*) can open it, and Tailscale gets and renews the certificate itself.
+
+Plain `http://<ip>:7337` keeps working on your home network alongside it, so nothing you use today changes.
+
+### Step 1: Turn on HTTPS in Tailscale
+
+In the Tailscale admin console, open the [DNS page](https://login.tailscale.com/admin/dns), turn on **MagicDNS** if it's off, then under **HTTPS Certificates** choose **Enable HTTPS**.
+
+> Certificates are published in a public log that lists the machine's name (for example `hem-pi.tail1234.ts.net`), though nobody can reach it unless they're on your tailnet. If the machine's name says anything you'd rather keep private, rename it on the [Machines page](https://login.tailscale.com/admin/machines) first.
+
+While you're on the Machines page, open the **⋯** menu for the machine that runs Home Energy Manager and choose **Disable key expiry**. Otherwise Tailscale signs that machine out after 180 days and the HTTPS address stops working until you sign it in again.
+
+### Step 2: Put Tailscale where Home Energy Manager runs
+
+Home Energy Manager always listens on port 7337 of the machine it runs on, so the same command works for every install. What differs is where Tailscale goes:
+
+| How you run it | Where Tailscale goes |
+|---|---|
+| Desktop app (Windows, macOS, Linux) | On the PC. Install it from [tailscale.com/download](https://tailscale.com/download) and sign in. |
+| [Headless Linux](#option-1-native) or [Raspberry Pi](#raspberry-pi-headless-server) | On the same machine: `curl -fsSL https://tailscale.com/install.sh \| sh`, then `sudo tailscale up`. |
+| [Docker](#option-2-docker) or [unRAID](#option-3-unraid) | On the Docker host, not in the container, which stays as it is. This works with `--network host` / `network_mode: host` and with `-p 7337:7337`, because either way Home Energy Manager is on the host's port 7337. |
+| [Proxmox VE LXC](#proxmox-ve-lxc) | Inside the container. See [Proxmox: give the container a TUN device](#proxmox-give-the-container-a-tun-device) first. |
+
+If you've moved Home Energy Manager to another port (`--port 8080`, `HEM_PORT=8080`, or `-p 8080:7337` with Docker), use that port instead of 7337 in the next step.
+
+### Step 3: Turn on the HTTPS address
+
+On the machine where you installed Tailscale, run:
+
+**Linux, Raspberry Pi, Docker host, Proxmox LXC:**
+
+```bash
+sudo tailscale serve --bg --https=443 http://127.0.0.1:7337
+```
+
+**Windows** (in PowerShell or Command Prompt):
+
+```powershell
+tailscale serve --bg --https=443 http://127.0.0.1:7337
+```
+
+**macOS** (in Terminal; the app's command-line tool lives inside the app):
+
+```bash
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg --https=443 http://127.0.0.1:7337
+```
+
+It prints the address, something like `https://hem-pi.tail1234.ts.net`. You can show it again any time with `tailscale serve status`.
+
+`--bg` makes it permanent: it comes back by itself after a restart, until you turn it off with `tailscale serve reset`. Without `--bg` it stops when you close the terminal.
+
+### Step 4: Open it on your phone
+
+1. Install the Tailscale app on your phone ([App Store](https://apps.apple.com/app/tailscale/id1470499037), [Google Play](https://play.google.com/store/apps/details?id=com.tailscale.ipn)), sign in to the same account and switch it on.
+2. Open the address from Step 3 in Safari or Chrome. The very first visit can take several seconds while Tailscale fetches the certificate; after that it's quick.
+3. Add it to your home screen as in [Step 4 of the phone guide](#step-4-add-it-to-your-home-screen-optional-but-nice).
+
+The mini page works the same way: add `/mini` to the end of the address.
+
+### Keeping it working after a restart
+
+The `serve` setting survives a restart, but the address only works while Tailscale is connected and Home Energy Manager is running:
+
+- **Linux, Raspberry Pi, Docker host, Proxmox:** Tailscale starts at boot by itself, so there's nothing to do.
+- **Windows:** Tailscale starts at boot but disconnects until someone logs in. To keep it connected, right-click the Tailscale icon in the system tray and choose **Preferences → Run unattended**.
+- **macOS:** turn on **Launch at login** in the Tailscale app's settings.
+- **Desktop app on any system:** the HTTPS address only works while the app is open, so leave the PC awake and turn on **Settings → App → Start on Login** (see the [phone guide's tips](#it-doesnt-work--what-now)).
+
+### Proxmox: give the container a TUN device
+
+Tailscale needs the `/dev/net/tun` device, which an unprivileged LXC doesn't have. On the Proxmox host, with your container's ID in place of `<container-id>`:
+
+```bash
+pct set <container-id> --dev0 /dev/net/tun
+pct reboot <container-id>
+```
+
+(Or in the Proxmox web UI: the container's **Resources → Add → Device Passthrough**, path `/dev/net/tun`, then restart it.) On Proxmox 7, which doesn't have that option, add these two lines to `/etc/pve/lxc/<container-id>.conf` instead and restart the container:
+
+```text
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+```
+
+Then open a shell in the container with `pct enter <container-id>`, install Tailscale and run Step 3 there (without `sudo`, since you're already root).
+
+If you'd rather not pass the device through, Tailscale can run without it in [userspace networking mode](https://tailscale.com/kb/1112/userspace-networking): inside the container, set `FLAGS="--tun=userspace-networking"` in `/etc/default/tailscaled` and run `systemctl restart tailscaled`. `tailscale serve` works the same way in that mode. Tailscale's own [LXC guide](https://tailscale.com/kb/1130/lxc-unprivileged) has more detail.
+
+### Things to know
+
+- **No login is added.** Anyone who can open the HTTPS address can see and control the inverter, as on your home network. Keep your tailnet to people you trust.
+- **Every visitor looks local to Home Energy Manager.** The HTTPS address reaches it from the machine itself, so the authenticated API's key and port settings, normally changeable only on that machine, can be changed from any device on your tailnet.
+- **The authenticated API can have its own HTTPS address.** Leave its listen address on `127.0.0.1` and give it a second port, e.g. `sudo tailscale serve --bg --https=8443 http://127.0.0.1:7338`, so the key only ever travels over HTTPS. See [REMOTE_CONTROL.md](./REMOTE_CONTROL.md).
+
+### If it doesn't work
+
+- **The address doesn't open at all:** check that Tailscale is switched on on the phone and that both devices show as connected in the Tailscale app. On the HEM machine, `tailscale serve status` should list the address.
+- **An error page instead of the dashboard:** Tailscale is working but can't reach Home Energy Manager. Make sure it's running (on a server, `curl http://127.0.0.1:7337/api/status` should answer) and that the port in Step 3 is the one it uses.
+- **A certificate error on the first visit:** HTTPS isn't enabled for your tailnet (Step 1), or the certificate is still being issued; wait a minute and reload.
+- **The page loads but the figures never update:** the live updates travel over a WebSocket on the same address, which `tailscale serve` passes through. Check that Home Energy Manager itself is connected to the inverter (the same page over `http://<ip>:7337` should be updating too). If only the HTTPS address sticks, [open an issue](https://github.com/psylsph/home-energy-manager/issues) with your Tailscale version (`tailscale version`).
+
+### Without Tailscale
+
+If you only use Home Energy Manager at home and don't want Tailscale, a reverse proxy such as [Caddy](https://caddyserver.com) or nginx in front of port 7337 does the same job with your own domain and certificate (see [discussion #486](https://github.com/psylsph/home-energy-manager/discussions/486)). The same two notes apply: it adds no login, and every visitor looks local.
+
+### Optional: Tailscale Funnel (public internet)
+
+Funnel puts the same HTTPS address on the public internet, so a phone can open it without the Tailscale app. **Think hard before doing this:** Home Energy Manager has no login, so anyone who finds the address can control your battery and inverter. This guide is about tailnet-only access, and that's what we recommend.
+
+If you still want it, Funnel replaces `serve` on the same port:
+
+```bash
+sudo tailscale funnel --bg --https=443 http://127.0.0.1:7337
+```
+
+Run the Step 3 command again to take it back to tailnet-only. Tailscale's [Funnel guide](https://tailscale.com/kb/1223/funnel) covers the rest.
 
 ---
 
