@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.21.0] - 2026-11-19
+
+### Added
+
+- **The Planner can show a gentler charge rate.** Turn on Spread Charge Across Window in Plan Settings and the plan card says what rate would deliver the same charge more slowly, finishing about 80% of the way through the cheap period instead of in a hard burst at the start, with the time it would finish. For now it's advice only, so you can check the numbers on real nights: Apply and the automatic plan still charge at full power. Short windows, charges that already fill most of the window, and sunny windows where a lower limit would leave the battery lower later keep full power, and the card says why.
+
 ## [1.20.2] - 2026-11-19
 
 ### Added
