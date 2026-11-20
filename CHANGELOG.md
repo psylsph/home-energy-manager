@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **A notification when an export finishes.** Turn on Export Finished in Settings → Notifications and HEM tells you, once an export ends, how far the battery went down (for example 82% → 24%, about 5.4 kWh) and how much went to the grid, however the export started: Export Once, Timed Export, Force Discharge or the GivEnergy app. Saving Session exports keep their own messages, which now carry the same figures (#499).
+
+## [1.21.1] - 2026-11-20
+
+### Fixed
+
+- **Two Energy Flow display switches stay as you set them.** Home Excludes Car Charging and Show Node Status Words in Settings → Panel Controls are now saved with your other settings, so updating HEM, clearing the browser's data or opening HEM from another device no longer puts them back to their defaults. If you'd changed either one, set it once more after this update (#498).
+
 ## [1.21.0] - 2026-11-19
 
 ### Added
