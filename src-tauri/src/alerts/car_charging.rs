@@ -162,9 +162,6 @@ impl CarSession {
 
 /// `meta` key holding the persisted [`CarSession`].
 pub const META_KEY: &str = "car_charging_alert";
-/// How often the session's progress is saved when nothing else changed, so a
-/// restart resumes close to where it was without a write every poll.
-const PERSIST_EVERY_SECS: i64 = 60;
 /// A polled charger drawing no more than this is idle (it reads its own
 /// standby draw), so a charger that never quite reads zero still ends.
 pub const MEASURED_FLOOR_W: f64 = 100.0;
@@ -185,12 +182,20 @@ pub fn car_input_w(
 }
 
 /// The session plus what the runner keeps around it.
-#[derive(Debug, Default)]
-pub struct CarSessionRunner {
-    loaded: bool,
-    session: CarSession,
-    persisted_at: Option<i64>,
-    outbox: crate::alerts::battery_health::SocOutbox,
+pub type CarSessionRunner = crate::alerts::session_runner::SessionRunner<CarSession>;
+
+impl crate::alerts::session_runner::AlertSession for CarSession {
+    const META_KEY: &'static str = META_KEY;
+    const WHAT: &'static str = "Car charging";
+    /// A session opening or closing, a run starting or ending.
+    type Shape = (bool, bool, bool);
+    fn shape(&self) -> Self::Shape {
+        (
+            self.pending_since.is_some(),
+            self.open.is_some(),
+            self.idle_since.is_some(),
+        )
+    }
 }
 
 fn alert_on(config: &crate::settings::AlertsConfig) -> bool {
@@ -199,13 +204,13 @@ fn alert_on(config: &crate::settings::AlertsConfig) -> bool {
         && crate::alerts::has_delivery_channel(config)
 }
 
-fn clock(ts: i64) -> String {
+pub(crate) fn clock(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
         .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
         .unwrap_or_default()
 }
 
-fn duration(secs: i64) -> String {
+pub(crate) fn duration(secs: i64) -> String {
     let minutes = (secs.max(0) + 30) / 60;
     match (minutes / 60, minutes % 60) {
         (0, m) => format!("{m} m"),
@@ -255,100 +260,20 @@ where
     let config = state.alert_config.lock().await.clone();
     let db = state.history.lock().await.clone();
     let on = alert_on(&config) && car_w.is_some();
-
-    let (messages, resend, to_save) = {
-        let mut runner = state.car_session.lock().await;
-        if on && !runner.loaded && db.is_none() {
-            // The saved session can't be read yet, so don't start a new one
-            // over it: wait for the history database.
-            return Vec::new();
-        }
-        if !runner.loaded {
-            runner.loaded = true;
-            if let Some(saved) = db
-                .as_ref()
-                .and_then(|db| db.get_meta_value(META_KEY))
-                .and_then(|json| serde_json::from_str::<CarSession>(&json).ok())
-            {
-                runner.session = saved;
-            }
-        }
-        if !on {
-            // Switched off, or nothing to go on: drop the session, the held
-            // messages and the saved copy.
-            let had_state =
-                runner.session != CarSession::default() || runner.persisted_at.is_some();
-            runner.session = CarSession::default();
-            runner.outbox = Default::default();
-            runner.persisted_at = None;
-            let clear = had_state
-                .then(|| serde_json::to_string(&CarSession::default()).ok())
-                .flatten();
-            drop(runner);
-            if let (Some(db), Some(json)) = (db, clear) {
-                let _ =
-                    tokio::task::spawn_blocking(move || db.set_meta_value(META_KEY, &json)).await;
-            }
-            return Vec::new();
-        }
-        let before = runner.session.clone();
-        let events = runner.session.step(now_ts, car_w.unwrap_or(0.0));
-        let resend = runner.outbox.take_due(now_ts);
-        // Save on a change of shape (a session opening or closing, a run
-        // starting or ending) and otherwise every minute.
-        let shape = |s: &CarSession| {
-            (
-                s.pending_since.is_some(),
-                s.open.is_some(),
-                s.idle_since.is_some(),
-            )
-        };
-        let due = runner
-            .persisted_at
-            .is_none_or(|at| now_ts < at || now_ts - at >= PERSIST_EVERY_SECS);
-        let save = !events.is_empty() || shape(&before) != shape(&runner.session) || due;
-        let to_save = save.then(|| {
-            runner.persisted_at = Some(now_ts);
-            serde_json::to_string(&runner.session).ok()
-        });
-        let messages: Vec<String> = events.iter().map(|e| event_message(e, estimated)).collect();
-        (messages, resend, to_save.flatten())
-    };
-
-    if let (Some(db), Some(json)) = (db, to_save) {
-        let _ = tokio::task::spawn_blocking(move || db.set_meta_value(META_KEY, &json)).await;
-    }
-
-    // Each message goes out on its own task; one that isn't delivered is held
-    // for a resend, carrying when it first failed.
-    let mut handles = Vec::new();
-    let mut deliver = |texts: Vec<(i64, String)>| {
-        let text = texts
-            .iter()
-            .map(|(_, t)| t.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let delivery = send(config.clone(), text);
-        let state = state.clone();
-        handles.push(tokio::spawn(async move {
-            if !delivery.await {
-                tracing::warn!("Car charging message not delivered, will resend");
-                state
-                    .car_session
-                    .lock()
-                    .await
-                    .outbox
-                    .add_failed(texts, now_ts);
-            }
-        }));
-    };
-    if !resend.is_empty() {
-        deliver(resend);
-    }
-    for message in messages {
-        deliver(vec![(now_ts, message)]);
-    }
-    handles
+    crate::alerts::session_runner::run_session(
+        &state.car_session,
+        db,
+        config,
+        on,
+        now_ts,
+        |session: &mut CarSession| {
+            let events = session.step(now_ts, car_w.unwrap_or(0.0));
+            let messages = events.iter().map(|e| event_message(e, estimated)).collect();
+            (!events.is_empty(), messages)
+        },
+        send,
+    )
+    .await
 }
 
 #[cfg(test)]

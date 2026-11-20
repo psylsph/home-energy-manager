@@ -1348,8 +1348,8 @@ export default function ForecastPage() {
                 automatic plan still charge at full power. Short windows, and charges that already
                 fill 65% or more of the window at full power, stay at full power. The charge limit
                 also caps solar charging, so a daytime window keeps full power when a lower limit
-                would leave the battery lower later. Nothing is suggested while Adaptive Charge sets
-                the limit.
+                would leave the battery lower later. While Adaptive Charge sets the limit, the plan
+                keeps full power and says so.
               </HelpTip>
             </p>
           </div>

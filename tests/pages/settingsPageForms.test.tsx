@@ -242,6 +242,32 @@ describe('<SettingsPage/> — notification form reaches the right keys', () => {
     expect(lastPost('/api/alerts')).toMatchObject({ car_charging_alert_enabled: true });
   });
 
+  it('saves the export finished switch, which starts off (issue #499)', async () => {
+    mount({ alerts: { enabled: true } });
+    render(<SettingsPage />);
+    const s = await heading('Notifications');
+    await waitFor(() => expect(within(s).getByRole('button', { name: 'Save Notification Settings' })).toBeEnabled());
+
+    const toggle = within(s).getByRole('switch', { name: 'Export Finished' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    // One-line hint; the threshold and the Saving Session note sit behind the ⓘ.
+    const hint = within(s).getByText('Battery and grid figures when an export ends');
+    expect(hint.textContent!.split(/\s+/).length).toBeLessThanOrEqual(15);
+    fireEvent.click(toggle);
+    fireEvent.click(within(s).getByRole('button', { name: 'Save Notification Settings' }));
+    await waitFor(() => expect(postsTo('/api/alerts')).toHaveLength(1));
+    expect(lastPost('/api/alerts')).toMatchObject({ export_summary_alert_enabled: true });
+  });
+
+  it('keeps a saved export finished switch on', async () => {
+    mount({ alerts: { enabled: true, export_summary_alert_enabled: true } });
+    render(<SettingsPage />);
+    const s = await heading('Notifications');
+    await waitFor(() =>
+      expect(within(s).getByRole('switch', { name: 'Export Finished' }).getAttribute('aria-checked')).toBe('true'),
+    );
+  });
+
   it('drops the car charging note once a threshold is set', async () => {
     useInverterStore.setState({ carCharging: { forecast_exclude_load_above_kw: 7.4 } });
     mount({ alerts: { enabled: true } });

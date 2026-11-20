@@ -406,24 +406,19 @@ fn a_window_across_midnight_finishes_after_midnight() {
     let t = iog();
     let inp = inputs(&sim, &hours, &p, &t, 20.0, day_ts(0, 21, 0));
     let plan = plan_overnight_charge(&inp);
-    assert!(
-        matches!(plan, PlanRecommendation::Charge { .. }),
-        "{plan:?}"
-    );
+    let PlanRecommendation::Charge { window, .. } = &plan else {
+        panic!("{plan:?}")
+    };
     let advice = spread_charge_advice(&inp, &plan, direct(5.0));
     let Some(SpreadAdvice::Spread {
         full_rate_finish_min,
-        full_rate_minutes,
         ..
     }) = advice
     else {
         panic!("{advice:?}")
     };
-    // 23:30 plus the full-power charge, wrapped past midnight.
-    assert_eq!(
-        full_rate_finish_min,
-        (23 * 60 + 30 + full_rate_minutes) % 1440
-    );
+    // The plan's own slot from 23:30, wrapped past midnight.
+    assert_eq!(full_rate_finish_min, window.end_min);
     assert!(full_rate_finish_min < 23 * 60 + 30);
     let (_, _, _, _, finish, _, window_min, _) = spread(advice);
     assert_eq!(window_min, 360);
@@ -665,4 +660,31 @@ fn the_advised_percent_is_the_one_the_control_page_shows_for_that_register() {
         let raw = scale.percent_to_raw(percent);
         assert_eq!(scale.raw_to_percent(raw), percent, "{wanted} kW");
     }
+}
+
+#[test]
+fn full_power_on_a_minimum_soc_plan_finishes_when_the_plans_own_slot_ends() {
+    // The card's Time is the slot Apply writes (the kWh at full power); the
+    // spread's "instead of" names the same end, not a hold to the rounded-up
+    // target with the sun on top.
+    let solar: [f64; 24] = std::array::from_fn(|h| if (13..16).contains(&h) { 2.3 } else { 0.0 });
+    let load: [f64; 24] = std::array::from_fn(|h| if (16..22).contains(&h) { 1.2 } else { 0.3 });
+    let p = params(5.0);
+    let (sim, hours, p) = series(50.0, solar, load, &p);
+    let t = cosy();
+    let mut inp = inputs(&sim, &hours, &p, &t, 20.0, day_ts(0, 11, 0));
+    inp.every_cheap_window = true;
+    let plan = plan_overnight_charge(&inp);
+    let PlanRecommendation::Charge { window, .. } = &plan else {
+        panic!("{plan:?}")
+    };
+    let advice = spread_charge_advice(&inp, &plan, direct(5.0));
+    let Some(SpreadAdvice::Spread {
+        full_rate_finish_min,
+        ..
+    }) = advice
+    else {
+        panic!("{advice:?}")
+    };
+    assert_eq!(full_rate_finish_min, window.end_min);
 }

@@ -9640,32 +9640,19 @@ pub(crate) fn plan_response_json(
 }
 
 /// Compute the typed plan recommendation from a forecast payload, plus
-/// the export advice that rides the same trajectory. Shared by the API
-/// handler (which serialises both) and the poll loop's nightly
-/// auto-refresh (which acts on the charge side), so the applied slot,
-/// the displayed plan, and the export card can never come from
-/// different computations. The export half is `None` exactly when the
-/// charge half is `NoPlan` — the same gates (projection, history,
-/// import tariff) underpin both.
-#[cfg(test)]
-pub(crate) fn compute_full_plan(
-    forecast: &crate::forecast::ForecastPayload,
-    settings: &crate::settings::Settings,
-    snapshot: Option<&crate::inverter::model::InverterSnapshot>,
-    now_ts: i64,
-) -> (
-    crate::forecast::planner::PlanRecommendation,
-    Option<crate::forecast::planner::ExportAdvice>,
-) {
-    let (charge, export, _) = compute_full_plan_advice(forecast, settings, snapshot, now_ts);
-    (charge, export)
-}
-
-/// [`compute_full_plan`] plus the spread-charge advice (issue #483): what
-/// the Planner would do with the charge limit if it spread the charge across
-/// the window. `None` unless the setting is on and there is a charge to
-/// spread. Advice only: the plan and its Apply payload are the same either
-/// way. The Planner card and plan history show it; nothing acts on it.
+/// the export advice that rides the same trajectory and the spread-charge
+/// advice (issue #483). Shared by the API handler (which serialises all
+/// three) and the poll loop's nightly auto-refresh (which acts on the charge
+/// side), so the applied slot, the displayed plan, and the export card can
+/// never come from different computations. The export half is `None`
+/// exactly when the charge half is `NoPlan`: the same gates (projection,
+/// history, import tariff) underpin both.
+///
+/// The spread advice is what the Planner would do with the charge limit if
+/// it spread the charge across the window: `None` unless the setting is on
+/// and there is a charge to spread. Advice only: the plan and its Apply
+/// payload are the same either way. The Planner card and plan history show
+/// it; nothing acts on it.
 pub(crate) fn compute_full_plan_advice(
     forecast: &crate::forecast::ForecastPayload,
     settings: &crate::settings::Settings,
@@ -9791,7 +9778,7 @@ pub(crate) fn compute_plan_recommendation(
     snapshot: Option<&crate::inverter::model::InverterSnapshot>,
     now_ts: i64,
 ) -> crate::forecast::planner::PlanRecommendation {
-    compute_full_plan(forecast, settings, snapshot, now_ts).0
+    compute_full_plan_advice(forecast, settings, snapshot, now_ts).0
 }
 
 /// The charge plan for the cheap window that started at `window_start`
@@ -10107,14 +10094,22 @@ fn spread_advice(
     if !settings.forecast_plan_spread_charge {
         return None;
     }
-    let snapshot = snapshot
-        .filter(|s| s.device_type.battery_controls_reach_battery() && s.max_battery_power_w > 0)?;
+    use crate::forecast::planner::{SpreadAdvice, SpreadSkip};
+    // A Gateway's charge limit never reaches the battery (the toggle is
+    // hidden there).
+    if snapshot.is_some_and(|s| !s.device_type.battery_controls_reach_battery()) {
+        return None;
+    }
     // Adaptive Charge owns the limit register; the Planner never fights it.
     if crate::inverter::forecast_plan::adaptive_owns_rate(settings) {
-        return Some(crate::forecast::planner::SpreadAdvice::FullRate(
-            crate::forecast::planner::SpreadSkip::AdaptiveCharge,
-        ));
+        return Some(SpreadAdvice::FullRate(SpreadSkip::AdaptiveCharge));
     }
+    let Some(snapshot) = snapshot.filter(|s| s.max_battery_power_w > 0) else {
+        // No live rating to size the register's steps from: say so wherever
+        // there would have been advice.
+        return crate::forecast::planner::spread_charge_advice(inputs, charge, |_| None)
+            .map(|_| SpreadAdvice::FullRate(SpreadSkip::NoChargeRating));
+    };
     let scale = crate::inverter::power_limit::PowerLimitScale::from_snapshot(snapshot);
     crate::forecast::planner::spread_charge_advice(inputs, charge, |percent| {
         scale.can_convert(percent).then(|| {
@@ -10330,6 +10325,10 @@ fn spread_advice_to_json(advice: &crate::forecast::planner::SpreadAdvice) -> Val
                     "Full power: a lower limit needs the battery's capacity, which isn't known \
                      yet."
                         .to_string(),
+                ),
+                SpreadSkip::NoChargeRating => (
+                    "no_charge_rating",
+                    "Full power: HEM hasn't read the inverter's charge rating yet.".to_string(),
                 ),
                 SpreadSkip::WorseTrough => (
                     "worse_trough",
@@ -28499,6 +28498,11 @@ pub(crate) mod tests {
             ),
             (SpreadSkip::NeedsPackSize, "needs_pack_size", "capacity"),
             (SpreadSkip::WorseTrough, "worse_trough", "lower before"),
+            (
+                SpreadSkip::NoChargeRating,
+                "no_charge_rating",
+                "charge rating",
+            ),
         ];
         for (skip, reason, words) in cases {
             let json = spread_advice_to_json(&SpreadAdvice::FullRate(skip));

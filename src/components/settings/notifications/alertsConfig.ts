@@ -19,6 +19,7 @@ export interface AlertsConfig {
   schedule_reset_alert_enabled: boolean;
   full_charge_alert_enabled: boolean;
   car_charging_alert_enabled: boolean;
+  export_summary_alert_enabled: boolean;
   full_charge_alert_days: number;
   connection_lost_enabled: boolean;
   solar_clipping_enabled: boolean;
@@ -47,6 +48,7 @@ export const DEFAULT_ALERTS_CONFIG: AlertsConfig = {
   schedule_reset_alert_enabled: true,
   full_charge_alert_enabled: true,
   car_charging_alert_enabled: false,
+  export_summary_alert_enabled: false,
   full_charge_alert_days: 30,
   connection_lost_enabled: false,
   solar_clipping_enabled: false, solar_clipping_ceiling_w: 0,

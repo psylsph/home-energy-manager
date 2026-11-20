@@ -95,6 +95,9 @@ pub enum SpreadSkip {
     NeedsPackSize,
     /// Adaptive Charge sets the charge limit, so the Planner leaves it.
     AdaptiveCharge,
+    /// No live snapshot, or no charge rating in it, to size the limit
+    /// register's steps from.
+    NoChargeRating,
     /// At the lower rate the battery wouldn't reach the charge or would
     /// dip lower before the next cheap period (solar capped in the window,
     /// say), so full power stays.
@@ -201,7 +204,12 @@ pub fn spread_charge_advice(
     };
     let charge_minutes = (minutes_to_target.ceil() as u16).min(window_minutes);
     let finish_min = (ctx.window.start_min + charge_minutes) % 1440;
-    let full_rate_finish_min = (ctx.window.start_min + full_rate_minutes) % 1440;
+    // What full power would show: the minimum-SOC plan's own slot, which is
+    // what Apply writes and the card's Time shows; a hold's time to target.
+    let full_rate_finish_min = match plan {
+        PlanRecommendation::Charge { window, .. } => window.end_min,
+        _ => (ctx.window.start_min + full_rate_minutes) % 1440,
+    };
     Some(SpreadAdvice::Spread {
         rate_percent,
         rate_kw,

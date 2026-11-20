@@ -1759,10 +1759,6 @@ pub(crate) mod tests {
             ))
         );
         settings.adaptive_charge_enabled = false;
-        // The entry point without the advice gives the same plan.
-        let (plain, _) =
-            crate::server::api::compute_full_plan(&payload, &settings, Some(&snap), now_ts);
-        assert_eq!(format!("{plain:?}"), format!("{:?}", off.0));
 
         // A Gateway's battery writes don't reach the battery: no advice.
         let gateway = InverterSnapshot {
@@ -1776,9 +1772,20 @@ pub(crate) mod tests {
             now_ts,
         );
         assert!(gw.2.is_none(), "{:?}", gw.2);
-        // Nor without a live snapshot to size the register's steps from.
+        // Without a live snapshot (or its charge rating) to size the
+        // register's steps from, the card says why rather than nothing.
+        let unrated = Some(SpreadAdvice::FullRate(
+            crate::forecast::planner::SpreadSkip::NoChargeRating,
+        ));
         let none = crate::server::api::compute_full_plan_advice(&payload, &settings, None, now_ts);
-        assert!(none.2.is_none(), "{:?}", none.2);
+        assert_eq!(none.2, unrated);
+        let zero = InverterSnapshot {
+            max_battery_power_w: 0,
+            ..battery_snapshot()
+        };
+        let zero =
+            crate::server::api::compute_full_plan_advice(&payload, &settings, Some(&zero), now_ts);
+        assert_eq!(zero.2, unrated);
     }
 
     /// Issue #359 review: the export advice must see a hold plan's charge,
@@ -1827,8 +1834,12 @@ pub(crate) mod tests {
             crate::settings::PlanStrategy::HoldWindow,
         ] {
             settings.forecast_plan_strategy = strategy;
-            let (_, export) =
-                crate::server::api::compute_full_plan(&payload, &settings, Some(&snap), now_ts);
+            let (_, export, _) = crate::server::api::compute_full_plan_advice(
+                &payload,
+                &settings,
+                Some(&snap),
+                now_ts,
+            );
             match export {
                 Some(ExportAdvice::NoExport { reason }) => assert!(
                     reason.contains("overlaps the planned charge"),

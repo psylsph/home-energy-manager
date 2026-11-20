@@ -1603,6 +1603,18 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     });
   });
 
+  it('says behind the ⓘ that Adaptive Charge keeps full power, as the card does', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    const row = await screen.findByTestId('forecast-plan-spread-setting');
+    fireEvent.click(
+      within(row).getByRole('button', { name: 'More about Spread Charge Across Window' }),
+    );
+    const tip = screen.getByRole('tooltip').textContent ?? '';
+    expect(tip).toMatch(/While Adaptive Charge sets the limit, the plan keeps full power and says so\./);
+    expect(tip).not.toMatch(/Nothing is suggested/);
+  });
+
   it('reports a failed Spread Charge Across Window save and stays off', async () => {
     mockPage(planPayload('charge'));
     apiPostMocked.mockRejectedValueOnce(new Error('Save refused'));

@@ -658,6 +658,7 @@ export type SpreadAdvice =
         | 'not_worthwhile'
         | 'needs_full_rate'
         | 'adaptive_charge'
+        | 'no_charge_rating'
         | 'needs_pack_size'
         | 'worse_trough';
       summary: string;

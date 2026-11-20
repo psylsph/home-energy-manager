@@ -59,6 +59,12 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string; help?: string
     help: "Needs a Car Charging Threshold: the car is the home load above it, or a GivEnergy charger's own power where HEM reads one. A session starts after three minutes of charging and ends after ten without, so a pause between slots doesn't send a second message.",
   },
   {
+    key: 'export_summary_alert_enabled',
+    label: 'Export Finished',
+    hint: 'Battery and grid figures when an export ends',
+    help: "Counts any export, however it started, once the battery discharges at more than half the inverter's capacity for a minute; an export capped below that isn't announced. It ends after ten minutes without. The grid figure includes any solar exported alongside. Saving Sessions keep their own messages, which carry the same figures.",
+  },
+  {
     key: 'connection_lost_enabled',
     label: 'Connection Lost',
     hint: 'Notify when contact with the inverter is dropped and restored',

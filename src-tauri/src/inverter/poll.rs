@@ -579,6 +579,8 @@ pub struct AppState {
     pub schedule_watch: Arc<Mutex<crate::inverter::schedule_reset::ScheduleWatch>>,
     /// "Car charging started / finished" session and its resend box (issue #454).
     pub car_session: Arc<Mutex<crate::alerts::car_charging::CarSessionRunner>>,
+    /// "Export finished" session and its resend box (issue #499).
+    pub export_session: Arc<Mutex<crate::alerts::export_summary::ExportSessionRunner>>,
     /// Discharge floor guard configuration (developer mode only).
     pub discharge_floor_config: Arc<Mutex<DischargeFloorConfig>>,
     /// Discharge floor guard runtime state.
@@ -827,6 +829,7 @@ impl AppState {
             full_charge_check: Arc::new(Mutex::new(Default::default())),
             schedule_watch: Arc::new(Mutex::new(Default::default())),
             car_session: Arc::new(Mutex::new(Default::default())),
+            export_session: Arc::new(Mutex::new(Default::default())),
             discharge_floor_config: Arc::new(Mutex::new({
                 let s = crate::settings::Settings::load();
                 DischargeFloorConfig {
@@ -6165,6 +6168,45 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                 &config,
                                                 &text,
                                                 "car charging",
+                                            )
+                                            .await
+                                        },
+                                    )
+                                    .await;
+                                }
+
+                                // ---- Export finished (issue #499) ----
+                                // Off by default; read-only. Telemetry only, so it
+                                // covers every way of starting an export. Skipped
+                                // during the post-connect grace period.
+                                if readings_since_connect > GRACE_READINGS {
+                                    let events = &poll_settings.export_once_events;
+                                    let sample = if crate::alerts::export_summary::is_on(&state).await {
+                                        let mut sample = crate::alerts::export_summary::export_sample(
+                                            &snapshot,
+                                            events,
+                                            poll_settings.poll_interval,
+                                        );
+                                        if sample.exporting() {
+                                            sample.owner = crate::alerts::export_summary::current_owner(
+                                                &state, &snapshot, events,
+                                            )
+                                            .await;
+                                        }
+                                        Some(sample)
+                                    } else {
+                                        None
+                                    };
+                                    crate::alerts::export_summary::run_export_session(
+                                        &state,
+                                        sample,
+                                        events,
+                                        chrono::Utc::now().timestamp(),
+                                        |config: crate::settings::AlertsConfig, text: String| async move {
+                                            crate::alerts::dispatch_alert_text(
+                                                &config,
+                                                &text,
+                                                "export summary",
                                             )
                                             .await
                                         },

@@ -118,9 +118,29 @@ pub struct ExportOnceEvent {
     /// Human-readable reason for `Failed`, or a note on how it ended.
     #[serde(default)]
     pub note: Option<String>,
+    /// SOC when the export was applied, for the figures in a Saving
+    /// Session's "finished" message (issue #499).
+    #[serde(default)]
+    pub start_soc: Option<u8>,
+    /// The day's export counter when the export was applied.
+    #[serde(default)]
+    pub start_export_kwh: Option<f32>,
+    /// The "finished" message carried the figures, so the export summary
+    /// alert leaves this export to it (issue #499).
+    #[serde(default)]
+    pub figures_reported: bool,
 }
 
 impl ExportOnceEvent {
+    /// Whether HEM's slot is exporting for this event at `now`: applied, live
+    /// and inside its window (not in the lead time before it opens).
+    pub fn running_at(&self, now: NaiveDateTime) -> bool {
+        self.applied
+            && self.state == ExportOnceState::Active
+            && self.start_at().is_some_and(|start| start <= now)
+            && self.end_at().is_some_and(|end| now < end)
+    }
+
     pub fn start_at(&self) -> Option<NaiveDateTime> {
         parse_local(&self.start)
     }
@@ -268,6 +288,9 @@ pub fn validate_new(
         floor_refused: false,
         reserve_attempts: 0,
         note: None,
+        start_soc: None,
+        start_export_kwh: None,
+        figures_reported: false,
     })
 }
 
@@ -529,14 +552,16 @@ async fn restore_reserve_floor(
 
 /// The inverter's local clock, falling back to the host's.
 pub async fn inverter_now(state: &Arc<AppState>) -> NaiveDateTime {
-    let reported = state
-        .latest_snapshot
-        .lock()
-        .await
-        .as_ref()
-        .map(|snapshot| snapshot.inverter_time.clone())
-        .unwrap_or_default();
-    NaiveDateTime::parse_from_str(&reported, "%Y-%m-%d %H:%M:%S")
+    match state.latest_snapshot.lock().await.as_ref() {
+        Some(snapshot) => snapshot_local_now(snapshot),
+        None => chrono::Local::now().naive_local(),
+    }
+}
+
+/// The clock a snapshot was read on: the inverter's, falling back to the
+/// host's when it didn't report one.
+pub fn snapshot_local_now(snapshot: &crate::inverter::model::InverterSnapshot) -> NaiveDateTime {
+    NaiveDateTime::parse_from_str(&snapshot.inverter_time, "%Y-%m-%d %H:%M:%S")
         .unwrap_or_else(|_| chrono::Local::now().naive_local())
 }
 
@@ -649,7 +674,7 @@ async fn finish(id: &str, state: ExportOnceState, note: Option<String>) {
 }
 
 /// Exports booked for Octopus Saving Sessions carry this `source` prefix.
-const SESSION_SOURCE_PREFIX: &str = "saving_session:";
+pub const SESSION_SOURCE_PREFIX: &str = "saving_session:";
 
 /// Failed writes to put Minimum SOC back before the booking lets go and says
 /// so. Reverts are spaced by the retry back-off (a minute), so this covers about
@@ -753,6 +778,41 @@ fn export_started_detail(event: &ExportOnceEvent, stop_soc: u8) -> String {
          setting afterwards.",
         event.slot
     )
+}
+
+/// A revert later than this after the window's end (HEM closed through it,
+/// or retries) reads a battery that has moved on: no figures then.
+pub const FIGURES_WITHIN_MINUTES: i64 = 15;
+
+/// "Battery 82% → 24% (58%, about 5.4 kWh), 4.9 kWh to the grid." for a
+/// finished export, from what was recorded when it was applied and the
+/// latest read (issue #499). Nothing when the start wasn't recorded (an
+/// export applied before this was added) or the read is long after the end;
+/// the grid figure is left out when the day's counter restarted since (the
+/// export crossed midnight) or went backwards (a corrupt read).
+async fn finished_figures(state: &Arc<AppState>, event: &ExportOnceEvent) -> Option<String> {
+    let start_soc = event.start_soc?;
+    let snapshot = state.latest_snapshot.lock().await.clone()?;
+    let now = snapshot_local_now(&snapshot);
+    let end = event.end_at()?;
+    if now - end > chrono::Duration::minutes(FIGURES_WITHIN_MINUTES) {
+        return None;
+    }
+    let same_day = event
+        .start_at()
+        .is_some_and(|start| start.date() == now.date());
+    let grid = event
+        .start_export_kwh
+        .filter(|_| same_day)
+        .map(|start| f64::from(snapshot.today_export_kwh) - f64::from(start))
+        .filter(|kwh| *kwh >= 0.0);
+    let figures = crate::alerts::export_summary::figures_text(
+        start_soc,
+        snapshot.soc,
+        f64::from(snapshot.battery_capacity_kwh),
+        grid,
+    );
+    Some(format!("Battery {figures}."))
 }
 
 /// Tell the user how a Saving Session export is going. Exports the user
@@ -1051,9 +1111,23 @@ async fn apply_event_with(state: &Arc<AppState>, id: &str, backstop: Backstop) -
     let (status, body) =
         set_discharge_slot_locked(state.clone(), slot_body(event.slot, &window)).await;
     if status == StatusCode::OK {
-        update_event(id, |e| {
+        // Where the battery and the export counter stood as the export began,
+        // for the figures when it finishes (issue #499).
+        let start = state
+            .latest_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .map(|snapshot| (snapshot.soc, snapshot.today_export_kwh));
+        update_event(id, move |e| {
             e.applied = true;
             e.note = None;
+            if e.start_soc.is_none() {
+                if let Some((soc, export_kwh)) = start {
+                    e.start_soc = Some(soc);
+                    e.start_export_kwh = Some(export_kwh);
+                }
+            }
         })
         .await;
         let floor_note = hold_reserve_floor_locked(state, id).await;
@@ -1221,13 +1295,17 @@ async fn revert_locked(state: &Arc<AppState>, id: &str, cancelling: bool) -> Res
     if cancelling {
         finish(id, ExportOnceState::Cancelled, None).await;
     } else if event.applied {
+        let figures = finished_figures(state, &event).await;
+        if figures.is_some() && event.source.starts_with(SESSION_SOURCE_PREFIX) {
+            update_event(id, |e| e.figures_reported = true).await;
+        }
         finish(id, ExportOnceState::Done, None).await;
-        notify_session_export(
-            state,
-            &event,
-            "Saving Session export finished",
-            format!("Slot {} is back to how it was.", event.slot),
-        );
+        let mut detail = format!("Slot {} is back to how it was.", event.slot);
+        if let Some(figures) = figures {
+            detail.push('\n');
+            detail.push_str(&figures);
+        }
+        notify_session_export(state, &event, "Saving Session export finished", detail);
     } else {
         let note = event
             .note
@@ -1471,6 +1549,9 @@ mod tests {
             floor_refused: false,
             reserve_attempts: 0,
             note: None,
+            start_soc: None,
+            start_export_kwh: None,
+            figures_reported: false,
         }
     }
 
@@ -2946,6 +3027,173 @@ mod tests {
             let alerts = mock.alerts_after(2).await;
             assert_eq!(alerts.len(), 2, "{alerts:?}");
             assert!(alerts[1].contains("export finished"), "{}", alerts[1]);
+        })
+        .await;
+    }
+
+    async fn set_battery(state: &Arc<AppState>, soc: u8, export_kwh: f32) {
+        let mut snapshot = state.latest_snapshot.lock().await;
+        let snapshot = snapshot.as_mut().unwrap();
+        snapshot.soc = soc;
+        snapshot.today_export_kwh = export_kwh;
+        snapshot.battery_capacity_kwh = 10.0;
+    }
+
+    #[tokio::test]
+    async fn a_saving_session_export_finishes_with_what_the_battery_exported() {
+        // Issue #499: the "finished" message carries the figures, and the
+        // export summary alert stays quiet for it.
+        with_isolated_config_dir_async(|| async {
+            let mock = NtfyMock::spawn().await;
+            let state = make_state().await;
+            alerts_to(&state, &mock).await;
+            seed_schedule(&state, true, vec![sched(22, 0, 23, 0, 30)]).await;
+            store(vec![session_export("e1", 1)]);
+
+            set_battery(&state, 80, 1.0).await;
+            set_clock(&state, "2026-10-17 17:55").await;
+            run_tick(&state).await;
+            assert_eq!(mock.alerts_after(1).await.len(), 1);
+            let recorded = stored("e1");
+            assert_eq!(
+                (recorded.start_soc, recorded.start_export_kwh),
+                (Some(80), Some(1.0))
+            );
+            // Applied in the lead time; running once the window opens.
+            let events = list_events().await;
+            let running = |at: &str| {
+                crate::alerts::export_summary::saving_session_running(
+                    &events,
+                    parse_local(at).unwrap(),
+                )
+            };
+            assert_eq!(running("2026-10-17 17:55"), None);
+            assert_eq!(running("2026-10-17 18:30").as_deref(), Some("e1"));
+
+            set_battery(&state, 30, 5.5).await;
+            set_clock(&state, "2026-10-17 19:01").await;
+            run_tick(&state).await;
+            let alerts = mock.alerts_after(2).await;
+            assert!(
+                alerts[1].contains("Battery 80% → 30% (50%, about 5.0 kWh), 4.5 kWh to the grid."),
+                "{}",
+                alerts[1]
+            );
+            // So the export summary alert knows this message had the figures.
+            assert!(stored("e1").figures_reported);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_saving_session_reverted_long_after_its_end_leaves_the_figures_out() {
+        // HEM closed through the end and opened next morning: the battery has
+        // charged since, so its level then says nothing about the export.
+        with_isolated_config_dir_async(|| async {
+            let mock = NtfyMock::spawn().await;
+            let state = make_state().await;
+            alerts_to(&state, &mock).await;
+            seed_schedule(&state, true, vec![sched(22, 0, 23, 0, 30)]).await;
+            store(vec![session_export("e1", 1)]);
+
+            set_battery(&state, 80, 1.0).await;
+            set_clock(&state, "2026-10-17 17:55").await;
+            run_tick(&state).await;
+            set_battery(&state, 100, 0.2).await;
+            set_clock(&state, "2026-10-18 08:00").await;
+            run_tick(&state).await;
+            let alerts = mock.alerts_after(2).await;
+            assert!(
+                alerts[1].ends_with("Slot 1 is back to how it was."),
+                "{}",
+                alerts[1]
+            );
+            assert!(!stored("e1").figures_reported);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_saving_session_across_midnight_leaves_the_grid_figure_out() {
+        // The day's export counter restarted at midnight, so the difference
+        // isn't what went to the grid.
+        with_isolated_config_dir_async(|| async {
+            let mock = NtfyMock::spawn().await;
+            let state = make_state().await;
+            alerts_to(&state, &mock).await;
+            seed_schedule(&state, true, vec![sched(22, 0, 23, 0, 30)]).await;
+            store(vec![ExportOnceEvent {
+                source: "saving_session:9".to_string(),
+                ..event("e1", 1, "2026-10-17 23:30", "2026-10-18 00:30")
+            }]);
+
+            set_battery(&state, 80, 5.0).await;
+            set_clock(&state, "2026-10-17 23:25").await;
+            run_tick(&state).await;
+            set_battery(&state, 30, 6.0).await;
+            set_clock(&state, "2026-10-18 00:31").await;
+            run_tick(&state).await;
+            let alerts = mock.alerts_after(2).await;
+            assert!(
+                alerts[1].contains("Battery 80% → 30% (50%, about 5.0 kWh)."),
+                "{}",
+                alerts[1]
+            );
+            assert!(!alerts[1].contains("to the grid"), "{}", alerts[1]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_saving_session_whose_counter_went_back_leaves_the_grid_figure_out() {
+        with_isolated_config_dir_async(|| async {
+            let mock = NtfyMock::spawn().await;
+            let state = make_state().await;
+            alerts_to(&state, &mock).await;
+            seed_schedule(&state, true, vec![sched(22, 0, 23, 0, 30)]).await;
+            store(vec![session_export("e1", 1)]);
+
+            set_battery(&state, 80, 6.0).await;
+            set_clock(&state, "2026-10-17 17:55").await;
+            run_tick(&state).await;
+            set_battery(&state, 30, 0.5).await;
+            set_clock(&state, "2026-10-17 19:01").await;
+            run_tick(&state).await;
+            let alerts = mock.alerts_after(2).await;
+            assert!(
+                alerts[1].contains("Battery 80% → 30% (50%, about 5.0 kWh)."),
+                "{}",
+                alerts[1]
+            );
+            assert!(!alerts[1].contains("to the grid"), "{}", alerts[1]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_saving_session_applied_before_the_figures_were_kept_finishes_as_before() {
+        with_isolated_config_dir_async(|| async {
+            let mock = NtfyMock::spawn().await;
+            let state = make_state().await;
+            alerts_to(&state, &mock).await;
+            seed_schedule(&state, true, vec![sched(22, 0, 23, 0, 30)]).await;
+            store(vec![session_export("e1", 1)]);
+            set_clock(&state, "2026-10-17 17:55").await;
+            run_tick(&state).await;
+            // As an event stored by an older HEM: no start recorded.
+            crate::settings::Settings::update(|s| {
+                s.export_once_events[0].start_soc = None;
+                s.export_once_events[0].start_export_kwh = None;
+            })
+            .unwrap();
+            set_clock(&state, "2026-10-17 19:01").await;
+            run_tick(&state).await;
+            let alerts = mock.alerts_after(2).await;
+            assert!(
+                alerts[1].ends_with("Slot 1 is back to how it was."),
+                "{}",
+                alerts[1]
+            );
         })
         .await;
     }

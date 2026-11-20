@@ -7,8 +7,10 @@
 
 pub mod battery_health;
 pub mod car_charging;
+pub mod export_summary;
 pub mod full_charge;
 pub mod report;
+pub mod session_runner;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -2534,6 +2536,7 @@ mod tests {
             schedule_reset_alert_enabled: true,
             full_charge_alert_enabled: true,
             car_charging_alert_enabled: false,
+            export_summary_alert_enabled: false,
             full_charge_alert_days: 30,
             ntfy_topic: String::new(),
             ntfy_server: "https://ntfy.sh".to_string(),
