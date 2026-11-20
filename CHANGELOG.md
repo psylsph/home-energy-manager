@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-11-20
+
 ### Added
 
 - **A notification when an export finishes.** Turn on Export Finished in Settings → Notifications and HEM tells you, once an export ends, how far the battery went down (for example 82% → 24%, about 5.4 kWh) and how much went to the grid, however the export started: Export Once, Timed Export, Force Discharge or the GivEnergy app. Saving Session exports keep their own messages, which now carry the same figures (#499).
