@@ -97,23 +97,15 @@ describe('useInverterStore', () => {
   });
 
   describe('showFlowStatusWords', () => {
-    it('defaults to true', () => {
-      // The store initializer calls loadShowFlowStatusWords which reads
-      // localStorage. In jsdom, localStorage.getItem returns null, so
-      // the default should be true.
-      const state = useInverterStore.getState();
-      expect(state.showFlowStatusWords).toBe(true);
+    it('defaults to true until the settings load (issue #498)', () => {
+      expect(useInverterStore.getState().showFlowStatusWords).toBe(true);
     });
 
-    it('setShowFlowStatusWords updates the value and persists to localStorage', () => {
-      localStorage.removeItem('showFlowStatusWords');
+    it('setShowFlowStatusWords updates the value', () => {
       useInverterStore.getState().setShowFlowStatusWords(false);
       expect(useInverterStore.getState().showFlowStatusWords).toBe(false);
-      expect(localStorage.getItem('showFlowStatusWords')).toBe('false');
-
       useInverterStore.getState().setShowFlowStatusWords(true);
       expect(useInverterStore.getState().showFlowStatusWords).toBe(true);
-      expect(localStorage.getItem('showFlowStatusWords')).toBe('true');
     });
   });
 

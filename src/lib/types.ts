@@ -402,6 +402,10 @@ export interface PollSettings {
   status_show_car_charging?: boolean;
   /** Show the battery runtime line in the Battery Level card (issues #472, #476). */
   status_show_battery_runtime?: boolean;
+  /** Show the status words under the orbit's nodes (issue #498; default on). */
+  status_show_flow_status_words?: boolean;
+  /** Show the Status Home load without the car's charging (issues #457, #498). */
+  status_home_excludes_car?: boolean;
 }
 
 export interface DiscoveredInverter {

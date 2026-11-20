@@ -1,54 +1,74 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../src/lib/api', () => ({
   apiPost: vi.fn().mockResolvedValue({ ok: true, data: {} }),
 }));
 
 import PanelControlsSection from '../../src/components/settings/PanelControlsSection';
+import { apiPost } from '../../src/lib/api';
 import { useInverterStore } from '../../src/store/useInverterStore';
 
 /**
  * Settings → Panel Controls → Home Excludes Car Charging (issue #457): show
  * the Status diagrams' Home reading without the car's charging, off by
- * default so nothing changes until it is turned on.
+ * default. Saved in settings.json since issue #498.
  */
 describe('<PanelControlsSection/> — Home Excludes Car Charging', () => {
+  const flash = vi.fn();
+
   beforeEach(() => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    localStorage.removeItem('homeExcludesCar');
+    vi.mocked(apiPost).mockReset();
+    vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
+    flash.mockReset();
+    localStorage.clear();
     useInverterStore.setState({ homeExcludesCar: false });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     cleanup();
-    localStorage.removeItem('homeExcludesCar');
+    localStorage.clear();
     useInverterStore.setState({ homeExcludesCar: false });
   });
 
   const renderSection = () =>
-    render(<PanelControlsSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
+    render(<PanelControlsSection flash={flash} initialHiddenPanels={[]} octopusConfigured={false} />);
   const toggle = () => screen.getByRole('switch', { name: 'Home Excludes Car Charging' });
 
-  it('is off by default with nothing saved', () => {
+  it('starts from the store, off by default', () => {
     renderSection();
     expect(toggle().getAttribute('aria-checked')).toBe('false');
-    expect(localStorage.getItem('homeExcludesCar')).toBeNull();
-    expect(useInverterStore.getState().homeExcludesCar).toBe(false);
+    cleanup();
+    useInverterStore.setState({ homeExcludesCar: true });
+    renderSection();
+    expect(toggle().getAttribute('aria-checked')).toBe('true');
   });
 
-  it('saves the choice to localStorage and the store in both directions', () => {
+  it('saves to settings.json in both directions, not to localStorage', async () => {
     renderSection();
     fireEvent.click(toggle());
-    expect(useInverterStore.getState().homeExcludesCar).toBe(true);
-    expect(localStorage.getItem('homeExcludesCar')).toBe('true');
-    expect(toggle().getAttribute('aria-checked')).toBe('true');
-
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith('/api/settings', { status_home_excludes_car: true }),
+    );
+    await waitFor(() => expect(useInverterStore.getState().homeExcludesCar).toBe(true));
+    await waitFor(() => expect(flash).toHaveBeenLastCalledWith('Home shown without car charging', true));
     fireEvent.click(toggle());
-    expect(useInverterStore.getState().homeExcludesCar).toBe(false);
-    expect(localStorage.getItem('homeExcludesCar')).toBe('false');
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenLastCalledWith('/api/settings', { status_home_excludes_car: false }),
+    );
+    await waitFor(() => expect(useInverterStore.getState().homeExcludesCar).toBe(false));
+    expect(localStorage.getItem('homeExcludesCar')).toBeNull();
+  });
+
+  it('moves back and says so when the save fails', async () => {
+    vi.mocked(apiPost).mockRejectedValueOnce(new Error('disk full'));
+    renderSection();
+    fireEvent.click(toggle());
+    await waitFor(() => expect(flash).toHaveBeenCalledWith('Failed to save: disk full', false));
     expect(toggle().getAttribute('aria-checked')).toBe('false');
+    expect(useInverterStore.getState().homeExcludesCar).toBe(false);
   });
 
   it('shows a one-line hint and keeps the full explanation behind the ⓘ', () => {
@@ -61,40 +81,5 @@ describe('<PanelControlsSection/> — Home Excludes Car Charging', () => {
     const tipEl = screen.getByRole('tooltip');
     expect(tipEl.textContent).toContain('never below zero');
     expect(tipEl.textContent).toContain('Home (Excl. Car)');
-  });
-});
-
-/** The saved choice loads with the store: a saved true stays on, anything else stays off. */
-describe('<PanelControlsSection/> — Home Excludes Car Charging saved state', () => {
-  function silenceConsoleError() {
-    return vi.spyOn(console, 'error').mockImplementation(() => {});
-  }
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    cleanup();
-    localStorage.removeItem('homeExcludesCar');
-  });
-
-  it('loads a saved true as on', async () => {
-    silenceConsoleError();
-    localStorage.setItem('homeExcludesCar', 'true');
-    vi.resetModules();
-    const { default: FreshSection } = await import('../../src/components/settings/PanelControlsSection');
-    const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
-    render(<FreshSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
-    expect(freshStore.getState().homeExcludesCar).toBe(true);
-    expect(screen.getByRole('switch', { name: 'Home Excludes Car Charging' }).getAttribute('aria-checked')).toBe('true');
-  });
-
-  it('loads anything but a literal true as off (garbage-safe, issue #457)', async () => {
-    silenceConsoleError();
-    localStorage.setItem('homeExcludesCar', 'yes');
-    vi.resetModules();
-    const { default: FreshSection } = await import('../../src/components/settings/PanelControlsSection');
-    const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
-    render(<FreshSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
-    expect(freshStore.getState().homeExcludesCar).toBe(false);
-    expect(screen.getByRole('switch', { name: 'Home Excludes Car Charging' }).getAttribute('aria-checked')).toBe('false');
   });
 });

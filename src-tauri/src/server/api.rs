@@ -1894,6 +1894,9 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "status_show_car_charging": settings.status_show_car_charging,
             // Issue #472/#476: the battery runtime line in the Battery Level card.
             "status_show_battery_runtime": settings.status_show_battery_runtime,
+            // Issue #498: the Energy Flow Diagram's two display switches.
+            "status_show_flow_status_words": settings.status_show_flow_status_words,
+            "status_home_excludes_car": settings.status_home_excludes_car,
             // Issue #283: forecast efficiencies consumed by the SOC
             // projection on the Forecast page.
             "forecast_charge_efficiency": settings.forecast_charge_efficiency,
@@ -2406,6 +2409,18 @@ pub async fn update_settings(
             .and_then(|v| v.as_bool())
         {
             persist.status_show_battery_runtime = v;
+        }
+        if let Some(v) = body
+            .get("status_show_flow_status_words")
+            .and_then(|v| v.as_bool())
+        {
+            persist.status_show_flow_status_words = v;
+        }
+        if let Some(v) = body
+            .get("status_home_excludes_car")
+            .and_then(|v| v.as_bool())
+        {
+            persist.status_home_excludes_car = v;
         }
         if let Some(v) = body.get("meter_names") {
             persist.meter_names = crate::settings::parse_meter_names(v)?;
@@ -7620,6 +7635,12 @@ pub async fn set_alerts(
         .and_then(|v| v.as_bool())
     {
         candidate.car_charging_alert_enabled = v;
+    }
+    if let Some(v) = body
+        .get("export_summary_alert_enabled")
+        .and_then(|v| v.as_bool())
+    {
+        candidate.export_summary_alert_enabled = v;
     }
     if let Some(v) = body
         .get("full_charge_alert_enabled")
@@ -21533,6 +21554,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn set_alerts_persists_the_export_summary_alert_which_is_off_by_default() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            assert!(!state.alert_config.lock().await.export_summary_alert_enabled);
+
+            let body = serde_json::json!({ "export_summary_alert_enabled": true });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(state.alert_config.lock().await.export_summary_alert_enabled);
+            assert!(
+                crate::settings::Settings::load()
+                    .alerts_config
+                    .export_summary_alert_enabled
+            );
+
+            // A non-boolean is ignored, and another field's save leaves it alone.
+            let body = serde_json::json!({
+                "export_summary_alert_enabled": "no",
+                "car_charging_alert_enabled": true
+            });
+            let (status, _) = set_alerts(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(state.alert_config.lock().await.export_summary_alert_enabled);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn set_alerts_persists_the_car_charging_alert_which_is_off_by_default() {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
@@ -22948,6 +22997,66 @@ pub(crate) mod tests {
             assert!(!crate::settings::Settings::load().status_show_battery_runtime);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn the_energy_flow_display_switches_save_and_read_back() {
+        // Issue #498: Show Node Status Words and Home Excludes Car Charging
+        // live in settings.json, so cleared site data or another browser
+        // keeps them.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["status_show_flow_status_words"], true);
+            assert_eq!(body["data"]["status_home_excludes_car"], false);
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({
+                    "status_show_flow_status_words": false,
+                    "status_home_excludes_car": true,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let saved = crate::settings::Settings::load();
+            assert!(!saved.status_show_flow_status_words);
+            assert!(saved.status_home_excludes_car);
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["status_show_flow_status_words"], false);
+            assert_eq!(body["data"]["status_home_excludes_car"], true);
+            // Anything but a boolean leaves them alone, as does a save of
+            // other fields.
+            for body in [
+                json!({ "status_show_flow_status_words": "true", "status_home_excludes_car": 0 }),
+                json!({ "status_show_flow_status_words": null }),
+                json!({ "forecast_plan_strategy": "cheapest" }),
+            ] {
+                let (status, _) = update_settings(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::OK);
+                let saved = crate::settings::Settings::load();
+                assert!(!saved.status_show_flow_status_words);
+                assert!(saved.status_home_excludes_car);
+            }
+        })
+        .await;
+    }
+
+    #[test]
+    fn an_older_settings_file_keeps_the_status_words_on() {
+        // Issue #498: a settings.json from before the switch moved has no
+        // key, and the words were on by default.
+        let mut file = serde_json::to_value(crate::settings::Settings {
+            status_show_flow_status_words: false,
+            status_home_excludes_car: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let map = file.as_object_mut().unwrap();
+        assert!(map.remove("status_show_flow_status_words").is_some());
+        assert!(map.remove("status_home_excludes_car").is_some());
+        let s: crate::settings::Settings = serde_json::from_value(file).unwrap();
+        assert!(s.status_show_flow_status_words);
+        assert!(!s.status_home_excludes_car);
     }
 
     #[tokio::test]

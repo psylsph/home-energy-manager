@@ -5,81 +5,84 @@ vi.mock('../../src/lib/api', () => ({
   apiPost: vi.fn().mockResolvedValue({ ok: true, data: {} }),
 }));
 
-function silenceConsoleError() {
-  return vi.spyOn(console, 'error').mockImplementation(() => {});
-}
+import PanelControlsSection from '../../src/components/settings/PanelControlsSection';
+import { apiPost } from '../../src/lib/api';
+import { useInverterStore } from '../../src/store/useInverterStore';
 
-function toggleFor(label: string): HTMLElement {
-  const labelEl = Array.from(document.body.querySelectorAll('span')).find(
-    (s) => s.textContent?.trim() === label,
-  );
-  if (!labelEl) throw new Error(`label not found: ${label}`);
-  const row = labelEl.parentElement?.parentElement;
-  if (!row) throw new Error(`row not found for label: ${label}`);
-  const toggle = row.querySelector('div.cursor-pointer');
-  if (!toggle) throw new Error(`toggle not found for label: ${label}`);
-  return toggle as HTMLElement;
-}
+/**
+ * Settings → Panel Controls → Show Node Status Words: the Generating /
+ * Importing / Charging words under the orbit's nodes. On by default, and
+ * saved in settings.json since issue #498, so clearing site data or opening
+ * HEM in another browser no longer turns them off.
+ */
+describe('<PanelControlsSection/> — Show Node Status Words', () => {
+  const flash = vi.fn();
 
-describe('<PanelControlsSection/> — Energy Flow diagram node status words', () => {
   beforeEach(() => {
-    silenceConsoleError();
-    localStorage.removeItem('showFlowStatusWords');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(apiPost).mockReset();
+    vi.mocked(apiPost).mockResolvedValue({ ok: true, data: {} });
+    flash.mockReset();
+    localStorage.clear();
+    useInverterStore.setState({ showFlowStatusWords: true, energyFlowDisplay: 'orbit' });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     cleanup();
-    localStorage.removeItem('showFlowStatusWords');
+    localStorage.clear();
+    useInverterStore.setState({ showFlowStatusWords: true, energyFlowDisplay: 'orbit' });
   });
 
-  it('defaults node status words to ON so non-technical users see Generating / Importing / Charging by default', async () => {
-    // The status words carry the direction signal that used to live in a
-    // `+`/`-` prefix on the orbit node value (e.g. "-839W + Discharging"
-    // used to read as a bug). Now that the orbit and BatteryPanel show
-    // plain magnitudes, the words are the primary direction signal, so
-    // they're on by default. The toggle remains in Settings so a user
-    // who prefers the bare value can still turn them off.
-    //
-    // We force a fresh module load so the store re-reads localStorage and
-    // picks up the (absent) key; otherwise the cached store from a prior
-    // test would carry whatever state the previous test set it to.
-    vi.resetModules();
-    const { default: PanelControlsSection } = await import('../../src/components/settings/PanelControlsSection');
-    const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
+  const renderSection = () =>
+    render(<PanelControlsSection flash={flash} initialHiddenPanels={[]} octopusConfigured={false} />);
+  const toggle = () => screen.queryByRole('switch', { name: 'Show Node Status Words' });
 
-    render(<PanelControlsSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
-    await screen.findByText('Show Node Status Words');
+  it('starts from the store, on by default', () => {
+    renderSection();
+    expect(toggle()!.getAttribute('aria-checked')).toBe('true');
+    cleanup();
+    useInverterStore.setState({ showFlowStatusWords: false });
+    renderSection();
+    expect(toggle()!.getAttribute('aria-checked')).toBe('false');
+  });
 
-    expect(freshStore.getState().showFlowStatusWords).toBe(true);
+  it('saves to settings.json in both directions, not to localStorage', async () => {
+    renderSection();
+    fireEvent.click(toggle()!);
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith('/api/settings', { status_show_flow_status_words: false }),
+    );
+    await waitFor(() => expect(useInverterStore.getState().showFlowStatusWords).toBe(false));
+    await waitFor(() => expect(flash).toHaveBeenLastCalledWith('Node status words hidden', true));
+    fireEvent.click(toggle()!);
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenLastCalledWith('/api/settings', { status_show_flow_status_words: true }),
+    );
+    await waitFor(() => expect(useInverterStore.getState().showFlowStatusWords).toBe(true));
     expect(localStorage.getItem('showFlowStatusWords')).toBeNull();
   });
 
-  it('clicking the node-status toggle shows/hides node words, persisting each choice', async () => {
-    // Fresh-load the store so it picks up the absent localStorage key and
-    // initializes to the ON default, then exercise the toggle in both
-    // directions.
-    vi.resetModules();
-    const { default: PanelControlsSection } = await import('../../src/components/settings/PanelControlsSection');
-    const { useInverterStore: freshStore } = await import('../../src/store/useInverterStore');
+  it('moves back and says so when the save fails', async () => {
+    vi.mocked(apiPost).mockRejectedValueOnce(new Error('disk full'));
+    renderSection();
+    fireEvent.click(toggle()!);
+    await waitFor(() => expect(flash).toHaveBeenCalledWith('Failed to save: disk full', false));
+    expect(toggle()!.getAttribute('aria-checked')).toBe('true');
+    expect(useInverterStore.getState().showFlowStatusWords).toBe(true);
+  });
 
-    render(<PanelControlsSection flash={() => {}} initialHiddenPanels={[]} octopusConfigured={false} />);
-    await screen.findByText('Show Node Status Words');
+  it('marks the change as the user\'s, so a settings load in flight leaves it', async () => {
+    renderSection();
+    const before = useInverterStore.getState().statusToggleRevision.showFlowStatusWords;
+    fireEvent.click(toggle()!);
+    await waitFor(() => expect(useInverterStore.getState().showFlowStatusWords).toBe(false));
+    expect(useInverterStore.getState().statusToggleRevision.showFlowStatusWords).toBeGreaterThan(before);
+  });
 
-    // The toggle starts checked (default-on). First click turns it off.
-    fireEvent.click(toggleFor('Show Node Status Words'));
-
-    await waitFor(() => {
-      expect(freshStore.getState().showFlowStatusWords).toBe(false);
-      expect(localStorage.getItem('showFlowStatusWords')).toBe('false');
-    });
-
-    // Second click re-enables.
-    fireEvent.click(toggleFor('Show Node Status Words'));
-
-    await waitFor(() => {
-      expect(freshStore.getState().showFlowStatusWords).toBe(true);
-      expect(localStorage.getItem('showFlowStatusWords')).toBe('true');
-    });
+  it('is offered only with the orbit, whose nodes carry the words', () => {
+    useInverterStore.setState({ energyFlowDisplay: 'house' });
+    renderSection();
+    expect(toggle()).toBeNull();
   });
 });

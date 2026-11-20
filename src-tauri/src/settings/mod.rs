@@ -1831,6 +1831,16 @@ pub struct Settings {
     /// browser's localStorage so every browser and device shares it (#476).
     #[serde(default)]
     pub status_show_battery_runtime: bool,
+    /// Show the status words (Generating, Importing, Charging…) under the
+    /// orbit's nodes. On by default. In settings.json rather than a
+    /// browser's localStorage so it survives cleared site data and is the
+    /// same in every browser (issue #498).
+    #[serde(default = "default_true")]
+    pub status_show_flow_status_words: bool,
+    /// Show the Status diagram's Home load without the car's charging
+    /// (issue #457). Off by default; settings.json since #498.
+    #[serde(default)]
+    pub status_home_excludes_car: bool,
     /// The running top-up, saved before its first write so a restart can
     /// always put the charge settings back.
     #[serde(default, deserialize_with = "deserialize_or_default")]
@@ -2152,6 +2162,10 @@ pub struct AlertsConfig {
     /// default, and silent until a threshold is set.
     #[serde(default)]
     pub car_charging_alert_enabled: bool,
+    /// Notify when an export ends, however it started (issue #499): the
+    /// battery's SOC drop and what went to the grid. Off by default.
+    #[serde(default)]
+    pub export_summary_alert_enabled: bool,
     /// Days without a full charge before [`Self::full_charge_alert_enabled`]
     /// notifies (7–90).
     #[serde(default = "default_full_charge_alert_days")]
@@ -2247,6 +2261,7 @@ impl Default for AlertsConfig {
             schedule_reset_alert_enabled: true,
             full_charge_alert_enabled: true,
             car_charging_alert_enabled: false,
+            export_summary_alert_enabled: false,
             full_charge_alert_days: default_full_charge_alert_days(),
             ntfy_topic: String::new(),
             ntfy_server: default_ntfy_server(),
@@ -2378,6 +2393,8 @@ impl Default for Settings {
             octopus_dispatch_charge: false,
             status_show_car_charging: false,
             status_show_battery_runtime: false,
+            status_show_flow_status_words: true,
+            status_home_excludes_car: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
@@ -2890,6 +2907,10 @@ mod tests {
         // Issue #472: the battery runtime line is opt-in; settings.json since
         // #476 so every browser shares it.
         assert!(!s.status_show_battery_runtime);
+        // Issue #498: the orbit's status words start on, Home Excludes Car
+        // Charging off, as they did in localStorage.
+        assert!(s.status_show_flow_status_words);
+        assert!(!s.status_home_excludes_car);
         // Issue #212 starts with no supplier credentials (which is also "off").
         assert!(s.octopus_api_key.is_empty());
         assert!(s.octopus_account_number.is_empty());
@@ -3142,6 +3163,8 @@ mod tests {
             octopus_dispatch_charge: false,
             status_show_car_charging: false,
             status_show_battery_runtime: false,
+            status_show_flow_status_words: true,
+            status_home_excludes_car: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
@@ -4014,6 +4037,8 @@ mod tests {
             octopus_dispatch_charge: false,
             status_show_car_charging: false,
             status_show_battery_runtime: false,
+            status_show_flow_status_words: true,
+            status_home_excludes_car: false,
             dispatch_charge_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,

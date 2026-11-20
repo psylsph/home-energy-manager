@@ -326,7 +326,7 @@ function Layout() {
   useWebSocket();
   useGridOutageNotifications();
   const [searchParams] = useSearchParams();
-  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setShowBatteryRuntime, setNavSettingsLoaded, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
+  const { snapshot, developerMode, themeMode, hiddenPanels, readOnly, energyFlowDisplay, setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setShowBatteryRuntime, setShowFlowStatusWords, setHomeExcludesCar, setNavSettingsLoaded, setInverterTempConfig, setReadOnly, setLatestVersionInfo } = useInverterStore();
   const [octopusConfigured, setOctopusConfigured] = useState(false);
 
   // Load navigation-affecting settings on mount. The Octopus page is opt-in:
@@ -378,6 +378,14 @@ function Layout() {
         if (unchanged('showBatteryRuntime')) {
           setShowBatteryRuntime(res.ok && res.data.status_show_battery_runtime === true);
         }
+        // The Energy Flow Diagram's display switches, shared by every
+        // browser since #498. A failed load keeps the defaults.
+        if (res.ok && unchanged('showFlowStatusWords')) {
+          setShowFlowStatusWords(res.data.status_show_flow_status_words !== false);
+        }
+        if (res.ok && unchanged('homeExcludesCar')) {
+          setHomeExcludesCar(res.data.status_home_excludes_car === true);
+        }
       } catch { /* use defaults */ }
       // Either way the car line's switch is now known (issue #474).
       setNavSettingsLoaded(true);
@@ -385,7 +393,7 @@ function Layout() {
     void load();
     window.addEventListener('octopus-settings-changed', load);
     return () => window.removeEventListener('octopus-settings-changed', load);
-  }, [setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setShowBatteryRuntime, setNavSettingsLoaded]);
+  }, [setHiddenPanels, setEvcHost, setCarCharging, setMeterLabels, setShowCarCharging, setShowBatteryRuntime, setShowFlowStatusWords, setHomeExcludesCar, setNavSettingsLoaded]);
 
   // Seed the inverter-temperature alert thresholds from the backend so the
   // SystemAlertBanners render with the saved config. The store is the single

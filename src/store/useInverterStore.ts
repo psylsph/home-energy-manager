@@ -21,7 +21,11 @@ export type BatteryModePending = { kind: BatteryModeKind; enabled: boolean };
 export type EvcConnectionState = 'never_connected' | 'connected' | 'degraded' | 'disconnected';
 
 /** The settings.json toggles the store mirrors, changed through `changeStatusToggle`. */
-export type StatusToggleKey = 'showCarCharging' | 'showBatteryRuntime';
+export type StatusToggleKey =
+  | 'showCarCharging'
+  | 'showBatteryRuntime'
+  | 'showFlowStatusWords'
+  | 'homeExcludesCar';
 
 interface InverterState {
   snapshot: InverterSnapshot | null;
@@ -197,7 +201,9 @@ interface InverterState {
    * direction signal that used to live in a `+`/`-` prefix on the
    * value, so a non-technical user reading "−839W + Discharging"
    * doesn't have to reconcile two contradictory signs. The toggle in
-   * Settings remains for users who prefer the bare value.
+   * Settings remains for users who prefer the bare value. The saved
+   * `status_show_flow_status_words` (settings.json since #498, so cleared
+   * site data or another browser keeps it), loaded with the nav settings.
    */
   showFlowStatusWords: boolean;
   /**
@@ -217,8 +223,9 @@ interface InverterState {
    * car's charging — home power minus the car's draw (the charger's own
    * reading when one is polled, otherwise the threshold estimate), floored
    * at zero — so a charging night reads as the house alone. The EV node
-   * keeps the car's draw and the flow lines are unchanged. Off by default;
-   * persisted to localStorage so the choice survives reloads.
+   * keeps the car's draw and the flow lines are unchanged. Off by default.
+   * The saved `status_home_excludes_car` (settings.json since #498), loaded
+   * with the nav settings.
    */
   homeExcludesCar: boolean;
   /**
@@ -389,6 +396,22 @@ function dropOldBatteryRuntimeKey(): false {
   return false;
 }
 
+/**
+ * Show Node Status Words and Home Excludes Car Charging were per-browser
+ * localStorage flags until issue #498, which lost them whenever site data
+ * went. They are settings.json now, loaded by App: clear the obsolete keys
+ * and start from the defaults (words on, car not excluded) until the
+ * settings arrive.
+ */
+function dropOldFlowDisplayKeys(): void {
+  for (const key of ['showFlowStatusWords', 'homeExcludesCar']) {
+    try {
+      localStorage.removeItem(key);
+    } catch { /* ignore */ }
+  }
+}
+dropOldFlowDisplayKeys();
+
 function loadReadOnly(): boolean {
   // Older releases persisted this flag permanently. Remove that stale key so
   // upgrading immediately restores the normal navigation in a new session.
@@ -439,22 +462,6 @@ function loadPanelGraphsYLock(): boolean {
   }
 }
 
-function loadShowFlowStatusWords(): boolean {
-  try {
-    // Default to ON: the status words (Generating / Importing / Charging /
-    // Discharging / Exporting / Idle) under each orbit node carry the
-    // direction signal that used to live in a `-`/`+` prefix on the value.
-    // Showing the words by default makes the diagram self-explanatory for
-    // non-technical users without them having to find a Settings toggle.
-    // The toggle remains in Settings so users who prefer the bare value
-    // can still turn it off.
-    const stored = localStorage.getItem('showFlowStatusWords');
-    return stored === null ? true : stored === 'true';
-  } catch {
-    return true;
-  }
-}
-
 function loadEnergyFlowDisplay(): EnergyFlowDisplay {
   try {
     // Only the literal 'house' selects the house view; anything else
@@ -484,16 +491,6 @@ function loadShowTodayStats(): boolean {
   // orbit is also what loadEnergyFlowDisplay falls back to, so both loaders
   // degrade the same way.
   return savedTodayStats() ?? loadEnergyFlowDisplay() !== 'house';
-}
-
-function loadHomeExcludesCar(): boolean {
-  try {
-    // Only the literal "true" enables the exclusion (issue #457); any other
-    // stored value — or no entry — stays off, matching the opt-in default so
-    // nothing changes for existing users until they turn it on.
-    return localStorage.getItem('homeExcludesCar') === 'true';
-  } catch { /* ignore */ }
-  return false;
 }
 
 function loadVisualNoiseThreshold(): number {
@@ -595,10 +592,10 @@ export const useInverterStore = create<InverterState>((set) => ({
   panelGraphsScale: loadPanelGraphsScale(),
   panelGraphsYLock: loadPanelGraphsYLock(),
   panelGraphsYLockMax: 0,
-  showFlowStatusWords: loadShowFlowStatusWords(),
+  showFlowStatusWords: true,
   energyFlowDisplay: loadEnergyFlowDisplay(),
   showTodayStats: loadShowTodayStats(),
-  homeExcludesCar: loadHomeExcludesCar(),
+  homeExcludesCar: false,
   showBatteryRuntime: dropOldBatteryRuntimeKey(),
   visualNoiseThreshold: loadVisualNoiseThreshold(),
   gridMeterAddress: loadGridMeterAddress(),
@@ -615,7 +612,12 @@ export const useInverterStore = create<InverterState>((set) => ({
   carCharging: {},
   meterLabels: { names: {}, solarArrays: [] },
   showCarCharging: false,
-  statusToggleRevision: { showCarCharging: 0, showBatteryRuntime: 0 },
+  statusToggleRevision: {
+    showCarCharging: 0,
+    showBatteryRuntime: 0,
+    showFlowStatusWords: 0,
+    homeExcludesCar: 0,
+  },
   navSettingsLoaded: false,
   evcPower: 0,
   evcChargingState: '',
@@ -684,12 +686,7 @@ export const useInverterStore = create<InverterState>((set) => ({
     set({ panelGraphsYLock: enabled, panelGraphsYLockMax: 0 });
   },
   setPanelGraphsYLockMax: (max) => set({ panelGraphsYLockMax: max }),
-  setShowFlowStatusWords: (enabled) => {
-    try {
-      localStorage.setItem('showFlowStatusWords', String(enabled));
-    } catch { /* ignore */ }
-    set({ showFlowStatusWords: enabled });
-  },
+  setShowFlowStatusWords: (enabled) => set({ showFlowStatusWords: enabled }),
   setEnergyFlowDisplay: (display) => {
     if (display !== 'orbit' && display !== 'house') return;
     try {
@@ -709,12 +706,7 @@ export const useInverterStore = create<InverterState>((set) => ({
     } catch { /* ignore */ }
     set({ showTodayStats: show });
   },
-  setHomeExcludesCar: (enabled) => {
-    try {
-      localStorage.setItem('homeExcludesCar', String(enabled));
-    } catch { /* ignore */ }
-    set({ homeExcludesCar: enabled });
-  },
+  setHomeExcludesCar: (enabled) => set({ homeExcludesCar: enabled }),
   setShowBatteryRuntime: (show) => set({ showBatteryRuntime: show }),
   setVisualNoiseThreshold: (threshold) => {
     try {

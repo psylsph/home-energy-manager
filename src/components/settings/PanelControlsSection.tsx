@@ -301,6 +301,14 @@ function CarChargingSlotsToggle({ flash }: { flash: Flash }) {
   );
 }
 
+// Issue #498: settings.json, like the toggles above, not localStorage.
+const HOME_EXCLUDES_CAR_TEXT = {
+  on: 'Home shown without car charging',
+  off: 'Home shown with car charging',
+  ariaLabel: 'Home Excludes Car Charging',
+};
+const STATUS_WORDS_TEXT = { on: 'Node status words shown', off: 'Node status words hidden', ariaLabel: 'Show Node Status Words' };
+
 const RUNTIME_TEXT = { on: 'Battery runtime shown', off: 'Battery runtime hidden', ariaLabel: 'Show Battery Runtime' };
 
 /**
@@ -334,8 +342,6 @@ function BatteryRuntimeToggle({ flash }: { flash: Flash }) {
 }
 
 function EnergyFlowGroup({ carCharging, flash }: { carCharging: ReactNode; flash: Flash }) {
-  const showFlowStatusWords = useInverterStore((s) => s.showFlowStatusWords);
-  const setShowFlowStatusWords = useInverterStore((s) => s.setShowFlowStatusWords);
   const visualNoiseThreshold = useInverterStore((s) => s.visualNoiseThreshold);
   const setVisualNoiseThreshold = useInverterStore((s) => s.setVisualNoiseThreshold);
   const gridMeterAddress = useInverterStore((s) => s.gridMeterAddress);
@@ -345,8 +351,6 @@ function EnergyFlowGroup({ carCharging, flash }: { carCharging: ReactNode; flash
   const setEnergyFlowDisplay = useInverterStore((s) => s.setEnergyFlowDisplay);
   const showTodayStats = useInverterStore((s) => s.showTodayStats);
   const setShowTodayStats = useInverterStore((s) => s.setShowTodayStats);
-  const homeExcludesCar = useInverterStore((s) => s.homeExcludesCar);
-  const setHomeExcludesCar = useInverterStore((s) => s.setHomeExcludesCar);
   // External CT clamps (address >= 0x01) — offered as the grid-CT source for
   // AC-coupled systems whose grid isn't the built-in 0x00 meter. The meter
   // list is replaced each snapshot, so only its addresses are taken (as a
@@ -414,9 +418,11 @@ function EnergyFlowGroup({ carCharging, flash }: { carCharging: ReactNode; flash
       {/* Issue #457: show Home without the car's charging, off by default.
           Applies to both the orbit and the house view — they share the one
           view model, so they can't disagree. */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex flex-col gap-0.5">
-          <span className={LABEL}>
+      <SavedStatusToggle
+        storeKey="homeExcludesCar"
+        settingKey="status_home_excludes_car"
+        label={
+          <>
             Home Excludes Car Charging{' '}
             <HelpTip label="Home Excludes Car Charging">
               With it on, the Status diagram's Home reading is the house load alone: home power minus the car's
@@ -424,24 +430,24 @@ function EnergyFlowGroup({ carCharging, flash }: { carCharging: ReactNode; flash
               zero, so a charging night no longer counts the car as house load too. The EV node, the flow lines and
               the house cables keep the car's energy, and History's Home (Excl. Car) series shows the same split.
             </HelpTip>
-          </span>
-          <span className={HINT}>Show the Status Home load without the car's charging.</span>
-        </div>
-        <Toggle checked={homeExcludesCar} ariaLabel="Home Excludes Car Charging" onChange={setHomeExcludesCar} />
-      </div>
+          </>
+        }
+        hint="Show the Status Home load without the car's charging."
+        text={HOME_EXCLUDES_CAR_TEXT}
+        flash={flash}
+      />
 
       {/* The house view always shows its status pills, so the toggle only
           applies to the orbit. */}
       {energyFlowDisplay === 'orbit' && (
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex flex-col gap-0.5">
-            <span className={LABEL}>Show Node Status Words</span>
-            <span className={HINT}>
-              Show short words like Generating, Importing, and Charging under the orbit nodes.
-            </span>
-          </div>
-          <Toggle checked={showFlowStatusWords} ariaLabel="Show Node Status Words" onChange={setShowFlowStatusWords} />
-        </div>
+        <SavedStatusToggle
+          storeKey="showFlowStatusWords"
+          settingKey="status_show_flow_status_words"
+          label="Show Node Status Words"
+          hint="Show short words like Generating, Importing, and Charging under the orbit nodes."
+          text={STATUS_WORDS_TEXT}
+          flash={flash}
+        />
       )}
 
       {/* Grid CT meter source (issue #192): which CT clamp measures the grid

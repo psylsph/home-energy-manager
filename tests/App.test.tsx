@@ -289,6 +289,45 @@ describe('<App/> Octopus navigation (issue #212)', () => {
     await waitFor(() => expect(useInverterStore.getState().showBatteryRuntime).toBe(false));
   });
 
+  it('loads the energy flow display switches from settings.json (issue #498)', async () => {
+    onTestFinished(() => useInverterStore.setState({ showFlowStatusWords: true, homeExcludesCar: false }));
+    vi.mocked(apiGet).mockImplementation(async (path: string) => path === '/api/settings'
+      ? { ok: true, data: { status_show_flow_status_words: false, status_home_excludes_car: true } }
+      : { ok: true, data: {} });
+    render(<App />);
+    await waitFor(() => expect(useInverterStore.getState().homeExcludesCar).toBe(true));
+    expect(useInverterStore.getState().showFlowStatusWords).toBe(false);
+    cleanup();
+
+    // Settings without them give the defaults: words on, car included.
+    vi.mocked(apiGet).mockImplementation(async () => ({ ok: true, data: {} }));
+    render(<App />);
+    await waitFor(() => expect(useInverterStore.getState().homeExcludesCar).toBe(false));
+    expect(useInverterStore.getState().showFlowStatusWords).toBe(true);
+  });
+
+  it('keeps the energy flow switches flipped while their settings load was in flight', async () => {
+    onTestFinished(() => useInverterStore.setState({ showFlowStatusWords: true, homeExcludesCar: false }));
+    useInverterStore.setState({ showFlowStatusWords: true, homeExcludesCar: false });
+    let answer: (value: unknown) => void = () => {};
+    vi.mocked(apiGet).mockImplementation((path: string) => path === '/api/settings'
+      ? new Promise((resolve) => { answer = resolve; })
+      : Promise.resolve({ ok: true, data: {} }) as never);
+    render(<App />);
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/settings'));
+    act(() => {
+      const store = useInverterStore.getState();
+      store.changeStatusToggle('showFlowStatusWords', false);
+      store.changeStatusToggle('homeExcludesCar', true);
+    });
+    await act(async () => answer({ ok: true, data: {
+      status_show_flow_status_words: true, status_home_excludes_car: false,
+    } }));
+    await waitFor(() => expect(useInverterStore.getState().navSettingsLoaded).toBe(true));
+    expect(useInverterStore.getState().showFlowStatusWords).toBe(false);
+    expect(useInverterStore.getState().homeExcludesCar).toBe(true);
+  });
+
   // Issue #476: App's settings load and a Settings toggle race. A load that
   // started before the user flipped a toggle must not put the old value back.
   it('keeps a toggle flipped while its settings load was in flight', async () => {
