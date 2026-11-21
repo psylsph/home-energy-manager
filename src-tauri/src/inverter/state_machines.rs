@@ -3047,10 +3047,11 @@ impl RepairReads {
         candidate: bool,
         snapshot: &InverterSnapshot,
     ) -> bool {
-        // RED: no memory yet, every candidate read confirms itself.
-        let _ = (previous, RepairReadMark::confirms, &self.last);
         self.last = candidate.then(|| RepairReadMark::of(snapshot));
-        candidate
+        match (&previous, &self.last) {
+            (Some(previous), Some(current)) => previous.confirms(current),
+            _ => false,
+        }
     }
 
     /// Forget the remembered read after a repair, so the next one needs two
@@ -3259,8 +3260,7 @@ pub fn check_timed_export(
 
     // Outside-window repairs need two non-Eco reads in a row (issue #501),
     // and never run while the re-arm detector is holding writes to watch.
-    let repair_confirmed = !rearm_observation_in_progress; // RED: two-read wait not applied yet
-    let _ = reads;
+    let repair_confirmed = repair_confirmed && !rearm_observation_in_progress;
 
     let quiet = |st: &TimedExportState| TimedExportDecision {
         new_state: st.clone(),

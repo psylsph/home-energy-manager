@@ -232,7 +232,7 @@ Three-phase slot/target registers mirror the single-phase layout at HR 1080-1124
 
 ### Discharge slot handling
 
-Saving an enabled Timed Export slot via `/api/control/discharge-slot` writes the slot + target SOC first, then arms Timed Export (`battery_power_mode=0`, `enable_discharge=1`); the button is locked until a slot exists and direct enables without a slot are rejected. Disabling the last slot while armed returns to Eco (clearing all discharge slot registers). Schedule-backup restores write slots before `enable_discharge=1`; on reconnect the poll loop repairs an externally-created armed-but-slotless state.
+Saving an enabled Timed Export slot via `/api/control/discharge-slot` writes the slot + target SOC first, then arms Timed Export (`battery_power_mode=0`, `enable_discharge=1`); the button is locked until a slot exists and direct enables without a slot are rejected. Disabling the last slot while armed returns to Eco (clearing all discharge slot registers). Schedule-backup restores write slots before `enable_discharge=1`; on reconnect the poll loop repairs an externally-created armed-but-slotless state. Outside a window, the Timed Export machine and the slotless-HR59 invariant repair put the inverter back to Eco only after two reads in a row that each meet the repair's own condition (`outside_window_repair_candidate` / `should_repair_timed_export`), show the same HR27/enable/slot shape and come from different frames (`RepairReads`, by the inverter clock; a failed read breaks the run), so one bad or repeated dongle read never reaches the inverter. They log what they read (`readback_detail`), first sighting included; HEM's own unfinished stop and window exits don't wait (issue #501).
 
 ### Optional block carry-forward
 
