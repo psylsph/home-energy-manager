@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.22.1] - 2026-11-21
+
+### Fixed
+
+- **One odd reading from the dongle no longer switches the inverter back to Eco.** Outside an export window, HEM now waits for a second matching reading before stepping in. A single bad reading, ten minutes before a booked export, had stopped a running charge slot early and set the battery discharging into the house. When HEM does step in, the log now says exactly what the inverter reported.
+
 ## [1.22.0] - 2026-11-20
 
 ### Added
