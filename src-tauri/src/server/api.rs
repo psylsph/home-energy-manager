@@ -14637,7 +14637,10 @@ pub(crate) mod tests {
                 12 * 60,
                 DeviceType::Gen3Hybrid,
                 TimedExportWriteOutcome::NoneIssued,
-                false,
+                crate::inverter::state_machines::RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: false,
+                },
             );
             assert!(
                 !decision.writes.is_empty(),
@@ -14656,7 +14659,10 @@ pub(crate) mod tests {
                 12 * 60,
                 DeviceType::Gen3Hybrid,
                 TimedExportWriteOutcome::NoneIssued,
-                false,
+                crate::inverter::state_machines::RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: false,
+                },
             );
             assert!(
                 !decision.writes.is_empty(),
@@ -14682,7 +14688,10 @@ pub(crate) mod tests {
                 12 * 60,
                 DeviceType::Gen3Hybrid,
                 TimedExportWriteOutcome::Succeeded,
-                false,
+                crate::inverter::state_machines::RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: false,
+                },
             );
             drop(config);
             assert!(

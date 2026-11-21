@@ -2942,6 +2942,139 @@ pub(crate) fn timed_export_claims_discharge(
     }
 }
 
+/// What the poll loop tells [`check_timed_export`] about the reads around
+/// this one. Named fields so the two flags can't be swapped at a call site.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RepairReadContext {
+    /// The HR59 re-arm detector is holding repair writes to observe whether
+    /// firmware re-asserts HR59; the machine must not disarm again meanwhile.
+    pub rearm_observation_in_progress: bool,
+    /// This read and the one judged on the previous poll both met the
+    /// outside-window repair condition, with the same register shape, in
+    /// different frames ([`RepairReads::judge`]). The repairs wait for this,
+    /// so one bad read from the dongle never reaches the inverter (issue #501).
+    pub repair_confirmed: bool,
+}
+
+/// Whether this read meets an outside-window repair condition of
+/// [`check_timed_export`], judged from the machine state before the decision:
+/// a stopped schedule parked in `Off` reading non-Eco with no physical slot
+/// (and no stop of HEM's own pending), or an enabled schedule in `Off` or
+/// `Configured` reading non-Eco outside every window. The one source for both
+/// the decision's repair branches and the poll loop's two-read memory, so a
+/// legitimate export (another controller's slot, an in-window export) never
+/// counts as the first of two reads (issue #501).
+pub fn outside_window_repair_candidate(
+    config: &TimedExportConfig,
+    state: &TimedExportState,
+    snapshot: &InverterSnapshot,
+    minute_of_day: u16,
+) -> bool {
+    let eco_confirmed = snapshot.battery_power_mode == 1 && !snapshot.enable_discharge;
+    if eco_confirmed {
+        return false;
+    }
+    let has_enabled_slots = config.slots.iter().any(ScheduleSlot::is_configured);
+    if !config.schedule_enabled || !has_enabled_slots {
+        let physical_slot_configured = snapshot
+            .discharge_slots
+            .iter()
+            .any(ScheduleSlot::is_configured);
+        matches!(state, TimedExportState::Off) && !config.stop_pending && !physical_slot_configured
+    } else {
+        matches!(state, TimedExportState::Off | TimedExportState::Configured)
+            && !is_in_export_window(&config.slots, minute_of_day)
+    }
+}
+
+/// The parts of a read the two-read confirmation compares: the register
+/// shape, and the inverter clock to tell a fresh frame from a repeated one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairReadMark {
+    battery_power_mode: u8,
+    enable_discharge: bool,
+    slot_set: bool,
+    inverter_time: String,
+}
+
+impl RepairReadMark {
+    fn of(snapshot: &InverterSnapshot) -> Self {
+        Self {
+            battery_power_mode: snapshot.battery_power_mode,
+            enable_discharge: snapshot.enable_discharge,
+            slot_set: snapshot
+                .discharge_slots
+                .iter()
+                .any(ScheduleSlot::is_configured),
+            inverter_time: snapshot.inverter_time.clone(),
+        }
+    }
+
+    /// The same shape, read from a different frame. A dongle repeating a
+    /// frozen frame repeats the inverter's clock too; with no clock decoded
+    /// there is nothing to tell them apart by, so the shape alone counts.
+    fn confirms(&self, later: &Self) -> bool {
+        let same_shape = self.battery_power_mode == later.battery_power_mode
+            && self.enable_discharge == later.enable_discharge
+            && self.slot_set == later.slot_set;
+        let fresh = self.inverter_time.is_empty() || self.inverter_time != later.inverter_time;
+        same_shape && fresh
+    }
+}
+
+/// Two-read confirmation for a repair (issue #501): the poll loop keeps one
+/// per repair. Only reads that met the repair's own condition are
+/// remembered, and only for the next poll.
+#[derive(Debug, Default)]
+pub struct RepairReads {
+    last: Option<RepairReadMark>,
+}
+
+impl RepairReads {
+    /// Call once at the start of every poll, before reading. Returns the
+    /// previous poll's candidate read and forgets it, so a poll whose read
+    /// fails or is never judged breaks the run.
+    pub fn begin_poll(&mut self) -> Option<RepairReadMark> {
+        self.last.take()
+    }
+
+    /// Judge this poll's read: remember it when it is a `candidate`, and
+    /// return whether it confirms `previous` (both candidates, same shape,
+    /// different frames).
+    pub fn judge(
+        &mut self,
+        previous: Option<RepairReadMark>,
+        candidate: bool,
+        snapshot: &InverterSnapshot,
+    ) -> bool {
+        // RED: no memory yet, every candidate read confirms itself.
+        let _ = (previous, RepairReadMark::confirms, &self.last);
+        self.last = candidate.then(|| RepairReadMark::of(snapshot));
+        candidate
+    }
+
+    /// Forget the remembered read after a repair, so the next one needs two
+    /// fresh reads again.
+    pub fn forget(&mut self) {
+        self.last = None;
+    }
+}
+
+/// What a read showed of the registers behind the outside-window repairs, for
+/// their log lines (issue #501: knowing which shape triggered a repair).
+pub(crate) fn readback_detail(snapshot: &InverterSnapshot) -> String {
+    let slot_set = snapshot
+        .discharge_slots
+        .iter()
+        .any(ScheduleSlot::is_configured);
+    format!(
+        "read HR27={}, discharge enable={}, discharge slot set={}",
+        snapshot.battery_power_mode,
+        u8::from(snapshot.enable_discharge),
+        if slot_set { "yes" } else { "no" }
+    )
+}
+
 fn is_in_export_window(slots: &[ScheduleSlot], minute_of_day: u16) -> bool {
     slots.iter().any(|slot| {
         if !slot.enabled {
@@ -3062,6 +3195,20 @@ pub fn authoritative_minute_of_day(snapshot: &InverterSnapshot, host_minute: u16
     inverter_minute_of_day(snapshot).unwrap_or(host_minute)
 }
 
+/// A read that would be repaired but isn't confirmed yet: no writes, the
+/// state unchanged, and the registers logged (issue #501).
+fn first_sighting(state: &TimedExportState, snapshot: &InverterSnapshot) -> TimedExportDecision {
+    TimedExportDecision {
+        new_state: state.clone(),
+        writes: Vec::new(),
+        log_message: Some(format!(
+            "not in Eco outside a window ({}); repairing if the next read agrees",
+            readback_detail(snapshot)
+        )),
+        is_exit_transition: false,
+    }
+}
+
 /// Check the Timed Export state machine and return any required writes.
 ///
 /// This is a pure **reconciler** that consumes:
@@ -3075,9 +3222,8 @@ pub fn authoritative_minute_of_day(snapshot: &InverterSnapshot, host_minute: u16
 ///   discharge-enable registers)
 /// - `last_write_outcome`: whether the previous poll's writes succeeded,
 ///   failed, or were never issued
-/// - `rearm_observation_in_progress`: the HR59 re-arm detector is currently
-///   holding repair writes to observe whether firmware re-asserts HR59; the
-///   machine must not disarm again while this is set
+/// - `reads`: what the poll loop knows about the reads around this one
+///   ([`RepairReadContext`])
 ///
 /// Returns a decision with optional fail-fast writes to issue.
 pub fn check_timed_export(
@@ -3087,8 +3233,12 @@ pub fn check_timed_export(
     minute_of_day: u16,
     device_type: DeviceType,
     last_write_outcome: TimedExportWriteOutcome,
-    rearm_observation_in_progress: bool,
+    reads: RepairReadContext,
 ) -> TimedExportDecision {
+    let RepairReadContext {
+        rearm_observation_in_progress,
+        repair_confirmed,
+    } = reads;
     let in_window = is_in_export_window(&config.slots, minute_of_day);
     // An enabled slot with a zero-length (00:00–00:00) window is not a
     // safety boundary. Treat it as unconfigured so the reconciler never arms
@@ -3106,6 +3256,11 @@ pub fn check_timed_export(
         .discharge_slots
         .iter()
         .any(ScheduleSlot::is_configured);
+
+    // Outside-window repairs need two non-Eco reads in a row (issue #501),
+    // and never run while the re-arm detector is holding writes to watch.
+    let repair_confirmed = !rearm_observation_in_progress; // RED: two-read wait not applied yet
+    let _ = reads;
 
     let quiet = |st: &TimedExportState| TimedExportDecision {
         new_state: st.clone(),
@@ -3214,7 +3369,7 @@ pub fn check_timed_export(
             // or a failed disable)? Repair to the Eco baseline unless the
             // re-arm detector is deliberately holding writes to observe
             // firmware behaviour.
-            if !eco_confirmed && !rearm_observation_in_progress {
+            if !eco_confirmed && repair_confirmed {
                 *state = TimedExportState::Exiting {
                     polls_waiting: 0,
                     retries: 0,
@@ -3222,12 +3377,15 @@ pub fn check_timed_export(
                 return TimedExportDecision {
                     new_state: state.clone(),
                     writes: build_timed_export_exit_writes(device_type, config),
-                    log_message: Some(
-                        "Timed Export: repairing export-armed registers outside a window"
-                            .to_string(),
-                    ),
+                    log_message: Some(format!(
+                        "Timed Export: repairing export-armed registers outside a window ({})",
+                        readback_detail(snapshot)
+                    )),
                     is_exit_transition: true,
                 };
+            }
+            if !eco_confirmed && !rearm_observation_in_progress {
+                return first_sighting(state, snapshot);
             }
             return quiet(state);
         }
@@ -3259,9 +3417,11 @@ pub fn check_timed_export(
                     log_message: Some("Timed Export blocked by Pause Discharge".to_string()),
                     is_exit_transition: false,
                 }
-            } else if !eco_confirmed && !rearm_observation_in_progress {
+            } else if !eco_confirmed && repair_confirmed {
                 // Startup outside a window with registers left over from an
-                // export (previous process stopped mid-window): repair.
+                // export (previous process stopped mid-window): repair. A
+                // first such read settles in `Configured`, which repairs if
+                // the next read agrees.
                 *state = TimedExportState::Exiting {
                     polls_waiting: 0,
                     retries: 0,
@@ -3269,11 +3429,15 @@ pub fn check_timed_export(
                 TimedExportDecision {
                     new_state: state.clone(),
                     writes: build_timed_export_exit_writes(device_type, config),
-                    log_message: Some(
-                        "Timed Export: startup repair — export-armed outside window".to_string(),
-                    ),
+                    log_message: Some(format!(
+                        "Timed Export: startup repair — export-armed outside window ({})",
+                        readback_detail(snapshot)
+                    )),
                     is_exit_transition: true,
                 }
+            } else if !eco_confirmed && !rearm_observation_in_progress {
+                *state = TimedExportState::Configured;
+                first_sighting(state, snapshot)
             } else {
                 *state = TimedExportState::Configured;
                 TimedExportDecision {
@@ -3304,7 +3468,7 @@ pub fn check_timed_export(
                         build_timed_export_entry_writes(device_type, config),
                     )
                 }
-            } else if !eco_confirmed && !rearm_observation_in_progress {
+            } else if !eco_confirmed && repair_confirmed {
                 // Outside a window but registers say maximum-power export is
                 // still armed — another controller, a failed exit, or firmware
                 // re-arm. Repair idempotently (bounded by the Exiting retry
@@ -3316,11 +3480,14 @@ pub fn check_timed_export(
                 TimedExportDecision {
                     new_state: state.clone(),
                     writes: build_timed_export_exit_writes(device_type, config),
-                    log_message: Some(
-                        "Timed Export: repair — export-armed outside window".to_string(),
-                    ),
+                    log_message: Some(format!(
+                        "Timed Export: repair — export-armed outside window ({})",
+                        readback_detail(snapshot)
+                    )),
                     is_exit_transition: true,
                 }
+            } else if !eco_confirmed && !rearm_observation_in_progress {
+                first_sighting(state, snapshot)
             } else {
                 // Eco baseline holds; nothing to do.
                 quiet(state)
@@ -4314,8 +4481,11 @@ mod tests {
     use crate::modbus::registers::{HR_DISCHARGE_SLOT_1_END, HR_DISCHARGE_SLOT_1_START};
 
     /// Wrapper around [`check_timed_export`] with the poll-loop defaults
-    /// used by the original tests: no previous write outcome and no active
-    /// re-arm observation. Tests exercising the retry / reconciliation
+    /// used by the original tests: no previous write outcome, no active
+    /// re-arm observation, and a repair already confirmed by an earlier
+    /// matching read, so these tests describe the decision on that second
+    /// read. The first-read wait (issue #501) is tested through
+    /// `issue_501_decide`. Tests exercising the retry / reconciliation
     /// behaviour call [`check_timed_export`] directly with explicit args.
     fn check_timed_export_with_defaults(
         snapshot: &InverterSnapshot,
@@ -4331,7 +4501,10 @@ mod tests {
             minute_of_day,
             device_type,
             TimedExportWriteOutcome::NoneIssued,
-            false,
+            RepairReadContext {
+                rearm_observation_in_progress: false,
+                repair_confirmed: true,
+            },
         )
     }
 
@@ -4660,7 +4833,10 @@ mod tests {
             EVENING,
             DeviceType::Gen3Hybrid,
             TimedExportWriteOutcome::NoneIssued,
-            true,
+            RepairReadContext {
+                rearm_observation_in_progress: true,
+                repair_confirmed: true,
+            },
         );
         assert!(decision.writes.is_empty());
         assert!(matches!(decision.new_state, TimedExportState::Error { .. }));
@@ -4693,7 +4869,10 @@ mod tests {
             EVENING,
             DeviceType::Gen3Hybrid,
             TimedExportWriteOutcome::Failed,
-            false,
+            RepairReadContext {
+                rearm_observation_in_progress: false,
+                repair_confirmed: true,
+            },
         );
         assert!(matches!(
             decision.new_state,
@@ -4740,7 +4919,10 @@ mod tests {
                 EVENING,
                 DeviceType::Gen3Hybrid,
                 outcome,
-                false,
+                RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: true,
+                },
             );
             outcome = if decision.writes.is_empty() {
                 TimedExportWriteOutcome::NoneIssued
@@ -4766,7 +4948,10 @@ mod tests {
             EVENING,
             DeviceType::Gen3Hybrid,
             TimedExportWriteOutcome::NoneIssued,
-            false,
+            RepairReadContext {
+                rearm_observation_in_progress: false,
+                repair_confirmed: true,
+            },
         );
         assert_eq!(decision.new_state, TimedExportState::Configured);
     }
@@ -8849,6 +9034,298 @@ mod tests {
         }
     }
 
+    fn issue_501_config() -> TimedExportConfig {
+        TimedExportConfig {
+            schedule_enabled: true,
+            slots: vec![ScheduleSlot {
+                enabled: true,
+                start_hour: 7,
+                start_minute: 0,
+                end_hour: 8,
+                end_minute: 0,
+                target_soc: 20,
+            }],
+            device_rearm_confirmed: true,
+            stop_pending: false,
+        }
+    }
+
+    /// One decision at 06:50, before the 07:00–08:00 window, given whether
+    /// the previous read also wasn't Eco.
+    fn issue_501_decide(
+        snap: &InverterSnapshot,
+        config: &TimedExportConfig,
+        state: &mut TimedExportState,
+        repair_confirmed: bool,
+    ) -> TimedExportDecision {
+        check_timed_export(
+            snap,
+            config,
+            state,
+            6 * 60 + 50,
+            DeviceType::Gen2Hybrid,
+            TimedExportWriteOutcome::NoneIssued,
+            RepairReadContext {
+                rearm_observation_in_progress: false,
+                repair_confirmed,
+            },
+        )
+    }
+
+    #[test]
+    fn timed_export_waits_for_a_second_non_eco_read_before_repairing() {
+        // Issue #501: one read outside the window showed the inverter armed,
+        // four seconds after it read Eco. A single read is not enough.
+        let config = issue_501_config();
+        let snap = export_armed_snapshot();
+        let mut state = TimedExportState::Configured;
+        let first = issue_501_decide(&snap, &config, &mut state, false);
+        assert!(first.writes.is_empty(), "first read: {:?}", first.writes);
+        assert_eq!(first.new_state, TimedExportState::Configured);
+        let message = first.log_message.expect("the first sighting is logged");
+        assert!(
+            message.contains("HR27=0") && message.contains("discharge enable=1"),
+            "{message}"
+        );
+
+        let second = issue_501_decide(&snap, &config, &mut state, true);
+        assert!(second.is_exit_transition);
+        assert!(!second.writes.is_empty());
+        let message = second.log_message.expect("the repair is logged");
+        assert!(
+            message.contains("repair")
+                && message.contains("HR27=0")
+                && message.contains("discharge enable=1")
+                && message.contains("discharge slot set=no"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn timed_export_startup_repair_waits_for_a_second_non_eco_read() {
+        let config = issue_501_config();
+        let snap = export_armed_snapshot();
+        let mut state = TimedExportState::Off;
+        let first = issue_501_decide(&snap, &config, &mut state, false);
+        assert!(first.writes.is_empty(), "first read: {:?}", first.writes);
+        assert_eq!(first.new_state, TimedExportState::Configured);
+
+        let mut state = TimedExportState::Off;
+        let confirmed = issue_501_decide(&snap, &config, &mut state, true);
+        assert!(confirmed.is_exit_transition);
+        assert!(confirmed.log_message.unwrap().contains("HR27=0"));
+    }
+
+    #[test]
+    fn timed_export_stopped_schedule_repair_waits_for_a_second_non_eco_read() {
+        let config = TimedExportConfig {
+            schedule_enabled: false,
+            ..issue_501_config()
+        };
+        let snap = export_armed_snapshot();
+        let mut state = TimedExportState::Off;
+        let first = issue_501_decide(&snap, &config, &mut state, false);
+        assert!(first.writes.is_empty(), "first read: {:?}", first.writes);
+        assert_eq!(first.new_state, TimedExportState::Off);
+
+        let mut state = TimedExportState::Off;
+        let confirmed = issue_501_decide(&snap, &config, &mut state, true);
+        assert!(confirmed.is_exit_transition);
+        assert!(confirmed.log_message.unwrap().contains("HR27=0"));
+    }
+
+    #[test]
+    fn timed_export_stop_pending_repair_does_not_wait() {
+        // HEM's own unfinished stop is not a reading to doubt.
+        let config = TimedExportConfig {
+            schedule_enabled: false,
+            stop_pending: true,
+            ..issue_501_config()
+        };
+        let mut state = TimedExportState::Off;
+        let decision = issue_501_decide(&export_armed_snapshot(), &config, &mut state, false);
+        assert!(!decision.writes.is_empty());
+    }
+
+    fn armed_at(time: &str) -> InverterSnapshot {
+        InverterSnapshot {
+            inverter_time: time.into(),
+            ..export_armed_snapshot()
+        }
+    }
+
+    #[test]
+    fn repair_reads_needs_two_candidate_reads_in_a_row() {
+        let mut reads = RepairReads::default();
+        let previous = reads.begin_poll();
+        assert!(previous.is_none(), "nothing judged yet");
+        assert!(!reads.judge(previous, true, &armed_at("2026-11-21 06:50:04")));
+        let previous = reads.begin_poll();
+        assert!(reads.judge(previous, true, &armed_at("2026-11-21 06:50:42")));
+
+        // A poll whose read failed judges nothing, which breaks the run.
+        let _failed_poll = reads.begin_poll();
+        let previous = reads.begin_poll();
+        assert!(!reads.judge(previous, true, &armed_at("2026-11-21 06:52:00")));
+    }
+
+    #[test]
+    fn repair_reads_ignores_reads_that_were_not_candidates() {
+        // Review finding: a legitimate export (here, not a candidate) followed
+        // by one bad candidate read is only the first of two.
+        let mut reads = RepairReads::default();
+        let previous = reads.begin_poll();
+        assert!(!reads.judge(previous, false, &armed_at("2026-11-21 06:50:04")));
+        let previous = reads.begin_poll();
+        assert!(!reads.judge(previous, true, &armed_at("2026-11-21 06:50:42")));
+    }
+
+    #[test]
+    fn repair_reads_needs_the_same_shape_twice() {
+        let mut reads = RepairReads::default();
+        let previous = reads.begin_poll();
+        reads.judge(previous, true, &armed_at("2026-11-21 06:50:04"));
+        let previous = reads.begin_poll();
+        let other_shape = InverterSnapshot {
+            battery_power_mode: 1,
+            enable_discharge: true,
+            inverter_time: "2026-11-21 06:50:42".into(),
+            ..Default::default()
+        };
+        assert!(!reads.judge(previous, true, &other_shape));
+    }
+
+    #[test]
+    fn repair_reads_does_not_confirm_a_repeated_frame() {
+        // A dongle repeating a frozen frame repeats the inverter's clock.
+        let mut reads = RepairReads::default();
+        let previous = reads.begin_poll();
+        reads.judge(previous, true, &armed_at("2026-11-21 06:50:04"));
+        let previous = reads.begin_poll();
+        assert!(!reads.judge(previous, true, &armed_at("2026-11-21 06:50:04")));
+        // The next fresh frame with the same shape confirms.
+        let previous = reads.begin_poll();
+        assert!(reads.judge(previous, true, &armed_at("2026-11-21 06:50:40")));
+    }
+
+    #[test]
+    fn repair_reads_uses_the_shape_alone_without_a_clock() {
+        let mut reads = RepairReads::default();
+        let previous = reads.begin_poll();
+        reads.judge(previous, true, &armed_at(""));
+        let previous = reads.begin_poll();
+        assert!(reads.judge(previous, true, &armed_at("")));
+    }
+
+    #[test]
+    fn repair_reads_needs_two_fresh_reads_after_a_repair() {
+        let mut reads = RepairReads::default();
+        let previous = reads.begin_poll();
+        reads.judge(previous, true, &armed_at("2026-11-21 06:50:04"));
+        let previous = reads.begin_poll();
+        assert!(reads.judge(previous, true, &armed_at("2026-11-21 06:50:40")));
+        reads.forget();
+        let previous = reads.begin_poll();
+        assert!(!reads.judge(previous, true, &armed_at("2026-11-21 06:51:15")));
+    }
+
+    #[test]
+    fn repair_candidate_skips_another_controllers_export() {
+        // Review finding: a stopped schedule with Agile/Cosy exporting through
+        // its own discharge slot is not a repair candidate, so one corrupt
+        // read with the slot zeroed can't count as the second read.
+        let config = TimedExportConfig {
+            schedule_enabled: false,
+            ..issue_501_config()
+        };
+        let mut agile = export_armed_snapshot();
+        agile.discharge_slots[0] = configured_slot();
+        assert!(!outside_window_repair_candidate(
+            &config,
+            &TimedExportState::Off,
+            &agile,
+            17 * 60
+        ));
+        assert!(outside_window_repair_candidate(
+            &config,
+            &TimedExportState::Off,
+            &export_armed_snapshot(),
+            17 * 60
+        ));
+        // A stopped schedule's kept 07:00–08:00 window doesn't hide residue.
+        assert!(outside_window_repair_candidate(
+            &config,
+            &TimedExportState::Off,
+            &export_armed_snapshot(),
+            7 * 60 + 30
+        ));
+        // HEM's own pending stop is repaired without waiting, not a candidate.
+        let stopping = TimedExportConfig {
+            stop_pending: true,
+            ..config.clone()
+        };
+        assert!(!outside_window_repair_candidate(
+            &stopping,
+            &TimedExportState::Off,
+            &export_armed_snapshot(),
+            17 * 60
+        ));
+    }
+
+    #[test]
+    fn repair_candidate_follows_the_enabled_schedule_windows() {
+        let config = issue_501_config();
+        let armed = export_armed_snapshot();
+        for state in [TimedExportState::Off, TimedExportState::Configured] {
+            assert!(outside_window_repair_candidate(
+                &config,
+                &state,
+                &armed,
+                6 * 60 + 50
+            ));
+            assert!(
+                !outside_window_repair_candidate(&config, &state, &armed, 7 * 60 + 30),
+                "an in-window export is the schedule's own"
+            );
+        }
+        assert!(!outside_window_repair_candidate(
+            &config,
+            &TimedExportState::Active,
+            &armed,
+            6 * 60 + 50
+        ));
+        assert!(!outside_window_repair_candidate(
+            &config,
+            &TimedExportState::Configured,
+            &eco_snapshot(),
+            6 * 60 + 50
+        ));
+    }
+
+    #[test]
+    fn first_doubtful_reads_are_logged_with_their_registers() {
+        for (config, start) in [
+            (issue_501_config(), TimedExportState::Configured),
+            (issue_501_config(), TimedExportState::Off),
+            (
+                TimedExportConfig {
+                    schedule_enabled: false,
+                    ..issue_501_config()
+                },
+                TimedExportState::Off,
+            ),
+        ] {
+            let mut state = start.clone();
+            let decision = issue_501_decide(&export_armed_snapshot(), &config, &mut state, false);
+            assert!(decision.writes.is_empty());
+            let message = decision.log_message.expect("logged");
+            assert!(
+                message.starts_with("not in Eco outside a window (read HR27=0"),
+                "{start:?}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn timed_export_startup_outside_window_repairs_export_armed_registers() {
         // A process that stopped mid-export restarts outside the window with
@@ -9090,7 +9567,10 @@ mod tests {
                 10 * 60,
                 DeviceType::Gen3Hybrid,
                 TimedExportWriteOutcome::Failed,
-                false,
+                RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: true,
+                },
             );
         }
         assert!(
@@ -9143,7 +9623,10 @@ mod tests {
             10 * 60,
             DeviceType::Gen3Hybrid,
             TimedExportWriteOutcome::NoneIssued,
-            true, // rearm_observation_in_progress
+            RepairReadContext {
+                rearm_observation_in_progress: true,
+                repair_confirmed: true,
+            },
         );
         assert!(matches!(decision.new_state, TimedExportState::Configured));
         assert!(
@@ -9170,7 +9653,10 @@ mod tests {
                 16 * 60 + 30,
                 DeviceType::Gen3Hybrid,
                 TimedExportWriteOutcome::Failed,
-                false,
+                RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: true,
+                },
             );
             assert_eq!(
                 decision.writes.len(),
@@ -9187,7 +9673,10 @@ mod tests {
             16 * 60 + 30,
             DeviceType::Gen3Hybrid,
             TimedExportWriteOutcome::Failed,
-            false,
+            RepairReadContext {
+                rearm_observation_in_progress: false,
+                repair_confirmed: true,
+            },
         );
         assert!(matches!(decision.new_state, TimedExportState::Error { .. }));
         assert!(decision.writes.is_empty());
@@ -9213,7 +9702,10 @@ mod tests {
                 16 * 60 + 30,
                 DeviceType::Gen3Hybrid,
                 TimedExportWriteOutcome::Succeeded,
-                false,
+                RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: true,
+                },
             );
             assert!(decision.writes.is_empty(), "grace period must not re-issue");
         }
@@ -9226,7 +9718,10 @@ mod tests {
             16 * 60 + 30,
             DeviceType::Gen3Hybrid,
             TimedExportWriteOutcome::Succeeded,
-            false,
+            RepairReadContext {
+                rearm_observation_in_progress: false,
+                repair_confirmed: true,
+            },
         );
         assert_eq!(
             decision.writes.len(),
@@ -9252,7 +9747,10 @@ mod tests {
                 20 * 60,
                 DeviceType::Gen3Hybrid,
                 TimedExportWriteOutcome::Failed,
-                false,
+                RepairReadContext {
+                    rearm_observation_in_progress: false,
+                    repair_confirmed: true,
+                },
             );
             assert_eq!(
                 decision.writes.len(),
@@ -9269,7 +9767,10 @@ mod tests {
             20 * 60,
             DeviceType::Gen3Hybrid,
             TimedExportWriteOutcome::Failed,
-            false,
+            RepairReadContext {
+                rearm_observation_in_progress: false,
+                repair_confirmed: true,
+            },
         );
         assert!(matches!(decision.new_state, TimedExportState::Error { .. }));
     }

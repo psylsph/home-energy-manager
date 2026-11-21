@@ -3994,13 +3994,19 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // an externally-created HR59/no-slot state. This avoids
                 // reacting to a single transient read while still healing the
                 // invalid state promptly on the next poll cycle.
-                let mut invalid_timed_export_polls: u8 = 0;
+                let mut invalid_timed_export_reads =
+                    crate::inverter::state_machines::RepairReads::default();
                 // Outcome of the Timed Export boundary writes issued on the
                 // previous poll (connection-scoped: a fresh connection starts
                 // with no writes in flight). Fed back into the reconciler so
                 // failed transitions retry instead of advancing.
                 let mut last_timed_export_write_outcome =
                     crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued;
+                // The last read the Timed Export machine judged that met its
+                // outside-window repair condition: the repairs wait for two
+                // matching reads in a row (issue #501).
+                let mut timed_export_repair_reads =
+                    crate::inverter::state_machines::RepairReads::default();
                 // Outcome of the auto-winter register batch issued on the
                 // previous poll. Pending activation/restoration stays
                 // unclaimed until a later snapshot confirms both values.
@@ -4064,6 +4070,11 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // bump by the API is always detected regardless of timing.
                 let settings_version_at_connect = state.settings.lock().await.version;
                 loop {
+                    // Taken before the read, so a poll that never judges a
+                    // read breaks both runs of repair-worthy reads.
+                    let timed_export_previous_repair_read = timed_export_repair_reads.begin_poll();
+                    let invalid_timed_export_previous_read =
+                        invalid_timed_export_reads.begin_poll();
                     // Capture version BEFORE the poll to detect changes that
                     // happen during the poll (API bumps version while we read).
                     // NOTE: this is the INSTANTANEOUS version, not a stored
@@ -5132,6 +5143,16 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         let mut te_state = te_state_at_decision.clone();
                                         let mut te_rearm = te_rearm_at_decision.clone();
 
+                                        let repair_confirmed = timed_export_repair_reads.judge(
+                                            timed_export_previous_repair_read,
+                                            crate::inverter::state_machines::outside_window_repair_candidate(
+                                                &te_config,
+                                                &te_state,
+                                                &snapshot,
+                                                minute_of_day,
+                                            ),
+                                            &snapshot,
+                                        );
                                         let decision = crate::inverter::state_machines::check_timed_export(
                                             &snapshot,
                                             &te_config,
@@ -5139,7 +5160,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             minute_of_day,
                                             identity.device_type.unwrap_or_default(),
                                             last_timed_export_write_outcome,
-                                            te_rearm.is_observing(),
+                                            crate::inverter::state_machines::RepairReadContext {
+                                                rearm_observation_in_progress: te_rearm.is_observing(),
+                                                repair_confirmed,
+                                            },
                                         );
 
                                         if let Some(msg) = &decision.log_message {
@@ -5229,7 +5253,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                     minute_of_day,
                                                     identity.device_type.unwrap_or_default(),
                                                     crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued,
-                                                    false,
+                                                    crate::inverter::state_machines::RepairReadContext {
+                                                        rearm_observation_in_progress: false,
+                                                        repair_confirmed: true,
+                                                    },
                                                 );
                                                 te_state = te_state_fallback;
                                                 if !fallback.writes.is_empty() {
@@ -5317,21 +5344,22 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         &snapshot.discharge_slots,
                                         force_discharge_in_progress,
                                     );
-                                    if invalid_timed_export {
-                                        invalid_timed_export_polls =
-                                            invalid_timed_export_polls.saturating_add(1);
-                                    } else {
-                                        invalid_timed_export_polls = 0;
-                                    }
-
-                                    if invalid_timed_export_polls >= 2 {
-                                        invalid_timed_export_polls = 0;
+                                    if invalid_timed_export_reads.judge(
+                                        invalid_timed_export_previous_read,
+                                        invalid_timed_export,
+                                        &snapshot,
+                                    ) {
+                                        invalid_timed_export_reads.forget();
                                         let writes = build_timed_export_disable_writes(
                                             snapshot.device_type,
                                         );
                                         if discharge_arbiter
                                             .request(DischargeControlOwner::TimedExport)
                                         {
+                                            tracing::warn!(
+                                                "Timed Export invariant repair: discharge enabled with no discharge slot ({})",
+                                                crate::inverter::state_machines::readback_detail(&snapshot)
+                                            );
                                             discharge_control_may_override_pause = !writes.is_empty();
                                             for write in writes {
                                                 match client
