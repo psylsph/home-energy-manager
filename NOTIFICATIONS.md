@@ -66,9 +66,9 @@ to your phone.
 - **No "Car Charging Started or Finished" message** — It is off by default
   and needs a **Car Charging Threshold** (Settings → EV Charger); a
   GivEnergy EV charger HEM reads then supplies the figure instead of the
-  estimate. A session starts after twenty minutes of
-  charging and ends after ten without, and at most one "started" message is
-  sent every half hour.
+  estimate. A session starts after twenty minutes of estimated charging
+  (three minutes when the charger measures it) and ends after ten without,
+  and at most one "started" message is sent every half hour.
 
 ### Talking to your bot
 

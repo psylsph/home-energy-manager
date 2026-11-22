@@ -1,7 +1,8 @@
 //! "Car charging started / finished" notification (issue #454).
 //!
 //! A session starts once the car has drawn power for twenty minutes running
-//! and ends once it has drawn none for ten, so a pause between Octopus slots
+//! (three when a polled GivEnergy charger measures it) and ends once it has
+//! drawn none for ten, so a pause between Octopus slots
 //! or a taper under the threshold neither ends it nor starts a second one.
 //! The car's power is the polled GivEnergy charger's, else the estimate from
 //! home load above the user's threshold (`history::car_charging`), which must
@@ -13,9 +14,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The car must draw power this long before a session starts: the history
-/// rule's `history::car_charging::MIN_RUN_MINUTES` (issue #504).
+/// Power estimated from house load must last this long before a session
+/// starts, the history rule's `history::car_charging::MIN_RUN_MINUTES`, so a
+/// long appliance run is never announced as the car (issue #504).
 pub const START_AFTER_SECS: i64 = 1200;
+/// A polled charger's own power needs only this long: History counts it as
+/// the car at any length, and this just rides out a charger's brief wake-ups.
+pub const MEASURED_START_AFTER_SECS: i64 = 180;
 /// ...and draw none this long before it ends.
 pub const END_AFTER_SECS: i64 = 600;
 /// A gap between polls longer than this (or a clock that steps back) ends
@@ -68,12 +73,13 @@ pub struct CarSession {
 }
 
 impl CarSession {
-    /// Feed one poll: `car_w` is the car's power at `now` (Unix seconds).
+    /// Feed one poll: `car_w` is the car's power at `now` (Unix seconds),
+    /// `estimated` when it comes from house load rather than a charger.
     ///
     /// Energy is the previous poll's power held until this one, so a gap is
     /// never bridged: a long one ends the session first. A reading that is
     /// not a finite non-negative number counts as no power.
-    pub fn step(&mut self, now: i64, car_w: f64) -> Vec<CarEvent> {
+    pub fn step(&mut self, now: i64, car_w: f64, estimated: bool) -> Vec<CarEvent> {
         let car_w = if car_w.is_finite() && car_w > 0.0 {
             car_w
         } else {
@@ -111,7 +117,12 @@ impl CarSession {
             } else {
                 let since = *self.pending_since.get_or_insert(now);
                 self.pending_kwh += credited;
-                if now - since >= START_AFTER_SECS {
+                let wait = if estimated {
+                    START_AFTER_SECS
+                } else {
+                    MEASURED_START_AFTER_SECS
+                };
+                if now - since >= wait {
                     // Only the "started" message is rate-limited; the
                     // "finished" energy summary always goes out.
                     let announce = self
@@ -268,7 +279,7 @@ where
         on,
         now_ts,
         |session: &mut CarSession| {
-            let events = session.step(now_ts, car_w.unwrap_or(0.0));
+            let events = session.step(now_ts, car_w.unwrap_or(0.0), estimated);
             let messages = events.iter().map(|e| event_message(e, estimated)).collect();
             (!events.is_empty(), messages)
         },
@@ -288,7 +299,7 @@ mod tests {
         let mut events = Vec::new();
         let mut t = from;
         while t <= to {
-            events.extend(s.step(t, power));
+            events.extend(s.step(t, power, true));
             t += 60;
         }
         events
@@ -305,8 +316,8 @@ mod tests {
     fn a_session_starts_after_start_after_secs_and_not_a_poll_sooner() {
         let mut s = CarSession::default();
         assert!(feed(&mut s, 0, S - 60, W).is_empty(), "a minute short");
-        assert_eq!(s.step(S - 1, W), vec![]);
-        assert_eq!(s.step(S, W), vec![CarEvent::Started { at: 0 }]);
+        assert_eq!(s.step(S - 1, W, true), vec![]);
+        assert_eq!(s.step(S, W, true), vec![CarEvent::Started { at: 0 }]);
         // Nothing more while it carries on.
         assert!(feed(&mut s, ON, ON + 1200, W).is_empty());
     }
@@ -317,12 +328,12 @@ mod tests {
         // the alert waits twenty minutes, like the history rule.
         let mut s = CarSession::default();
         assert!(feed(&mut s, 0, 19 * 60, W).is_empty(), "nineteen minutes");
-        assert_eq!(s.step(1199, W), vec![]);
-        assert_eq!(s.step(1200, W), vec![CarEvent::Started { at: 0 }]);
+        assert_eq!(s.step(1199, W, true), vec![]);
+        assert_eq!(s.step(1200, W, true), vec![CarEvent::Started { at: 0 }]);
     }
 
     #[test]
-    fn the_alert_and_the_history_rule_wait_the_same_time() {
+    fn the_alert_waits_as_long_as_the_history_rule_for_an_estimated_car() {
         assert_eq!(
             START_AFTER_SECS,
             crate::history::car_charging::MIN_RUN_MINUTES * 60
@@ -333,10 +344,10 @@ mod tests {
     fn a_short_run_is_forgotten() {
         let mut s = CarSession::default();
         assert!(feed(&mut s, 0, S - 60, W).is_empty());
-        assert!(s.step(S, 0.0).is_empty());
+        assert!(s.step(S, 0.0, true).is_empty());
         // The clock starts again: the whole wait is needed once more.
         assert!(feed(&mut s, ON, ON + S - 60, W).is_empty());
-        assert_eq!(s.step(ON + S, W), vec![CarEvent::Started { at: ON }]);
+        assert_eq!(s.step(ON + S, W, true), vec![CarEvent::Started { at: ON }]);
     }
 
     #[test]
@@ -348,7 +359,7 @@ mod tests {
             feed(&mut s, IDLE, IDLE + 540, 0.0).is_empty(),
             "nine minutes"
         );
-        let events = s.step(IDLE + 600, 0.0);
+        let events = s.step(IDLE + 600, 0.0, true);
         assert_eq!(events.len(), 1);
         match &events[0] {
             CarEvent::Finished {
@@ -405,7 +416,7 @@ mod tests {
     fn a_long_gap_ends_the_session_at_the_last_poll_without_the_missing_energy() {
         let mut s = CarSession::default();
         feed(&mut s, 0, ON, W);
-        let events = s.step(ON + 601, W);
+        let events = s.step(ON + 601, W, true);
         let [CarEvent::Finished {
             started_at,
             ended_at,
@@ -428,14 +439,14 @@ mod tests {
     fn a_gap_of_exactly_ten_minutes_is_still_a_continuing_session() {
         let mut s = CarSession::default();
         feed(&mut s, 0, ON, W);
-        assert!(s.step(ON + 600, W).is_empty());
+        assert!(s.step(ON + 600, W, true).is_empty());
     }
 
     #[test]
     fn a_clock_that_steps_back_ends_the_session_too() {
         let mut s = CarSession::default();
         feed(&mut s, 0, ON, W);
-        let events = s.step(100, W);
+        let events = s.step(100, W, true);
         assert!(matches!(
             events.as_slice(),
             [CarEvent::Finished { ended_at: ON, .. }]
@@ -447,29 +458,62 @@ mod tests {
         let mut s = CarSession::default();
         feed(&mut s, 0, ON, W);
         let before = s.clone();
-        assert!(s.step(ON, W).is_empty());
+        assert!(s.step(ON, W, true).is_empty());
         assert_eq!(s, before);
     }
 
+    /// Feed a polled charger's measured power, like [`feed`].
+    fn feed_measured(s: &mut CarSession, from: i64, to: i64, power: f64) -> Vec<CarEvent> {
+        let mut events = Vec::new();
+        let mut t = from;
+        while t <= to {
+            events.extend(s.step(t, power, false));
+            t += 60;
+        }
+        events
+    }
+
     #[test]
-    fn a_start_inside_half_an_hour_of_the_last_start_message_skips_only_that_message() {
-        // With a twenty-minute start and a ten-minute end, polls alone can't
-        // bring two start messages this close, so the saved state carries
-        // the last one.
-        let mut s = CarSession {
-            last_started_notified: Some(0),
-            ..CarSession::default()
-        };
-        let events = feed(&mut s, 60, 60 + S, W);
+    fn a_polled_chargers_power_starts_a_session_after_three_minutes() {
+        let mut s = CarSession::default();
+        assert!(feed_measured(&mut s, 0, 120, W).is_empty(), "two minutes");
+        assert_eq!(s.step(179, W, false), vec![]);
+        assert_eq!(s.step(180, W, false), vec![CarEvent::Started { at: 0 }]);
+    }
+
+    #[test]
+    fn a_run_judged_partly_on_each_source_waits_for_the_poll_in_hand() {
+        // The charger drops out of polling three minutes in: the estimate
+        // takes over and its own wait applies to the run so far.
+        let mut s = CarSession::default();
+        assert!(feed_measured(&mut s, 0, 120, W).is_empty());
+        assert!(feed(&mut s, 180, S - 60, W).is_empty());
+        assert_eq!(s.step(S, W, true), vec![CarEvent::Started { at: 0 }]);
+    }
+
+    #[test]
+    fn a_second_session_inside_half_an_hour_of_the_last_start_skips_only_the_start_message() {
+        let mut s = CarSession::default();
+        let first = feed_measured(&mut s, 0, 240, W);
+        assert_eq!(first, vec![CarEvent::Started { at: 0 }]);
+        // Ends at 300 (10 idle minutes seen by 900).
+        let events = feed_measured(&mut s, 300, 900, 0.0);
+        assert!(matches!(events.last(), Some(CarEvent::Finished { .. })));
+        // Charging again from 1000: opens at 1180, only 1000 s after the
+        // first start message.
+        let events = feed_measured(&mut s, 1000, 1300, W);
         assert!(events.is_empty(), "no second start message: {events:?}");
         assert!(s.open.is_some(), "the session is still tracked");
         // Its end is still announced: the rate limit is for "started"
         // messages, and the energy summary is what the user is waiting for.
-        let events = feed(&mut s, 120 + S, 120 + S + 700, 0.0);
+        let events = feed_measured(&mut s, 1360, 1360 + 700, 0.0);
         assert!(
             matches!(
                 events.as_slice(),
-                [CarEvent::Finished { started_at: 60, .. }]
+                [CarEvent::Finished {
+                    started_at: 1000,
+                    ..
+                }]
             ),
             "finish still sent: {events:?}"
         );
