@@ -913,7 +913,10 @@ impl AppState {
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             e2e_admin: std::sync::atomic::AtomicBool::new(false),
-            health: Arc::new(crate::health::HealthMarks::default()),
+            health: Arc::new(crate::health::HealthMarks::with_features_on(
+                std::time::Instant::now(),
+                &crate::server::health::features_on(&crate::settings::Settings::load()),
+            )),
             weather: Arc::new(Mutex::new(crate::weather::WeatherState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()

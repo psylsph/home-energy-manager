@@ -19,11 +19,28 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 
 use crate::health::{
-    build_health, BackupInput, DiskInput, Feature, FetchInput, HealthInputs, HealthReport,
+    build_health, BackupInput, DiskInput, Feature, FetchInput, HealthInputs, HealthReport, LastOk,
     NotifyInput, OctopusInput, Overall,
 };
 use crate::inverter::poll::AppState;
 use crate::settings::Settings;
+
+/// Which optional features are on in `settings`, the way [`health_report`]
+/// judges them, so the health marks can count the ones on at start from
+/// start (see [`crate::health::HealthMarks::with_features_on`]).
+pub fn features_on(settings: &Settings) -> [(Feature, bool); 4] {
+    let weather = weather_on(&settings.weather_config);
+    [
+        (Feature::Backup, settings.history_backup.enabled),
+        (Feature::Weather, weather),
+        (Feature::SolarForecast, weather),
+        (Feature::Octopus, crate::octopus::configured(settings)),
+    ]
+}
+
+fn weather_on(config: &crate::settings::WeatherConfig) -> bool {
+    config.enabled && config.latitude.is_some() && config.longitude.is_some()
+}
 
 pub async fn get_health(State(state): State<Arc<AppState>>) -> Response {
     let report = health_report(&state, chrono::Utc::now().timestamp(), Instant::now()).await;
@@ -44,6 +61,7 @@ pub async fn get_health(State(state): State<Arc<AppState>>) -> Response {
 pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -> HealthReport {
     let (poll_interval_secs, host_configured) = {
         let poll = state.settings.lock().await;
+        // The poll loop's own test, so the two never disagree.
         (poll.interval_secs, !poll.host.trim().is_empty())
     };
     let connection = state.connection_state.lock().await.clone();
@@ -75,9 +93,12 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
 
     let (weather_enabled, weather_last) = {
         let ws = state.weather.lock().await;
-        let enabled =
-            ws.config.enabled && ws.config.latitude.is_some() && ws.config.longitude.is_some();
-        (enabled, ws.last_fetch_at.map(|at| at.timestamp()))
+        (
+            weather_on(&ws.config),
+            ws.last_fetch_at
+                .zip(ws.last_fetch_mono)
+                .map(|(at, marked)| LastOk::since(at.timestamp(), marked, now_mono)),
+        )
     };
     let weather = FetchInput {
         enabled: weather_enabled,
@@ -87,7 +108,7 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
     let solar_forecast = FetchInput {
         enabled: weather_enabled,
         enabled_for_s: marks.enabled_for_s(Feature::SolarForecast, weather_enabled, now_mono),
-        last_ok: db.as_ref().and_then(|db| db.forecast_stored_at()),
+        last_ok: db.as_ref().and_then(|db| db.forecast_last_ok(now_mono)),
     };
 
     let octopus = {
@@ -96,8 +117,10 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
         OctopusInput {
             configured,
             enabled_for_s: marks.enabled_for_s(Feature::Octopus, configured, now_mono),
-            last_sync_at: o.last_sync_at.map(|at| at.timestamp()),
-            failed: o.last_error.is_some(),
+            last_sync: o
+                .last_good_sync
+                .map(|(at, marked)| LastOk::since(at.timestamp(), marked, now_mono)),
+            failed: o.failed_with.is_some(),
         }
     };
 

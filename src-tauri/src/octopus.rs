@@ -53,6 +53,77 @@ pub struct OctopusState {
     pub imported_intervals: u64,
     pub tariff_prices: usize,
     pub last_tariff_error: Option<String>,
+    /// The latest sync that worked, on the monotonic clock too, for
+    /// `GET /api/health`.
+    #[serde(skip)]
+    pub last_good_sync: Option<(DateTime<Utc>, std::time::Instant)>,
+    /// When the latest finished sync failed, the fingerprint of the
+    /// credentials it used ([`credentials_key`]), for `GET /api/health`: it
+    /// counts only while they're still the saved ones. A sync fails when it
+    /// can't read the account, the database or any meter, or when every
+    /// meter's recent fetch fails; one meter or the tariff failing on its own
+    /// doesn't count, since the rest still synced. Kept while the next sync
+    /// runs.
+    #[serde(skip)]
+    pub failed_with: Option<u64>,
+}
+
+/// A fingerprint of the saved Octopus credentials.
+pub fn credentials_key(settings: &Settings) -> u64 {
+    crate::health::credentials_key(&[
+        settings.octopus_api_key.trim(),
+        settings.octopus_account_number.trim(),
+    ])
+}
+
+/// What a sync that got as far as the meters found.
+struct SyncSummary {
+    streams: usize,
+    imported: u64,
+    complete: bool,
+    tariff_prices: usize,
+    tariff_error: Option<String>,
+    sync_error: Option<String>,
+    /// Every meter's recent fetch failed: nothing new can have arrived.
+    every_stream_failed: bool,
+}
+
+/// Record a sync made with credentials `key` that finished at `now` /
+/// `now_mono` in `status`, returning its result.
+fn finish_sync(
+    status: &mut OctopusState,
+    result: Result<SyncSummary, String>,
+    now: DateTime<Utc>,
+    now_mono: std::time::Instant,
+    key: u64,
+) -> Result<(), String> {
+    status.syncing = false;
+    match result {
+        Ok(summary) => {
+            status.last_sync_at = Some(now);
+            status.last_error = summary.sync_error.clone();
+            status.discovered_streams = summary.streams;
+            status.imported_intervals = status.imported_intervals.saturating_add(summary.imported);
+            status.backfill_complete = summary.complete;
+            status.tariff_prices = summary.tariff_prices;
+            status.last_tariff_error = summary.tariff_error;
+            if summary.every_stream_failed && summary.imported == u64::MAX {
+                status.failed_with = Some(key);
+            } else {
+                status.failed_with = None;
+                status.last_good_sync = Some((now, now_mono));
+            }
+            match summary.sync_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+        Err(error) => {
+            status.failed_with = Some(key);
+            status.last_error = Some(error.clone());
+            Err(error)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -876,6 +947,7 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
         // backfill takes much longer to finish.
         let (recent_imported, recent_errors) =
             sync_recent_streams(&settings, db.clone(), &streams, now).await;
+        let every_stream_failed = recent_errors.len() >= streams.len();
         imported += recent_imported;
         sync_errors.extend(recent_errors);
         let (tariff_prices, tariff_error) =
@@ -909,38 +981,25 @@ async fn run_sync(state: Arc<AppState>) -> Result<(), String> {
                 }
             }
         }
-        Ok::<_, String>((
-            streams.len(),
+        Ok::<SyncSummary, String>(SyncSummary {
+            streams: streams.len(),
             imported,
-            all_complete,
+            complete: all_complete,
             tariff_prices,
             tariff_error,
-            summarize_sync_errors(sync_errors),
-        ))
+            sync_error: summarize_sync_errors(sync_errors),
+            every_stream_failed,
+        })
     }
     .await;
 
-    let mut status = state.octopus.lock().await;
-    status.syncing = false;
-    match result {
-        Ok((streams, imported, complete, tariff_prices, tariff_error, sync_error)) => {
-            status.last_sync_at = Some(Utc::now());
-            status.last_error = sync_error.clone();
-            status.discovered_streams = streams;
-            status.imported_intervals = status.imported_intervals.saturating_add(imported);
-            status.backfill_complete = complete;
-            status.tariff_prices = tariff_prices;
-            status.last_tariff_error = tariff_error;
-            match sync_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        }
-        Err(error) => {
-            status.last_error = Some(error.clone());
-            Err(error)
-        }
-    }
+    finish_sync(
+        &mut *state.octopus.lock().await,
+        result,
+        Utc::now(),
+        std::time::Instant::now(),
+        credentials_key(&settings),
+    )
 }
 
 pub async fn run_octopus_loop(state: Arc<AppState>) {
@@ -2228,6 +2287,77 @@ mod tests {
             request.contains(&format!("period_from={expected_from}")),
             "expected sync to resume at {prior_end}, got {request}"
         );
+    }
+
+    #[test]
+    fn only_a_sync_that_got_nothing_counts_as_failed_for_health() {
+        let now = Utc::now();
+        let mono = std::time::Instant::now();
+        let summary = |error: Option<&str>, every_stream_failed| SyncSummary {
+            streams: 2,
+            imported: 10,
+            complete: true,
+            tariff_prices: 5,
+            tariff_error: None,
+            sync_error: error.map(str::to_string),
+            every_stream_failed,
+        };
+        let mut status = OctopusState::default();
+        // One stream's backfill failing: shown, but the sync worked.
+        let partial = finish_sync(
+            &mut status,
+            Ok(summary(Some("gas backfill: 500"), false)),
+            now,
+            mono,
+            1,
+        );
+        assert!(partial.is_err());
+        assert!(status.last_error.is_some());
+        assert_eq!(status.failed_with, None);
+        assert_eq!(status.last_good_sync, Some((now, mono)));
+
+        // Every meter's fetch failing: the account read, but nothing came.
+        let later = mono + std::time::Duration::from_secs(60);
+        let empty = finish_sync(
+            &mut status,
+            Ok(summary(Some("import: 500; export: 500"), true)),
+            now,
+            later,
+            1,
+        );
+        assert!(empty.is_err());
+        assert_eq!(status.failed_with, Some(1));
+        assert_eq!(status.last_good_sync, Some((now, mono)), "not a good sync");
+
+        // The account can't be read: the whole sync failed.
+        status.syncing = true;
+        assert!(finish_sync(&mut status, Err("401".into()), now, later, 2).is_err());
+        assert_eq!(status.failed_with, Some(2));
+        assert!(!status.syncing);
+
+        // A clean sync clears it.
+        assert!(finish_sync(&mut status, Ok(summary(None, false)), now, later, 2).is_ok());
+        assert_eq!(status.failed_with, None);
+        assert!(status.last_error.is_none());
+        assert_eq!(status.last_good_sync, Some((now, later)));
+    }
+
+    #[test]
+    fn the_credentials_fingerprint_follows_the_saved_key_and_account() {
+        let mut settings = Settings {
+            octopus_api_key: "sk_a".into(),
+            octopus_account_number: "A-1".into(),
+            ..Default::default()
+        };
+        let first = credentials_key(&settings);
+        settings.octopus_api_key = " sk_a ".into();
+        assert_eq!(
+            credentials_key(&settings),
+            first,
+            "trimmed like configured()"
+        );
+        settings.octopus_api_key = "sk_b".into();
+        assert_ne!(credentials_key(&settings), first);
     }
 
     #[tokio::test]

@@ -1410,13 +1410,27 @@ static TELEGRAM_DELIVERY: crate::health::DeliveryMarks = crate::health::Delivery
 static NTFY_DELIVERY: crate::health::DeliveryMarks = crate::health::DeliveryMarks::new();
 static PUSHOVER_DELIVERY: crate::health::DeliveryMarks = crate::health::DeliveryMarks::new();
 
-/// Note one send in `marks` and pass the result on.
+/// Note one send, made with credentials `key`, in `marks` and pass the
+/// result on.
 fn recorded(
     marks: &crate::health::DeliveryMarks,
+    key: u64,
     result: Result<(), String>,
 ) -> Result<(), String> {
-    marks.record(result.is_ok(), chrono::Utc::now().timestamp());
+    marks.record(key, result.is_ok(), chrono::Utc::now().timestamp());
     result
+}
+
+fn telegram_key(bot_token: &str, chat_id: &str) -> u64 {
+    crate::health::credentials_key(&[bot_token, chat_id])
+}
+
+fn ntfy_key(topic: &str, server: &str) -> u64 {
+    crate::health::credentials_key(&[topic, server])
+}
+
+fn pushover_key(app_token: &str, user_key: &str) -> u64 {
+    crate::health::credentials_key(&[app_token, user_key])
 }
 
 /// The delivery marks of every channel set up in `config`.
@@ -1434,38 +1448,50 @@ pub(crate) fn channel_marks(
     .collect()
 }
 
-/// Clear the delivery marks of every channel whose settings differ between
-/// `old` and `new`: past sends with other credentials say nothing about the
-/// new ones.
+/// Start the delivery marks afresh for every channel whose credentials
+/// differ between `old` and `new`: past sends with other credentials say
+/// nothing about the new ones, and a send still in flight with the old ones
+/// is ignored when it finishes.
 pub(crate) fn reset_changed_channel_marks(
     old: &crate::settings::AlertsConfig,
     new: &crate::settings::AlertsConfig,
 ) {
-    for (marks, changed) in channel_changes(old, new) {
-        if changed {
-            marks.reset();
+    reset_changed(
+        channel_keys(old).map(|(marks, _)| marks),
+        channel_keys(old).map(|(_, key)| key),
+        channel_keys(new).map(|(_, key)| key),
+    );
+}
+
+/// Reset each of `marks` whose key differs between `old` and `new`.
+fn reset_changed<const N: usize>(
+    marks: [&crate::health::DeliveryMarks; N],
+    old: [u64; N],
+    new: [u64; N],
+) {
+    for ((marks, old), new) in marks.into_iter().zip(old).zip(new) {
+        if old != new {
+            marks.reset(new);
         }
     }
 }
 
-fn channel_changes(
-    old: &crate::settings::AlertsConfig,
-    new: &crate::settings::AlertsConfig,
-) -> [(&'static crate::health::DeliveryMarks, bool); 3] {
+/// Each channel's marks with the fingerprint of its credentials in `config`.
+fn channel_keys(
+    config: &crate::settings::AlertsConfig,
+) -> [(&'static crate::health::DeliveryMarks, u64); 3] {
     [
         (
             &TELEGRAM_DELIVERY,
-            old.telegram_bot_token != new.telegram_bot_token
-                || old.telegram_chat_id != new.telegram_chat_id,
+            telegram_key(&config.telegram_bot_token, &config.telegram_chat_id),
         ),
         (
             &NTFY_DELIVERY,
-            old.ntfy_topic != new.ntfy_topic || old.ntfy_server != new.ntfy_server,
+            ntfy_key(&config.ntfy_topic, &config.ntfy_server),
         ),
         (
             &PUSHOVER_DELIVERY,
-            old.pushover_app_token != new.pushover_app_token
-                || old.pushover_user_key != new.pushover_user_key,
+            pushover_key(&config.pushover_app_token, &config.pushover_user_key),
         ),
     ]
 }
@@ -1476,11 +1502,15 @@ fn channel_changes(
 pub fn send_telegram_message(bot_token: &str, chat_id: &str, text: &str) -> Result<(), String> {
     recorded(
         &TELEGRAM_DELIVERY,
-        send_telegram_message_unrecorded(bot_token, chat_id, text),
+        telegram_key(bot_token, chat_id),
+        send_telegram_reply(bot_token, chat_id, text),
     )
 }
 
-fn send_telegram_message_unrecorded(
+/// [`send_telegram_message`] without counting towards the channel's health:
+/// for replies to bot commands, which say nothing about whether alerts get
+/// through.
+pub(crate) fn send_telegram_reply(
     bot_token: &str,
     chat_id: &str,
     text: &str,
@@ -1529,24 +1559,10 @@ fn send_telegram_message_unrecorded(
 /// otherwise tries to HTML-parse the caption and returns 400
 /// "can't parse entities" the moment it sees an unescaped `<`, `>`, or
 /// `&` in user-supplied content (e.g. a support-bundle description).
-/// Uses `sendDocument` with `multipart/form-data`.
+/// Uses `sendDocument` with `multipart/form-data`. Reports don't count towards
+/// the channel's health (`GET /api/health`): a rejected document says nothing
+/// about whether alerts get through.
 pub fn send_telegram_document(
-    bot_token: &str,
-    chat_id: &str,
-    caption: &str,
-    filename: &str,
-    file_body: &[u8],
-    parse_mode: Option<&str>,
-) -> Result<(), String> {
-    recorded(
-        &TELEGRAM_DELIVERY,
-        send_telegram_document_unrecorded(
-            bot_token, chat_id, caption, filename, file_body, parse_mode,
-        ),
-    )
-}
-
-fn send_telegram_document_unrecorded(
     bot_token: &str,
     chat_id: &str,
     caption: &str,
@@ -1643,6 +1659,7 @@ fn send_telegram_document_unrecorded(
 pub fn send_ntfy_message(topic: &str, server: &str, text: &str) -> Result<(), String> {
     recorded(
         &NTFY_DELIVERY,
+        ntfy_key(topic, server),
         send_ntfy_message_via(notify_agent(), topic, server, text),
     )
 }
@@ -1700,6 +1717,7 @@ fn send_ntfy_message_via(
 pub fn send_pushover_message(app_token: &str, user_key: &str, text: &str) -> Result<(), String> {
     recorded(
         &PUSHOVER_DELIVERY,
+        pushover_key(app_token, user_key),
         send_pushover_message_via(
             notify_agent(),
             "https://api.pushover.net/1/messages.json",
@@ -2465,7 +2483,7 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
                 let token_c = token.clone();
                 tracing::info!("Telegram: replying to '/{cmd}' for chat {chat_id}");
                 tokio::task::spawn_blocking(move || {
-                    if let Err(e) = send_telegram_message(&token_c, &cid_str, &reply) {
+                    if let Err(e) = send_telegram_reply(&token_c, &cid_str, &reply) {
                         tracing::warn!("Telegram reply failed: {e}");
                     }
                 });
@@ -4284,7 +4302,11 @@ mod tests {
             ..Default::default()
         };
         let changed = |new: &crate::settings::AlertsConfig| -> Vec<bool> {
-            channel_changes(&old, new).iter().map(|(_, c)| *c).collect()
+            channel_keys(&old)
+                .iter()
+                .zip(channel_keys(new))
+                .map(|((_, a), (_, b))| *a != b)
+                .collect()
         };
         assert_eq!(changed(&old), [false, false, false]);
         let mut new = old.clone();
@@ -4296,11 +4318,8 @@ mod tests {
         new.ntfy_server = "https://ntfy.example".into();
         new.pushover_user_key = "u2".into();
         assert_eq!(changed(&new), [false, true, true]);
-        // Each flag belongs to its own channel's marks.
-        let marks: Vec<_> = channel_changes(&old, &old)
-            .iter()
-            .map(|(m, _)| *m)
-            .collect();
+        // Each key belongs to its own channel's marks.
+        let marks: Vec<_> = channel_keys(&old).iter().map(|(m, _)| *m).collect();
         assert!(std::ptr::eq(marks[0], &TELEGRAM_DELIVERY));
         assert!(std::ptr::eq(marks[1], &NTFY_DELIVERY));
         assert!(std::ptr::eq(marks[2], &PUSHOVER_DELIVERY));
@@ -4310,12 +4329,51 @@ mod tests {
     fn a_send_is_recorded_and_passed_on() {
         let marks = crate::health::DeliveryMarks::new();
         let before = chrono::Utc::now().timestamp();
-        assert!(recorded(&marks, Err("down".into())).is_err());
+        assert!(recorded(&marks, 7, Err("down".into())).is_err());
         let failed = marks.snapshot();
         assert!(failed.failing && failed.failed_at >= before, "{failed:?}");
-        assert!(recorded(&marks, Ok(())).is_ok());
+        assert!(recorded(&marks, 7, Ok(())).is_ok());
         let delivered = marks.snapshot();
         assert!(!delivered.failing && delivered.delivered_at >= before);
+    }
+
+    #[test]
+    fn a_send_in_flight_when_the_credentials_change_is_not_counted() {
+        // An alert started with the old Telegram token; the user saves a new
+        // one; the old send then fails. The fixed channel must not be
+        // flagged by it.
+        let marks = crate::health::DeliveryMarks::new();
+        let old = telegram_key("old-token", "1");
+        let new = telegram_key("new-token", "1");
+        assert!(recorded(&marks, old, Err("unauthorized".into())).is_err());
+        marks.reset(new);
+        assert!(recorded(&marks, old, Err("unauthorized".into())).is_err());
+        assert!(!marks.snapshot().failing);
+        assert!(recorded(&marks, new, Ok(())).is_ok());
+        assert!(marks.snapshot().delivered_at > 0);
+    }
+
+    #[test]
+    fn only_the_changed_channels_are_reset_to_their_new_credentials() {
+        // Local marks, not the process-wide ones other tests send through.
+        let (kept, changed) = (
+            crate::health::DeliveryMarks::new(),
+            crate::health::DeliveryMarks::new(),
+        );
+        kept.record(1, true, 100);
+        changed.record(2, false, 100);
+        reset_changed([&kept, &changed], [1, 2], [1, 3]);
+        assert_eq!(
+            kept.snapshot().delivered_at,
+            100,
+            "unchanged keeps its marks"
+        );
+        assert_eq!(changed.snapshot(), crate::health::NotifyMarks::default());
+        // A late send with the old credentials is ignored; the new ones count.
+        changed.record(2, false, 110);
+        assert!(!changed.snapshot().failing);
+        changed.record(3, true, 120);
+        assert_eq!(changed.snapshot().delivered_at, 120);
     }
 
     #[test]

@@ -53,6 +53,9 @@ pub struct BackupState {
     pub status: BackupStatus,
     /// `status` has been read back from the database.
     loaded: bool,
+    /// When a failed status read was last logged; retries come with every
+    /// Settings refresh, so the warning is kept to one a minute.
+    read_warned_at: Option<std::time::Instant>,
     /// Signalled each time a backup finishes, so tests can await one
     /// without polling a clock.
     pub done: Arc<tokio::sync::Notify>,
@@ -247,6 +250,10 @@ async fn conclude(
     now: &DateTime<Local>,
     record: &BackupRecord,
 ) {
+    // Read the stored status again first if the read before the backup
+    // failed: whether this outage has already been alerted comes from it, so
+    // a restart doesn't repeat the alert. Still unreadable, the alert goes
+    // out (a repeat beats silence).
     let (was_alerted, status) = {
         let mut guard = state.backup.lock().await;
         guard.status.last = Some(record.clone());
@@ -344,7 +351,12 @@ async fn ensure_loaded(state: &Arc<AppState>) {
     let stored = match read {
         Ok(raw) => raw.and_then(|raw| serde_json::from_str::<BackupStatus>(&raw).ok()),
         Err(e) => {
-            tracing::warn!("Couldn't read the history backup status, will retry: {e}");
+            let mut guard = state.backup.lock().await;
+            let now = std::time::Instant::now();
+            if read_warning_due(guard.read_warned_at, now) {
+                guard.read_warned_at = Some(now);
+                tracing::warn!("Couldn't read the history backup status, will retry: {e}");
+            }
             return;
         }
     };
@@ -365,6 +377,12 @@ async fn ensure_loaded(state: &Arc<AppState>) {
         }
         guard.loaded = true;
     }
+}
+
+/// Whether a failed status read should be logged at `now`.
+fn read_warning_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    let _ = (last, now);
+    true
 }
 
 async fn persist(db: Arc<crate::history::HistoryDb>, status: &BackupStatus) {
@@ -1314,6 +1332,69 @@ mod tests {
             // A manual run leaves the scheduled history and alert state alone.
             assert_eq!(saved.last_scheduled, stored_status().last_scheduled);
             assert!(saved.failure_alerted);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_failure_after_a_failed_read_keeps_the_stored_alert_state() {
+        // After a restart the read fails at the start of a scheduled backup
+        // and works by the time it fails: the outage was already alerted
+        // before the restart, so it must not count as a new one.
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let db = state.history.lock().await.clone().unwrap();
+            db.set_meta_value(
+                STATUS_META_KEY,
+                &serde_json::to_string(&stored_status()).unwrap(),
+            )
+            .unwrap();
+
+            hide_meta(&db, true);
+            let back = db.clone();
+            let work = async move {
+                hide_meta(&back, false);
+                Err("destination missing".to_string())
+            };
+            let result = run_claimed_with(&state, Trigger::Scheduled, local(NOON), work).await;
+            assert!(result.is_err(), "{result:?}");
+
+            assert!(state.backup.lock().await.status.failure_alerted);
+            let saved: BackupStatus =
+                serde_json::from_str(&db.get_meta_value(STATUS_META_KEY).unwrap()).unwrap();
+            assert!(saved.failure_alerted, "{saved:?}");
+            assert_eq!(saved.last_scheduled.map(|r| r.at), Some(NOON));
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_failed_status_read_is_logged_at_most_once_a_minute() {
+        let start = std::time::Instant::now();
+        assert!(read_warning_due(None, start));
+        assert!(!read_warning_due(Some(start), start));
+        assert!(!read_warning_due(
+            Some(start),
+            start + Duration::from_secs(59)
+        ));
+        assert!(read_warning_due(
+            Some(start),
+            start + Duration::from_secs(60)
+        ));
+    }
+
+    #[tokio::test]
+    async fn repeated_failed_reads_note_the_warning_once() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let db = state.history.lock().await.clone().unwrap();
+            hide_meta(&db, true);
+            ensure_loaded(&state).await;
+            let first = state.backup.lock().await.read_warned_at;
+            assert!(first.is_some());
+            ensure_loaded(&state).await;
+            assert_eq!(state.backup.lock().await.read_warned_at, first);
+            hide_meta(&db, false);
         })
         .await;
     }

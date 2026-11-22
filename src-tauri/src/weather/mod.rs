@@ -73,6 +73,9 @@ pub struct WeatherState {
     /// ISO-8601 UTC timestamp of the most recent successful live fetch.
     #[serde(default)]
     pub last_fetch_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// `last_fetch_at` on the monotonic clock, for `GET /api/health`.
+    #[serde(skip)]
+    pub last_fetch_mono: Option<std::time::Instant>,
     /// Temperature returned by the most recent successful live fetch.
     #[serde(default)]
     pub last_fetched_temperature_c: Option<f32>,
@@ -1039,9 +1042,12 @@ mod tests {
             .with_timezone(&chrono::Utc);
         let mut state = WeatherState::default();
 
+        let before = std::time::Instant::now();
         apply_live_fetch_state(&mut state, &observation, fetched_at);
 
         assert_eq!(state.last_fetch_at, Some(fetched_at));
+        // The health check ages it on the monotonic clock (#503).
+        assert!(state.last_fetch_mono.is_some_and(|at| at >= before));
         assert_ne!(
             state.last_fetch_at.map(|time| time.timestamp()),
             Some(observation.timestamp)

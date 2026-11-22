@@ -822,6 +822,63 @@ async fn health_route_answers_503_no_store_without_an_inverter_host() {
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 }
 
+fn configure_octopus() {
+    givenergy_local::settings::Settings::update(|s| {
+        s.octopus_api_key = "sk_test".into();
+        s.octopus_account_number = "A-TEST".into();
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn health_counts_a_feature_on_at_start_from_start() {
+    let _config = IsolatedConfig::enter();
+    configure_octopus();
+    let state = Arc::new(AppState::new());
+    // 14 h after start with no sync, past Octopus's 13 h grace: never.
+    let body = health_after(&state, 14 * 3600).await;
+    assert_eq!(body["checks"]["octopus"]["detail"], "never", "{body}");
+}
+
+#[tokio::test]
+async fn health_gives_a_feature_switched_on_after_start_its_grace() {
+    // Octopus details entered after start, and the monitor set up later
+    // still: its first look must not read "never" straight away.
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    configure_octopus();
+    let body = health_after(&state, 14 * 3600).await;
+    assert_eq!(body["checks"]["octopus"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["octopus"]["detail"], "not_yet");
+}
+
+#[tokio::test]
+async fn health_drops_an_octopus_failure_once_new_credentials_are_saved() {
+    let _config = IsolatedConfig::enter();
+    configure_octopus();
+    let state = Arc::new(AppState::new());
+    let saved = givenergy_local::settings::Settings::load();
+    state.octopus.lock().await.failed_with =
+        Some(givenergy_local::octopus::credentials_key(&saved));
+    let body = health_after(&state, 60).await;
+    assert_eq!(body["checks"]["octopus"]["detail"], "last_failed", "{body}");
+    // A working key entered: the failure was the old key's.
+    givenergy_local::settings::Settings::update(|s| s.octopus_api_key = "sk_new".into()).unwrap();
+    let body = health_after(&state, 120).await;
+    assert_eq!(body["checks"]["octopus"]["status"], "ok", "{body}");
+}
+
+#[tokio::test]
+async fn health_and_the_poll_loop_agree_on_a_blank_host() {
+    // A host of spaces is something the poll loop tries to connect to, so
+    // health mustn't call it not configured.
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    state.settings.lock().await.host = "  ".into();
+    let body = health_after(&state, 600).await;
+    assert_eq!(body["checks"]["inverter"]["detail"], "no_reading", "{body}");
+}
+
 #[tokio::test]
 async fn health_without_a_poll_loop_or_reading_is_unhealthy_after_start() {
     let _config = IsolatedConfig::enter();

@@ -17,7 +17,7 @@ pub mod reprice;
 pub use rate_stamp::{OffPeakHalfHours, RateStamp};
 
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use chrono::{Datelike, TimeZone, Timelike};
@@ -1134,8 +1134,9 @@ pub struct HistoryDb {
     /// When minute rows were last written, last failed to write, and since
     /// when ready rows have waited, for `GET /api/health` (issue #503).
     writes: crate::health::WriteMarks,
-    /// When a solar forecast was last stored (unix seconds, 0 = never).
-    forecast_stored_at: AtomicI64,
+    /// When a solar forecast was last stored: unix seconds, and on the
+    /// monotonic clock for `GET /api/health`.
+    forecast_stored: parking_lot::Mutex<Option<(i64, std::time::Instant)>>,
 }
 
 /// How many recent minutes' own rows the writer remembers. A minute can only
@@ -1877,7 +1878,7 @@ impl HistoryDb {
             owned_rows: Mutex::new(OwnedRows::new()),
             health: Mutex::new(health),
             writes: crate::health::WriteMarks::default(),
-            forecast_stored_at: AtomicI64::new(0),
+            forecast_stored: parking_lot::Mutex::new(None),
         })
     }
 
@@ -2029,7 +2030,14 @@ impl HistoryDb {
 
     /// When a solar forecast was last stored (unix seconds), if ever.
     pub fn forecast_stored_at(&self) -> Option<i64> {
-        Some(self.forecast_stored_at.load(Ordering::Relaxed)).filter(|&at| at > 0)
+        self.forecast_stored.lock().map(|(at, _)| at)
+    }
+
+    /// The last stored forecast as `GET /api/health` judges it at `now`.
+    pub fn forecast_last_ok(&self, now: std::time::Instant) -> Option<crate::health::LastOk> {
+        self.forecast_stored
+            .lock()
+            .map(|(at, marked)| crate::health::LastOk::since(at, marked, now))
     }
 
     /// Hold the database connection, so a job that needs it waits until the
@@ -2115,13 +2123,11 @@ impl HistoryDb {
         }
         let now = chrono::Utc::now().timestamp();
         if all_ok {
-            self.writes.write_ok(now);
-            // Rows queued since the take keep the older wait time; their own
-            // flush, already on its way, clears it.
+            // Rows queued since the take wait on, counted from when they
+            // became ready; their own flush, already on its way, clears them.
+            // Checked under the queue lock, which queueing a row also holds.
             let rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
-            if !rows.has_queued() {
-                self.writes.all_written();
-            }
+            self.writes.write_ok(now, rows.has_queued());
         } else {
             // A failed row is dropped, so the wait stays until a write works.
             self.writes.write_failed(now);
@@ -3136,8 +3142,8 @@ impl HistoryDb {
         }
         tx.commit().map_err(|e| e.to_string())?;
         if written > 0 {
-            self.forecast_stored_at
-                .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+            *self.forecast_stored.lock() =
+                Some((chrono::Utc::now().timestamp(), std::time::Instant::now()));
         }
         Ok(written)
     }
@@ -4392,7 +4398,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_is_marked_and_the_wait_is_kept_until_a_write_works() {
+    fn a_failed_write_is_marked_and_keeps_its_wait_until_a_write_works() {
         let db = test_db();
         let before = chrono::Utc::now().timestamp();
         db.hold_connection_for_test()
@@ -4407,14 +4413,22 @@ mod tests {
         assert!(failed.err_at >= before, "{failed:?}");
         assert!(failed.failing);
         assert_eq!(failed.ok_at, 0);
-        assert_eq!(failed.waited_s, waited, "the wait must survive");
+        // The wait is kept, but while writes fail it runs only to the latest
+        // ready rows: none have come since, so nothing has waited yet.
+        assert_eq!(failed.waited_s, Some(0), "the wait must survive");
 
         // The table comes back: the next write clears both.
         db.hold_connection_for_test()
             .execute_batch("ALTER TABLE readings_away RENAME TO readings")
             .unwrap();
         assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 65, 0, 0.0), RateStamp::default()));
-        assert_eq!(db.write_marks(probe).waited_s, waited, "earliest wait kept");
+        // Still failing: the earliest wait counts, up to these new rows,
+        // never up to the probe.
+        let still = db.write_marks(probe).waited_s.unwrap();
+        assert!(
+            still < waited.unwrap(),
+            "runs to the latest rows, not now: {still}"
+        );
         db.flush_poll_rows();
         let recovered = db.write_marks(probe);
         assert!(recovered.ok_at >= failed.err_at, "{recovered:?}");
@@ -4450,6 +4464,11 @@ mod tests {
         }])
         .unwrap();
         assert!(db.forecast_stored_at().is_some_and(|at| at >= before));
+        // Aged on the monotonic clock for the health check.
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let last = db.forecast_last_ok(later).unwrap();
+        assert_eq!(Some(last.at), db.forecast_stored_at());
+        assert!((89..=90).contains(&last.age_s), "{last:?}");
     }
 
     #[test]
