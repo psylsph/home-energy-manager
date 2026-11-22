@@ -1251,6 +1251,32 @@ mod tests {
     }
 
     #[test]
+    fn nineteen_minutes_over_is_the_house_and_twenty_is_the_car() {
+        // Issue #504: oven, kettle and shower, or a heat pump with the
+        // immersion on, can hold the house over the threshold for well over
+        // three minutes; only twenty minutes running is the car.
+        let house = db();
+        for m in 0..19 {
+            put(&house, m, 9000, 230.0);
+        }
+        put(&house, 19, 800, 230.0);
+        assert_eq!(car_by_minute(&house, &cfg(), 0, 20), vec![0.0; 20]);
+        let w = whole_window(T0, T0 + 3600);
+        assert_eq!(house.car_kwh_in_window(&w, &cfg()).unwrap(), 0.0);
+        assert!(house.car_block_minutes_since(&cfg(), 0).unwrap().is_empty());
+
+        let car = db();
+        for m in 0..20 {
+            put(&car, m, 9000, 230.0);
+        }
+        put(&car, 20, 800, 230.0);
+        let mut want = vec![7360.0; 20];
+        want.push(0.0);
+        assert_eq!(car_by_minute(&car, &cfg(), 0, 21), want);
+        assert!((car.car_kwh_in_window(&w, &cfg()).unwrap() - 20.0 * 7.36 / 60.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn a_reading_at_the_threshold_splits_a_run() {
         let db = db();
         for (m, h) in [9000, 9000, 3000, 9000, 9000].iter().enumerate() {

@@ -307,6 +307,16 @@ mod tests {
     }
 
     #[test]
+    fn nineteen_minutes_of_house_load_never_starts_a_session() {
+        // Issue #504: a long appliance run over the threshold is the house;
+        // the alert waits twenty minutes, like the history rule.
+        let mut s = CarSession::default();
+        assert!(feed(&mut s, 0, 19 * 60, W).is_empty(), "nineteen minutes");
+        assert_eq!(s.step(1199, W), vec![]);
+        assert_eq!(s.step(1200, W), vec![CarEvent::Started { at: 0 }]);
+    }
+
+    #[test]
     fn a_short_run_is_forgotten() {
         let mut s = CarSession::default();
         assert!(feed(&mut s, 0, 120, W).is_empty());
