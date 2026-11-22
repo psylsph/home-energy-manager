@@ -1449,13 +1449,24 @@ pub(crate) fn reset_changed_channel_marks(
 }
 
 fn channel_changes(
-    _old: &crate::settings::AlertsConfig,
-    _new: &crate::settings::AlertsConfig,
+    old: &crate::settings::AlertsConfig,
+    new: &crate::settings::AlertsConfig,
 ) -> [(&'static crate::health::DeliveryMarks, bool); 3] {
     [
-        (&TELEGRAM_DELIVERY, false),
-        (&NTFY_DELIVERY, false),
-        (&PUSHOVER_DELIVERY, false),
+        (
+            &TELEGRAM_DELIVERY,
+            old.telegram_bot_token != new.telegram_bot_token
+                || old.telegram_chat_id != new.telegram_chat_id,
+        ),
+        (
+            &NTFY_DELIVERY,
+            old.ntfy_topic != new.ntfy_topic || old.ntfy_server != new.ntfy_server,
+        ),
+        (
+            &PUSHOVER_DELIVERY,
+            old.pushover_app_token != new.pushover_app_token
+                || old.pushover_user_key != new.pushover_user_key,
+        ),
     ]
 }
 

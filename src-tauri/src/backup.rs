@@ -325,9 +325,12 @@ fn build_backup_failed_message(
 }
 
 /// Read the persisted status back once per process. A read that fails leaves
-/// it unloaded, to try again next time: taken as empty, it would make a
-/// backup due at once and the next save would wipe the stored status. A
-/// stored value that won't parse is treated as none (rereading can't help).
+/// it unloaded, to try again next time, and [`conclude`] never saves over a
+/// stored status that hasn't been read. Scheduled backups still go by the
+/// in-memory status meanwhile, which may run one early: a backup has its own
+/// connection, so a status that can't be read (a poisoned lock never
+/// recovers) mustn't stop them. A stored value that won't parse is treated
+/// as none (rereading can't help).
 async fn ensure_loaded(state: &Arc<AppState>) {
     if state.backup.lock().await.loaded {
         return;

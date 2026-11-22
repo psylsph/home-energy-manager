@@ -157,8 +157,10 @@ impl HealthMarks {
         let read_ms = self.reading_ms.load(Ordering::Relaxed).checked_sub(1)?;
         let now_ms = self.ms(now);
         let cycle = self.cycle_started_ms.load(Ordering::Relaxed).checked_sub(1);
-        let _ = cycle;
-        let until_ms = now_ms;
+        let until_ms = match cycle {
+            Some(cycle_ms) if cycle_ms >= read_ms && cycle_ms <= now_ms => cycle_ms,
+            _ => now_ms,
+        };
         let age_s = i64::try_from(until_ms.saturating_sub(read_ms) / 1000).unwrap_or(i64::MAX);
         Some(Reading {
             at: self.reading_at.load(Ordering::Relaxed),
@@ -318,7 +320,11 @@ impl DeliveryMarks {
     }
 
     /// Forget past sends (the channel's settings changed).
-    pub fn reset(&self) {}
+    pub fn reset(&self) {
+        self.delivered_at.store(0, Ordering::Relaxed);
+        self.failed_at.store(0, Ordering::Relaxed);
+        self.failing.store(false, Ordering::Relaxed);
+    }
 
     /// Record one channel's send at `now`.
     pub fn record(&self, delivered: bool, now: i64) {
@@ -632,10 +638,10 @@ fn history_check(inputs: &HealthInputs) -> Check {
     // A failed write only degrades: a single SQLite hiccup heals with the
     // next minute's row. Failed rows keep their wait, so writes that stay
     // broken fail as not_written once it runs out.
-    let check = if writes.failing {
-        Check::new(true, CheckStatus::Fail, Some("write_failed"))
-    } else if waiting_too_long {
+    let check = if waiting_too_long {
         Check::new(true, CheckStatus::Fail, Some("not_written"))
+    } else if writes.failing {
+        Check::new(true, CheckStatus::Warn, Some("write_failed"))
     } else if writes.ok_at == 0 {
         Check::new(true, CheckStatus::Ok, Some("idle"))
     } else {
