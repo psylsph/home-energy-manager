@@ -861,7 +861,9 @@ async fn health_keeps_the_last_reading_across_a_reconnect() {
     let wall = chrono::Utc::now().timestamp();
     // A reading at 590 s, then the dongle drops (the poll loop clears the
     // snapshot) and the loop is backing off.
-    state.health.note_reading(wall + 590);
+    state
+        .health
+        .note_reading_at(start + std::time::Duration::from_secs(590), wall + 590);
     *state.connection_state.lock().await =
         givenergy_local::inverter::poll::ConnectionState::Reconnecting;
     state.health.poll_beat_at_time(
@@ -901,7 +903,9 @@ async fn health_with_fresh_readings_and_history_is_ok() {
         });
     let start = std::time::Instant::now();
     let wall = chrono::Utc::now().timestamp();
-    state.health.note_reading(wall + 595);
+    state
+        .health
+        .note_reading_at(start + std::time::Duration::from_secs(595), wall + 595);
     state.health.poll_beat_at_time(
         start + std::time::Duration::from_secs(599),
         wall + 599,

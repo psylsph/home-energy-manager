@@ -49,23 +49,34 @@ const OCTOPUS_STALE_S: i64 = 13 * 60 * 60;
 // Marks the running parts of HEM leave for the health check
 // ---------------------------------------------------------------------------
 
-/// Process start and the poll loop's heartbeat, in [`crate::inverter::poll::AppState`].
+/// Process start, the latest reading and the poll loop's heartbeat, in
+/// [`crate::inverter::poll::AppState`].
+///
+/// Every age judged here is measured on the monotonic clock (milliseconds
+/// after `started`), so a wall clock stepping either way, such as a Pi
+/// booting with a stale time until NTP corrects it, can neither hide an
+/// outage nor invent one. Wall times are kept only to show `last_ok`.
 #[derive(Debug)]
 pub struct HealthMarks {
     started: Instant,
-    started_wall: i64,
     /// Milliseconds after `started` by which the poll loop said it would beat
-    /// again; 0 before its first beat. Monotonic, so clock steps can't trip it.
+    /// again; 0 before its first beat.
     poll_due_ms: AtomicU64,
     /// Wall-clock seconds of the poll loop's latest beat; 0 before the first.
     poll_beat_at: AtomicI64,
-    /// Timestamp of the latest published reading; 0 before the first. Kept
-    /// across reconnects (unlike `latest_snapshot`, which a disconnect
-    /// clears), so an outage still shows how long ago HEM last had data.
+    /// When the poll cycle now running started (ms after `started`, plus one
+    /// so 0 can mean none): set at the top of a connected poll cycle, cleared
+    /// when the loop goes back to waiting.
+    cycle_started_ms: AtomicU64,
+    /// The latest published reading's own timestamp, for `last_ok`; 0 before
+    /// the first. Kept across reconnects (unlike `latest_snapshot`, which a
+    /// disconnect clears), so an outage still shows when HEM last had data.
     reading_at: AtomicI64,
-    /// Per [`Feature`], when the health check first saw it enabled
-    /// ([`UNOBSERVED`] before its first look, 0 while disabled).
-    enabled_since: [AtomicI64; FEATURES],
+    /// When that reading was published (ms after `started`, plus one).
+    reading_ms: AtomicU64,
+    /// Per [`Feature`], when the health check first saw it enabled (ms after
+    /// `started`), or [`UNOBSERVED`] / [`DISABLED`].
+    enabled_since_ms: [AtomicI64; FEATURES],
 }
 
 /// The optional features whose first fetch gets a grace from being enabled.
@@ -79,10 +90,11 @@ pub enum Feature {
 
 const FEATURES: usize = 4;
 const UNOBSERVED: i64 = -1;
+const DISABLED: i64 = -2;
 
 impl Default for HealthMarks {
     fn default() -> Self {
-        Self::new(Instant::now(), chrono::Utc::now().timestamp())
+        Self::new(Instant::now())
     }
 }
 
@@ -95,44 +107,83 @@ pub enum PollBeat {
     Beat { at: i64, overdue: bool },
 }
 
+/// The latest reading as the inverter check sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading {
+    /// The reading's own timestamp (unix seconds), for `last_ok`.
+    pub at: i64,
+    /// How old it counts as, in seconds, on the monotonic clock.
+    pub age_s: i64,
+}
+
 impl HealthMarks {
-    pub fn new(started: Instant, started_wall: i64) -> Self {
+    pub fn new(started: Instant) -> Self {
         Self {
             started,
-            started_wall,
             poll_due_ms: AtomicU64::new(0),
             poll_beat_at: AtomicI64::new(0),
+            cycle_started_ms: AtomicU64::new(0),
             reading_at: AtomicI64::new(0),
-            enabled_since: std::array::from_fn(|_| AtomicI64::new(UNOBSERVED)),
+            reading_ms: AtomicU64::new(0),
+            enabled_since_ms: std::array::from_fn(|_| AtomicI64::new(UNOBSERVED)),
         }
     }
 
-    /// A reading taken at `timestamp` was published.
+    /// Milliseconds after start at `now`, never negative.
+    fn ms(&self, now: Instant) -> u64 {
+        u64::try_from(now.saturating_duration_since(self.started).as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// A reading taken at `timestamp` was published now.
     pub fn note_reading(&self, timestamp: i64) {
+        self.note_reading_at(Instant::now(), timestamp);
+    }
+
+    /// [`Self::note_reading`] at an injected time.
+    pub fn note_reading_at(&self, now: Instant, timestamp: i64) {
         self.reading_at.store(timestamp.max(1), Ordering::Relaxed);
+        self.reading_ms
+            .store(self.ms(now).saturating_add(1), Ordering::Relaxed);
     }
 
-    /// The latest published reading's timestamp, if any.
-    pub fn last_reading(&self) -> Option<i64> {
-        Some(self.reading_at.load(Ordering::Relaxed)).filter(|&at| at > 0)
+    /// The latest reading at `now`, if there has been one.
+    ///
+    /// While a connected poll cycle that started after that reading is still
+    /// running, its age is counted only up to the cycle's start: a cycle
+    /// working through a queue of writes the dongle keeps refusing can run for
+    /// minutes before it reads, and that is the poll loop being busy, which
+    /// the heartbeat already judges, not the inverter going quiet.
+    pub fn reading(&self, now: Instant) -> Option<Reading> {
+        let read_ms = self.reading_ms.load(Ordering::Relaxed).checked_sub(1)?;
+        let now_ms = self.ms(now);
+        let cycle = self.cycle_started_ms.load(Ordering::Relaxed).checked_sub(1);
+        let _ = cycle;
+        let until_ms = now_ms;
+        let age_s = i64::try_from(until_ms.saturating_sub(read_ms) / 1000).unwrap_or(i64::MAX);
+        Some(Reading {
+            at: self.reading_at.load(Ordering::Relaxed),
+            age_s,
+        })
     }
 
-    /// How long `feature` has been enabled at `now` (0 while disabled). A
-    /// feature already on at the health check's first look counts from
-    /// start; one switched on later, from the first look that saw it on.
-    pub fn enabled_for_s(&self, feature: Feature, enabled: bool, now: i64) -> i64 {
-        let slot = &self.enabled_since[feature as usize];
+    /// How long `feature` has been enabled at `now`, in seconds (0 while
+    /// disabled). A feature already on at the health check's first look
+    /// counts from start; one switched on later, from the first look that
+    /// saw it on.
+    pub fn enabled_for_s(&self, feature: Feature, enabled: bool, now: Instant) -> i64 {
+        let slot = &self.enabled_since_ms[feature as usize];
         if !enabled {
-            slot.store(0, Ordering::Relaxed);
+            slot.store(DISABLED, Ordering::Relaxed);
             return 0;
         }
-        let since = match slot.load(Ordering::Relaxed) {
-            UNOBSERVED => self.started_wall,
-            0 => now,
-            since => return (now - since).max(0),
+        let now_ms = i64::try_from(self.ms(now)).unwrap_or(i64::MAX);
+        let since_ms = match slot.load(Ordering::Relaxed) {
+            UNOBSERVED => 0,
+            DISABLED => now_ms,
+            since => since,
         };
-        slot.store(since, Ordering::Relaxed);
-        (now - since).max(0)
+        slot.store(since_ms, Ordering::Relaxed);
+        (now_ms - since_ms).max(0) / 1000
     }
 
     /// Seconds since start at `now`.
@@ -140,13 +191,31 @@ impl HealthMarks {
         i64::try_from(now.saturating_duration_since(self.started).as_secs()).unwrap_or(i64::MAX)
     }
 
-    /// The poll loop is alive now and will beat again within `budget`.
+    /// The poll loop is alive now and will beat again within `budget`. It is
+    /// waiting, or connecting, not in a connected poll cycle.
     pub fn poll_beat(&self, budget: Duration) {
         self.poll_beat_at_time(Instant::now(), chrono::Utc::now().timestamp(), budget);
     }
 
     /// [`Self::poll_beat`] at injected times.
     pub fn poll_beat_at_time(&self, now: Instant, now_wall: i64, budget: Duration) {
+        self.beat(now, now_wall, budget);
+        self.cycle_started_ms.store(0, Ordering::Relaxed);
+    }
+
+    /// A connected poll cycle (reads, then any queued writes) starts now.
+    pub fn poll_cycle_start(&self) {
+        self.poll_cycle_start_at(Instant::now(), chrono::Utc::now().timestamp());
+    }
+
+    /// [`Self::poll_cycle_start`] at injected times.
+    pub fn poll_cycle_start_at(&self, now: Instant, now_wall: i64) {
+        self.beat(now, now_wall, POLL_BUSY_BUDGET);
+        self.cycle_started_ms
+            .store(self.ms(now).saturating_add(1), Ordering::Relaxed);
+    }
+
+    fn beat(&self, now: Instant, now_wall: i64, budget: Duration) {
         let due = now.saturating_duration_since(self.started) + budget;
         let due_ms = u64::try_from(due.as_millis()).unwrap_or(u64::MAX).max(1);
         self.poll_due_ms.store(due_ms, Ordering::Relaxed);
@@ -159,55 +228,53 @@ impl HealthMarks {
         if due_ms == 0 {
             return PollBeat::NotYet;
         }
-        let elapsed_ms = u64::try_from(now.saturating_duration_since(self.started).as_millis())
-            .unwrap_or(u64::MAX);
         PollBeat::Beat {
             at: self.poll_beat_at.load(Ordering::Relaxed),
-            overdue: elapsed_ms > due_ms,
+            overdue: self.ms(now) > due_ms,
         }
     }
 }
 
 /// When history writes last succeeded and failed, and since when minute rows
-/// have been waiting to be written. Kept on [`crate::history::HistoryDb`] as
-/// atomics so the health check never takes the database lock.
+/// have been waiting to be written. Kept on [`crate::history::HistoryDb`] so
+/// the health check never takes the database lock.
 ///
 /// Whether the latest write failed is a flag, not a comparison of the two
-/// times, so a clock stepping back can't leave a recovered writer failing.
+/// times, so a clock stepping back can't leave a recovered writer failing;
+/// the wait is on the monotonic clock, so a clock step can't fake or hide it.
 #[derive(Debug, Default)]
 pub struct WriteMarks {
     ok_at: AtomicI64,
     err_at: AtomicI64,
-    ready_since: AtomicI64,
     failing: AtomicBool,
+    ready_since: parking_lot::Mutex<Option<Instant>>,
 }
 
-/// A copy of [`WriteMarks`] at one moment; 0 means never / nothing waiting.
+/// A copy of [`WriteMarks`] at one moment; 0 means never.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HistoryWrites {
     pub ok_at: i64,
     pub err_at: i64,
-    pub ready_since: i64,
+    /// How long ready rows have waited to be written, if any are waiting.
+    pub waited_s: Option<i64>,
     /// The latest write failed.
     pub failing: bool,
 }
 
 impl WriteMarks {
     /// Rows became ready at `now`; keeps the earliest unwritten time.
-    pub fn rows_ready(&self, now: i64) {
-        let _ =
-            self.ready_since
-                .compare_exchange(0, now.max(1), Ordering::Relaxed, Ordering::Relaxed);
+    pub fn rows_ready(&self, now: Instant) {
+        self.ready_since.lock().get_or_insert(now);
     }
 
-    /// A write succeeded at `now`. Plain stores: a time stamped while the
-    /// clock was ahead must not hide staleness after it is corrected.
+    /// A write succeeded at `now` (unix seconds). Plain stores: a time stamped
+    /// while the clock was ahead must not hide staleness after it is corrected.
     pub fn write_ok(&self, now: i64) {
         self.ok_at.store(now, Ordering::Relaxed);
         self.failing.store(false, Ordering::Relaxed);
     }
 
-    /// A write failed at `now`.
+    /// A write failed at `now` (unix seconds).
     pub fn write_failed(&self, now: i64) {
         self.err_at.store(now, Ordering::Relaxed);
         self.failing.store(true, Ordering::Relaxed);
@@ -215,14 +282,17 @@ impl WriteMarks {
 
     /// Every ready row has been written.
     pub fn all_written(&self) {
-        self.ready_since.store(0, Ordering::Relaxed);
+        *self.ready_since.lock() = None;
     }
 
-    pub fn snapshot(&self) -> HistoryWrites {
+    pub fn snapshot(&self, now: Instant) -> HistoryWrites {
+        let waited_s = self.ready_since.lock().map(|since| {
+            i64::try_from(now.saturating_duration_since(since).as_secs()).unwrap_or(i64::MAX)
+        });
         HistoryWrites {
             ok_at: self.ok_at.load(Ordering::Relaxed),
             err_at: self.err_at.load(Ordering::Relaxed),
-            ready_since: self.ready_since.load(Ordering::Relaxed),
+            waited_s,
             failing: self.failing.load(Ordering::Relaxed),
         }
     }
@@ -246,6 +316,9 @@ impl DeliveryMarks {
             failing: AtomicBool::new(false),
         }
     }
+
+    /// Forget past sends (the channel's settings changed).
+    pub fn reset(&self) {}
 
     /// Record one channel's send at `now`.
     pub fn record(&self, delivered: bool, now: i64) {
@@ -430,8 +503,8 @@ pub struct HealthInputs {
     pub poll_interval_secs: u64,
     pub host_configured: bool,
     pub connection: ConnectionState,
-    /// The latest published reading's timestamp, kept across reconnects.
-    pub last_reading: Option<i64>,
+    /// The latest published reading, kept across reconnects.
+    pub reading: Option<Reading>,
     pub poll: PollBeat,
     /// `None` when the history database isn't open.
     pub history: Option<HistoryWrites>,
@@ -509,17 +582,23 @@ fn inverter_check(inputs: &HealthInputs) -> Check {
         ConnectionState::Reconnecting => "reconnecting",
         ConnectionState::Disconnected => "disconnected",
     };
-    let status = match inputs.last_reading {
-        Some(at) if inputs.now - at <= reading_max_age_s(inputs) => Ok,
+    let status = match inputs.reading {
+        Some(r) if r.age_s <= reading_max_age_s(inputs) => Ok,
         None if starting(inputs) => Starting,
         _ => Fail,
     };
-    let detail = match (status, inputs.last_reading, &inputs.connection) {
+    let detail = match (status, inputs.reading, &inputs.connection) {
         (Fail, None, _) => "no_reading",
         (Fail, Some(_), ConnectionState::Connected) => "stale_reading",
         _ => connection,
     };
-    Check::new(true, status, Some(detail)).last_ok(inputs.now, inputs.last_reading)
+    let mut check = Check::new(true, status, Some(detail));
+    if let Some(r) = inputs.reading {
+        // The age comes from the monotonic clock, not `now - at`.
+        check.last_ok = Some(r.at);
+        check.age_s = Some(r.age_s);
+    }
+    check
 }
 
 fn poll_check(inputs: &HealthInputs) -> Check {
@@ -547,8 +626,12 @@ fn history_check(inputs: &HealthInputs) -> Check {
     let Some(writes) = inputs.history else {
         return Check::new(true, CheckStatus::Fail, Some("unavailable"));
     };
-    let waiting_too_long =
-        writes.ready_since > 0 && inputs.now - writes.ready_since > history_max_wait_s(inputs);
+    let waiting_too_long = writes
+        .waited_s
+        .is_some_and(|waited| waited > history_max_wait_s(inputs));
+    // A failed write only degrades: a single SQLite hiccup heals with the
+    // next minute's row. Failed rows keep their wait, so writes that stay
+    // broken fail as not_written once it runs out.
     let check = if writes.failing {
         Check::new(true, CheckStatus::Fail, Some("write_failed"))
     } else if waiting_too_long {
@@ -654,6 +737,14 @@ mod tests {
 
     const NOW: i64 = 1_763_800_000;
 
+    /// A reading `age_s` seconds old, stamped that long before `NOW`.
+    fn read(age_s: i64) -> Reading {
+        Reading {
+            at: NOW - age_s,
+            age_s,
+        }
+    }
+
     /// Everything set up and working, an hour after start.
     fn good() -> HealthInputs {
         HealthInputs {
@@ -662,7 +753,7 @@ mod tests {
             poll_interval_secs: 60,
             host_configured: true,
             connection: ConnectionState::Connected,
-            last_reading: Some(NOW - 10),
+            reading: Some(read(10)),
             poll: PollBeat::Beat {
                 at: NOW - 1,
                 overdue: false,
@@ -767,7 +858,7 @@ mod tests {
         // 60 s polls: 180 s is the limit.
         let at = |age, interval| {
             with(|i| {
-                i.last_reading = Some(NOW - age);
+                i.reading = Some(read(age));
                 i.poll_interval_secs = interval;
             })
         };
@@ -787,7 +878,7 @@ mod tests {
     fn a_long_outage_fails_the_inverter_but_not_history_and_keeps_its_age() {
         let report = with(|i| {
             i.connection = ConnectionState::Reconnecting;
-            i.last_reading = Some(NOW - 3600);
+            i.reading = Some(read(3600));
             // History stopped when the readings did: nothing is waiting.
             i.history = Some(HistoryWrites {
                 ok_at: NOW - 3600,
@@ -809,18 +900,18 @@ mod tests {
         for connection in [ConnectionState::Reconnecting, ConnectionState::Disconnected] {
             let report = with(|i| {
                 i.connection = connection.clone();
-                i.last_reading = Some(NOW - 30);
+                i.reading = Some(read(30));
             });
             assert_eq!(report.status, Overall::Healthy, "{connection:?}");
             assert_eq!(report.checks.inverter.status, CheckStatus::Ok);
         }
-        let back = with(|i| i.last_reading = Some(NOW - 170));
+        let back = with(|i| i.reading = Some(read(170)));
         assert_eq!(back.checks.inverter.status, CheckStatus::Ok);
         assert_eq!(back.checks.inverter.detail, Some("connected"));
         // Three polls without data fails, whatever the connection says.
         let gone = with(|i| {
             i.connection = ConnectionState::Disconnected;
-            i.last_reading = Some(NOW - 181);
+            i.reading = Some(read(181));
         });
         assert_eq!(gone.checks.inverter.detail, Some("disconnected"));
         assert_eq!(gone.status, Overall::Unhealthy);
@@ -831,7 +922,7 @@ mod tests {
         let report = with(|i| {
             i.host_configured = false;
             i.connection = ConnectionState::Disconnected;
-            i.last_reading = None;
+            i.reading = None;
         });
         assert_eq!(report.checks.inverter.status, CheckStatus::Fail);
         assert_eq!(report.checks.inverter.detail, Some("not_configured"));
@@ -843,7 +934,7 @@ mod tests {
             with(|i| {
                 i.uptime_s = uptime;
                 i.connection = ConnectionState::Disconnected;
-                i.last_reading = None;
+                i.reading = None;
                 i.poll = PollBeat::NotYet;
             })
         };
@@ -860,7 +951,7 @@ mod tests {
         // Connected with no reading yet is also only starting at first.
         let connected = with(|i| {
             i.uptime_s = 30;
-            i.last_reading = None;
+            i.reading = None;
         });
         assert_eq!(connected.checks.inverter.status, CheckStatus::Starting);
         assert_eq!(connected.checks.inverter.detail, Some("connected"));
@@ -885,7 +976,7 @@ mod tests {
             with(|i| {
                 i.history = Some(HistoryWrites {
                     ok_at: NOW - 1000,
-                    ready_since: NOW - secs,
+                    waited_s: Some(secs),
                     ..HistoryWrites::default()
                 })
             })
@@ -901,19 +992,33 @@ mod tests {
             i.history = Some(HistoryWrites {
                 ok_at: NOW - 120,
                 err_at: NOW - 60,
-                ready_since: 0,
+                waited_s: None,
                 failing: true,
             })
         });
+        // One failed write only degrades: the next minute's row may heal it.
+        assert_eq!(failed.checks.history.status, CheckStatus::Warn);
         assert_eq!(failed.checks.history.detail, Some("write_failed"));
         assert_eq!(failed.checks.history.last_ok, Some(NOW - 120));
+        assert_eq!(failed.status, Overall::Degraded);
+        // Still failing once the rows have waited too long: unhealthy.
+        let stuck = with(|i| {
+            i.history = Some(HistoryWrites {
+                ok_at: NOW - 400,
+                err_at: NOW - 60,
+                waited_s: Some(301),
+                failing: true,
+            })
+        });
+        assert_eq!(stuck.checks.history.detail, Some("not_written"));
+        assert_eq!(stuck.status, Overall::Unhealthy);
 
         // A later success clears it.
         let recovered = with(|i| {
             i.history = Some(HistoryWrites {
                 ok_at: NOW - 30,
                 err_at: NOW - 60,
-                ready_since: 0,
+                waited_s: None,
                 failing: false,
             })
         });
@@ -935,7 +1040,7 @@ mod tests {
             i.poll_interval_secs = 300;
             i.history = Some(HistoryWrites {
                 ok_at: NOW - 700,
-                ready_since: NOW - 720,
+                waited_s: Some(720),
                 ..HistoryWrites::default()
             });
         });
@@ -1082,7 +1187,10 @@ mod tests {
     #[test]
     fn a_backwards_clock_never_gives_a_negative_age() {
         let report = with(|i| {
-            i.last_reading = Some(NOW + 120);
+            i.reading = Some(Reading {
+                at: NOW + 120,
+                age_s: 0,
+            });
             i.weather.last_ok = Some(NOW + 600);
         });
         assert_eq!(report.checks.inverter.age_s, Some(0));
@@ -1136,7 +1244,7 @@ mod tests {
     #[test]
     fn poll_marks_go_overdue_only_after_their_budget() {
         let start = Instant::now();
-        let marks = HealthMarks::new(start, NOW);
+        let marks = HealthMarks::new(start);
         assert_eq!(marks.poll_state(start), PollBeat::NotYet);
         marks.poll_beat_at_time(start, NOW, Duration::from_secs(120));
         let at = |s| marks.poll_state(start + Duration::from_secs(s));
@@ -1173,57 +1281,113 @@ mod tests {
     }
 
     #[test]
-    fn the_last_reading_survives_until_a_newer_one() {
-        let marks = HealthMarks::new(Instant::now(), NOW);
-        assert_eq!(marks.last_reading(), None);
-        marks.note_reading(NOW - 5);
-        assert_eq!(marks.last_reading(), Some(NOW - 5));
-        marks.note_reading(NOW);
-        assert_eq!(marks.last_reading(), Some(NOW));
+    fn the_last_reading_ages_on_the_monotonic_clock() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        let marks = HealthMarks::new(start);
+        assert_eq!(marks.reading(at(10)), None);
+        marks.note_reading_at(at(100), NOW);
+        assert_eq!(marks.reading(at(130)), Some(Reading { at: NOW, age_s: 30 }));
+        // The wall stamp is only shown: a reading stamped while the clock ran
+        // an hour ahead still ages from when it was published, so a dead
+        // dongle shows up after the clock is stepped back.
+        marks.note_reading_at(at(200), NOW + 3600);
+        assert_eq!(
+            marks.reading(at(500)),
+            Some(Reading {
+                at: NOW + 3600,
+                age_s: 300
+            })
+        );
+    }
+
+    #[test]
+    fn a_running_poll_cycle_stops_the_reading_from_ageing() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        let marks = HealthMarks::new(start);
+        marks.note_reading_at(at(100), NOW);
+        // The next cycle starts 60 s later and spends minutes draining writes
+        // the dongle keeps refusing: the reading counts as 60 s old until the
+        // cycle ends (its own budget is the poll check's business).
+        marks.poll_cycle_start_at(at(160), NOW + 60);
+        assert_eq!(marks.reading(at(400)).unwrap().age_s, 60);
+        assert_eq!(
+            marks.poll_state(at(400)),
+            PollBeat::Beat {
+                at: NOW + 60,
+                overdue: false
+            }
+        );
+        // Back to waiting without a new reading: ageing resumes.
+        marks.poll_beat_at_time(at(410), NOW + 310, POLL_IDLE_BUDGET);
+        assert_eq!(marks.reading(at(420)).unwrap().age_s, 320);
+        // A cycle that publishes a reading counts from that reading.
+        marks.poll_cycle_start_at(at(500), NOW + 400);
+        marks.note_reading_at(at(505), NOW + 405);
+        assert_eq!(marks.reading(at(600)).unwrap().age_s, 95);
+        // The busy budget still catches a cycle that never ends.
+        assert!(matches!(
+            marks.poll_state(at(500) + POLL_BUSY_BUDGET + Duration::from_secs(1)),
+            PollBeat::Beat { overdue: true, .. }
+        ));
     }
 
     #[test]
     fn a_feature_counts_from_start_or_from_when_it_was_switched_on() {
-        let marks = HealthMarks::new(Instant::now(), NOW - 3600);
-        // On at the first look: counted from start.
-        assert_eq!(marks.enabled_for_s(Feature::Weather, true, NOW), 3600);
-        assert_eq!(marks.enabled_for_s(Feature::Weather, true, NOW + 60), 3660);
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        let marks = HealthMarks::new(start);
+        // On at the first look: counted from start, on the monotonic clock,
+        // so a wall clock corrected by weeks after boot doesn't matter.
+        assert_eq!(marks.enabled_for_s(Feature::Weather, true, at(3600)), 3600);
+        assert_eq!(marks.enabled_for_s(Feature::Weather, true, at(3660)), 3660);
         // Off at the first look, switched on later: counted from then.
-        assert_eq!(marks.enabled_for_s(Feature::Octopus, false, NOW), 0);
-        assert_eq!(marks.enabled_for_s(Feature::Octopus, true, NOW + 100), 0);
-        assert_eq!(marks.enabled_for_s(Feature::Octopus, true, NOW + 400), 300);
+        assert_eq!(marks.enabled_for_s(Feature::Octopus, false, at(3600)), 0);
+        assert_eq!(marks.enabled_for_s(Feature::Octopus, true, at(3700)), 0);
+        assert_eq!(marks.enabled_for_s(Feature::Octopus, true, at(4000)), 300);
         // Off and on again restarts it.
-        assert_eq!(marks.enabled_for_s(Feature::Weather, false, NOW + 500), 0);
-        assert_eq!(marks.enabled_for_s(Feature::Weather, true, NOW + 600), 0);
-        // A backwards clock never gives a negative time.
-        assert_eq!(marks.enabled_for_s(Feature::Weather, true, NOW), 0);
+        assert_eq!(marks.enabled_for_s(Feature::Weather, false, at(4100)), 0);
+        assert_eq!(marks.enabled_for_s(Feature::Weather, true, at(4200)), 0);
+        assert_eq!(marks.enabled_for_s(Feature::Weather, true, at(4260)), 60);
     }
 
     #[test]
     fn write_marks_keep_the_earliest_wait_and_clear_when_written() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
         let marks = WriteMarks::default();
-        marks.rows_ready(100);
-        marks.rows_ready(160);
-        assert_eq!(marks.snapshot().ready_since, 100);
+        marks.rows_ready(at(100));
+        marks.rows_ready(at(160));
+        assert_eq!(marks.snapshot(at(200)).waited_s, Some(100));
         marks.write_ok(170);
         marks.all_written();
         assert_eq!(
-            marks.snapshot(),
+            marks.snapshot(at(200)),
             HistoryWrites {
                 ok_at: 170,
                 ..HistoryWrites::default()
             }
         );
-        marks.rows_ready(200);
+        marks.rows_ready(at(300));
         marks.write_failed(205);
-        assert_eq!(marks.snapshot().ready_since, 200);
-        assert_eq!(marks.snapshot().err_at, 205);
-        assert!(marks.snapshot().failing);
+        assert_eq!(marks.snapshot(at(310)).waited_s, Some(10));
+        assert_eq!(marks.snapshot(at(310)).err_at, 205);
+        assert!(marks.snapshot(at(310)).failing);
         // A success after the clock steps back still clears the failure, and
         // its own (earlier) time is what's shown.
         marks.write_ok(150);
-        assert!(!marks.snapshot().failing);
-        assert_eq!(marks.snapshot().ok_at, 150);
+        assert!(!marks.snapshot(at(310)).failing);
+        assert_eq!(marks.snapshot(at(310)).ok_at, 150);
+    }
+
+    #[test]
+    fn a_reset_channel_starts_afresh() {
+        let marks = DeliveryMarks::new();
+        marks.record(true, 100);
+        marks.record(false, 120);
+        marks.reset();
+        assert_eq!(marks.snapshot(), NotifyMarks::default());
     }
 
     #[test]

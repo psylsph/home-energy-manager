@@ -2017,14 +2017,14 @@ impl HistoryDb {
         let mut rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
         let ready = rows.push(snap, stamp);
         if ready {
-            self.writes.rows_ready(chrono::Utc::now().timestamp());
+            self.writes.rows_ready(std::time::Instant::now());
         }
         ready
     }
 
-    /// The minute-row write marks, for `GET /api/health` (issue #503).
-    pub fn write_marks(&self) -> crate::health::HistoryWrites {
-        self.writes.snapshot()
+    /// The minute-row write marks at `now`, for `GET /api/health` (#503).
+    pub fn write_marks(&self, now: std::time::Instant) -> crate::health::HistoryWrites {
+        self.writes.snapshot(now)
     }
 
     /// When a solar forecast was last stored (unix seconds), if ever.
@@ -4366,23 +4366,29 @@ mod tests {
         );
     }
 
+    /// The write marks as seen 1000 s from now: a wait that started earlier
+    /// reads as just over 1000 s, the same for as long as it is kept.
+    fn marks_later(db: &HistoryDb) -> crate::health::HistoryWrites {
+        db.write_marks(std::time::Instant::now() + std::time::Duration::from_secs(1000))
+    }
+
     #[test]
     fn a_good_flush_marks_the_write_and_clears_the_wait() {
         let db = test_db();
         let before = chrono::Utc::now().timestamp();
-        assert_eq!(db.write_marks(), crate::health::HistoryWrites::default());
+        assert_eq!(marks_later(&db), crate::health::HistoryWrites::default());
         assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0), RateStamp::default()));
-        let waiting = db.write_marks();
-        assert!(waiting.ready_since >= before, "{waiting:?}");
+        let waiting = marks_later(&db);
+        assert!(waiting.waited_s.is_some_and(|w| w >= 999), "{waiting:?}");
         assert_eq!(waiting.ok_at, 0);
         db.flush_poll_rows();
-        let written = db.write_marks();
+        let written = marks_later(&db);
         assert!(written.ok_at >= before, "{written:?}");
         assert_eq!(written.err_at, 0);
-        assert_eq!(written.ready_since, 0);
+        assert_eq!(written.waited_s, None);
         // A mid-minute poll readies nothing, so nothing waits.
         assert!(!db.queue_poll_reading(poll_snap(POLL_NOON + 15, 0, 0.0), RateStamp::default()));
-        assert_eq!(db.write_marks().ready_since, 0);
+        assert_eq!(marks_later(&db).waited_s, None);
     }
 
     #[test]
@@ -4393,29 +4399,27 @@ mod tests {
             .execute_batch("ALTER TABLE readings RENAME TO readings_away")
             .unwrap();
         assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0), RateStamp::default()));
-        let ready_since = db.write_marks().ready_since;
+        let probe = std::time::Instant::now() + std::time::Duration::from_secs(1000);
+        let waited = db.write_marks(probe).waited_s;
+        assert!(waited.is_some());
         db.flush_poll_rows();
-        let failed = db.write_marks();
+        let failed = db.write_marks(probe);
         assert!(failed.err_at >= before, "{failed:?}");
         assert!(failed.failing);
         assert_eq!(failed.ok_at, 0);
-        assert_eq!(failed.ready_since, ready_since, "the wait must survive");
+        assert_eq!(failed.waited_s, waited, "the wait must survive");
 
         // The table comes back: the next write clears both.
         db.hold_connection_for_test()
             .execute_batch("ALTER TABLE readings_away RENAME TO readings")
             .unwrap();
         assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 65, 0, 0.0), RateStamp::default()));
-        assert_eq!(
-            db.write_marks().ready_since,
-            ready_since,
-            "earliest wait kept"
-        );
+        assert_eq!(db.write_marks(probe).waited_s, waited, "earliest wait kept");
         db.flush_poll_rows();
-        let recovered = db.write_marks();
+        let recovered = db.write_marks(probe);
         assert!(recovered.ok_at >= failed.err_at, "{recovered:?}");
         assert!(!recovered.failing);
-        assert_eq!(recovered.ready_since, 0);
+        assert_eq!(recovered.waited_s, None);
     }
 
     #[test]
@@ -4425,9 +4429,9 @@ mod tests {
         let _ = std::thread::spawn(move || poisoner.poison_connection_for_test()).join();
         assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0), RateStamp::default()));
         db.flush_poll_rows();
-        let marks = db.write_marks();
+        let marks = marks_later(&db);
         assert!(marks.err_at > 0 && marks.failing, "{marks:?}");
-        assert!(marks.ready_since > 0, "{marks:?}");
+        assert!(marks.waited_s.is_some(), "{marks:?}");
     }
 
     #[test]

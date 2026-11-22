@@ -7701,6 +7701,9 @@ pub async fn set_alerts(
         tracing::warn!("Failed to persist alert config: {e}");
         return server_error(&format!("Failed to save: {e}"));
     }
+    // A channel whose credentials changed starts afresh in the health check
+    // (#503), so a fixed token stops reading as failing straight away.
+    crate::alerts::reset_changed_channel_marks(&config_guard, &candidate);
     *config_guard = candidate;
     // Reset debounce so toggling an alert off/on immediately re-enables
     // notification delivery on the next poll cycle.

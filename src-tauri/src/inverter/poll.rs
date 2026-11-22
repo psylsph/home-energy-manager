@@ -4079,8 +4079,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // bump by the API is always detected regardless of timing.
                 let settings_version_at_connect = state.settings.lock().await.version;
                 loop {
-                    // A poll cycle: reads with retries and any queued writes.
-                    state.health.poll_beat(crate::health::POLL_BUSY_BUDGET);
+                    // A poll cycle: queued writes, then reads with retries.
+                    state.health.poll_cycle_start();
                     // Taken before the read, so a poll that never judges a
                     // read breaks both runs of repair-worthy reads.
                     let timed_export_previous_repair_read = timed_export_repair_reads.begin_poll();

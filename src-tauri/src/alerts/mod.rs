@@ -1434,6 +1434,31 @@ pub(crate) fn channel_marks(
     .collect()
 }
 
+/// Clear the delivery marks of every channel whose settings differ between
+/// `old` and `new`: past sends with other credentials say nothing about the
+/// new ones.
+pub(crate) fn reset_changed_channel_marks(
+    old: &crate::settings::AlertsConfig,
+    new: &crate::settings::AlertsConfig,
+) {
+    for (marks, changed) in channel_changes(old, new) {
+        if changed {
+            marks.reset();
+        }
+    }
+}
+
+fn channel_changes(
+    _old: &crate::settings::AlertsConfig,
+    _new: &crate::settings::AlertsConfig,
+) -> [(&'static crate::health::DeliveryMarks, bool); 3] {
+    [
+        (&TELEGRAM_DELIVERY, false),
+        (&NTFY_DELIVERY, false),
+        (&PUSHOVER_DELIVERY, false),
+    ]
+}
+
 /// Send a notification via the Telegram Bot API.
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
@@ -4235,6 +4260,39 @@ mod tests {
         let mock = MockNtfy::spawn(axum::http::StatusCode::OK).await;
         let res = send_ntfy_message("hem-alerts", &mock.base_url, "battery temp high");
         assert!(res.is_ok(), "2xx should succeed, got: {res:?}");
+    }
+
+    #[test]
+    fn only_the_channels_whose_settings_changed_are_reset() {
+        let old = crate::settings::AlertsConfig {
+            telegram_bot_token: "t".into(),
+            telegram_chat_id: "1".into(),
+            ntfy_topic: "hem".into(),
+            pushover_app_token: "a".into(),
+            pushover_user_key: "u".into(),
+            ..Default::default()
+        };
+        let changed = |new: &crate::settings::AlertsConfig| -> Vec<bool> {
+            channel_changes(&old, new).iter().map(|(_, c)| *c).collect()
+        };
+        assert_eq!(changed(&old), [false, false, false]);
+        let mut new = old.clone();
+        new.cooldown_minutes += 5;
+        assert_eq!(changed(&new), [false, false, false], "other settings");
+        new.telegram_bot_token = "t2".into();
+        assert_eq!(changed(&new), [true, false, false]);
+        let mut new = old.clone();
+        new.ntfy_server = "https://ntfy.example".into();
+        new.pushover_user_key = "u2".into();
+        assert_eq!(changed(&new), [false, true, true]);
+        // Each flag belongs to its own channel's marks.
+        let marks: Vec<_> = channel_changes(&old, &old)
+            .iter()
+            .map(|(m, _)| *m)
+            .collect();
+        assert!(std::ptr::eq(marks[0], &TELEGRAM_DELIVERY));
+        assert!(std::ptr::eq(marks[1], &NTFY_DELIVERY));
+        assert!(std::ptr::eq(marks[2], &PUSHOVER_DELIVERY));
     }
 
     #[test]

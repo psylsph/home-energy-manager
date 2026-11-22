@@ -58,7 +58,7 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
         let enabled = settings.history_backup.enabled;
         BackupInput {
             enabled,
-            enabled_for_s: marks.enabled_for_s(Feature::Backup, enabled, now),
+            enabled_for_s: marks.enabled_for_s(Feature::Backup, enabled, now_mono),
             interval_hours: settings.history_backup.interval_hours,
             last_success_at: guard.status.last_success_at,
             last_attempt_ok: guard.status.last.as_ref().map(|r| r.ok),
@@ -81,12 +81,12 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
     };
     let weather = FetchInput {
         enabled: weather_enabled,
-        enabled_for_s: marks.enabled_for_s(Feature::Weather, weather_enabled, now),
+        enabled_for_s: marks.enabled_for_s(Feature::Weather, weather_enabled, now_mono),
         last_ok: weather_last,
     };
     let solar_forecast = FetchInput {
         enabled: weather_enabled,
-        enabled_for_s: marks.enabled_for_s(Feature::SolarForecast, weather_enabled, now),
+        enabled_for_s: marks.enabled_for_s(Feature::SolarForecast, weather_enabled, now_mono),
         last_ok: db.as_ref().and_then(|db| db.forecast_stored_at()),
     };
 
@@ -95,7 +95,7 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
         let o = state.octopus.lock().await;
         OctopusInput {
             configured,
-            enabled_for_s: marks.enabled_for_s(Feature::Octopus, configured, now),
+            enabled_for_s: marks.enabled_for_s(Feature::Octopus, configured, now_mono),
             last_sync_at: o.last_sync_at.map(|at| at.timestamp()),
             failed: o.last_error.is_some(),
         }
@@ -118,9 +118,9 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
         poll_interval_secs,
         host_configured,
         connection,
-        last_reading: marks.last_reading(),
+        reading: marks.reading(now_mono),
         poll: marks.poll_state(now_mono),
-        history: db.as_ref().map(|db| db.write_marks()),
+        history: db.as_ref().map(|db| db.write_marks(now_mono)),
         backup,
         disk,
         notifications,
