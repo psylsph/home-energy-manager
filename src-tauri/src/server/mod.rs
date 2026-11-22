@@ -14,6 +14,7 @@ pub mod export_once;
 pub mod external_commands;
 mod external_control;
 pub mod external_snapshot;
+pub mod health;
 pub mod logs;
 pub mod mini;
 pub mod ratelimit;
@@ -213,6 +214,9 @@ fn create_router_at(
         // your Apple Watch”). Deliberately a separate, minimal-field surface
         // rather than a filtered /api/snapshot; see server::mini docs.
         .route("/api/mini/status", get(mini::mini_status))
+        // HEM's own health for external monitors (issue #503): tokenless,
+        // read-only, statuses and times only; 503 when a core part fails.
+        .route("/api/health", get(health::get_health))
         // Tiny self-contained GUI page that renders the mini status. Open
         // this URL in a phone/watch browser; it fetches /api/mini/status.
         .route("/mini", get(mini::mini_page))

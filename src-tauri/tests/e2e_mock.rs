@@ -21,6 +21,7 @@
 //!   * `GET /api/charging-mode` / `/api/adaptive-charge` — automation defaults
 //!   * `GET/POST /api/temperature-limiter` — defaults, update, and validation
 //!   * `GET /api/mini/status` — tokenless glance summary (empty + seeded)
+//!   * `GET /api/health` — 503 on a core failure, 200 when working, no-store
 //!   * `GET /api/{unknown}` — returns 404, not 200
 //!
 //! Things deliberately NOT covered here:
@@ -777,6 +778,146 @@ async fn mini_status_seeded_snapshot_round_trips_and_is_no_store() {
     assert!((body["battery_kw"].as_f64().unwrap() - (-1.8)).abs() < 1e-6);
     assert!((body["grid_kw"].as_f64().unwrap() - 0.9).abs() < 1e-6);
     assert!((body["home_kw"].as_f64().unwrap() - 1.5).abs() < 1e-6);
+}
+
+// ====================================================================
+// GET /api/health (issue #503)
+// ====================================================================
+
+/// Judge `state` as if `ago` seconds had passed since it was created. Both
+/// clocks are injected, so the test never subtracts from `Instant::now()`
+/// (which can't go back past boot on Windows).
+async fn health_after(state: &Arc<AppState>, ago: u64) -> Value {
+    let now_mono = std::time::Instant::now() + std::time::Duration::from_secs(ago);
+    let now = chrono::Utc::now().timestamp() + ago as i64;
+    let report = givenergy_local::server::health::health_report(state, now, now_mono).await;
+    serde_json::to_value(report).unwrap()
+}
+
+/// A history database in the isolated config folder.
+fn open_history() -> Arc<givenergy_local::history::HistoryDb> {
+    let dir = givenergy_local::settings::Settings::settings_dir();
+    Arc::new(givenergy_local::history::HistoryDb::open(&dir.join("history.db")).unwrap())
+}
+
+#[tokio::test]
+async fn health_route_answers_503_no_store_without_an_inverter_host() {
+    let router = fresh_router();
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router call");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+    let bytes = to_bytes(resp.into_body(), BODY_LIMIT).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "unhealthy");
+    assert_eq!(body["checks"]["inverter"]["detail"], "not_configured");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[tokio::test]
+async fn health_without_a_poll_loop_or_reading_is_unhealthy_after_start() {
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    state.settings.lock().await.host = "192.0.2.10".into();
+    let body = health_after(&state, 600).await;
+    assert_eq!(body["status"], "unhealthy");
+    assert_eq!(body["checks"]["inverter"]["detail"], "no_reading");
+    assert_eq!(body["checks"]["poll_loop"]["detail"], "not_running");
+    assert_eq!(body["checks"]["history"]["detail"], "unavailable");
+    assert_eq!(body["checks"]["notifications"]["status"], "disabled");
+    assert_eq!(body["checks"]["octopus"]["status"], "disabled");
+    assert!(body["uptime_s"].as_i64().unwrap() >= 600);
+}
+
+#[tokio::test]
+async fn health_just_after_start_is_starting_not_failing() {
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    state.settings.lock().await.host = "192.0.2.10".into();
+    *state.history.lock().await = Some(open_history());
+    let body = health_after(&state, 0).await;
+    assert_eq!(body["status"], "degraded", "{body}");
+    assert_eq!(body["checks"]["inverter"]["status"], "starting");
+    assert_eq!(body["checks"]["poll_loop"]["status"], "starting");
+    // The backup loop hasn't loaded its status yet, which is fine.
+    assert_eq!(body["checks"]["backup"]["detail"], "not_yet");
+}
+
+#[tokio::test]
+async fn health_keeps_the_last_reading_across_a_reconnect() {
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    state.settings.lock().await.host = "192.0.2.10".into();
+    *state.history.lock().await = Some(open_history());
+    let start = std::time::Instant::now();
+    let wall = chrono::Utc::now().timestamp();
+    // A reading at 590 s, then the dongle drops (the poll loop clears the
+    // snapshot) and the loop is backing off.
+    state.health.note_reading(wall + 590);
+    *state.connection_state.lock().await =
+        givenergy_local::inverter::poll::ConnectionState::Reconnecting;
+    state.health.poll_beat_at_time(
+        start + std::time::Duration::from_secs(599),
+        wall + 599,
+        givenergy_local::health::POLL_IDLE_BUDGET,
+    );
+    let body = health_after(&state, 600).await;
+    assert_eq!(body["checks"]["inverter"]["status"], "ok", "{body}");
+    assert_eq!(body["checks"]["inverter"]["detail"], "reconnecting");
+    assert_eq!(body["checks"]["poll_loop"]["status"], "ok");
+    assert_ne!(body["status"], "unhealthy");
+    // Still down ten minutes later: failing, and it says since when.
+    state.health.poll_beat_at_time(
+        start + std::time::Duration::from_secs(1199),
+        wall + 1199,
+        givenergy_local::health::POLL_IDLE_BUDGET,
+    );
+    let body = health_after(&state, 1200).await;
+    assert_eq!(body["status"], "unhealthy");
+    assert_eq!(body["checks"]["inverter"]["detail"], "reconnecting");
+    assert_eq!(body["checks"]["inverter"]["last_ok"], wall + 590);
+    assert_eq!(body["checks"]["history"]["status"], "ok");
+}
+
+#[tokio::test]
+async fn health_with_fresh_readings_and_history_is_ok() {
+    let _config = IsolatedConfig::enter();
+    let state = Arc::new(AppState::new());
+    state.settings.lock().await.host = "192.0.2.10".into();
+    *state.connection_state.lock().await =
+        givenergy_local::inverter::poll::ConnectionState::Connected;
+    *state.latest_snapshot.lock().await =
+        Some(givenergy_local::inverter::model::InverterSnapshot {
+            inverter_serial: "SECRET-SERIAL".into(),
+            ..Default::default()
+        });
+    let start = std::time::Instant::now();
+    let wall = chrono::Utc::now().timestamp();
+    state.health.note_reading(wall + 595);
+    state.health.poll_beat_at_time(
+        start + std::time::Duration::from_secs(599),
+        wall + 599,
+        givenergy_local::health::POLL_IDLE_BUDGET,
+    );
+    *state.history.lock().await = Some(open_history());
+
+    let body = health_after(&state, 600).await;
+    assert_ne!(body["status"], "unhealthy", "{body}");
+    for core in ["inverter", "poll_loop", "history"] {
+        assert_eq!(body["checks"][core]["status"], "ok", "{core}: {body}");
+        assert_eq!(body["checks"][core]["core"], true);
+    }
+    assert_eq!(body["checks"]["inverter"]["last_ok"], wall + 595);
+    assert!(!body.to_string().contains("SECRET-SERIAL"));
+    assert!(body["checks"]["disk"]["free_mb"].as_u64().is_some());
 }
 
 // ====================================================================

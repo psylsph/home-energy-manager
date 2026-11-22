@@ -1402,10 +1402,53 @@ fn notify_agent() -> &'static ureq::Agent {
     })
 }
 
+/// When each notification channel last delivered and last failed, for
+/// `GET /api/health` (issue #503). One per channel, so a dead channel shows
+/// even while another gets through; process-wide because the senders below
+/// are plain functions with no `AppState`.
+static TELEGRAM_DELIVERY: crate::health::DeliveryMarks = crate::health::DeliveryMarks::new();
+static NTFY_DELIVERY: crate::health::DeliveryMarks = crate::health::DeliveryMarks::new();
+static PUSHOVER_DELIVERY: crate::health::DeliveryMarks = crate::health::DeliveryMarks::new();
+
+/// Note one send in `marks` and pass the result on.
+fn recorded(
+    marks: &crate::health::DeliveryMarks,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    let _ = marks;
+    result
+}
+
+/// The delivery marks of every channel set up in `config`.
+pub(crate) fn channel_marks(
+    config: &crate::settings::AlertsConfig,
+) -> Vec<crate::health::NotifyMarks> {
+    [
+        (telegram_configured(config), &TELEGRAM_DELIVERY),
+        (ntfy_configured(config), &NTFY_DELIVERY),
+        (pushover_configured(config), &PUSHOVER_DELIVERY),
+    ]
+    .into_iter()
+    .filter(|(configured, _)| *configured)
+    .map(|(_, marks)| marks.snapshot())
+    .collect()
+}
+
 /// Send a notification via the Telegram Bot API.
 ///
 /// Uses `ureq` (synchronous) — call from `tokio::task::spawn_blocking`.
 pub fn send_telegram_message(bot_token: &str, chat_id: &str, text: &str) -> Result<(), String> {
+    recorded(
+        &TELEGRAM_DELIVERY,
+        send_telegram_message_unrecorded(bot_token, chat_id, text),
+    )
+}
+
+fn send_telegram_message_unrecorded(
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+) -> Result<(), String> {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
 
     let payload = serde_json::json!({
@@ -1452,6 +1495,22 @@ pub fn send_telegram_message(bot_token: &str, chat_id: &str, text: &str) -> Resu
 /// `&` in user-supplied content (e.g. a support-bundle description).
 /// Uses `sendDocument` with `multipart/form-data`.
 pub fn send_telegram_document(
+    bot_token: &str,
+    chat_id: &str,
+    caption: &str,
+    filename: &str,
+    file_body: &[u8],
+    parse_mode: Option<&str>,
+) -> Result<(), String> {
+    recorded(
+        &TELEGRAM_DELIVERY,
+        send_telegram_document_unrecorded(
+            bot_token, chat_id, caption, filename, file_body, parse_mode,
+        ),
+    )
+}
+
+fn send_telegram_document_unrecorded(
     bot_token: &str,
     chat_id: &str,
     caption: &str,
@@ -1546,7 +1605,10 @@ pub fn send_telegram_document(
 /// `text` is Telegram HTML like every alert; it is sent as plain text
 /// (see [`telegram_html_to_plain`]).
 pub fn send_ntfy_message(topic: &str, server: &str, text: &str) -> Result<(), String> {
-    send_ntfy_message_via(notify_agent(), topic, server, text)
+    recorded(
+        &NTFY_DELIVERY,
+        send_ntfy_message_via(notify_agent(), topic, server, text),
+    )
 }
 
 /// Inner ntfy send taking the agent explicitly so tests can inject one
@@ -1600,12 +1662,15 @@ fn send_ntfy_message_via(
 /// Pushover accepts `application/json`, so this mirrors
 /// [`send_telegram_message`] rather than form-encoding.
 pub fn send_pushover_message(app_token: &str, user_key: &str, text: &str) -> Result<(), String> {
-    send_pushover_message_via(
-        notify_agent(),
-        "https://api.pushover.net/1/messages.json",
-        app_token,
-        user_key,
-        text,
+    recorded(
+        &PUSHOVER_DELIVERY,
+        send_pushover_message_via(
+            notify_agent(),
+            "https://api.pushover.net/1/messages.json",
+            app_token,
+            user_key,
+            text,
+        ),
     )
 }
 
@@ -4170,6 +4235,34 @@ mod tests {
         let mock = MockNtfy::spawn(axum::http::StatusCode::OK).await;
         let res = send_ntfy_message("hem-alerts", &mock.base_url, "battery temp high");
         assert!(res.is_ok(), "2xx should succeed, got: {res:?}");
+    }
+
+    #[test]
+    fn a_send_is_recorded_and_passed_on() {
+        let marks = crate::health::DeliveryMarks::new();
+        let before = chrono::Utc::now().timestamp();
+        assert!(recorded(&marks, Err("down".into())).is_err());
+        let failed = marks.snapshot();
+        assert!(failed.failing && failed.failed_at >= before, "{failed:?}");
+        assert!(recorded(&marks, Ok(())).is_ok());
+        let delivered = marks.snapshot();
+        assert!(!delivered.failing && delivered.delivered_at >= before);
+    }
+
+    #[test]
+    fn only_configured_channels_are_reported() {
+        let mut config = crate::settings::AlertsConfig::default();
+        assert!(channel_marks(&config).is_empty());
+        config.ntfy_topic = "hem".into();
+        assert_eq!(channel_marks(&config).len(), 1);
+        config.telegram_bot_token = "t".into();
+        assert_eq!(
+            channel_marks(&config).len(),
+            1,
+            "a token alone isn't set up"
+        );
+        config.telegram_chat_id = "1".into();
+        assert_eq!(channel_marks(&config).len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

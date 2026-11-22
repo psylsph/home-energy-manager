@@ -7,6 +7,7 @@ pub mod backup;
 pub mod carbon;
 pub mod evc;
 pub mod forecast;
+pub mod health;
 pub mod history;
 pub mod inverter;
 pub mod modbus;

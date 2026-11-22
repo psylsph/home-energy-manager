@@ -733,6 +733,9 @@ pub struct AppState {
     /// can isolate spec files from each other. Production launches never set
     /// this, and the handler answers 404 without it.
     pub e2e_admin: std::sync::atomic::AtomicBool,
+    /// Process start and the poll loop's heartbeat, for `GET /api/health`
+    /// (issue #503).
+    pub health: Arc<crate::health::HealthMarks>,
 }
 
 impl AppState {
@@ -910,6 +913,7 @@ impl AppState {
             connect_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             reconnect_request: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             e2e_admin: std::sync::atomic::AtomicBool::new(false),
+            health: Arc::new(crate::health::HealthMarks::default()),
             weather: Arc::new(Mutex::new(crate::weather::WeatherState {
                 config: crate::settings::Settings::load().weather_config,
                 ..Default::default()
@@ -3534,6 +3538,7 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
         let mut latest = state.latest_snapshot.lock().await;
         *latest = Some(snapshot.clone());
     }
+    state.health.note_reading(snapshot.timestamp);
     clear_confirmed_force_restorations(state, &snapshot).await;
     clear_confirmed_pause_restoration(state, &snapshot).await;
     retry_stalled_force_restorations(state).await;
@@ -3712,6 +3717,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
     let mut last_discovery_time: Option<Instant> = None;
 
     loop {
+        // Settings, connect, warm-up and any LAN scan come before the next
+        // beat, so this one gets the long budget.
+        state.health.poll_beat(crate::health::POLL_BUSY_BUDGET);
         // ---- Manual reconnect request? ----
         // `POST /api/reconnect` (and any other path that wants to bypass the
         // back-off schedule) bumps `state.reconnect_request`. If it's advanced
@@ -3733,6 +3741,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
         // it (serial provisioning comes from persisted settings).
         if settings.host.is_empty() {
             tracing::debug!("Poll loop: waiting for host setting");
+            state.health.poll_beat(crate::health::POLL_IDLE_BUDGET);
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -4070,6 +4079,8 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // bump by the API is always detected regardless of timing.
                 let settings_version_at_connect = state.settings.lock().await.version;
                 loop {
+                    // A poll cycle: reads with retries and any queued writes.
+                    state.health.poll_beat(crate::health::POLL_BUSY_BUDGET);
                     // Taken before the read, so a poll that never judges a
                     // read breaks both runs of repair-worthy reads.
                     let timed_export_previous_repair_read = timed_export_repair_reads.begin_poll();
@@ -6347,6 +6358,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     let sleep_deadline =
                         tokio::time::Instant::now() + Duration::from_secs(poll_delay_secs);
                     loop {
+                        state.health.poll_beat(crate::health::POLL_IDLE_BUDGET);
                         // Wait up to 1 second, or until writes are queued
                         tokio::select! {
                             _ = state.write_notify.notified() => {
@@ -6504,6 +6516,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
         let sleep_start = tokio::time::Instant::now();
         let sleep_deadline = sleep_start + delay;
         loop {
+            state.health.poll_beat(crate::health::POLL_IDLE_BUDGET);
             let now = tokio::time::Instant::now();
             if now >= sleep_deadline {
                 break;

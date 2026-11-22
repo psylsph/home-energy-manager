@@ -17,7 +17,7 @@ pub mod reprice;
 pub use rate_stamp::{OffPeakHalfHours, RateStamp};
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use chrono::{Datelike, TimeZone, Timelike};
@@ -1131,6 +1131,11 @@ pub struct HistoryDb {
     /// Battery health polls awaiting a flush (issue #393). Lock order:
     /// `conn` before `health`, never the reverse.
     health: Mutex<battery_health::HealthAccumulator>,
+    /// When minute rows were last written, last failed to write, and since
+    /// when ready rows have waited, for `GET /api/health` (issue #503).
+    writes: crate::health::WriteMarks,
+    /// When a solar forecast was last stored (unix seconds, 0 = never).
+    forecast_stored_at: AtomicI64,
 }
 
 /// How many recent minutes' own rows the writer remembers. A minute can only
@@ -1281,7 +1286,9 @@ fn add_readings_column_if_missing(
 /// and ours is skipped: rows written by anything else (a previous process,
 /// real history under a clock that came up wrong) are never replaced or
 /// deleted. `owned` is updated only once the transaction commits.
-fn replace_minute_row(conn: &Connection, owned: &mut OwnedRows, row: &minute::MinuteRow) {
+/// Returns whether the write went through (a row left alone because another
+/// one holds its second still counts: the database took the statement).
+fn replace_minute_row(conn: &Connection, owned: &mut OwnedRows, row: &minute::MinuteRow) -> bool {
     let timestamp = row.row.timestamp;
     let mine: Vec<i64> = owned
         .iter()
@@ -1317,8 +1324,12 @@ fn replace_minute_row(conn: &Connection, owned: &mut OwnedRows, row: &minute::Mi
                     owned.push_back((row.start, stamps));
                 }
             }
+            true
         }
-        Err(e) => tracing::warn!("Failed to replace history minute row: {e}"),
+        Err(e) => {
+            tracing::warn!("Failed to replace history minute row: {e}");
+            false
+        }
     }
 }
 
@@ -1865,6 +1876,8 @@ impl HistoryDb {
             poll_rows: Mutex::new(minute::PollRows::new()),
             owned_rows: Mutex::new(OwnedRows::new()),
             health: Mutex::new(health),
+            writes: crate::health::WriteMarks::default(),
+            forecast_stored_at: AtomicI64::new(0),
         })
     }
 
@@ -2002,7 +2015,18 @@ impl HistoryDb {
         // poisoned lock (a panic mid-fold) is recovered rather than stopping
         // history for good.
         let mut rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
-        rows.push(snap, stamp)
+        let ready = rows.push(snap, stamp);
+        ready
+    }
+
+    /// The minute-row write marks, for `GET /api/health` (issue #503).
+    pub fn write_marks(&self) -> crate::health::HistoryWrites {
+        self.writes.snapshot()
+    }
+
+    /// When a solar forecast was last stored (unix seconds), if ever.
+    pub fn forecast_stored_at(&self) -> Option<i64> {
+        Some(self.forecast_stored_at.load(Ordering::Relaxed)).filter(|&at| at > 0)
     }
 
     /// Hold the database connection, so a job that needs it waits until the
@@ -2077,10 +2101,15 @@ impl HistoryDb {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        let mut owned = self.owned_rows.lock().unwrap_or_else(|e| e.into_inner());
-        for row in &queued {
-            replace_minute_row(&conn, &mut owned, row);
+        if queued.is_empty() {
+            return;
         }
+        let mut owned = self.owned_rows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all_ok = true;
+        for row in &queued {
+            all_ok &= replace_minute_row(&conn, &mut owned, row);
+        }
+        let _ = all_ok;
     }
 
     /// Insert a snapshot as its own reading row, unbucketed. Live polls go
@@ -4315,6 +4344,88 @@ mod tests {
             db.queue_poll_reading(poll_snap(POLL_NOON + 65, 0, 0.0), RateStamp::default()),
             "minute ended"
         );
+    }
+
+    #[test]
+    fn a_good_flush_marks_the_write_and_clears_the_wait() {
+        let db = test_db();
+        let before = chrono::Utc::now().timestamp();
+        assert_eq!(db.write_marks(), crate::health::HistoryWrites::default());
+        assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0), RateStamp::default()));
+        let waiting = db.write_marks();
+        assert!(waiting.ready_since >= before, "{waiting:?}");
+        assert_eq!(waiting.ok_at, 0);
+        db.flush_poll_rows();
+        let written = db.write_marks();
+        assert!(written.ok_at >= before, "{written:?}");
+        assert_eq!(written.err_at, 0);
+        assert_eq!(written.ready_since, 0);
+        // A mid-minute poll readies nothing, so nothing waits.
+        assert!(!db.queue_poll_reading(poll_snap(POLL_NOON + 15, 0, 0.0), RateStamp::default()));
+        assert_eq!(db.write_marks().ready_since, 0);
+    }
+
+    #[test]
+    fn a_failed_write_is_marked_and_the_wait_is_kept_until_a_write_works() {
+        let db = test_db();
+        let before = chrono::Utc::now().timestamp();
+        db.hold_connection_for_test()
+            .execute_batch("ALTER TABLE readings RENAME TO readings_away")
+            .unwrap();
+        assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0), RateStamp::default()));
+        let ready_since = db.write_marks().ready_since;
+        db.flush_poll_rows();
+        let failed = db.write_marks();
+        assert!(failed.err_at >= before, "{failed:?}");
+        assert!(failed.failing);
+        assert_eq!(failed.ok_at, 0);
+        assert_eq!(failed.ready_since, ready_since, "the wait must survive");
+
+        // The table comes back: the next write clears both.
+        db.hold_connection_for_test()
+            .execute_batch("ALTER TABLE readings_away RENAME TO readings")
+            .unwrap();
+        assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 65, 0, 0.0), RateStamp::default()));
+        assert_eq!(
+            db.write_marks().ready_since,
+            ready_since,
+            "earliest wait kept"
+        );
+        db.flush_poll_rows();
+        let recovered = db.write_marks();
+        assert!(recovered.ok_at >= failed.err_at, "{recovered:?}");
+        assert!(!recovered.failing);
+        assert_eq!(recovered.ready_since, 0);
+    }
+
+    #[test]
+    fn a_poisoned_connection_counts_as_a_failed_write() {
+        let db = std::sync::Arc::new(test_db());
+        let poisoner = db.clone();
+        let _ = std::thread::spawn(move || poisoner.poison_connection_for_test()).join();
+        assert!(db.queue_poll_reading(poll_snap(POLL_NOON + 5, 0, 0.0), RateStamp::default()));
+        db.flush_poll_rows();
+        let marks = db.write_marks();
+        assert!(marks.err_at > 0 && marks.failing, "{marks:?}");
+        assert!(marks.ready_since > 0, "{marks:?}");
+    }
+
+    #[test]
+    fn storing_forecast_rows_marks_when_the_forecast_was_stored() {
+        let db = test_db();
+        assert_eq!(db.forecast_stored_at(), None);
+        db.insert_forecast_values(&[]).unwrap();
+        assert_eq!(db.forecast_stored_at(), None, "nothing stored");
+        let before = chrono::Utc::now().timestamp();
+        db.insert_forecast_values(&[ForecastValueRow {
+            timestamp: POLL_NOON,
+            variable: "shortwave_radiation".to_string(),
+            value: 100.0,
+            source: "open-meteo".to_string(),
+            fetched_at: POLL_NOON,
+        }])
+        .unwrap();
+        assert!(db.forecast_stored_at().is_some_and(|at| at >= before));
     }
 
     #[test]

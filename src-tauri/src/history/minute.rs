@@ -229,6 +229,11 @@ impl PollRows {
         self.queued.extend(rows);
     }
 
+    /// Whether any rows are waiting to be taken.
+    pub fn has_queued(&self) -> bool {
+        !self.queued.is_empty()
+    }
+
     /// Take every queued row, oldest first.
     pub fn take(&mut self) -> Vec<MinuteRow> {
         std::mem::take(&mut self.queued)

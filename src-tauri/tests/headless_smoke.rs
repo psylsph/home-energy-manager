@@ -349,6 +349,28 @@ fn headless_init_tracing_and_run_headless_reach_a_responsive_http_server() {
                 return Err(format!("GET {path} returned 5xx: {}", resp.status()));
             }
         }
+        // /api/health (issue #503) answers 503 here on purpose: no inverter
+        // host is configured. The poll loop is running, waiting for one.
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut resp = agent
+            .get(&format!("{base_url}/api/health"))
+            .call()
+            .map_err(|e| format!("GET /api/health: {e}"))?;
+        if resp.status().as_u16() != 503 {
+            return Err(format!("GET /api/health returned {}", resp.status()));
+        }
+        let body: serde_json::Value = resp
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("/api/health was not JSON: {e}"))?;
+        if body["checks"]["inverter"]["detail"] != "not_configured"
+            || body["checks"]["poll_loop"]["status"] == "fail"
+        {
+            return Err(format!("unexpected /api/health body: {body}"));
+        }
         Ok(())
     });
 
