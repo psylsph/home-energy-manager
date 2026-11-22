@@ -67,7 +67,7 @@ export default function CarChargingEstimate({
     <SettingsGroup
       title="Car Charging Estimate"
       description="Without a charger HEM reads, estimate the car from home load."
-      help="Home load that stays above the threshold for three minutes or more is treated as the car charging, drawing the charger current at the grid voltage (32 A is about 7.4 kW). History, the Power page, the Planner's consumption forecast and the reports then show it as Car Charging instead of Home. Shorter spikes, like an oven and kettle together, stay in Home. It only suits a house where nothing but the car stays over the threshold. A GivEnergy EV charger that HEM reads (above) uses its own measured power instead. The estimate is worked out when the data is read, so changing either value re-works past history too. Leave the threshold empty to turn this off."
+      help="Home load that stays above the threshold for twenty minutes or more is treated as the car charging, drawing the charger current at the grid voltage (32 A is about 7.4 kW). History, the Power page, the Planner's consumption forecast and the reports then show it as Car Charging instead of Home. Shorter runs, like an oven, kettle and shower together, stay in Home. It only suits a house where nothing but the car stays over the threshold. A GivEnergy EV charger that HEM reads (above) uses its own measured power instead. The estimate is worked out when the data is read, so changing either value re-works past history too. Leave the threshold empty to turn this off."
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div className="flex flex-col gap-1.5">

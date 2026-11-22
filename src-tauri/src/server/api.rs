@@ -24791,7 +24791,7 @@ pub(crate) mod tests {
             {
                 let guard = state.history.lock().await;
                 let db = guard.as_ref().unwrap();
-                for m in 0..3 {
+                for m in 0..crate::history::car_charging::MIN_RUN_MINUTES {
                     db.insert_reading(&crate::inverter::model::InverterSnapshot {
                         timestamp: start_ts + m * 60,
                         home_power: 9000,

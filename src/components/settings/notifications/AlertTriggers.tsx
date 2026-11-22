@@ -56,7 +56,7 @@ const TRIGGERS: { key: BooleanField; label: string; hint?: string; help?: string
     key: 'car_charging_alert_enabled',
     label: 'Car Charging Started or Finished',
     hint: 'Notify when the car starts and stops charging, with the energy and time',
-    help: "Needs a Car Charging Threshold: the car is the home load above it, or a GivEnergy charger's own power where HEM reads one. A session starts after three minutes of charging and ends after ten without, so a pause between slots doesn't send a second message.",
+    help: "Needs a Car Charging Threshold: the car is the home load above it, or a GivEnergy charger's own power where HEM reads one. A session starts after twenty minutes of charging and ends after ten without, so a pause between slots doesn't send a second message.",
   },
   {
     key: 'export_summary_alert_enabled',

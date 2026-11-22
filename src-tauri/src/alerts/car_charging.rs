@@ -1,6 +1,6 @@
 //! "Car charging started / finished" notification (issue #454).
 //!
-//! A session starts once the car has drawn power for three minutes running
+//! A session starts once the car has drawn power for twenty minutes running
 //! and ends once it has drawn none for ten, so a pause between Octopus slots
 //! or a taper under the threshold neither ends it nor starts a second one.
 //! The car's power is the polled GivEnergy charger's, else the estimate from
@@ -13,8 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The car must draw power this long before a session starts.
-pub const START_AFTER_SECS: i64 = 180;
+/// The car must draw power this long before a session starts: the history
+/// rule's `history::car_charging::MIN_RUN_MINUTES` (issue #504).
+pub const START_AFTER_SECS: i64 = 1200;
 /// ...and draw none this long before it ends.
 pub const END_AFTER_SECS: i64 = 600;
 /// A gap between polls longer than this (or a clock that steps back) ends
@@ -293,17 +294,21 @@ mod tests {
         events
     }
 
+    /// The car must charge this long before a session starts.
+    const S: i64 = START_AFTER_SECS;
+    /// The first poll after a session has started (fed every 60 s from 0).
+    const ON: i64 = S + 60;
+    /// The first idle poll after [`ON`].
+    const IDLE: i64 = ON + 60;
+
     #[test]
-    fn a_session_starts_after_three_minutes_and_not_two() {
+    fn a_session_starts_after_start_after_secs_and_not_a_poll_sooner() {
         let mut s = CarSession::default();
-        assert!(
-            feed(&mut s, 0, 120, W).is_empty(),
-            "two minutes is not enough"
-        );
-        assert_eq!(s.step(179, W), vec![]);
-        assert_eq!(s.step(180, W), vec![CarEvent::Started { at: 0 }]);
+        assert!(feed(&mut s, 0, S - 60, W).is_empty(), "a minute short");
+        assert_eq!(s.step(S - 1, W), vec![]);
+        assert_eq!(s.step(S, W), vec![CarEvent::Started { at: 0 }]);
         // Nothing more while it carries on.
-        assert!(feed(&mut s, 240, 1200, W).is_empty());
+        assert!(feed(&mut s, ON, ON + 1200, W).is_empty());
     }
 
     #[test]
@@ -317,23 +322,33 @@ mod tests {
     }
 
     #[test]
+    fn the_alert_and_the_history_rule_wait_the_same_time() {
+        assert_eq!(
+            START_AFTER_SECS,
+            crate::history::car_charging::MIN_RUN_MINUTES * 60
+        );
+    }
+
+    #[test]
     fn a_short_run_is_forgotten() {
         let mut s = CarSession::default();
-        assert!(feed(&mut s, 0, 120, W).is_empty());
-        assert!(s.step(180, 0.0).is_empty());
-        // The clock starts again: three more minutes are needed.
-        assert!(feed(&mut s, 240, 360, W).is_empty());
-        assert_eq!(s.step(420, W), vec![CarEvent::Started { at: 240 }]);
+        assert!(feed(&mut s, 0, S - 60, W).is_empty());
+        assert!(s.step(S, 0.0).is_empty());
+        // The clock starts again: the whole wait is needed once more.
+        assert!(feed(&mut s, ON, ON + S - 60, W).is_empty());
+        assert_eq!(s.step(ON + S, W), vec![CarEvent::Started { at: ON }]);
     }
 
     #[test]
     fn nine_idle_minutes_keep_the_session_and_ten_end_it() {
         let mut s = CarSession::default();
-        let started = feed(&mut s, 0, 240, W);
+        let started = feed(&mut s, 0, ON, W);
         assert_eq!(started, vec![CarEvent::Started { at: 0 }]);
-        // Idle from 300 (the first zero reading).
-        assert!(feed(&mut s, 300, 300 + 540, 0.0).is_empty(), "nine minutes");
-        let events = s.step(300 + 600, 0.0);
+        assert!(
+            feed(&mut s, IDLE, IDLE + 540, 0.0).is_empty(),
+            "nine minutes"
+        );
+        let events = s.step(IDLE + 600, 0.0);
         assert_eq!(events.len(), 1);
         match &events[0] {
             CarEvent::Finished {
@@ -342,7 +357,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*started_at, 0);
-                assert_eq!(*ended_at, 300, "it ended when the power stopped");
+                assert_eq!(*ended_at, IDLE, "it ended when the power stopped");
             }
             other => panic!("{other:?}"),
         }
@@ -351,26 +366,26 @@ mod tests {
     #[test]
     fn the_finished_energy_is_the_integral_of_what_was_drawn() {
         let mut s = CarSession::default();
-        feed(&mut s, 0, 240, W);
-        let events = feed(&mut s, 300, 300 + 600, 0.0);
+        feed(&mut s, 0, ON, W);
+        let events = feed(&mut s, IDLE, IDLE + 600, 0.0);
         let CarEvent::Finished { kwh, .. } = events.last().unwrap() else {
             panic!()
         };
-        // 7.36 kW from 0 to 300 s.
-        assert!((kwh - 7.36 * 300.0 / 3600.0).abs() < 1e-9, "{kwh}");
+        // 7.36 kW from 0 to the first idle poll, the wait included.
+        assert!((kwh - 7.36 * IDLE as f64 / 3600.0).abs() < 1e-9, "{kwh}");
     }
 
     #[test]
     fn a_pause_and_a_restart_is_one_session() {
         let mut s = CarSession::default();
-        assert_eq!(feed(&mut s, 0, 240, W), vec![CarEvent::Started { at: 0 }]);
+        assert_eq!(feed(&mut s, 0, ON, W), vec![CarEvent::Started { at: 0 }]);
         assert!(
-            feed(&mut s, 300, 300 + 300, 0.0).is_empty(),
+            feed(&mut s, IDLE, IDLE + 300, 0.0).is_empty(),
             "five idle minutes"
         );
-        let resumed = feed(&mut s, 660, 900, W);
+        let resumed = feed(&mut s, IDLE + 360, IDLE + 600, W);
         assert!(resumed.is_empty(), "no second start");
-        let events = feed(&mut s, 960, 960 + 600, 0.0);
+        let events = feed(&mut s, IDLE + 660, IDLE + 660 + 600, 0.0);
         let CarEvent::Finished {
             started_at, kwh, ..
         } = events.last().unwrap()
@@ -378,9 +393,10 @@ mod tests {
             panic!()
         };
         assert_eq!(*started_at, 0);
-        // 0..300 and 660..960 at 7.36 kW; the idle minutes between add nothing.
+        // 0..IDLE and five more minutes after the pause at 7.36 kW; the idle
+        // minutes between add nothing.
         assert!(
-            (kwh - 7.36 * (300.0 + 300.0) / 3600.0).abs() < 1e-9,
+            (kwh - 7.36 * (IDLE as f64 + 300.0) / 3600.0).abs() < 1e-9,
             "{kwh}"
         );
     }
@@ -388,8 +404,8 @@ mod tests {
     #[test]
     fn a_long_gap_ends_the_session_at_the_last_poll_without_the_missing_energy() {
         let mut s = CarSession::default();
-        feed(&mut s, 0, 240, W);
-        let events = s.step(240 + 601, W);
+        feed(&mut s, 0, ON, W);
+        let events = s.step(ON + 601, W);
         let [CarEvent::Finished {
             started_at,
             ended_at,
@@ -398,63 +414,62 @@ mod tests {
         else {
             panic!("{events:?}")
         };
-        assert_eq!((*started_at, *ended_at), (0, 240));
+        assert_eq!((*started_at, *ended_at), (0, ON));
         assert!(
-            (kwh - 7.36 * 240.0 / 3600.0).abs() < 1e-9,
+            (kwh - 7.36 * ON as f64 / 3600.0).abs() < 1e-9,
             "no energy for the gap: {kwh}"
         );
         // The new reading begins a fresh run; no energy claimed for the gap.
-        assert_eq!(s.pending_since, Some(240 + 601));
+        assert_eq!(s.pending_since, Some(ON + 601));
         assert_eq!(s.pending_kwh, 0.0);
     }
 
     #[test]
     fn a_gap_of_exactly_ten_minutes_is_still_a_continuing_session() {
         let mut s = CarSession::default();
-        feed(&mut s, 0, 240, W);
-        assert!(s.step(240 + 600, W).is_empty());
+        feed(&mut s, 0, ON, W);
+        assert!(s.step(ON + 600, W).is_empty());
     }
 
     #[test]
     fn a_clock_that_steps_back_ends_the_session_too() {
         let mut s = CarSession::default();
-        feed(&mut s, 0, 240, W);
+        feed(&mut s, 0, ON, W);
         let events = s.step(100, W);
         assert!(matches!(
             events.as_slice(),
-            [CarEvent::Finished { ended_at: 240, .. }]
+            [CarEvent::Finished { ended_at: ON, .. }]
         ));
     }
 
     #[test]
     fn a_repeated_timestamp_changes_nothing() {
         let mut s = CarSession::default();
-        feed(&mut s, 0, 240, W);
+        feed(&mut s, 0, ON, W);
         let before = s.clone();
-        assert!(s.step(240, W).is_empty());
+        assert!(s.step(ON, W).is_empty());
         assert_eq!(s, before);
     }
 
     #[test]
-    fn a_second_session_inside_half_an_hour_of_the_last_start_skips_only_the_start_message() {
-        let mut s = CarSession::default();
-        assert_eq!(feed(&mut s, 0, 240, W), vec![CarEvent::Started { at: 0 }]);
-        // Ends at 300 (10 idle minutes seen by 900).
-        let events = feed(&mut s, 300, 900, 0.0);
-        assert!(matches!(events.last(), Some(CarEvent::Finished { .. })));
-        // Charging again from 1000: opens at 1180, only 1180 s after the first start message.
-        let events = feed(&mut s, 1000, 1300, W);
+    fn a_start_inside_half_an_hour_of_the_last_start_message_skips_only_that_message() {
+        // With a twenty-minute start and a ten-minute end, polls alone can't
+        // bring two start messages this close, so the saved state carries
+        // the last one.
+        let mut s = CarSession {
+            last_started_notified: Some(0),
+            ..CarSession::default()
+        };
+        let events = feed(&mut s, 60, 60 + S, W);
         assert!(events.is_empty(), "no second start message: {events:?}");
+        assert!(s.open.is_some(), "the session is still tracked");
         // Its end is still announced: the rate limit is for "started"
         // messages, and the energy summary is what the user is waiting for.
-        let events = feed(&mut s, 1360, 1360 + 700, 0.0);
+        let events = feed(&mut s, 120 + S, 120 + S + 700, 0.0);
         assert!(
             matches!(
                 events.as_slice(),
-                [CarEvent::Finished {
-                    started_at: 1000,
-                    ..
-                }]
+                [CarEvent::Finished { started_at: 60, .. }]
             ),
             "finish still sent: {events:?}"
         );
@@ -463,21 +478,23 @@ mod tests {
     #[test]
     fn a_session_half_an_hour_after_the_last_start_is_announced_again() {
         let mut s = CarSession::default();
-        feed(&mut s, 0, 240, W);
-        feed(&mut s, 300, 900, 0.0);
-        let events = feed(&mut s, 2000, 2200, W);
-        assert_eq!(events, vec![CarEvent::Started { at: 2000 }]);
+        feed(&mut s, 0, ON, W);
+        feed(&mut s, IDLE, IDLE + 600, 0.0);
+        let again = IDLE + 660 + START_MESSAGE_MIN_GAP_SECS;
+        let events = feed(&mut s, again, again + S, W);
+        assert_eq!(events, vec![CarEvent::Started { at: again }]);
     }
 
     #[test]
     fn a_stopped_session_resumes_from_its_saved_state() {
         let mut live = CarSession::default();
-        feed(&mut live, 0, 540, W);
+        feed(&mut live, 0, ON + 300, W);
+        assert!(live.open.is_some());
         let saved = serde_json::to_string(&live).unwrap();
         let mut restored: CarSession = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored, live);
-        let a = feed(&mut live, 600, 600 + 900, 0.0);
-        let b = feed(&mut restored, 600, 600 + 900, 0.0);
+        let a = feed(&mut live, ON + 360, ON + 360 + 900, 0.0);
+        let b = feed(&mut restored, ON + 360, ON + 360 + 900, 0.0);
         assert_eq!(a, b);
         assert!(matches!(a.last(), Some(CarEvent::Finished { .. })));
     }
@@ -492,7 +509,7 @@ mod tests {
     fn corrupt_power_counts_as_none() {
         for bad in [f64::NAN, f64::INFINITY, -50.0] {
             let mut s = CarSession::default();
-            assert!(feed(&mut s, 0, 600, bad).is_empty());
+            assert!(feed(&mut s, 0, S + 600, bad).is_empty());
             assert_eq!(s.pending_since, None);
         }
     }
@@ -575,20 +592,22 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let state = state_with(on_config(), Some(db)).await;
-            let started = run_minutes(&state, 0, 600, W).await;
+            let started = run_minutes(&state, 0, S + 420, W).await;
             assert_eq!(started.len(), 1, "{started:?}");
             assert!(
                 started[0].starts_with("🚗 Car charging started at"),
                 "{started:?}"
             );
             assert!(started[0].ends_with("(estimated)"));
-            let finished = run_minutes(&state, 660, 660 + 700, 0.0).await;
+            let finished = run_minutes(&state, S + 480, S + 480 + 700, 0.0).await;
             assert_eq!(finished.len(), 1, "{finished:?}");
-            // 7.36 kW from 0 to 660 s.
-            assert!(
-                finished[0].contains("finished: 1.3 kWh in 11 m"),
-                "{finished:?}"
+            // 7.36 kW from 0 to the first idle poll, the wait included.
+            let want = format!(
+                "finished: {:.1} kWh in {} m",
+                7.36 * (S + 480) as f64 / 3600.0,
+                (S + 480) / 60
             );
+            assert!(finished[0].contains(&want), "{finished:?} vs {want}");
         })
         .await;
     }
@@ -602,7 +621,7 @@ mod tests {
                 ..on_config()
             };
             let state = state_with(off, Some(db.clone())).await;
-            assert!(run_minutes(&state, 0, 900, W).await.is_empty());
+            assert!(run_minutes(&state, 0, S + 600, W).await.is_empty());
             assert_eq!(stored(&db), None);
 
             // Master switch off, or nowhere to send, is the same.
@@ -617,7 +636,7 @@ mod tests {
                 },
             ] {
                 let state = state_with(cfg, Some(db.clone())).await;
-                assert!(run_minutes(&state, 0, 900, W).await.is_empty());
+                assert!(run_minutes(&state, 0, S + 600, W).await.is_empty());
                 assert_eq!(stored(&db), None);
             }
         })
@@ -630,7 +649,7 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let state = state_with(on_config(), Some(db.clone())).await;
-            for t in (0..900).step_by(60) {
+            for t in (0..S + 600).step_by(60) {
                 assert!(poll(&state, None, t, true).await.lock().unwrap().is_empty());
             }
             assert_eq!(stored(&db), None);
@@ -643,20 +662,19 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let state = state_with(on_config(), Some(db.clone())).await;
-            assert_eq!(run_minutes(&state, 0, 300, W).await.len(), 1);
+            assert_eq!(run_minutes(&state, 0, ON, W).await.len(), 1);
             assert!(stored(&db).unwrap().open.is_some());
 
             *state.alert_config.lock().await = AlertsConfig {
                 car_charging_alert_enabled: false,
                 ..on_config()
             };
-            assert!(run_minutes(&state, 360, 420, W).await.is_empty());
+            assert!(run_minutes(&state, ON + 60, ON + 120, W).await.is_empty());
             assert_eq!(stored(&db), Some(CarSession::default()), "nothing kept");
 
             *state.alert_config.lock().await = on_config();
-            // The session is new: three minutes must pass again, and as it is
-            // inside half an hour of the last start message, stays quiet.
-            assert!(poll(&state, Some(W), 480, true)
+            // The session is new: the whole wait must pass again.
+            assert!(poll(&state, Some(W), ON + 180, true)
                 .await
                 .lock()
                 .unwrap()
@@ -671,22 +689,22 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let state = state_with(on_config(), Some(db)).await;
-            // The start is due at 180 s but the channel refuses it.
-            for t in (0..180).step_by(60) {
+            // The start is due at S but the channel refuses it.
+            for t in (0..S).step_by(60) {
                 poll(&state, Some(W), t, false).await;
             }
-            let first = poll(&state, Some(W), 180, false).await;
+            let first = poll(&state, Some(W), S, false).await;
             assert_eq!(first.lock().unwrap().len(), 1, "tried once");
             // Before five minutes: not retried.
-            let soon = poll(&state, Some(W), 240, true).await;
+            let soon = poll(&state, Some(W), ON, true).await;
             assert!(soon.lock().unwrap().is_empty());
             // After five minutes: resent, and this time it is delivered.
-            let again = poll(&state, Some(W), 180 + 301, true).await;
+            let again = poll(&state, Some(W), S + 301, true).await;
             let texts = again.lock().unwrap().clone();
             assert_eq!(texts.len(), 1, "{texts:?}");
             assert!(texts[0].starts_with("🚗 Car charging started"));
             // Delivered, so it is not sent a third time.
-            let later = poll(&state, Some(W), 180 + 700, true).await;
+            let later = poll(&state, Some(W), S + 700, true).await;
             assert!(later.lock().unwrap().is_empty());
         })
         .await;
@@ -697,13 +715,13 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let state = state_with(on_config(), Some(db)).await;
-            for t in (0..=180).step_by(60) {
+            for t in (0..=S).step_by(60) {
                 poll(&state, Some(W), t, false).await;
             }
             // Over an hour later (a continuing session, polls every ten minutes).
-            let mut t = 180;
+            let mut t = S;
             let mut last = Vec::new();
-            while t < 180 + 3700 {
+            while t < S + 3700 {
                 t += 600;
                 last = poll(&state, Some(W), t, false)
                     .await
@@ -721,13 +739,13 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let first = state_with(on_config(), Some(db.clone())).await;
-            assert_eq!(run_minutes(&first, 0, 600, W).await.len(), 1);
+            assert_eq!(run_minutes(&first, 0, S + 420, W).await.len(), 1);
 
             // A new process: fresh state, same database.
             let second = state_with(on_config(), Some(db.clone())).await;
-            let more = run_minutes(&second, 660, 900, W).await;
+            let more = run_minutes(&second, S + 480, S + 720, W).await;
             assert!(more.is_empty(), "no second start message: {more:?}");
-            let finished = run_minutes(&second, 960, 960 + 700, 0.0).await;
+            let finished = run_minutes(&second, S + 780, S + 780 + 700, 0.0).await;
             assert_eq!(finished.len(), 1);
             assert!(finished[0].contains("finished"), "{finished:?}");
         })
@@ -739,21 +757,19 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let first = state_with(on_config(), Some(db.clone())).await;
-            run_minutes(&first, 0, 600, W).await;
+            run_minutes(&first, 0, S + 420, W).await;
             let saved = stored(&db).unwrap();
             assert!(saved.open.is_some());
 
             // HEM was closed for hours.
             let second = state_with(on_config(), Some(db.clone())).await;
-            let sent = poll(&second, Some(0.0), 600 + 5 * 3600, true).await;
+            let sent = poll(&second, Some(0.0), S + 420 + 5 * 3600, true).await;
             let texts = sent.lock().unwrap().clone();
             assert_eq!(texts.len(), 1, "{texts:?}");
             assert!(texts[0].contains("finished"), "{texts:?}");
             // It claims the session up to the last poll seen, not the gap.
-            assert!(
-                texts[0].contains("1.2 kWh") || texts[0].contains("1.3 kWh"),
-                "{texts:?}"
-            );
+            let want = format!("{:.1} kWh", 7.36 * (S + 420) as f64 / 3600.0);
+            assert!(texts[0].contains(&want), "{texts:?} vs {want}");
             assert!(stored(&db).unwrap().open.is_none());
         })
         .await;
@@ -765,7 +781,7 @@ mod tests {
             let db = open_history();
             db.set_meta_value(META_KEY, "not json").unwrap();
             let state = state_with(on_config(), Some(db)).await;
-            assert_eq!(run_minutes(&state, 0, 300, W).await.len(), 1);
+            assert_eq!(run_minutes(&state, 0, ON, W).await.len(), 1);
         })
         .await;
     }
@@ -778,10 +794,12 @@ mod tests {
         with_isolated_config_dir_async(|| async {
             let db = open_history();
             let first = state_with(on_config(), Some(db.clone())).await;
-            assert_eq!(run_minutes(&first, 0, 600, W).await.len(), 1);
+            assert_eq!(run_minutes(&first, 0, S + 420, W).await.len(), 1);
 
             let restarted = state_with(on_config(), None).await;
-            assert!(run_minutes(&restarted, 660, 900, W).await.is_empty());
+            assert!(run_minutes(&restarted, S + 480, S + 720, W)
+                .await
+                .is_empty());
             assert_eq!(
                 restarted.car_session.lock().await.session,
                 CarSession::default(),
@@ -789,7 +807,7 @@ mod tests {
             );
             // The database opens: the saved session is picked up and carries on.
             *restarted.history.lock().await = Some(db.clone());
-            let more = run_minutes(&restarted, 960, 1200, W).await;
+            let more = run_minutes(&restarted, S + 780, S + 1020, W).await;
             assert!(more.is_empty(), "no second start message: {more:?}");
             assert!(stored(&db).unwrap().open.is_some());
         })

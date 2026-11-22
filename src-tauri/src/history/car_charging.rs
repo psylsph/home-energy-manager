@@ -97,11 +97,12 @@ pub fn car_power_w(home_w: f64, grid_v: Option<f64>, cfg: &CarChargingConfig) ->
 }
 
 /// Home power must stay over the threshold for this many wall-clock minutes
-/// running before it is the car, so a few minutes of oven, kettle and shower
-/// together never are. Like the "car charging started" alert's three minutes
+/// running before it is the car, so oven, kettle and shower together, or a
+/// heat pump with the immersion on, never are (issue #504). Like the "car
+/// charging started" alert's twenty minutes
 /// (`alerts::car_charging::START_AFTER_SECS`), though judged on whole
 /// minutes' averages rather than from the first poll.
-pub const MIN_RUN_MINUTES: i64 = 3;
+pub const MIN_RUN_MINUTES: i64 = 20;
 
 /// The span, first minute to last, of a run of minutes that has lasted
 /// [`MIN_RUN_MINUTES`] minutes.
@@ -953,6 +954,8 @@ mod tests {
     // ---- the History series (issue #454 phase 2) ----
 
     const T0: i64 = 1_790_000_040; // a minute boundary
+    /// The shortest run that is the car, in minutes.
+    const RUN: i64 = MIN_RUN_MINUTES;
 
     fn db() -> HistoryDb {
         HistoryDb::open(&crate::test_util::make_unique_test_dir("car-charging").join("h.db"))
@@ -997,7 +1000,7 @@ mod tests {
     fn the_series_matches_the_rust_rule_for_every_minute() {
         let db = db();
         // (home W, grid V, EVC W)
-        let rows: [(i32, f32, Option<f64>); 9] = [
+        let mut rows: Vec<(i32, f32, Option<f64>)> = vec![
             (800, 231.0, None),
             (3000, 231.0, None),
             (3001, 231.0, None),
@@ -1006,8 +1009,10 @@ mod tests {
             (9500, 300.0, None),
             (9500, 100.0, None),
             (9500, 231.0, Some(7000.0)),
-            (1500, 231.0, Some(0.0)),
         ];
+        // Long enough a run that every minute over is the car.
+        rows.extend((0..RUN).map(|_| (9500, 231.0, None)));
+        rows.push((1500, 231.0, Some(0.0)));
         for (i, (h, v, evc)) in rows.iter().enumerate() {
             put(&db, i as i64, *h, *v);
             if let Some(e) = evc {
@@ -1045,12 +1050,13 @@ mod tests {
     #[test]
     fn car_and_house_add_up_to_home_in_wide_buckets() {
         let db = db();
-        for m in 0..60 {
+        // Three charges just over the run with five minutes of house between,
+        // then one a minute short that stays the house.
+        for m in 0..3 * (RUN + 7) + RUN - 1 {
             put(
                 &db,
                 m,
-                // Five-minute charges with five minutes of house between.
-                if (m / 5) % 2 == 0 {
+                if m % (RUN + 7) < RUN + 2 {
                     9000
                 } else {
                     700 + m as i32
@@ -1077,6 +1083,10 @@ mod tests {
             assert!(car[i].v >= 0.0 && house[i].v >= 0.0);
         }
         assert!(car.iter().any(|p| p.v > 0.0));
+        // Only the three long charges are the car.
+        let w = whole_window(T0, T0 + 24 * 3600);
+        let want = 3.0 * (RUN + 2) as f64 * 32.0 * 232.0 / 60_000.0;
+        assert!((db.car_kwh_in_window(&w, &c).unwrap() - want).abs() < 1e-6);
     }
 
     #[test]
@@ -1164,7 +1174,7 @@ mod tests {
     #[test]
     fn a_changed_threshold_rederives_the_past() {
         let db = db();
-        for m in 0..3 {
+        for m in 0..RUN {
             put(&db, m, 4000, 231.0);
         }
         let low = CarChargingConfig {
@@ -1236,18 +1246,24 @@ mod tests {
     }
 
     #[test]
-    fn two_minutes_over_is_not_the_car_and_three_is_from_the_first() {
+    fn a_minute_short_is_not_the_car_and_a_full_run_is_from_the_first() {
         let db = db();
-        let homes = [800, 9000, 9000, 800, 9000, 9000, 9000, 800];
+        let mut homes = vec![800];
+        homes.extend(vec![9000; (RUN - 1) as usize]);
+        homes.push(800);
+        homes.extend(vec![9000; RUN as usize]);
+        homes.push(800);
         for (m, h) in homes.iter().enumerate() {
             put(&db, m as i64, *h, 230.0);
         }
-        assert_eq!(
-            car_by_minute(&db, &cfg(), 0, 8),
-            vec![0.0, 0.0, 0.0, 0.0, 7360.0, 7360.0, 7360.0, 0.0]
-        );
+        let mut want = vec![0.0; (RUN + 1) as usize];
+        want.extend(vec![7360.0; RUN as usize]);
+        want.push(0.0);
+        assert_eq!(car_by_minute(&db, &cfg(), 0, homes.len() as i64), want);
         let w = whole_window(T0, T0 + 3600);
-        assert!((db.car_kwh_in_window(&w, &cfg()).unwrap() - 3.0 * 7.36 / 60.0).abs() < 1e-9);
+        assert!(
+            (db.car_kwh_in_window(&w, &cfg()).unwrap() - RUN as f64 * 7.36 / 60.0).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -1279,16 +1295,20 @@ mod tests {
     #[test]
     fn a_reading_at_the_threshold_splits_a_run() {
         let db = db();
-        for (m, h) in [9000, 9000, 3000, 9000, 9000].iter().enumerate() {
-            put(&db, m as i64, *h, 230.0);
+        // A minute short either side: joined, they would be the car.
+        for m in 0..2 * RUN - 1 {
+            put(&db, m, if m == RUN - 1 { 3000 } else { 9000 }, 230.0);
         }
-        assert_eq!(car_by_minute(&db, &cfg(), 0, 5), vec![0.0; 5]);
+        assert_eq!(
+            car_by_minute(&db, &cfg(), 0, 2 * RUN - 1),
+            vec![0.0; (2 * RUN - 1) as usize]
+        );
     }
 
     #[test]
     fn a_reading_without_home_power_splits_a_run() {
         let db = db();
-        for m in 0..5 {
+        for m in 0..2 * RUN - 1 {
             put(&db, m, 9000, 230.0);
         }
         db.conn
@@ -1296,25 +1316,37 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE readings SET home_power = NULL WHERE timestamp = ?1",
-                [T0 + 2 * 60],
+                [T0 + (RUN - 1) * 60],
             )
             .unwrap();
-        assert_eq!(car_by_minute(&db, &cfg(), 0, 5), vec![0.0; 4]);
+        assert_eq!(
+            car_by_minute(&db, &cfg(), 0, 2 * RUN - 1),
+            vec![0.0; (2 * RUN - 2) as usize]
+        );
     }
 
     #[test]
     fn a_gap_over_five_minutes_splits_a_run_and_one_of_five_does_not() {
+        // Two halves of a run, each too short alone, with a gap between.
+        let half = RUN / 2 + 1;
+        let halves = |gap: i64| (0..half).chain((half - 1 + gap)..(2 * half - 1 + gap));
         let split = db();
-        for m in [0, 1, 7, 8] {
+        for m in halves(6) {
             put(&split, m, 9000, 230.0);
         }
-        assert_eq!(car_by_minute(&split, &cfg(), 0, 10), vec![0.0; 4]);
+        assert_eq!(
+            car_by_minute(&split, &cfg(), 0, 3 * RUN),
+            vec![0.0; (2 * half) as usize]
+        );
 
         let joined = db();
-        for m in [0, 1, 6] {
+        for m in halves(5) {
             put(&joined, m, 9000, 230.0);
         }
-        assert_eq!(car_by_minute(&joined, &cfg(), 0, 10), vec![7360.0; 3]);
+        assert_eq!(
+            car_by_minute(&joined, &cfg(), 0, 3 * RUN),
+            vec![7360.0; (2 * half) as usize]
+        );
     }
 
     #[test]
@@ -1332,12 +1364,17 @@ mod tests {
     }
 
     #[test]
-    fn a_short_burst_in_polled_history_is_not_three_minutes_for_touching_three() {
-        // History from 15-second polling: 61 s over the threshold, from the
-        // last poll of one minute to the first of the minute after next.
+    fn a_burst_in_polled_history_is_not_a_full_run_for_touching_one() {
+        // History from 15-second polling: over the threshold from the last
+        // poll of one minute to the first of the minute a full run later, so
+        // it touches that many minutes but fills two fewer.
         let db = db();
-        for s in (0..240).step_by(15) {
-            let home = if (45..=120).contains(&s) { 9000 } else { 800 };
+        for s in (0..(RUN + 1) * 60).step_by(15) {
+            let home = if (45..=(RUN - 1) * 60).contains(&s) {
+                9000
+            } else {
+                800
+            };
             db.insert_reading(&InverterSnapshot {
                 timestamp: T0 + s,
                 home_power: home,
@@ -1350,10 +1387,10 @@ mod tests {
     }
 
     #[test]
-    fn three_minutes_of_polled_history_over_the_threshold_is_the_car() {
+    fn a_full_run_of_polled_history_over_the_threshold_is_the_car() {
         let db = db();
-        for s in (0..240).step_by(15) {
-            let home = if s < 180 { 9000 } else { 800 };
+        for s in (0..(RUN + 1) * 60).step_by(15) {
+            let home = if s < RUN * 60 { 9000 } else { 800 };
             db.insert_reading(&InverterSnapshot {
                 timestamp: T0 + s,
                 home_power: home,
@@ -1362,64 +1399,72 @@ mod tests {
             });
         }
         let w = whole_window(T0, T0 + 3600);
-        assert!((db.car_kwh_in_window(&w, &cfg()).unwrap() - 3.0 * 7.36 / 60.0).abs() < 1e-9);
+        assert!(
+            (db.car_kwh_in_window(&w, &cfg()).unwrap() - RUN as f64 * 7.36 / 60.0).abs() < 1e-9
+        );
     }
 
     #[test]
     fn minutes_the_charger_recorded_idle_do_not_lengthen_a_run() {
-        // The charger read 0 W for two heavy minutes, then missed one: the
-        // third minute alone is not three minutes of car.
+        // The charger read 0 W for two heavy minutes, then missed the rest:
+        // those alone are not a full run of car.
         let db = db();
-        for m in 0..3 {
+        for m in 0..RUN {
             put(&db, m, 9000, 230.0);
         }
         put_evc(&db, 0, 0.0);
         put_evc(&db, 1, 0.0);
-        assert_eq!(car_by_minute(&db, &cfg(), 0, 3), vec![0.0; 3]);
+        assert_eq!(car_by_minute(&db, &cfg(), 0, RUN), vec![0.0; RUN as usize]);
 
         // Recorded charging, it counts toward the run as before.
         let charging = self::db();
-        for m in 0..3 {
+        for m in 0..RUN {
             put(&charging, m, 9000, 230.0);
         }
         put_evc(&charging, 0, 7000.0);
         put_evc(&charging, 1, 7000.0);
-        assert_eq!(
-            car_by_minute(&charging, &cfg(), 0, 3),
-            vec![7000.0, 7000.0, 7360.0]
-        );
+        let mut want = vec![7000.0, 7000.0];
+        want.extend(vec![7360.0; (RUN - 2) as usize]);
+        assert_eq!(car_by_minute(&charging, &cfg(), 0, RUN), want);
     }
 
     #[test]
     fn a_run_crossing_the_window_edge_is_judged_whole() {
         let db = db();
-        for m in 0..10 {
+        let len = RUN + 8;
+        for m in 0..len {
             put(&db, m, 9000, 230.0);
         }
         // The last two minutes of the run, and its first two.
-        assert_eq!(car_by_minute(&db, &cfg(), 8, 20), vec![7360.0; 2]);
+        assert_eq!(
+            car_by_minute(&db, &cfg(), len - 2, len + 10),
+            vec![7360.0; 2]
+        );
         assert_eq!(car_by_minute(&db, &cfg(), 0, 2), vec![7360.0; 2]);
-        let tail = whole_window(T0 + 8 * 60, T0 + 20 * 60);
+        let tail = whole_window(T0 + (len - 2) * 60, T0 + (len + 10) * 60);
         assert!((db.car_kwh_in_window(&tail, &cfg()).unwrap() - 7.36 / 60.0).abs() < 1e-9);
         assert_eq!(
-            db.car_block_minutes_since(&cfg(), T0 + 8 * 60)
+            db.car_block_minutes_since(&cfg(), T0 + (len - 2) * 60)
                 .unwrap()
                 .iter()
                 .map(|x| x.timestamp)
                 .collect::<Vec<_>>(),
-            vec![T0 + 8 * 60, T0 + 9 * 60]
+            vec![T0 + (len - 2) * 60, T0 + (len - 1) * 60]
         );
     }
 
     #[test]
     fn a_short_spike_next_to_the_window_does_not_become_the_car() {
-        // Two minutes over, then the house: a window holding only the
-        // second minute must not count it either.
+        // A minute short of a run, then the house: a window that starts
+        // inside it must not count its end either.
         let db = db();
-        for (m, h) in [9000, 9000, 800, 800].iter().enumerate() {
-            put(&db, m as i64, *h, 230.0);
+        for m in 0..RUN + 1 {
+            put(&db, m, if m < RUN - 1 { 9000 } else { 800 }, 230.0);
         }
-        assert_eq!(car_by_minute(&db, &cfg(), 1, 4), vec![0.0; 3]);
+        assert_eq!(
+            car_by_minute(&db, &cfg(), 1, RUN + 1),
+            vec![0.0; RUN as usize]
+        );
     }
 
     #[test]
@@ -1427,25 +1472,20 @@ mod tests {
         let db = db();
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
         let base = crate::history::local_midnight_timestamp(date).unwrap() + 3 * 3600;
-        for (i, h) in [800, 9000, 9000, 800, 9000, 9000, 9000].iter().enumerate() {
+        let mut homes = vec![800];
+        homes.extend(vec![9000; (RUN - 1) as usize]);
+        homes.push(800);
+        homes.extend(vec![9000; RUN as usize]);
+        for (i, h) in homes.iter().enumerate() {
             put_at(&db, base + i as i64 * 60, *h, 0.0);
         }
         let rows = db
             .get_readings_for_date_with_car(date, Some(&cfg()))
             .unwrap();
         let car: Vec<Option<f64>> = rows.iter().map(|r| r.car_power).collect();
-        assert_eq!(
-            car,
-            vec![
-                Some(0.0),
-                Some(0.0),
-                Some(0.0),
-                Some(0.0),
-                Some(7360.0),
-                Some(7360.0),
-                Some(7360.0)
-            ]
-        );
+        let mut want = vec![Some(0.0); (RUN + 1) as usize];
+        want.extend(vec![Some(7360.0); RUN as usize]);
+        assert_eq!(car, want);
     }
 
     // ---- the cumulative energy series ----
@@ -1541,13 +1581,15 @@ mod tests {
     #[test]
     fn a_long_gap_is_not_bridged() {
         let db = db();
-        // Two three-minute charges an hour apart.
-        for ts in [0, 60, 120, 3600, 3660, 3720] {
-            put_at(&db, MIDNIGHT + 36_000 + ts, 9000, 0.0);
+        // Two shortest-run charges an hour apart.
+        for start in [0, 3600] {
+            for m in 0..RUN {
+                put_at(&db, MIDNIGHT + 36_000 + start + m * 60, 9000, 0.0);
+            }
         }
         let pts = energy(&db, CAR_ENERGY_FIELD, 3600, MIDNIGHT, MIDNIGHT + 86_400);
-        // Two minutes in each count; the hour between them doesn't.
-        assert!((pts.last().unwrap().v - 4.0 * 7.36 / 60.0).abs() < 1e-6);
+        // Each run's minutes between its readings count; the gap doesn't.
+        assert!((pts.last().unwrap().v - 2.0 * (RUN - 1) as f64 * 7.36 / 60.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1615,8 +1657,10 @@ mod tests {
     #[test]
     fn car_kwh_in_window_skips_gaps_and_is_zero_with_no_car() {
         let db = db();
-        for ts in [35_880, 35_940, 36_000, 39_880, 39_940, 40_000] {
-            put_at(&db, MIDNIGHT + ts, 9000, 0.0);
+        for end in [36_000, 40_000] {
+            for m in 0..RUN {
+                put_at(&db, MIDNIGHT + end - m * 60, 9000, 0.0);
+            }
         }
         put_at(&db, MIDNIGHT + 40_060, 800, 0.0);
         let w = crate::history::HistoryWindow {
@@ -1624,9 +1668,10 @@ mod tests {
             offset: 0,
             explicit_window: Some((MIDNIGHT, MIDNIGHT + 86_400)),
         };
-        // The gap adds nothing; two minutes of the first run count, and all
-        // three of the second's, the last of which runs on to the 800 W row.
-        assert!((db.car_kwh_in_window(&w, &cfg()).unwrap() - 5.0 * 7.36 / 60.0).abs() < 1e-6);
+        // The gap adds nothing; the first run's minutes between its readings
+        // count, and all the second's, whose last runs on to the 800 W row.
+        let want = (2 * RUN - 1) as f64 * 7.36 / 60.0;
+        assert!((db.car_kwh_in_window(&w, &cfg()).unwrap() - want).abs() < 1e-6);
         let empty = crate::history::HistoryWindow {
             explicit_window: Some((MIDNIGHT + 80_000, MIDNIGHT + 81_000)),
             ..w
@@ -1993,13 +2038,13 @@ mod tests {
     #[test]
     fn today_includes_the_reading_at_now() {
         let db = db();
-        for m in 0..=10 {
+        for m in 0..=RUN {
             put_at(&db, MIDNIGHT + 3600 + m * 60, 9000, 0.0);
         }
         let kwh = db
-            .car_kwh_today_in(&cfg(), MIDNIGHT + 3600 + 600, &utc())
+            .car_kwh_today_in(&cfg(), MIDNIGHT + 3600 + RUN * 60, &utc())
             .unwrap();
-        assert!((kwh - 7.36 * 10.0 / 60.0).abs() < 1e-6, "{kwh}");
+        assert!((kwh - 7.36 * RUN as f64 / 60.0).abs() < 1e-6, "{kwh}");
     }
 
     #[test]
@@ -2036,19 +2081,22 @@ mod tests {
     #[test]
     fn block_minutes_are_the_minutes_over_the_threshold() {
         let db = db();
-        // Two three-minute runs either side of a minute at the threshold.
+        // Two shortest runs either side of a minute at the threshold.
         put_at(&db, MIDNIGHT + 60, 800, 0.0);
-        for ts in [120, 180, 240] {
+        let first: Vec<i64> = (0..RUN).map(|m| 120 + m * 60).collect();
+        let at = 120 + RUN * 60;
+        let second: Vec<i64> = (0..RUN).map(|m| at + 60 + m * 60).collect();
+        for ts in &first {
             put_at(&db, MIDNIGHT + ts, 9000, 0.0);
         }
-        put_at(&db, MIDNIGHT + 300, 3000, 0.0); // at the threshold: not the car
-        for ts in [360, 420, 480] {
+        put_at(&db, MIDNIGHT + at, 3000, 0.0); // at the threshold: not the car
+        for ts in &second {
             put_at(&db, MIDNIGHT + ts, 9000, 0.0);
         }
         let m = db.car_block_minutes_since(&cfg(), 0).unwrap();
         assert_eq!(
             m.iter().map(|x| x.timestamp - MIDNIGHT).collect::<Vec<_>>(),
-            vec![120, 180, 240, 360, 420, 480]
+            [first, second].concat()
         );
         assert!(m.iter().all(|x| (x.power_w - 7360.0).abs() < 1e-6));
     }
@@ -2056,14 +2104,15 @@ mod tests {
     #[test]
     fn a_minute_the_charger_recorded_uses_its_own_figure_so_has_no_block() {
         let db = db();
-        for ts in [60, 120, 180, 240] {
+        let minutes: Vec<i64> = (0..=RUN).map(|m| 60 + m * 60).collect();
+        for ts in &minutes {
             put_at(&db, MIDNIGHT + ts, 9000, 0.0);
         }
         put_evc(&db, (MIDNIGHT + 60 - T0) / 60, 0.0); // polled and idle
         let m = db.car_block_minutes_since(&cfg(), 0).unwrap();
         assert_eq!(
             m.iter().map(|x| x.timestamp - MIDNIGHT).collect::<Vec<_>>(),
-            vec![120, 180, 240]
+            minutes[1..]
         );
     }
 
@@ -2071,16 +2120,17 @@ mod tests {
     fn several_rows_in_a_minute_average_and_cover_the_minute_once() {
         let db = db();
         // 15-second rows: the first minute has one under the threshold and
-        // three over, then two whole minutes over.
+        // three over, then the rest of a run of whole minutes over.
+        let end = 600 + RUN * 60;
         put_at(&db, MIDNIGHT + 600, 800, 0.0);
-        for ts in (615..780).step_by(15) {
+        for ts in (615..end).step_by(15) {
             put_at(&db, MIDNIGHT + ts, 9000, 0.0);
         }
-        put_at(&db, MIDNIGHT + 780, 800, 0.0);
+        put_at(&db, MIDNIGHT + end, 800, 0.0);
         let m = db.car_block_minutes_since(&cfg(), 0).unwrap();
         assert_eq!(
             m.iter().map(|x| x.timestamp - MIDNIGHT).collect::<Vec<_>>(),
-            vec![600, 660, 720]
+            (600..end).step_by(60).collect::<Vec<_>>()
         );
         assert!((m[0].power_w - 7360.0 * 3.0 / 4.0).abs() < 1e-6);
         assert!((m[1].power_w - 7360.0).abs() < 1e-6);
@@ -2089,13 +2139,17 @@ mod tests {
     #[test]
     fn only_readings_since_the_start_are_used() {
         let db = db();
-        for ts in [60, 120, 180, 6000, 6060, 6120] {
+        let later: Vec<i64> = (0..RUN).map(|m| 6000 + m * 60).collect();
+        for m in 0..RUN {
+            put_at(&db, MIDNIGHT + 60 + m * 60, 9000, 0.0);
+        }
+        for ts in &later {
             put_at(&db, MIDNIGHT + ts, 9000, 0.0);
         }
         let m = db.car_block_minutes_since(&cfg(), MIDNIGHT + 3600).unwrap();
         assert_eq!(
             m.iter().map(|x| x.timestamp - MIDNIGHT).collect::<Vec<_>>(),
-            vec![6000, 6060, 6120]
+            later
         );
     }
 
@@ -2104,15 +2158,17 @@ mod tests {
         // One rule: the profile's car kWh equals History's and Today's for
         // the same minute rows.
         let db = db();
+        // Runs long enough to be the car, and short ones that aren't.
         for m in 0..=90 {
-            put_at(
-                &db,
-                MIDNIGHT + 3600 + m * 60,
-                if m % 7 == 0 { 800 } else { 9000 },
-                0.0,
-            );
+            let home = if m % (RUN + 5) == 0 || m == 70 {
+                800
+            } else {
+                9000
+            };
+            put_at(&db, MIDNIGHT + 3600 + m * 60, home, 0.0);
         }
         let minutes = db.car_block_minutes_since(&cfg(), 0).unwrap();
+        assert!(!minutes.is_empty());
         let today = db
             .car_kwh_today_in(&cfg(), MIDNIGHT + 86_000, &utc())
             .unwrap();
@@ -2153,7 +2209,7 @@ mod tests {
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
         let base = crate::history::local_midnight_timestamp(date).unwrap() + 3 * 3600;
         // base is a minute boundary in every whole-minute zone offset.
-        for i in 0..3 {
+        for i in 0..RUN {
             put_at(&db, base + i * 60, 9000, 0.0);
         }
         db.record_evc_power_minute(&crate::history::evc_power::EvcMinuteRow {
@@ -2166,7 +2222,9 @@ mod tests {
             .get_readings_for_date_with_car(date, Some(&cfg()))
             .unwrap();
         let car: Vec<Option<f64>> = rows.iter().map(|r| r.car_power).collect();
-        assert_eq!(car, vec![Some(7360.0), Some(3000.0), Some(7360.0)]);
+        let mut want = vec![Some(7360.0); RUN as usize];
+        want[1] = Some(3000.0);
+        assert_eq!(car, want);
     }
 
     #[test]
@@ -2254,7 +2312,7 @@ mod tests {
     #[test]
     fn a_working_block_query_gives_its_minutes_through_the_wrapper() {
         let db = db();
-        for m in 0..3 {
+        for m in 0..RUN {
             put(&db, m, 9000, 230.0);
         }
         let direct = db.car_block_minutes_since(&cfg(), T0 - 60).unwrap();
