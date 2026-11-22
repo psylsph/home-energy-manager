@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.23.1] - 2026-11-22
+
+### Changed
+
+- **Long runs of heavy house load no longer count as car charging.** With the car charging estimate on, home load now has to stay above your threshold for twenty minutes, not three, before it's treated as the car. An oven, kettle and shower together, or a heat pump with the immersion on, now stays in Home, so the car's share of the day comes out right. History, Today, the reports and the forecast re-work past days the same way. The Car Charging Started notification waits twenty minutes too when it's estimating; with a GivEnergy charger that HEM reads, it still goes out after three.
+
 ## [1.23.0] - 2026-11-22
 
 ### Added
