@@ -864,6 +864,8 @@ The rest only make it `degraded`: `backup` (`last_failed`, `overdue`, `never`, `
 
 A sensible rule for a monitor: alert on 503, and on `degraded` only if it lasts more than half an hour. The answer contains only statuses, times and these codes: no serial numbers, settings or account details.
 
+Writing your own client or status display? [HEALTH.md](./HEALTH.md) documents every field and code, with example clients and a JSON Schema.
+
 ---
 
 ## HTTPS over Tailscale

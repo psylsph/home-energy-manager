@@ -822,6 +822,26 @@ async fn health_route_answers_503_no_store_without_an_inverter_host() {
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 }
 
+#[tokio::test]
+async fn health_answers_head_with_the_same_status_and_no_body() {
+    // HEALTH.md promises HEAD works, for monitors that only want the code.
+    let router = fresh_router();
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router call");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = to_bytes(resp.into_body(), BODY_LIMIT).await.unwrap();
+    assert!(bytes.is_empty());
+}
+
 fn configure_octopus() {
     givenergy_local::settings::Settings::update(|s| {
         s.octopus_api_key = "sk_test".into();
