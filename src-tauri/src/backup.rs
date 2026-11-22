@@ -254,6 +254,7 @@ async fn conclude(
     // failed: whether this outage has already been alerted comes from it, so
     // a restart doesn't repeat the alert. Still unreadable, the alert goes
     // out (a repeat beats silence).
+    ensure_loaded(state).await;
     let (was_alerted, status) = {
         let mut guard = state.backup.lock().await;
         guard.status.last = Some(record.clone());
@@ -381,8 +382,7 @@ async fn ensure_loaded(state: &Arc<AppState>) {
 
 /// Whether a failed status read should be logged at `now`.
 fn read_warning_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
-    let _ = (last, now);
-    true
+    last.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(60))
 }
 
 async fn persist(db: Arc<crate::history::HistoryDb>, status: &BackupStatus) {

@@ -107,7 +107,7 @@ fn finish_sync(
             status.backfill_complete = summary.complete;
             status.tariff_prices = summary.tariff_prices;
             status.last_tariff_error = summary.tariff_error;
-            if summary.every_stream_failed && summary.imported == u64::MAX {
+            if summary.every_stream_failed {
                 status.failed_with = Some(key);
             } else {
                 status.failed_with = None;

@@ -62,7 +62,7 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
     let (poll_interval_secs, host_configured) = {
         let poll = state.settings.lock().await;
         // The poll loop's own test, so the two never disagree.
-        (poll.interval_secs, !poll.host.trim().is_empty())
+        (poll.interval_secs, !poll.host.is_empty())
     };
     let connection = state.connection_state.lock().await.clone();
     let db = state.history.lock().await.clone();
@@ -120,7 +120,7 @@ pub async fn health_report(state: &Arc<AppState>, now: i64, now_mono: Instant) -
             last_sync: o
                 .last_good_sync
                 .map(|(at, marked)| LastOk::since(at.timestamp(), marked, now_mono)),
-            failed: o.failed_with.is_some(),
+            failed: o.failed_with == Some(crate::octopus::credentials_key(&settings)),
         }
     };
 

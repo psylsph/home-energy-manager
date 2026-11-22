@@ -699,6 +699,7 @@ fn apply_live_fetch_state(
     fetched_at: chrono::DateTime<chrono::Utc>,
 ) {
     state.last_fetch_at = Some(fetched_at);
+    state.last_fetch_mono = Some(std::time::Instant::now());
     state.last_fetched_temperature_c = Some(observation.temperature_c);
     state.last_fetched_weather_code = observation.weather_code;
     state.last_fetched_is_day = observation.is_day;

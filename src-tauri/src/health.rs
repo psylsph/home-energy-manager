@@ -151,8 +151,8 @@ impl HealthMarks {
     /// enabled since then.
     pub fn with_features_on(started: Instant, on: &[(Feature, bool)]) -> Self {
         let marks = Self::new(started);
-        for &(feature, _enabled) in on {
-            {
+        for &(feature, enabled) in on {
+            if enabled {
                 marks.enabled_since_ms[feature as usize].store(0, Ordering::Relaxed);
             }
         }
@@ -191,9 +191,7 @@ impl HealthMarks {
         let cycle = self.cycle_started_ms.load(Ordering::Relaxed).checked_sub(1);
         let until_ms = match cycle {
             Some(cycle_ms)
-                if cycle_ms >= read_ms
-                    && cycle_ms <= now_ms
-                    && (budget_ms > 0 || now_ms > cycle_ms) =>
+                if cycle_ms >= read_ms && cycle_ms <= now_ms && now_ms - cycle_ms <= budget_ms =>
             {
                 cycle_ms
             }
@@ -349,7 +347,7 @@ impl WriteMarks {
         let failing = self.failing.load(Ordering::Relaxed);
         let wait = *self.wait.lock();
         let waited_s = wait.since.map(|since| {
-            let until = if failing && wait.latest.is_none() {
+            let until = if failing {
                 wait.latest.unwrap_or(since)
             } else {
                 now
@@ -419,7 +417,9 @@ impl DeliveryMarks {
     /// Record a send made with credentials `key` at `now`.
     pub fn record(&self, key: u64, delivered: bool, now: i64) {
         let mut inner = self.inner.lock();
-        inner.key.get_or_insert(key);
+        if *inner.key.get_or_insert(key) != key {
+            return;
+        }
         let marks = &mut inner.marks;
         if delivered {
             marks.delivered_at = now;
@@ -784,8 +784,7 @@ fn backup_check(inputs: &HealthInputs) -> Check {
 /// gets the same time for its first update as one that never ran. One on
 /// since start doesn't, so a restart can't hide a backup that's overdue.
 fn just_switched_on(inputs: &HealthInputs, enabled_for_s: i64, age_s: i64, grace_s: i64) -> bool {
-    let _ = (inputs, enabled_for_s, age_s, grace_s);
-    false
+    enabled_for_s < inputs.uptime_s && age_s > enabled_for_s && enabled_for_s <= grace_s
 }
 
 fn disk_check(disk: DiskInput) -> Check {
@@ -832,7 +831,7 @@ fn fetch_check(inputs: &HealthInputs, fetch: FetchInput, stale_after_s: i64) -> 
             Check::new(false, CheckStatus::Ok, Some("not_yet"))
         }
         None => Check::new(false, CheckStatus::Warn, Some("never")),
-        Some(last) if inputs.now - last.at > stale_after_s => {
+        Some(last) if last.age_s > stale_after_s => {
             if just_switched_on(inputs, fetch.enabled_for_s, last.age_s, stale_after_s) {
                 Check::new(false, CheckStatus::Ok, Some("not_yet"))
             } else {
