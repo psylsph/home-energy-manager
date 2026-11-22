@@ -2924,6 +2924,23 @@ impl HistoryDb {
         .ok()
     }
 
+    /// Like [`Self::get_meta_value`], but tells a missing key (`Ok(None)`)
+    /// apart from a read that failed, for callers that must not mistake one
+    /// for the other.
+    pub fn try_get_meta_value(&self, key: &str) -> Result<Option<String>, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("History DB lock poisoned: {e}"))?;
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read meta {key}: {e}"))
+    }
+
     /// Upsert a `meta` table value by key.
     pub fn set_meta_value(&self, key: &str, value: &str) -> Result<(), String> {
         let conn = self

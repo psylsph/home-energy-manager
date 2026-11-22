@@ -281,16 +281,25 @@ async fn conclude(
         );
     }
 
-    let status = {
+    if trigger == Trigger::Scheduled {
         let mut guard = state.backup.lock().await;
-        if trigger == Trigger::Scheduled {
-            guard.status.failure_alerted = alerted_after(was_alerted, record.ok, delivered);
-        }
-        guard.status.clone()
+        guard.status.failure_alerted = alerted_after(was_alerted, record.ok, delivered);
+    }
+    // Never save over a stored status this process hasn't read: retry the
+    // read (it merges the stored status under this result) and save only
+    // once it has worked.
+    ensure_loaded(state).await;
+    let status = {
+        let guard = state.backup.lock().await;
+        guard.loaded.then(|| guard.status.clone())
     };
     let db = state.history.lock().await.clone();
-    if let Some(db) = db {
-        persist(db, &status).await;
+    match (db, status) {
+        (Some(db), Some(status)) => persist(db, &status).await,
+        (Some(_), None) => {
+            tracing::warn!("History backup status not saved: the stored one couldn't be read")
+        }
+        (None, _) => {}
     }
 }
 
@@ -315,7 +324,10 @@ fn build_backup_failed_message(
     msg
 }
 
-/// Read the persisted status back once per process.
+/// Read the persisted status back once per process. A read that fails leaves
+/// it unloaded, to try again next time: taken as empty, it would make a
+/// backup due at once and the next save would wipe the stored status. A
+/// stored value that won't parse is treated as none (rereading can't help).
 async fn ensure_loaded(state: &Arc<AppState>) {
     if state.backup.lock().await.loaded {
         return;
@@ -323,11 +335,16 @@ async fn ensure_loaded(state: &Arc<AppState>) {
     let Some(db) = state.history.lock().await.clone() else {
         return;
     };
-    let stored = tokio::task::spawn_blocking(move || db.get_meta_value(STATUS_META_KEY))
+    let read = tokio::task::spawn_blocking(move || db.try_get_meta_value(STATUS_META_KEY))
         .await
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<BackupStatus>(&raw).ok());
+        .unwrap_or_else(|e| Err(format!("status read task failed: {e}")));
+    let stored = match read {
+        Ok(raw) => raw.and_then(|raw| serde_json::from_str::<BackupStatus>(&raw).ok()),
+        Err(e) => {
+            tracing::warn!("Couldn't read the history backup status, will retry: {e}");
+            return;
+        }
+    };
     let mut guard = state.backup.lock().await;
     if !guard.loaded {
         if let Some(stored) = stored {

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A database hiccup no longer wipes your backup history.** If HEM couldn't read its backup record when it started, it treated it as empty: the next backup saved over it, losing when the last good backup ran. HEM now tries the read again and never saves over a record it hasn't read.
+
 ## [1.22.1] - 2026-11-21
 
 ### Fixed
