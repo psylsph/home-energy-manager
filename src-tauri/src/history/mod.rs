@@ -2016,6 +2016,9 @@ impl HistoryDb {
         // history for good.
         let mut rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
         let ready = rows.push(snap, stamp);
+        if ready {
+            self.writes.rows_ready(chrono::Utc::now().timestamp());
+        }
         ready
     }
 
@@ -2093,6 +2096,7 @@ impl HistoryDb {
                     "History DB lock poisoned, dropped {} row(s): {e}",
                     dropped.len()
                 );
+                self.writes.write_failed(chrono::Utc::now().timestamp());
                 return;
             }
         };
@@ -2109,7 +2113,19 @@ impl HistoryDb {
         for row in &queued {
             all_ok &= replace_minute_row(&conn, &mut owned, row);
         }
-        let _ = all_ok;
+        let now = chrono::Utc::now().timestamp();
+        if all_ok {
+            self.writes.write_ok(now);
+            // Rows queued since the take keep the older wait time; their own
+            // flush, already on its way, clears it.
+            let rows = self.poll_rows.lock().unwrap_or_else(|e| e.into_inner());
+            if !rows.has_queued() {
+                self.writes.all_written();
+            }
+        } else {
+            // A failed row is dropped, so the wait stays until a write works.
+            self.writes.write_failed(now);
+        }
     }
 
     /// Insert a snapshot as its own reading row, unbucketed. Live polls go
@@ -3119,6 +3135,10 @@ impl HistoryDb {
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
+        if written > 0 {
+            self.forecast_stored_at
+                .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+        }
         Ok(written)
     }
 

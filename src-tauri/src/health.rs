@@ -471,7 +471,18 @@ pub fn build_health(inputs: &HealthInputs) -> HealthReport {
 }
 
 fn overall(checks: &Checks) -> Overall {
-    let _ = checks.all();
+    let all = checks.all();
+    if all.iter().any(|c| c.core && c.status == CheckStatus::Fail) {
+        return Overall::Unhealthy;
+    }
+    if all.iter().any(|c| {
+        matches!(
+            c.status,
+            CheckStatus::Warn | CheckStatus::Fail | CheckStatus::Starting
+        )
+    }) {
+        return Overall::Degraded;
+    }
     Overall::Healthy
 }
 

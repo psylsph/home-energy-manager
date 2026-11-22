@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **A health check for monitoring tools.** If you run HEM headless, point Uptime Kuma, a cron job or your own script at `/api/health`. It tells you whether HEM is connected and reading the inverter, still polling, and still saving history, plus whether backups, disk space, notifications, weather, the solar forecast and Octopus are keeping up. It answers 503 when something core has stopped. See INSTALL.md for the details.
+
 ### Fixed
 
 - **A database hiccup no longer wipes your backup history.** If HEM couldn't read its backup record when it started, it treated it as empty: the next backup saved over it, losing when the last good backup ran. HEM now tries the read again and never saves over a record it hasn't read.

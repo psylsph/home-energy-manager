@@ -820,6 +820,50 @@ docker run -d \
 
 Your settings and history are preserved — only the app binary is replaced.
 
+### Checking HEM is healthy from another machine
+
+If you run HEM headless and watch it with a monitoring tool (Uptime Kuma, a cron job, your own script), point the tool at `/api/health` on the normal port. It needs no key, never reads the inverter, and is cheap enough to ask every minute:
+
+```bash
+curl -s http://solarpi:7337/api/health
+```
+
+It answers `healthy`, `degraded` or `unhealthy`, with HTTP **200** for the first two and **503** for `unhealthy`, so a tool that only checks the status code still works:
+
+```json
+{
+  "status": "healthy",
+  "version": "1.22.1",
+  "uptime_s": 86400,
+  "now": 1763800000,
+  "checks": {
+    "inverter":       { "status": "ok", "core": true, "detail": "connected", "last_ok": 1763799990, "age_s": 10 },
+    "poll_loop":      { "status": "ok", "core": true, "last_ok": 1763799999, "age_s": 1 },
+    "history":        { "status": "ok", "core": true, "last_ok": 1763799960, "age_s": 40 },
+    "backup":         { "status": "ok", "core": false, "last_ok": 1763760000, "age_s": 40000 },
+    "disk":           { "status": "ok", "core": false, "free_mb": 12000 },
+    "notifications":  { "status": "disabled", "core": false },
+    "weather":        { "status": "ok", "core": false, "last_ok": 1763799100, "age_s": 900 },
+    "solar_forecast": { "status": "ok", "core": false, "last_ok": 1763790000, "age_s": 10000 },
+    "octopus":        { "status": "disabled", "core": false }
+  }
+}
+```
+
+Each check's `status` is `ok`, `warn`, `fail`, `starting` or `disabled`. `last_ok` is when that part last worked (Unix seconds), `age_s` how long ago that was, and `detail` a short code saying what it found. Only the three `core` checks can make HEM `unhealthy`:
+
+| Check | Fails when | `detail` codes |
+|---|---|---|
+| `inverter` | The latest reading is older than three polls (at least 3 minutes), so a dongle that drops and reconnects quickly doesn't fail it | `connected`, `reconnecting`, `disconnected` (the connection right now), `stale_reading` (connected but no new data), `no_reading`, `not_configured` |
+| `poll_loop` | HEM's polling has stopped going round, even while the dongle isn't answering | `stuck`, `not_running` |
+| `history` | Readings aren't reaching the history database (a full disk or a failing SD card) | `write_failed`, `not_written`, `unavailable`, `idle` (nothing written yet) |
+
+During an outage the inverter's `last_ok` stays at the last reading HEM got, so `age_s` tells you how long it has been down.
+
+The rest only make it `degraded`: `backup` (`last_failed`, `overdue`, `never`, `not_yet`), `disk` (the drive holding the history: `low_space` under 500 MB, `very_low_space` under 100 MB), `notifications` (`last_failed` when the latest message on any of your channels didn't get through, `none_sent`), `weather`, `solar_forecast` and `octopus` (`stale`, `never`, `not_yet`, and `last_failed` for Octopus). A feature you've just switched on gets time for its first update before it counts as `never`. A feature you haven't set up is `disabled` and never counts. For five minutes after HEM starts, the inverter and poll checks say `starting`, so a restart shows as `degraded` rather than `unhealthy`.
+
+A sensible rule for a monitor: alert on 503, and on `degraded` only if it lasts more than half an hour. The answer contains only statuses, times and these codes: no serial numbers, settings or account details.
+
 ---
 
 ## HTTPS over Tailscale

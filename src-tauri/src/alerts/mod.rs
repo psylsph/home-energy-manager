@@ -1415,7 +1415,7 @@ fn recorded(
     marks: &crate::health::DeliveryMarks,
     result: Result<(), String>,
 ) -> Result<(), String> {
-    let _ = marks;
+    marks.record(result.is_ok(), chrono::Utc::now().timestamp());
     result
 }
 
