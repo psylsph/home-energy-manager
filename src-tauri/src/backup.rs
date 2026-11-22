@@ -1182,6 +1182,122 @@ mod tests {
         .await;
     }
 
+    /// The stored status a restart should read back: a success a day ago and
+    /// an outage that has already been alerted.
+    fn stored_status() -> BackupStatus {
+        BackupStatus {
+            last: Some(record(false)),
+            last_success_at: Some(NOON - 86_400),
+            last_scheduled: Some(record(false)),
+            failure_alerted: true,
+        }
+    }
+
+    fn hide_meta(db: &crate::history::HistoryDb, hidden: bool) {
+        let sql = if hidden {
+            "ALTER TABLE meta RENAME TO meta_away"
+        } else {
+            "ALTER TABLE meta_away RENAME TO meta"
+        };
+        db.hold_connection_for_test().execute_batch(sql).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_status_that_cannot_be_read_is_retried_not_taken_as_empty() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let db = state.history.lock().await.clone().unwrap();
+            db.set_meta_value(
+                STATUS_META_KEY,
+                &serde_json::to_string(&stored_status()).unwrap(),
+            )
+            .unwrap();
+
+            hide_meta(&db, true);
+            ensure_loaded(&state).await;
+            assert!(
+                !state.backup.lock().await.loaded,
+                "a failed read must not count as loaded"
+            );
+
+            hide_meta(&db, false);
+            ensure_loaded(&state).await;
+            let guard = state.backup.lock().await;
+            assert!(guard.loaded);
+            assert_eq!(guard.status, stored_status());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_backup_never_saves_over_a_status_it_could_not_read() {
+        // Backups keep going while the status can't be read (a poisoned
+        // connection lock never recovers, but a backup has its own
+        // connection), but the stored status is never replaced unread.
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let db = state.history.lock().await.clone().unwrap();
+            let raw = serde_json::to_string(&stored_status()).unwrap();
+            db.set_meta_value(STATUS_META_KEY, &raw).unwrap();
+
+            hide_meta(&db, true);
+            let record = run_scheduled_backup_if_due(&state, local(NOON))
+                .await
+                .expect("due on the in-memory status");
+            assert!(record.ok, "{record:?}");
+            // The table comes back before the save could have been retried.
+            hide_meta(&db, false);
+            assert_eq!(db.get_meta_value(STATUS_META_KEY), Some(raw));
+
+            // The next load keeps this run's success, which ended the stored
+            // outage, so its alert state is cleared rather than read back.
+            ensure_loaded(&state).await;
+            let status = state.backup.lock().await.status.clone();
+            assert_eq!(status.last_success_at, Some(NOON));
+            assert_eq!(status.last_scheduled.map(|r| r.ok), Some(true));
+            assert!(!status.failure_alerted);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_status_read_that_failed_is_retried_before_the_result_is_saved() {
+        // The read fails at the start of a backup and works again by the time
+        // its result is saved: the save must merge in the stored status, not
+        // replace it with this process's empty one.
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let db = state.history.lock().await.clone().unwrap();
+            db.set_meta_value(
+                STATUS_META_KEY,
+                &serde_json::to_string(&stored_status()).unwrap(),
+            )
+            .unwrap();
+
+            hide_meta(&db, true);
+            let back = db.clone();
+            let work = async move {
+                hide_meta(&back, false);
+                Ok(crate::history::backup::BackupOutcome {
+                    path: std::path::PathBuf::from("history-test.db"),
+                    size_bytes: 1,
+                    settings_path: None,
+                })
+            };
+            let result = run_claimed_with(&state, Trigger::Manual, local(NOON), work).await;
+            assert!(result.is_ok(), "{result:?}");
+
+            let saved: BackupStatus =
+                serde_json::from_str(&db.get_meta_value(STATUS_META_KEY).unwrap()).unwrap();
+            assert_eq!(saved.last_success_at, Some(NOON), "this run's result");
+            assert_eq!(saved.last.as_ref().map(|r| r.ok), Some(true));
+            // A manual run leaves the scheduled history and alert state alone.
+            assert_eq!(saved.last_scheduled, stored_status().last_scheduled);
+            assert!(saved.failure_alerted);
+        })
+        .await;
+    }
+
     #[test]
     fn a_failure_counts_as_alerted_only_once_an_alert_is_delivered() {
         // First failure, alert delivered.
