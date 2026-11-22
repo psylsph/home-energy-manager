@@ -549,9 +549,20 @@ mod tests {
     /// One poll at `now`, collecting what was sent; `deliver` says whether
     /// the (fake) channel accepts it.
     async fn poll(state: &Arc<AppState>, car_w: Option<f64>, now: i64, deliver: bool) -> Sent {
+        poll_from(state, car_w, true, now, deliver).await
+    }
+
+    /// [`poll`], saying whether the power is the estimate or a charger's own.
+    async fn poll_from(
+        state: &Arc<AppState>,
+        car_w: Option<f64>,
+        estimated: bool,
+        now: i64,
+        deliver: bool,
+    ) -> Sent {
         let sent: Sent = Arc::default();
         let log = sent.clone();
-        let handles = run_car_session(state, car_w, true, now, move |_cfg, text| {
+        let handles = run_car_session(state, car_w, estimated, now, move |_cfg, text| {
             let log = log.clone();
             async move {
                 log.lock().unwrap().push(text);
@@ -608,6 +619,43 @@ mod tests {
                 (S + 480) / 60
             );
             assert!(finished[0].contains(&want), "{finished:?} vs {want}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_polled_chargers_short_top_up_is_announced_like_history_counts_it() {
+        // Issue #504's twenty minutes is for guessing the car from house
+        // load. A polled charger's own power is the car at any length in
+        // History, so a fifteen-minute top-up still gets both messages.
+        with_isolated_config_dir_async(|| async {
+            let db = open_history();
+            let state = state_with(on_config(), Some(db)).await;
+            let mut sent = Vec::new();
+            for t in (0..=15 * 60).step_by(60) {
+                sent.extend(
+                    poll_from(&state, Some(7000.0), false, t, true)
+                        .await
+                        .lock()
+                        .unwrap()
+                        .clone(),
+                );
+            }
+            assert_eq!(sent.len(), 1, "{sent:?}");
+            assert!(sent[0].starts_with("🚗 Car charging started"), "{sent:?}");
+            assert!(!sent[0].contains("estimated"), "{sent:?}");
+            let mut done = Vec::new();
+            for t in (16 * 60..=27 * 60).step_by(60) {
+                done.extend(
+                    poll_from(&state, Some(0.0), false, t, true)
+                        .await
+                        .lock()
+                        .unwrap()
+                        .clone(),
+                );
+            }
+            assert_eq!(done.len(), 1, "{done:?}");
+            assert!(done[0].contains("finished: 1.9 kWh in 16 m"), "{done:?}");
         })
         .await;
     }
