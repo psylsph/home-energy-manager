@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.23.2] - 2026-11-23
+
+### Fixed
+
+- **The Planner keeps planning when your internet drops.** Once the solar forecast was more than six hours old, the Planner stopped planning altogether, so the inverter kept repeating its last charge slot and, with Plan Every Cheap Window on, your other cheap periods went uncharged. It now plans as if there's no sun until a fresh forecast arrives, so it never comes up short, and it holds off on export advice until then. HEM also tries again 15 minutes after a failed forecast fetch instead of three hours, so it catches up soon after your connection comes back. (#483)
+
 ## [1.23.1] - 2026-11-22
 
 ### Changed
