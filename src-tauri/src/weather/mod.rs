@@ -627,8 +627,10 @@ pub async fn run_weather_loop(state: Arc<AppState>) {
     // loop because it shares the Open-Meteo endpoint, agent, config and
     // enable gate. First tick fires immediately so a pre-configured
     // setup starts accumulating forecast history on startup.
-    let mut solar_tick = tokio::time::interval(crate::forecast::SOLAR_FORECAST_FETCH_INTERVAL);
-    solar_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A failed fetch comes round again after 15 minutes rather than three
+    // hours (issue #483), so the Planner isn't left on an out-of-date
+    // forecast long after the internet comes back.
+    let mut solar_due = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -647,8 +649,9 @@ pub async fn run_weather_loop(state: Arc<AppState>) {
                     }
                 }
             }
-            _ = solar_tick.tick() => {
-                crate::forecast::run_solar_forecast_fetch(state.clone()).await;
+            _ = tokio::time::sleep_until(solar_due) => {
+                let outcome = crate::forecast::run_solar_forecast_fetch(state.clone()).await;
+                solar_due = tokio::time::Instant::now() + outcome.next_fetch_in();
             }
         }
     }

@@ -9329,7 +9329,8 @@ pub const PLAN_HISTORY_MAX_SPAN_SECS: i64 =
 
 /// The forecast fields the Planner's past view draws: the generation and
 /// battery projections, plus the time they were made. The rest of a stored
-/// forecast (consumption profile, status text) is left out of
+/// forecast (consumption profile, status text; status is read only to drop
+/// assumed sun) is left out of
 /// `plan-history` so a 90 day request stays a manageable size.
 fn project_forecast(text: &str) -> Value {
     // Only the three kept fields are deserialised; serde skips everything else
@@ -9343,11 +9344,19 @@ fn project_forecast(text: &str) -> Value {
         solar: Value,
         #[serde(default)]
         battery: Value,
+        #[serde(default)]
+        status: Vec<String>,
     }
     match serde_json::from_str::<PastViewForecast>(text) {
+        // A day without sun standing in for an out-of-date or missing
+        // forecast (issue #483) wasn't a forecast of no sun: no solar line.
         Ok(view) => json!({
             "generated_at": view.generated_at,
-            "solar": view.solar,
+            "solar": if view.status.iter().any(|code| code == "solar_assumed_zero") {
+                Value::Null
+            } else {
+                view.solar
+            },
             "battery": view.battery,
         }),
         Err(_) => Value::Null,
@@ -9683,7 +9692,11 @@ pub(crate) fn compute_full_plan_advice(
         backstop_margin_pct,
     }) = export_ctx
     else {
-        return (charge, None, spread);
+        let export = solar_assumed_zero(forecast).then(|| ExportAdvice::NoExport {
+            reason: "no up-to-date solar forecast — no export advice until a fresh one arrives"
+                .to_string(),
+        });
+        return (charge, export, spread);
     };
     // Without an export tariff there is no window to sell into — say so
     // rather than hiding the card, so the user knows what to configure.
@@ -9742,14 +9755,23 @@ pub(crate) fn compute_full_plan_advice(
 /// Whether the payload carries a real solar forecast, for the runtime's
 /// confidence: a day without sun stood in for one isn't (issue #483).
 fn payload_solar_known(payload: &crate::forecast::ForecastPayload) -> bool {
-    !payload.solar.is_empty()
+    !payload.solar.is_empty() && !solar_assumed_zero(payload)
+}
+
+/// Whether the forecast's solar is out of date, or was replaced by a day
+/// without sun because it was or had run out (issue #483).
+fn solar_assumed_zero(forecast: &crate::forecast::ForecastPayload) -> bool {
+    forecast
+        .status
+        .iter()
+        .any(|code| code == "solar_assumed_zero" || code == "forecast_stale")
 }
 
 /// The back-stop floor (issue #407) for an export ending at `export_end_ts`:
 /// the SOC (%) the battery must still hold then to cover the house, on a busy
 /// day (p75 load, low solar), until the next cheap import window. Built from
 /// the same context as the Planner's export advice, so a booked export and the
-/// advice can't disagree. `None` when the forecast can't say: it's stale, there's
+/// advice can't disagree. `None` when the forecast can't say: it's stale or run out, there's
 /// no battery projection or import tariff, or the export ends beyond it.
 pub(crate) fn export_backstop_floor(
     forecast: &crate::forecast::ForecastPayload,
@@ -9916,27 +9938,29 @@ fn compute_charge_plan_inner<'a>(
     use crate::forecast::simulate::{SimHourResult, SimulationOutput, SimulationParams};
     let import_tariff = settings.import_tariff_config.as_ref();
 
-    if forecast
-        .status
-        .iter()
-        .any(|code| code == "forecast_stale" || code == "forecast_data_future")
-    {
-        let reason = if forecast
-            .status
-            .iter()
-            .any(|code| code == "forecast_data_future")
-        {
-            "the solar forecast has a future fetch timestamp — refresh it before scheduling a battery action"
-                .to_string()
-        } else {
-            let age = forecast.forecast_age_seconds.unwrap_or_default().max(0);
-            format!(
-                "the solar forecast is about {:.1} hours old — refresh it before scheduling a battery action",
-                age as f64 / 3600.0
-            )
-        };
+    // A fetch time in the future is a clock problem: no battery action. Nor is
+    // there one on an out-of-date forecast HEM isn't replacing with a day
+    // without sun (weather off, so nothing is fetched); with weather on it
+    // plans sunless (issue #483).
+    let has = |wanted: &str| forecast.status.iter().any(|code| code == wanted);
+    if has("forecast_stale") && !has("solar_assumed_zero") {
+        let age = forecast.forecast_age_seconds.unwrap_or_default().max(0);
         return (
-            crate::forecast::planner::PlanRecommendation::NoPlan { reason },
+            crate::forecast::planner::PlanRecommendation::NoPlan {
+                reason: format!(
+                    "the solar forecast is about {:.1} hours old and weather is off — turn it back on to plan",
+                    age as f64 / 3600.0
+                ),
+            },
+            None,
+            None,
+        );
+    }
+    if has("forecast_data_future") {
+        return (
+            crate::forecast::planner::PlanRecommendation::NoPlan {
+                reason: "the solar forecast has a future fetch timestamp — check the clock before scheduling a battery action".to_string(),
+            },
             None,
             None,
         );
@@ -10079,14 +10103,19 @@ fn compute_charge_plan_inner<'a>(
     } else {
         crate::forecast::export_floor::THIN_HISTORY_MARGIN_PCT
     };
-    let ctx = import_tariff.map(|t| ExportContext {
-        sim_hours,
-        params,
-        import_tariff: t,
-        floor_pct: min_soc_pct,
-        backstop_hours,
-        backstop_margin_pct,
-    });
+    // An out-of-date or missing forecast plans as a day without sun (issue
+    // #483); that's safe for a charge but says nothing an export can lean on,
+    // so the export advice and back-stop floor stand down.
+    let ctx = import_tariff
+        .filter(|_| !solar_assumed_zero(forecast))
+        .map(|t| ExportContext {
+            sim_hours,
+            params,
+            import_tariff: t,
+            floor_pct: min_soc_pct,
+            backstop_hours,
+            backstop_margin_pct,
+        });
     (charge, ctx, spread)
 }
 

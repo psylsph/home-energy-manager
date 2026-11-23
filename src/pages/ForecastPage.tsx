@@ -56,6 +56,7 @@ import {
   toConsumptionChartData,
   toSolarChartData,
   tomorrowSummary,
+  forecastSolarHours,
   withCarCharging,
 } from '../lib/forecast';
 import type { ForecastData, PlanResponse, PlanStrategy } from '../lib/forecast';
@@ -834,7 +835,7 @@ export default function ForecastPage() {
   const currentPlanWasApplied = currentPlanIdentity !== null
     && appliedPlanIdentity === currentPlanIdentity;
   const summary = tomorrowSummary(data);
-  const solarChart = toSolarChartData(data.solar);
+  const solarChart = toSolarChartData(forecastSolarHours(data));
   // Charge window markers come first: the start marker's instant is also
   // where the "if charge enacted" line must part from the projection
   // (see insertChargeStartVertices below).

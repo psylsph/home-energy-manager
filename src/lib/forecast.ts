@@ -108,11 +108,13 @@ export function forecastStatusMessages(status: string[]): string[] {
       case 'no_coordinates':
         return 'No location configured — set a postcode or coordinates in Settings.';
       case 'no_forecast_data':
-        return 'No forecast data yet — the fetcher runs every three hours once weather is enabled.';
+        return 'No forecast data yet.';
       case 'forecast_stale':
-        return 'Solar forecast data is stale — refresh it before using a battery charge recommendation.';
+        return 'Solar forecast is out of date.';
+      case 'solar_assumed_zero':
+        return "HEM retries every 15 minutes and plans as if there's no sun until then.";
       case 'forecast_data_future':
-        return 'Solar forecast data has a future fetch time — refresh it before using a battery charge recommendation.';
+        return "Solar forecast has a future fetch time — check this computer's clock.";
       case 'calibrating':
         return 'Solar model is still calibrating against your generation history; numbers are preliminary.';
       case 'insufficient_consumption_history':
@@ -145,7 +147,11 @@ export type SolarChartPoint = {
 /** The payload's solar hours to show as a prediction: none while the Planner
  *  stands in a day without sun for an out-of-date or missing forecast. */
 export function forecastSolarHours(data: ForecastData): ForecastSolarHour[] {
-  return data.solar;
+  return solarAssumedZero(data) ? [] : data.solar;
+}
+
+function solarAssumedZero(data: ForecastData): boolean {
+  return data.status.includes('solar_assumed_zero');
 }
 
 /** Chart-ready solar points with the band clamped at zero. */
@@ -442,7 +448,8 @@ export type TomorrowSummary = {
 /** The "Tomorrow" summary card numbers. Surplus is the predicted export. */
 export function tomorrowSummary(data: ForecastData): TomorrowSummary {
   return {
-    solarKwh: data.solar_tomorrow_kwh,
+    // No prediction (shown as "—") while the Planner assumes no sun.
+    solarKwh: solarAssumedZero(data) ? Number.NaN : data.solar_tomorrow_kwh,
     consumptionKwh: data.consumption_tomorrow_kwh,
     surplusKwh: data.export_tomorrow_kwh,
     importKwh: data.import_tomorrow_kwh,

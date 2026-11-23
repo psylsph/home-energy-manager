@@ -46,6 +46,11 @@ use crate::settings::Settings;
 pub const SOLAR_FORECAST_FETCH_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(3 * 60 * 60);
 
+/// How soon a failed fetch is tried again (issue #483), so a forecast isn't
+/// left out of date for hours after the internet comes back.
+pub const SOLAR_FORECAST_RETRY_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
 /// A forecast is allowed to survive one missed three-hour refresh, but an
 /// older projection must not be used to recommend a battery-control action.
 pub const SOLAR_FORECAST_MAX_AGE_SECS: i64 = 6 * 60 * 60;
@@ -306,13 +311,44 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
             }
         }
     }
-    if solar.is_empty() {
+    let run_out = solar.is_empty();
+    if run_out {
         status.push("no_forecast_data".to_string());
     }
+    let stale = matches!(forecast_age_seconds, Some(age) if age > SOLAR_FORECAST_MAX_AGE_SECS);
     match forecast_age_seconds {
         Some(age) if age < 0 => status.push("forecast_data_future".to_string()),
-        Some(age) if age > SOLAR_FORECAST_MAX_AGE_SECS => status.push("forecast_stale".to_string()),
+        _ if stale => status.push("forecast_stale".to_string()),
         _ => {}
+    }
+    // While weather is on, a forecast too old to act on, or none left, counts
+    // as a day without sun (issue #483): the Planner keeps planning every
+    // cheap window and never comes up short for sun that may not come.
+    // Exports stand down on it (`server::api::compute_charge_plan_inner`). A
+    // future fetch time is a clock problem and keeps refusing. With weather
+    // off or no location nothing is fetched, so nothing changes: a stale
+    // forecast refuses to plan and an empty one has no hours.
+    let weather_on = inputs.weather_enabled && inputs.weather_coords.is_some();
+    if weather_on && (stale || run_out) {
+        let first_ts = if inputs.include_current_hour || forecast_start_ts >= now_ts {
+            forecast_start_ts
+        } else {
+            forecast_start_ts + 3600
+        };
+        let end_ts = now_ts + 72 * 3600;
+        solar = (0..)
+            .map(|hour| first_ts + hour * 3600)
+            .take_while(|ts| *ts < end_ts)
+            .map(|timestamp| ForecastSolarHour {
+                timestamp,
+                kwh: 0.0,
+                band_low: 0.0,
+                band_high: 0.0,
+            })
+            .collect();
+        solar_today_remaining_kwh = 0.0;
+        solar_tomorrow_kwh = 0.0;
+        status.push("solar_assumed_zero".to_string());
     }
 
     // --- consumption profile ----------------------------------------------
@@ -701,11 +737,16 @@ pub fn store_and_calibrate(
         }
     }
 
-    if !rows.is_empty() {
-        if let Err(e) = db.insert_forecast_values(&rows) {
-            tracing::warn!("Failed to store solar forecast: {e}");
-        }
-    }
+    // No hours ahead, or none saved, leaves the stored forecast as old as it
+    // was, so the fetch counts as failed and is tried again soon (issue #483).
+    // Calibration below runs either way, as it always has.
+    let stored = if rows.is_empty() {
+        Err("the forecast had no hours ahead".to_string())
+    } else {
+        db.insert_forecast_values(&rows)
+            .map(|_| ())
+            .map_err(|e| format!("could not store the solar forecast: {e}"))
+    };
 
     let since = now_ts - CALIBRATION_LOOKBACK_DAYS * 86_400;
     let totals = db.daily_solar_totals_since(since).unwrap_or_default();
@@ -721,7 +762,7 @@ pub fn store_and_calibrate(
         let _ = db.set_meta_value(META_FORECAST_PR_DAYS, &fit.usable_days.to_string());
         let _ = db.set_meta_value(META_FORECAST_CALIBRATED_AT, &now_ts.to_string());
     }
-    Ok(fit.pr)
+    stored.map(|()| fit.pr)
 }
 
 /// Total rated kWp used by the radiation→power model. Mirrors the
@@ -747,7 +788,7 @@ pub(crate) fn effective_solar_kwp(settings: &crate::settings::Settings) -> f64 {
 /// One solar forecast fetch-and-store cycle, invoked by the weather loop
 /// every [`SOLAR_FORECAST_FETCH_INTERVAL`]. Gated on the same weather
 /// enable flag and coordinates; failures log a warning, and the loop tries
-/// again on the next tick.
+/// again after [`SOLAR_FORECAST_RETRY_INTERVAL`].
 pub async fn run_solar_forecast_fetch(
     state: std::sync::Arc<crate::inverter::poll::AppState>,
 ) -> SolarFetch {
@@ -768,7 +809,12 @@ pub enum SolarFetch {
 impl SolarFetch {
     /// How long the weather loop waits before the next fetch.
     pub fn next_fetch_in(self) -> std::time::Duration {
-        SOLAR_FORECAST_FETCH_INTERVAL
+        match self {
+            // A skipped cycle makes no network call, so it comes round as
+            // soon: turning weather on fetches within 15 minutes.
+            Self::Failed | Self::Skipped => SOLAR_FORECAST_RETRY_INTERVAL,
+            Self::Stored => SOLAR_FORECAST_FETCH_INTERVAL,
+        }
     }
 }
 
@@ -785,13 +831,13 @@ async fn run_solar_forecast_fetch_at(
         (ws.config.clone(), history_db)
     };
     if !config.enabled {
-        return SolarFetch::Stored;
+        return SolarFetch::Skipped;
     }
     let (Some(lat), Some(lon)) = (config.latitude, config.longitude) else {
-        return SolarFetch::Stored;
+        return SolarFetch::Skipped;
     };
     let Some(db) = history_db else {
-        return SolarFetch::Stored;
+        return SolarFetch::Skipped;
     };
 
     let settings = crate::settings::Settings::load_async().await;
@@ -810,8 +856,8 @@ async fn run_solar_forecast_fetch_at(
                 )
             })
             .await;
-            match stored.map(|result| result.unwrap_or(None)) {
-                Ok(Some(pr)) => {
+            match stored {
+                Ok(Ok(Some(pr))) => {
                     tracing::info!(
                         pr,
                         samples = sample_count,
@@ -819,22 +865,26 @@ async fn run_solar_forecast_fetch_at(
                     );
                     SolarFetch::Stored
                 }
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     tracing::info!(
                         samples = sample_count,
                         "solar forecast stored; not enough history to calibrate performance ratio yet"
                     );
                     SolarFetch::Stored
                 }
+                Ok(Err(error)) => {
+                    tracing::warn!("Solar forecast not stored: {error}");
+                    SolarFetch::Failed
+                }
                 Err(error) => {
                     tracing::warn!("Solar forecast database worker failed: {error}");
-                    SolarFetch::Stored
+                    SolarFetch::Failed
                 }
             }
         }
         Err(e) => {
             tracing::warn!("Solar forecast fetch failed: {e}");
-            SolarFetch::Stored
+            SolarFetch::Failed
         }
     }
 }
