@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.23.3] - 2026-11-23
+
+### Changed
+
+- **Spread Charge finishes closer to the end of the cheap period.** When the charge is to 90% or lower, the suggested rate now aims to finish about 90% of the way through the window instead of 80%, so a 13:00–16:00 charge to 80% finishes around 15:40 rather than 15:20. Charges above 90% keep the earlier finish, because the battery slows down as it nears full. (#483)
+
 ## [1.23.2] - 2026-11-23
 
 ### Fixed
