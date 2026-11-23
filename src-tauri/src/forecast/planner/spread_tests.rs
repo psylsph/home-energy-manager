@@ -174,11 +174,48 @@ fn spread(advice: Option<SpreadAdvice>) -> (u16, f64, u8, f64, u16, u16, u16, f6
 fn the_thresholds_are_the_ones_the_help_text_quotes() {
     // The Forecast page's ⓘ and the changelog say 80% of the window, 65%
     // of it, 2 hours and max(0.5 kW, 20% of the maximum): change them too.
+    // 90% of the window for a target of 90% or lower, 80% above it.
     assert_eq!(SPREAD_FINISH_FRACTION, 0.8);
+    assert_eq!(SPREAD_FINISH_FRACTION_BELOW_FULL, 0.9);
+    assert_eq!(SPREAD_NEAR_FULL_PCT, 90);
     assert_eq!(SPREAD_WORTHWHILE_FRACTION, 0.65);
     assert_eq!(SPREAD_MIN_WINDOW_MIN, 120);
     assert_eq!(SPREAD_FLOOR_KW, 0.5);
     assert_eq!(SPREAD_FLOOR_FRACTION, 0.2);
+}
+
+/// Issue #483 (peterb99, 23 Nov): a 13:00–16:00 charge to 80% finished
+/// about 15:20, leaving 40 minutes unused. The 20% margin is for charging
+/// slowing near full, which a target of 90% or lower never reaches, so those
+/// aim for 90% of the window and only fuller charges keep 80%.
+#[test]
+fn only_a_charge_near_full_keeps_the_wider_margin() {
+    assert_eq!(spread_finish_fraction(80), 0.9);
+    assert_eq!(spread_finish_fraction(90), 0.9);
+    assert_eq!(spread_finish_fraction(91), 0.8);
+    assert_eq!(spread_finish_fraction(100), 0.8);
+}
+
+#[test]
+fn a_charge_well_short_of_full_finishes_near_the_windows_end() {
+    // The 22:00–00:00 window from below, to a target well under 90%: no
+    // later than 90% of the way through (23:48), and after the latest an 80%
+    // finish (23:36) would allow, so the lower rate is really used.
+    let (solar, load) = winter_night();
+    let p = params(5.0);
+    let (sim, hours, p) = series(80.0, solar, load, &p);
+    let t = cosy();
+    let mut inp = inputs(&sim, &hours, &p, &t, 40.0, day_ts(0, 20, 0));
+    inp.every_cheap_window = true;
+    let plan = plan_overnight_charge(&inp);
+    let (_, _, target, _, finish, _, window_min, _) =
+        spread(spread_charge_advice(&inp, &plan, direct(5.0)));
+    assert_eq!(window_min, 120);
+    assert!(target <= SPREAD_NEAR_FULL_PCT, "target {target}");
+    assert!(
+        (23 * 60 + 37..=23 * 60 + 48).contains(&finish),
+        "finish {finish}"
+    );
 }
 
 #[test]
@@ -207,12 +244,18 @@ fn a_short_charge_in_a_long_window_is_spread_to_finish_near_its_end() {
     assert_eq!(window_min, 180);
     assert!(full_min < 117, "full-rate minutes {full_min}");
     assert!((20..100).contains(&percent), "rate {percent}%");
-    // Rounded up to the 1% step, and just enough to finish by 80%.
+    // Rounded up to the 1% step, and just enough to finish by the target's
+    // finish point (90% of the window for a target of 90% or lower).
+    let available_h = 3.0 * spread_finish_fraction(target);
     assert!((rate_kw - f64::from(percent) * 0.05).abs() < 1e-9);
-    assert!(rate_kw * 2.4 + 1e-9 >= kwh, "{rate_kw} kW for {kwh} kWh");
-    assert!((f64::from(percent) - 1.0) * 0.05 * 2.4 < kwh || percent == 20);
-    // Finishes inside the window, no later than 80% of the way through.
-    assert!((2 * 60..=2 * 60 + 144).contains(&finish), "finish {finish}");
+    assert!(
+        rate_kw * available_h + 1e-9 >= kwh,
+        "{rate_kw} kW for {kwh} kWh"
+    );
+    assert!((f64::from(percent) - 1.0) * 0.05 * available_h < kwh || percent == 20);
+    // Finishes inside the window, no later than that point.
+    let latest = 2 * 60 + (180.0 * spread_finish_fraction(target)).round() as u16;
+    assert!((2 * 60..=latest).contains(&finish), "finish {finish}");
     assert!((5..=100).contains(&target));
     assert!(after >= 20.0 - 0.05, "trough {after}");
     // Never less charge than the full-rate plan.
@@ -506,9 +549,9 @@ fn a_cheap_window_ending_at_midnight_counts_as_two_hours() {
     assert_eq!(window.start_min, 22 * 60);
     let (.., finish, _, window_min, _) = spread(spread_charge_advice(&inp, &plan, direct(5.0)));
     assert_eq!(window_min, 120);
-    // No later than 80% of the way through: 23:36.
+    // No later than 90% of the way through (the target is under 90%): 23:48.
     assert!(
-        (22 * 60..=23 * 60 + 36).contains(&finish),
+        (22 * 60..=23 * 60 + 48).contains(&finish),
         "finish {finish}"
     );
 }
@@ -534,7 +577,8 @@ fn the_registers_top_value_is_full_power_even_below_the_inverters_rating() {
 #[test]
 fn needing_the_full_rate_is_not_reported_as_filling_the_window() {
     // Full power takes 103 of 180 minutes, under the 65% test, but finishing
-    // by 80% of the window needs the register's top value.
+    // by 90% of the window needs about 2.29 kW, more than the register's top
+    // value allows on a 4.4 kWh pack (0.5C, 2.2 kW).
     let p = params(3.6);
     let (sim, hours, p) = series(30.0, [0.0; 24], [0.2; 24], &p);
     let t = flux();
@@ -547,7 +591,7 @@ fn needing_the_full_rate_is_not_reported_as_filling_the_window() {
         super::super::window_duration_minutes(window),
         180
     ));
-    let advice = spread_charge_advice(&inp, &plan, half_scale(3600, 5.2));
+    let advice = spread_charge_advice(&inp, &plan, half_scale(3600, 4.4));
     assert!(
         !matches!(
             advice,

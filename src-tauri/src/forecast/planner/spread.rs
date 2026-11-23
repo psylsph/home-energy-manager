@@ -4,7 +4,8 @@
 //! Every strategy charges at the inverter's full power from the start of
 //! the cheap window. On a long window that is a hard hour and then nothing.
 //! This works out the lower rate that would deliver the same charge and
-//! finish about [`SPREAD_FINISH_FRACTION`] of the way through the window,
+//! finish about 90% of the way through the window, or 80% for a charge
+//! above 90% ([`spread_finish_fraction`]),
 //! as a slot spanning the whole window with a target SOC so it can't
 //! overshoot. The plan itself is untouched: the result is shown beside it
 //! so the numbers can be checked on real nights before HEM writes a lower
@@ -29,9 +30,21 @@ use super::{window_duration_minutes, ChargeWindow, PlanInputs, PlanRecommendatio
 /// Shortest cheap window worth spreading, minutes. A backstop: the
 /// worthwhile test decides most nights.
 pub const SPREAD_MIN_WINDOW_MIN: u16 = 120;
-/// Where in the window the spread charge aims to finish. The 20% left over
-/// is the margin for charging slowing as the battery nears full.
+/// Where in the window a spread charge to above [`SPREAD_NEAR_FULL_PCT`]
+/// aims to finish. The 20% left over is the margin for charging slowing as
+/// the battery nears full.
 pub const SPREAD_FINISH_FRACTION: f64 = 0.8;
+/// Where a charge to [`SPREAD_NEAR_FULL_PCT`] or lower aims to finish: it
+/// never reaches the part where charging slows, so only a little is kept
+/// back for a cold battery or a wrong forecast (issue #483).
+pub const SPREAD_FINISH_FRACTION_BELOW_FULL: f64 = 0.8;
+/// Targets above this charge into the part where the battery slows down.
+pub const SPREAD_NEAR_FULL_PCT: u8 = 90;
+
+/// How far through the window a spread charge to `target_pct` aims to finish.
+pub fn spread_finish_fraction(_target_pct: u8) -> f64 {
+    SPREAD_FINISH_FRACTION
+}
 /// Skip the spread when a full-power charge already fills this share of the
 /// window: slowing it would barely change anything (peterb99's test).
 pub const SPREAD_WORTHWHILE_FRACTION: f64 = 0.65;
@@ -86,7 +99,7 @@ pub enum SpreadSkip {
         full_rate_minutes: u16,
         window_minutes: u16,
     },
-    /// Finishing by [`SPREAD_FINISH_FRACTION`] of the window would need
+    /// Finishing by [`spread_finish_fraction`] of the window would need
     /// the full rate anyway: the register's top value, or the inverter's
     /// maximum.
     NeedsFullRate,
@@ -178,7 +191,7 @@ pub fn spread_charge_advice(
     // At full power the battery takes the maximum, sun and grid together,
     // until it reaches the target: that energy has to fit in the first part
     // of the window at the lower limit, which caps the sun's share too.
-    let available_h = f64::from(window_minutes) * SPREAD_FINISH_FRACTION / 60.0;
+    let available_h = f64::from(window_minutes) * spread_finish_fraction(target) / 60.0;
     let floor_kw = SPREAD_FLOOR_KW.max(SPREAD_FLOOR_FRACTION * max_kw);
     let wanted_kw = (max_kw * full_minutes_to_target / 60.0 / available_h).max(floor_kw);
     let (rate_percent, rate_kw) = match register_rate(wanted_kw, max_kw, &rate_at) {
