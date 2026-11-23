@@ -107,6 +107,18 @@ describe('<HouseEnergyView/>', () => {
   });
 
   it('shows readings, status pills, SOC and the full battery mode', () => {
+    // Midday, so the 00:00–23:59 discharge window is open: its end is
+    // exclusive, and a real clock at 23:59 failed this in CI.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 28, 12, 0));
+    try {
+      showsReadingsPillsSocAndMode();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  function showsReadingsPillsSocAndMode() {
     const s = snap({
       battery_power: 3500, battery_state: 'discharging', home_power: 3500, soc: 33.5,
       battery_mode: 'timed_demand', enable_discharge: true,
@@ -125,7 +137,7 @@ describe('<HouseEnergyView/>', () => {
     // Solar and Home have no pill.
     expect(tid('house-status-solar')).toBeNull();
     expect(tid('house-status-home')).toBeNull();
-  });
+  }
 
   it('shows Grid Offline in the top pill on a grid fault', () => {
     render(<HouseEnergyView snapshot={snap()} connectionState="connected" gridFault />);

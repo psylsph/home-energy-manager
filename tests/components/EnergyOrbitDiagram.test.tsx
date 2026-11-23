@@ -146,7 +146,13 @@ describe('EnergyOrbitDiagram', () => {
     // Before the fix it was 144 viewBox units wide, which clipped
     // "Timed Demand (Discharging)" (25 chars at fontSize 11) on AC-coupled
     // inverters whose battery-mode string appended "(Discharging)".
-    const { container } = render(
+    // Midday, so the 00:00–23:59 window is open: its end is exclusive, and a
+    // real clock at 23:59 failed this in CI.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 28, 12, 0));
+    let container: HTMLElement;
+    try {
+      ({ container } = render(
       <EnergyOrbitDiagram
         snapshot={makeSnapshot({
           device_type_display: 'AC Coupled',
@@ -160,7 +166,10 @@ describe('EnergyOrbitDiagram', () => {
           home_power: 800,
         })}
       />,
-    );
+      ));
+    } finally {
+      vi.useRealTimers();
+    }
     const card = container.querySelector('[data-testid="inverter-mini-card"]');
     expect(card).not.toBeNull();
     const pill = card!.querySelector('rect');

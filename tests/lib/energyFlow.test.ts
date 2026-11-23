@@ -14,6 +14,9 @@ import {
 } from '../../src/lib/energyFlow';
 import type { InverterSnapshot, ScheduleSlot } from '../../src/lib/types';
 
+/** A fixed midday for window tests, so none depends on the real clock. */
+const NOON = new Date(2026, 5, 28, 12, 0);
+
 const slot = (h0: number, m0: number, h1: number, m1: number): ScheduleSlot => ({
   enabled: true,
   start_hour: h0,
@@ -1477,31 +1480,36 @@ describe('batteryModeDisplayLabel', () => {
   });
 
   it('returns an Eco charging label when inside an enabled charge window', () => {
-    // Window 00:00–23:59 always active.
+    // Inside 00:00–23:59 at a pinned noon: the end is exclusive, so a real
+    // clock at 23:59 made these fail in CI.
     const slots = [slot(0, 0, 23, 59)];
-    expect(batteryModeDisplayLabel('eco', false, false, true, false, slots, [])).toBe('Eco (Charging)');
-    expect(batteryModeDisplayLabel('eco_paused', false, false, true, false, slots, [])).toBe('Eco (Charging)');
+    const now = NOON;
+    expect(batteryModeDisplayLabel('eco', false, false, true, false, slots, [], now)).toBe('Eco (Charging)');
+    expect(batteryModeDisplayLabel('eco_paused', false, false, true, false, slots, [], now)).toBe('Eco (Charging)');
   });
 
   it('returns an Eco discharging label when inside an enabled discharge window', () => {
     const slots = [slot(0, 0, 23, 59)];
-    expect(batteryModeDisplayLabel('eco', false, false, false, true, [], slots)).toBe('Eco (Discharging)');
-    expect(batteryModeDisplayLabel('eco_paused', false, false, false, true, [], slots)).toBe('Eco (Discharging)');
+    const now = NOON;
+    expect(batteryModeDisplayLabel('eco', false, false, false, true, [], slots, now)).toBe('Eco (Discharging)');
+    expect(batteryModeDisplayLabel('eco_paused', false, false, false, true, [], slots, now)).toBe('Eco (Discharging)');
   });
 
   it('prefixes active-window labels with the actual timed/export mode', () => {
     const slots = [slot(0, 0, 23, 59)];
-    expect(batteryModeDisplayLabel('timed_demand', false, false, true, false, slots, []))
+    const now = NOON;
+    expect(batteryModeDisplayLabel('timed_demand', false, false, true, false, slots, [], now))
       .toBe('Timed Demand (Charging)');
-    expect(batteryModeDisplayLabel('timed_export', false, false, false, true, [], slots))
+    expect(batteryModeDisplayLabel('timed_export', false, false, false, true, [], slots, now))
       .toBe('Timed Export (Discharging)');
-    expect(batteryModeDisplayLabel('export_paused', false, false, true, false, slots, []))
+    expect(batteryModeDisplayLabel('export_paused', false, false, true, false, slots, [], now))
       .toBe('Export Paused (Charging)');
   });
 
   it('combines the suffix when both charge and discharge windows are active', () => {
     const slots = [slot(0, 0, 23, 59)];
-    expect(batteryModeDisplayLabel('eco', false, false, true, true, slots, slots))
+    const now = NOON;
+    expect(batteryModeDisplayLabel('eco', false, false, true, true, slots, slots, now))
       .toBe('Eco (Charging & Discharging)');
   });
 

@@ -210,6 +210,7 @@ describe('<ControlPage/> — connection-state gate', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanup();
@@ -383,6 +384,10 @@ describe('<ControlPage/> — connection-state gate', () => {
   });
 
   it('confirms Force Charge start and stop from snapshots and disables Force Discharge', async () => {
+    // Midday, so the 00:00–23:59 Force readback window is open: its end is
+    // exclusive, and at 23:59 on the real clock this test failed.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 28, 12, 0));
     vi.mocked(apiPost).mockClear();
     window.localStorage.setItem(FORCE_DURATION_STORAGE_KEY, '30');
     useInverterStore.setState({
@@ -457,6 +462,10 @@ describe('<ControlPage/> — connection-state gate', () => {
   });
 
   it('confirms Force Discharge start and stop from snapshots and disables Force Charge', async () => {
+    // Midday, so the 00:00–23:59 Force readback window is open: its end is
+    // exclusive, and at 23:59 on the real clock this test failed.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 5, 28, 12, 0));
     vi.mocked(apiPost).mockClear();
     window.localStorage.setItem(FORCE_DURATION_STORAGE_KEY, '30');
     useInverterStore.setState({
