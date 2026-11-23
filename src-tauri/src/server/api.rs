@@ -9290,7 +9290,7 @@ pub(crate) async fn get_battery_runtime_at(
             live_home_w: f64::from(snap.home_power),
             discharge_paused,
             profile_days: payload.consumption_days_observed,
-            solar_known: !payload.solar.is_empty(),
+            solar_known: payload_solar_known(&payload),
         };
         Some(battery_runtime(&inputs))
     })
@@ -9737,6 +9737,12 @@ pub(crate) fn compute_full_plan_advice(
         }),
     });
     (charge, Some(export), spread)
+}
+
+/// Whether the payload carries a real solar forecast, for the runtime's
+/// confidence: a day without sun stood in for one isn't (issue #483).
+fn payload_solar_known(payload: &crate::forecast::ForecastPayload) -> bool {
+    !payload.solar.is_empty()
 }
 
 /// The back-stop floor (issue #407) for an export ending at `export_end_ts`:
@@ -22588,6 +22594,18 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    /// Issue #483: sunless hours standing in for an out-of-date or missing
+    /// forecast aren't a solar forecast, so the runtime's confidence stays capped.
+    #[test]
+    fn sunless_hours_do_not_count_as_a_known_solar_forecast() {
+        let payload = forecast_with_bands(&[(0.0, 0.0, 0.0)]);
+        assert!(payload_solar_known(&payload));
+        let mut sunless = payload.clone();
+        sunless.status.push("solar_assumed_zero".to_string());
+        assert!(!payload_solar_known(&sunless));
+        assert!(!payload_solar_known(&forecast_with_bands(&[])));
+    }
+
     #[tokio::test]
     async fn battery_runtime_says_when_the_battery_reaches_its_reserve() {
         with_isolated_config_dir_async(|| async {
@@ -28123,6 +28141,37 @@ pub(crate) mod tests {
                     .all(|key| matches!(*key, "generated_at" | "solar" | "battery")),
                 "{kept:?}"
             );
+        })
+        .await;
+    }
+
+    /// Issue #483: a plan made while the solar forecast was out of date or
+    /// missing stood in a day without sun; those zeros weren't a forecast, so
+    /// the past view gets no solar line for them.
+    #[tokio::test]
+    async fn plan_history_leaves_out_the_sun_a_stale_plan_assumed() {
+        with_isolated_config_dir_async(|| async {
+            let mut sunless = history_row(1_000, "auto_apply");
+            sunless.forecast_json = r#"{
+                "generated_at": 1000,
+                "status": ["forecast_stale", "solar_assumed_zero"],
+                "solar": [{"timestamp": 1, "kwh": 0.0}],
+                "battery": {"start_soc_pct": 40.0, "hours": []}
+            }"#
+            .to_string();
+            let state = state_with_plan_history(&[sunless]).await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(2_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let forecast = &body["data"]["snapshots"][0]["forecast"];
+            assert!(forecast["solar"].is_null(), "{forecast}");
+            assert_eq!(forecast["battery"]["start_soc_pct"], 40.0, "{forecast}");
         })
         .await;
     }

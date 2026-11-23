@@ -142,6 +142,12 @@ export type SolarChartPoint = {
   high: number;
 };
 
+/** The payload's solar hours to show as a prediction: none while the Planner
+ *  stands in a day without sun for an out-of-date or missing forecast. */
+export function forecastSolarHours(data: ForecastData): ForecastSolarHour[] {
+  return data.solar;
+}
+
 /** Chart-ready solar points with the band clamped at zero. */
 export function toSolarChartData(points: ForecastSolarHour[]): SolarChartPoint[] {
   return points.map((p) => ({

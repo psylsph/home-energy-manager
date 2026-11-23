@@ -22,6 +22,7 @@ import {
   toSolarChartData,
   toBatteryChartData,
   tomorrowSummary,
+  forecastSolarHours,
   parseLoadAboveKw,
   consumptionExclusionNote,
   carChargingNote,
@@ -52,8 +53,27 @@ describe('forecastStatusMessages', () => {
     expect(messages[5]).toMatch(/inverter/i);
     expect(messages[6]).toMatch(/battery/i);
     expect(messages[7]).toMatch(/battery projection|efficiency/i);
-    expect(messages[8]).toMatch(/stale|refresh/i);
+    expect(messages[8]).toMatch(/out of date/i);
     expect(messages[9]).toMatch(/future|refresh/i);
+  });
+
+  it('says HEM retries an old forecast and plans without sun meanwhile (issue #483)', () => {
+    const [stale, missing, sunless] = forecastStatusMessages([
+      'forecast_stale',
+      'no_forecast_data',
+      'solar_assumed_zero',
+    ]);
+    // There's no refresh button, so nothing may tell the user to refresh.
+    // The retry is mentioned only on the line HEM sends while weather is on.
+    expect(stale).not.toMatch(/refresh/i);
+    expect(stale).toMatch(/out of date/i);
+    expect(missing).toMatch(/no forecast data/i);
+    for (const message of [stale, missing]) expect(message).not.toMatch(/retr/i);
+    expect(sunless).toMatch(/every 15 minutes.*as if there's no sun/i);
+    for (const message of [stale, missing, sunless]) {
+      expect(message).not.toMatch(/_/);
+      expect(message.split(/\s+/).length).toBeLessThanOrEqual(16);
+    }
   });
 
   it('explains the planned car charging codes (issue #406)', () => {
@@ -505,6 +525,18 @@ describe('tomorrowSummary', () => {
       importKwh: 1.1,
       startSocPct: 62,
     });
+  });
+
+  it('shows no solar prediction while the Planner assumes no sun (issue #483)', () => {
+    const sunless: ForecastData = {
+      ...base,
+      status: ['forecast_stale', 'solar_assumed_zero'],
+      solar_tomorrow_kwh: 0,
+      solar: [{ timestamp: 100, kwh: 0, band_low: 0, band_high: 0 }],
+    };
+    expect(Number.isNaN(tomorrowSummary(sunless).solarKwh)).toBe(true);
+    expect(forecastSolarHours(sunless)).toEqual([]);
+    expect(forecastSolarHours(base)).toBe(base.solar);
   });
 
   it('handles a payload without a battery projection', () => {

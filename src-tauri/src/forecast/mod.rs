@@ -127,7 +127,9 @@ pub struct ForecastBattery {
 /// The complete `GET /api/forecast` data block. `status` carries
 /// human-resolvable degradation codes (empty = fully calibrated):
 /// `weather_disabled`, `no_coordinates`, `no_forecast_data`,
-/// `calibrating`, `insufficient_consumption_history`, `no_snapshot`,
+/// `forecast_stale`, `forecast_data_future`, `solar_assumed_zero` (the solar
+/// hours are a day without sun, issue #483), `calibrating`,
+/// `insufficient_consumption_history`, `no_snapshot`,
 /// `no_battery_capacity`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ForecastPayload {
@@ -662,7 +664,7 @@ pub fn store_and_calibrate(
     source: &str,
     now: DateTime<Local>,
     forecast: &SolarForecast,
-) -> Option<f64> {
+) -> Result<Option<f64>, String> {
     let now_ts = now.timestamp();
     let mut rows: Vec<ForecastValueRow> = Vec::new();
     let mut past: Vec<crate::forecast::solar::SolarForecastSample> = Vec::new();
@@ -719,7 +721,7 @@ pub fn store_and_calibrate(
         let _ = db.set_meta_value(META_FORECAST_PR_DAYS, &fit.usable_days.to_string());
         let _ = db.set_meta_value(META_FORECAST_CALIBRATED_AT, &now_ts.to_string());
     }
-    fit.pr
+    Ok(fit.pr)
 }
 
 /// Total rated kWp used by the radiation→power model. Mirrors the
@@ -744,10 +746,30 @@ pub(crate) fn effective_solar_kwp(settings: &crate::settings::Settings) -> f64 {
 
 /// One solar forecast fetch-and-store cycle, invoked by the weather loop
 /// every [`SOLAR_FORECAST_FETCH_INTERVAL`]. Gated on the same weather
-/// enable flag and coordinates; failures log a warning and retry on the
-/// next tick.
-pub async fn run_solar_forecast_fetch(state: std::sync::Arc<crate::inverter::poll::AppState>) {
-    run_solar_forecast_fetch_at(state, Local::now()).await;
+/// enable flag and coordinates; failures log a warning, and the loop tries
+/// again on the next tick.
+pub async fn run_solar_forecast_fetch(
+    state: std::sync::Arc<crate::inverter::poll::AppState>,
+) -> SolarFetch {
+    run_solar_forecast_fetch_at(state, Local::now()).await
+}
+
+/// How one solar forecast fetch cycle went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolarFetch {
+    /// Fetched and stored.
+    Stored,
+    /// The fetch or the save failed.
+    Failed,
+    /// Weather is off, has no location, or there's no database.
+    Skipped,
+}
+
+impl SolarFetch {
+    /// How long the weather loop waits before the next fetch.
+    pub fn next_fetch_in(self) -> std::time::Duration {
+        SOLAR_FORECAST_FETCH_INTERVAL
+    }
 }
 
 /// Testable implementation of [`run_solar_forecast_fetch`]. The fetch time is
@@ -756,20 +778,20 @@ pub async fn run_solar_forecast_fetch(state: std::sync::Arc<crate::inverter::pol
 async fn run_solar_forecast_fetch_at(
     state: std::sync::Arc<crate::inverter::poll::AppState>,
     now: DateTime<Local>,
-) {
+) -> SolarFetch {
     let (config, history_db) = {
         let ws = state.weather.lock().await;
         let history_db = state.history.lock().await.clone();
         (ws.config.clone(), history_db)
     };
     if !config.enabled {
-        return;
+        return SolarFetch::Stored;
     }
     let (Some(lat), Some(lon)) = (config.latitude, config.longitude) else {
-        return;
+        return SolarFetch::Stored;
     };
     let Some(db) = history_db else {
-        return;
+        return SolarFetch::Stored;
     };
 
     let settings = crate::settings::Settings::load_async().await;
@@ -788,21 +810,31 @@ async fn run_solar_forecast_fetch_at(
                 )
             })
             .await;
-            match stored {
-                Ok(Some(pr)) => tracing::info!(
-                    pr,
-                    samples = sample_count,
-                    "solar forecast stored and performance ratio calibrated"
-                ),
-                Ok(None) => tracing::info!(
-                    samples = sample_count,
-                    "solar forecast stored; not enough history to calibrate performance ratio yet"
-                ),
-                Err(error) => tracing::warn!("Solar forecast database worker failed: {error}"),
+            match stored.map(|result| result.unwrap_or(None)) {
+                Ok(Some(pr)) => {
+                    tracing::info!(
+                        pr,
+                        samples = sample_count,
+                        "solar forecast stored and performance ratio calibrated"
+                    );
+                    SolarFetch::Stored
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        samples = sample_count,
+                        "solar forecast stored; not enough history to calibrate performance ratio yet"
+                    );
+                    SolarFetch::Stored
+                }
+                Err(error) => {
+                    tracing::warn!("Solar forecast database worker failed: {error}");
+                    SolarFetch::Stored
+                }
             }
         }
         Err(e) => {
             tracing::warn!("Solar forecast fetch failed: {e}");
+            SolarFetch::Stored
         }
     }
 }
@@ -942,7 +974,10 @@ pub(crate) mod tests {
                 // The first two cases return before checking the database;
                 // the third has coordinates but no HistoryDb. None may open
                 // a network connection in any of the three cases.
-                run_solar_forecast_fetch_at(state, now).await;
+                assert_eq!(
+                    run_solar_forecast_fetch_at(state, now).await,
+                    SolarFetch::Skipped
+                );
             }
 
             assert!(
@@ -1022,11 +1057,17 @@ pub(crate) mod tests {
 
             // A failed fetch is not persisted; the next weather-loop tick
             // retries the same provider and can succeed.
-            run_solar_forecast_fetch_at(state.clone(), now).await;
+            assert_eq!(
+                run_solar_forecast_fetch_at(state.clone(), now).await,
+                SolarFetch::Failed
+            );
             assert_eq!(series_len(db.as_ref(), "shortwave_radiation"), 0);
             assert!(db.get_meta_value(META_FORECAST_PR).is_none());
 
-            run_solar_forecast_fetch_at(state, now).await;
+            assert_eq!(
+                run_solar_forecast_fetch_at(state, now).await,
+                SolarFetch::Stored
+            );
             assert_eq!(series_len(db.as_ref(), "shortwave_radiation"), 1);
             assert_eq!(
                 db.get_meta_value(META_FORECAST_PR)
@@ -1063,7 +1104,7 @@ pub(crate) mod tests {
             grid_lon: None,
         };
 
-        let pr = store_and_calibrate(&db, 5.0, "open-meteo", now, &forecast);
+        let pr = store_and_calibrate(&db, 5.0, "open-meteo", now, &forecast).expect("stored");
 
         // 3 forward hours of shortwave; direct/cloud only where present.
         assert_eq!(series_len(&db, "shortwave_radiation"), 3);
@@ -1128,7 +1169,7 @@ pub(crate) mod tests {
             grid_lat: Some(51.5),
             grid_lon: Some(-0.13),
         };
-        let pr = store_and_calibrate(&db, rated, "open-meteo", now, &forecast);
+        let pr = store_and_calibrate(&db, rated, "open-meteo", now, &forecast).expect("stored");
 
         let pr = pr.expect("five complete days should calibrate");
         assert!((pr - 0.8).abs() < 1e-9, "pr = {pr}");
@@ -1351,7 +1392,7 @@ pub(crate) mod tests {
     fn store_and_calibrate_persists_pr_to_meta() {
         let db = test_db();
         let now = local_dt(2025, 6, 15, 12, 0);
-        let _now_ts = now.timestamp();
+        let now_ts = now.timestamp();
         let rated = 5.0_f64;
         let kwhs = [24.5_f32, 28.0, 31.5, 35.0, 21.0];
         for (i, &kwh) in kwhs.iter().enumerate() {
@@ -1382,12 +1423,14 @@ pub(crate) mod tests {
                 samples.push(sample(ts, 700.0, None, None));
             }
         }
+        // One hour ahead, so there is a forecast to store.
+        samples.push(sample(now_ts + 3600, 400.0, None, None));
         let forecast = SolarForecast {
             samples,
             grid_lat: None,
             grid_lon: None,
         };
-        let pr = store_and_calibrate(&db, rated, "open-meteo", now, &forecast);
+        let pr = store_and_calibrate(&db, rated, "open-meteo", now, &forecast).expect("stored");
         assert!(pr.is_some(), "five complete days should calibrate");
         // The PR and usable-day count survive to meta so GET /api/forecast
         // can serve them without recalibrating from scratch.
@@ -2084,14 +2127,20 @@ pub(crate) mod tests {
         let db = test_db();
         let hour_start = local_dt(2025, 6, 15, 12, 0);
         let now = hour_start + chrono::Duration::minutes(30);
-        db.insert_forecast_values(&[ForecastValueRow {
-            timestamp: hour_start.timestamp(),
-            variable: "shortwave_radiation".to_string(),
-            value: 1000.0,
-            source: "open-meteo".to_string(),
-            fetched_at: now.timestamp(),
-        }])
-        .unwrap();
+        // A dark next hour is stored too, so the forecast hasn't run out.
+        for (ts, value) in [
+            (hour_start.timestamp(), 1000.0),
+            (hour_start.timestamp() + 3600, 0.0),
+        ] {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: ts,
+                variable: "shortwave_radiation".to_string(),
+                value,
+                source: "open-meteo".to_string(),
+                fetched_at: now.timestamp(),
+            }])
+            .unwrap();
+        }
         db.set_meta_value(META_FORECAST_PR, "1.0").unwrap();
 
         let settings = Settings {
@@ -2208,7 +2257,8 @@ pub(crate) mod tests {
             &full_settings,
         ));
         assert!(stale_full.status.contains(&"forecast_stale".to_string()));
-        assert!(matches!(
+        // A stale forecast plans as a day without sun (issue #483).
+        assert!(!matches!(
             crate::server::api::compute_plan_recommendation(
                 &stale_full,
                 &full_settings,
@@ -2217,6 +2267,314 @@ pub(crate) mod tests {
             ),
             crate::forecast::planner::PlanRecommendation::NoPlan { .. }
         ));
+    }
+
+    /// Cosy's three cheap periods, planned one by one (issue #453), with a
+    /// minimum high enough that the evening needs a charge.
+    fn cosy_every_window_settings() -> Settings {
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.forecast_min_soc_pct = 30.0;
+        settings.forecast_plan_every_cheap_window = true;
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![
+                slot("00:00", "04:00", 0.27),
+                slot("04:00", "07:00", 0.13),
+                slot("07:00", "13:00", 0.27),
+                slot("13:00", "16:00", 0.13),
+                slot("16:00", "22:00", 0.27),
+                slot("22:00", "23:59", 0.13),
+            ],
+        });
+        settings
+    }
+
+    /// 72 hours of radiation from the current hour, all fetched at once.
+    fn store_radiation(db: &HistoryDb, now: DateTime<Local>, value: f64, fetched_at: i64) {
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value,
+                source: "open-meteo".to_string(),
+                fetched_at,
+            }])
+            .unwrap();
+        }
+    }
+
+    fn assert_sunless(payload: &ForecastPayload, now: DateTime<Local>, first_ts: i64) {
+        assert!(
+            payload.status.contains(&"solar_assumed_zero".to_string()),
+            "{:?}",
+            payload.status
+        );
+        let end = now.timestamp() + 72 * 3600;
+        let expected: Vec<i64> = (0..)
+            .map(|h| first_ts + h * 3600)
+            .take_while(|ts| *ts < end)
+            .collect();
+        assert_eq!(
+            payload
+                .solar
+                .iter()
+                .map(|h| h.timestamp)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(payload
+            .solar
+            .iter()
+            .all(|h| h.kwh == 0.0 && h.band_low == 0.0 && h.band_high == 0.0));
+        assert_eq!(payload.solar_today_remaining_kwh, 0.0);
+        assert_eq!(payload.solar_tomorrow_kwh, 0.0);
+    }
+
+    /// Issue #483: two days without internet left the solar forecast out of
+    /// date, the Planner refused to plan, and the inverter kept repeating its
+    /// last slot while Cosy's other cheap periods went unplanned. An out-of-date
+    /// forecast now plans exactly as a fresh forecast of no sun would, and the
+    /// export advice and back-stop floor still say nothing.
+    #[test]
+    fn a_stale_forecast_plans_every_cheap_window_as_a_day_without_sun() {
+        use crate::forecast::planner::{ExportAdvice, PlanRecommendation};
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        let now_ts = now.timestamp();
+        seed_full_forecast_state(&db, now);
+        let settings = cosy_every_window_settings();
+        let snap = battery_snapshot();
+        let plan_for = |payload: &ForecastPayload| {
+            crate::server::api::compute_full_plan_advice(payload, &settings, Some(&snap), now_ts)
+        };
+
+        // What a fresh forecast of no sun plans: a charge before 22:00's period.
+        store_radiation(&db, now, 0.0, now_ts);
+        let sunless =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(!sunless.status.contains(&"solar_assumed_zero".to_string()));
+        let (sunless_plan, _, _) = plan_for(&sunless);
+        assert!(
+            matches!(
+                sunless_plan,
+                PlanRecommendation::Charge { .. } | PlanRecommendation::ChargeAndHold { .. }
+            ),
+            "{sunless_plan:?}"
+        );
+
+        // A sunny forecast, fetched just over six hours ago.
+        store_radiation(&db, now, 500.0, now_ts - SOLAR_FORECAST_MAX_AGE_SECS - 1);
+        let stale = build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(stale.status.contains(&"forecast_stale".to_string()));
+        assert_sunless(&stale, now, now_ts);
+        assert_eq!(stale.battery, sunless.battery);
+        let (plan, export, _) = plan_for(&stale);
+        assert_eq!(plan, sunless_plan);
+        match export {
+            Some(ExportAdvice::NoExport { reason }) => {
+                assert!(reason.contains("no up-to-date solar forecast"), "{reason}")
+            }
+            other => panic!("expected no export on a stale forecast, got {other:?}"),
+        }
+        assert_eq!(
+            crate::server::api::export_backstop_floor(
+                &stale,
+                &settings,
+                Some(&snap),
+                now_ts,
+                now_ts + 3600
+            ),
+            None
+        );
+
+        // A fetch time in the future is a clock problem: still no plan.
+        store_radiation(&db, now, 500.0, now_ts + 3600);
+        let future =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        assert!(future.status.contains(&"forecast_data_future".to_string()));
+        assert!(!future.status.contains(&"solar_assumed_zero".to_string()));
+        assert!(matches!(
+            plan_for(&future).0,
+            PlanRecommendation::NoPlan { .. }
+        ));
+    }
+
+    /// Issue #483: once an outage outlasts the stored days there is no
+    /// forecast at all; with weather on, that too plans as a day without sun.
+    /// With weather off or no location nothing changes.
+    #[test]
+    fn a_forecast_that_has_run_out_plans_as_a_day_without_sun() {
+        let now = local_dt(2025, 1, 15, 20, 0);
+        let now_ts = now.timestamp();
+        let settings = cosy_every_window_settings();
+        let snap = battery_snapshot();
+
+        let fresh_db = test_db();
+        seed_full_forecast_state(&fresh_db, now);
+        store_radiation(&fresh_db, now, 0.0, now_ts);
+        let sunless = build_forecast_payload(&full_forecast_inputs(
+            &fresh_db,
+            Some(&snap),
+            now,
+            &settings,
+        ));
+
+        let empty_db = test_db();
+        seed_consumption_history(&empty_db, now);
+        let run_out = build_forecast_payload(&full_forecast_inputs(
+            &empty_db,
+            Some(&snap),
+            now,
+            &settings,
+        ));
+        assert!(run_out.status.contains(&"no_forecast_data".to_string()));
+        assert_sunless(&run_out, now, now_ts);
+        assert_eq!(run_out.battery, sunless.battery);
+        assert_eq!(
+            crate::server::api::compute_plan_recommendation(
+                &run_out,
+                &settings,
+                Some(&snap),
+                now_ts
+            ),
+            crate::server::api::compute_plan_recommendation(
+                &sunless,
+                &settings,
+                Some(&snap),
+                now_ts
+            ),
+        );
+
+        // Weather turned off with a sunny forecast still stored: once it is
+        // out of date there's no plan, as before, rather than a sunless one.
+        let off_db = test_db();
+        seed_full_forecast_state(&off_db, now);
+        store_radiation(
+            &off_db,
+            now,
+            500.0,
+            now_ts - SOLAR_FORECAST_MAX_AGE_SECS - 1,
+        );
+        let off = build_forecast_payload(&ForecastInputs {
+            weather_enabled: false,
+            ..full_forecast_inputs(&off_db, Some(&snap), now, &settings)
+        });
+        assert!(off.status.contains(&"forecast_stale".to_string()));
+        assert!(!off.status.contains(&"solar_assumed_zero".to_string()));
+        assert!(matches!(
+            crate::server::api::compute_plan_recommendation(&off, &settings, Some(&snap), now_ts),
+            crate::forecast::planner::PlanRecommendation::NoPlan { .. }
+        ));
+
+        for (enabled, coords) in [(false, Some((51.5, -0.13))), (true, None)] {
+            let inputs = ForecastInputs {
+                weather_enabled: enabled,
+                weather_coords: coords,
+                ..full_forecast_inputs(&empty_db, Some(&snap), now, &settings)
+            };
+            let payload = build_forecast_payload(&inputs);
+            assert!(payload.solar.is_empty(), "{enabled} {coords:?}");
+            assert!(!payload.status.contains(&"solar_assumed_zero".to_string()));
+            assert!(matches!(
+                crate::server::api::compute_plan_recommendation(
+                    &payload,
+                    &settings,
+                    Some(&snap),
+                    now_ts
+                ),
+                crate::forecast::planner::PlanRecommendation::NoPlan { .. }
+            ));
+        }
+    }
+
+    /// The sunless hours start where the stored ones would: the next hour, or
+    /// the current one when the plan asks for it (issue #404).
+    #[test]
+    fn sunless_hours_start_where_the_forecast_would() {
+        let now = local_dt(2025, 1, 15, 20, 30);
+        let hour_start = local_dt(2025, 1, 15, 20, 0).timestamp();
+        let settings = cosy_every_window_settings();
+        let db = test_db();
+        for (include_current_hour, first) in [(false, hour_start + 3600), (true, hour_start)] {
+            let inputs = ForecastInputs {
+                include_current_hour,
+                ..full_forecast_inputs(&db, None, now, &settings)
+            };
+            assert_sunless(&build_forecast_payload(&inputs), now, first);
+        }
+    }
+
+    /// A failed fetch is tried again in 15 minutes, not 3 hours, so a forecast
+    /// isn't left out of date long after the internet comes back (issue #483).
+    /// A skipped one (weather off, no location) costs no network call, so it
+    /// comes round as soon: turning weather on fetches within 15 minutes
+    /// rather than planning without sun for up to 3 hours.
+    #[test]
+    fn a_failed_or_skipped_solar_fetch_comes_round_in_fifteen_minutes() {
+        for outcome in [SolarFetch::Failed, SolarFetch::Skipped] {
+            assert_eq!(
+                outcome.next_fetch_in(),
+                std::time::Duration::from_secs(15 * 60),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(
+            SolarFetch::Stored.next_fetch_in(),
+            SOLAR_FORECAST_FETCH_INTERVAL
+        );
+    }
+
+    /// Issue #483: a forecast that couldn't be saved, or a reply with no hours
+    /// ahead, leaves the stored one out of date, so it is retried soon too.
+    #[tokio::test]
+    async fn a_forecast_that_cannot_be_saved_counts_as_a_failed_fetch() {
+        let now = local_dt(2025, 6, 15, 12, 0);
+        let now_ts = now.timestamp();
+        let ahead = SolarForecast {
+            samples: vec![sample(now_ts + 3600, 400.0, None, None)],
+            grid_lat: None,
+            grid_lon: None,
+        };
+        let only_past = SolarForecast {
+            samples: vec![sample(now_ts - 3600, 400.0, None, None)],
+            grid_lat: None,
+            grid_lon: None,
+        };
+        assert!(store_and_calibrate(&test_db(), 5.0, "open-meteo", now, &only_past).is_err());
+        let broken = Arc::new(test_db());
+        let poisoner = broken.clone();
+        let _ = std::thread::spawn(move || poisoner.poison_connection_for_test()).join();
+        assert!(store_and_calibrate(&broken, 5.0, "open-meteo", now, &ahead).is_err());
+        assert!(store_and_calibrate(&test_db(), 5.0, "open-meteo", now, &ahead).is_ok());
+
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (base_url, server) =
+                spawn_forecast_http_server(vec![forecast_response_body(&ahead.samples)]).await;
+            let db = Arc::new(test_db());
+            let poisoner = db.clone();
+            let _ = std::thread::spawn(move || poisoner.poison_connection_for_test()).join();
+            let state = Arc::new(crate::inverter::poll::AppState::new());
+            *state.history.lock().await = Some(db);
+            state.weather.lock().await.config = WeatherConfig {
+                enabled: true,
+                latitude: Some(51.5),
+                longitude: Some(-0.13),
+                open_meteo_base_url: base_url,
+                ..WeatherConfig::default()
+            };
+            assert_eq!(
+                run_solar_forecast_fetch_at(state, now).await,
+                SolarFetch::Failed
+            );
+            server.await.unwrap();
+        })
+        .await;
     }
 
     #[test]
@@ -2757,7 +3115,13 @@ pub(crate) mod tests {
             "SMART",
             Some(7.0),
         )]);
-        let payload = car_payload(&db, &five_kwp_settings(), &list);
+        let snap = full_battery();
+        let settings = five_kwp_settings();
+        let payload = build_forecast_payload(&ForecastInputs {
+            dispatches: &list,
+            weather_enabled: false,
+            ..full_forecast_inputs(&db, Some(&snap), car_now(), &settings)
+        });
         assert!(payload.solar.is_empty());
         assert_eq!(
             payload.ev_dispatch_windows,
