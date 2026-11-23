@@ -37,13 +37,17 @@ pub const SPREAD_FINISH_FRACTION: f64 = 0.8;
 /// Where a charge to [`SPREAD_NEAR_FULL_PCT`] or lower aims to finish: it
 /// never reaches the part where charging slows, so only a little is kept
 /// back for a cold battery or a wrong forecast (issue #483).
-pub const SPREAD_FINISH_FRACTION_BELOW_FULL: f64 = 0.8;
+pub const SPREAD_FINISH_FRACTION_BELOW_FULL: f64 = 0.9;
 /// Targets above this charge into the part where the battery slows down.
 pub const SPREAD_NEAR_FULL_PCT: u8 = 90;
 
 /// How far through the window a spread charge to `target_pct` aims to finish.
-pub fn spread_finish_fraction(_target_pct: u8) -> f64 {
-    SPREAD_FINISH_FRACTION
+pub fn spread_finish_fraction(target_pct: u8) -> f64 {
+    if target_pct <= SPREAD_NEAR_FULL_PCT {
+        SPREAD_FINISH_FRACTION_BELOW_FULL
+    } else {
+        SPREAD_FINISH_FRACTION
+    }
 }
 /// Skip the spread when a full-power charge already fills this share of the
 /// window: slowing it would barely change anything (peterb99's test).

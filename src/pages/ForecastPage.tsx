@@ -1344,7 +1344,8 @@ export default function ForecastPage() {
               <HelpTip label="Spread Charge Across Window">
                 The plan charges at full power from the start of the cheap period, then stops. With
                 this on, the plan also shows the lower rate that would deliver the same charge and
-                finish about 80% of the way through the window, as one slot across the whole window
+                finish about 90% of the way through the window (80% when charging above 90%, where
+                the battery slows down), as one slot across the whole window
                 with a target, so it can't overshoot. For now this is advice only: Apply and the
                 automatic plan still charge at full power. Short windows, and charges that already
                 fill 65% or more of the window at full power, stay at full power. The charge limit
