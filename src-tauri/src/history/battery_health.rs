@@ -696,11 +696,7 @@ mod tests {
     }
 
     fn test_db() -> HistoryDb {
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-battery-health-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("battery-health");
         HistoryDb::open(&dir.join("h.db")).unwrap()
     }
 
@@ -778,11 +774,7 @@ mod tests {
     #[test]
     fn a_restart_continues_the_days_row() {
         // A second HistoryDb on the same file is a restarted process.
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-battery-health-restart-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("battery-health-restart");
         let path = dir.join("h.db");
         let now = at(2026, 10, 1, 9, 0);
         {
@@ -993,11 +985,7 @@ mod tests {
 
     #[test]
     fn soc_event_counts_add_across_flushes_and_restarts() {
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-battery-health-soc-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("battery-health-soc");
         let path = dir.join("h.db");
         let now = at(2026, 10, 1, 9, 0);
         let s = snap(vec![module(0, &[3.3, 3.31], 60)]);
@@ -1040,11 +1028,7 @@ mod tests {
 
     #[test]
     fn a_database_from_before_soc_counts_gains_them_and_keeps_its_rows() {
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-battery-health-legacy-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("battery-health-legacy");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("h.db");
         {
@@ -1361,11 +1345,7 @@ mod tests {
     fn history_from_before_serials_were_kept_follows_the_first_battery_seen() {
         // Rows written by an earlier release have no serial. They belong to
         // whichever battery then reported a serial in that slot.
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-battery-health-pre-serial-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("battery-health-pre-serial");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("h.db");
         {
@@ -1579,11 +1559,7 @@ mod tests {
     fn a_restart_continues_a_batterys_row_as_one() {
         // A restart expects the battery it last saw, so its first polls join
         // that battery's row rather than waiting for the serial to settle.
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-battery-health-serial-restart-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("battery-health-serial-restart");
         let path = dir.join("h.db");
         let now = at(2026, 10, 1, 12, 0);
         let stored = || -> i64 {
@@ -1630,11 +1606,7 @@ mod tests {
 
     #[test]
     fn the_serial_key_migration_is_idempotent_and_keeps_every_row() {
-        let dir = std::env::temp_dir().join(format!(
-            "givenergy-battery-health-rekey-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
+        let dir = crate::test_util::make_unique_test_dir("battery-health-rekey");
         let path = dir.join("h.db");
         {
             let db = HistoryDb::open(&path).unwrap();

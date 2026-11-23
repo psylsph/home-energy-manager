@@ -48,7 +48,8 @@ pub fn ensure_fallback_config_dir() -> std::path::PathBuf {
 /// cleaner is the backstop.
 ///
 /// Unique by construction: the process id separates processes and a
-/// process-wide counter separates calls within one. The clock is NOT part of
+/// process-wide counter separates calls within one; a directory an earlier
+/// run with the same process id left behind is emptied first. The clock is NOT part of
 /// the name: macOS timestamps only have microsecond resolution, so two tests
 /// starting together got the same directory and raced on one SQLite file
 /// ("database is locked").
@@ -60,8 +61,16 @@ pub fn make_unique_test_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
-/// Create `dir` empty.
+/// Create `dir` empty. A name is unique within one run, but a later run that
+/// gets the same process id reuses it and nothing deletes the directories, so
+/// whatever an earlier run left there goes first. Safe: no other process
+/// alive now has this process id.
 fn fresh_test_dir(dir: &std::path::Path) {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("clear stale test dir {}: {error}", dir.display()),
+    }
     std::fs::create_dir_all(dir).expect("create unique test dir");
 }
 
