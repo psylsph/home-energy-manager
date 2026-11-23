@@ -56,8 +56,13 @@ pub fn make_unique_test_dir(label: &str) -> std::path::PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("hem-test-{label}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create unique test dir");
+    fresh_test_dir(&dir);
     dir
+}
+
+/// Create `dir` empty.
+fn fresh_test_dir(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).expect("create unique test dir");
 }
 
 /// Run a synchronous test body with an isolated config directory.
@@ -138,6 +143,19 @@ impl Drop for IsolationGuard {
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    /// A name is unique within one run, but a later run that gets the same
+    /// process id reuses it, and nothing deletes the directories: the test
+    /// must start empty, not on a database an earlier run left behind.
+    #[test]
+    fn a_directory_left_by_an_earlier_run_comes_back_empty() {
+        let dir = std::env::temp_dir().join(format!("hem-test-stale-check-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("h.db"), b"rows from an earlier run").unwrap();
+        super::fresh_test_dir(&dir);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn unique_test_dirs_never_collide_under_concurrency() {
