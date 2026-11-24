@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-11-24
+
+### Added
+
+- **Planned charges now say how far they got.** When the Planner charges to a target and holds it, HEM now logs the level the battery had reached when the cheap period ended. With Auto-Apply on and notifications set up, it sends you the same message, so you can see that a plan reached 65% without digging through the charts. If the battery ends well short of its target, the message says so and shows the target the inverter was reporting. Your own charge schedules are never reported on. (#507)
+
 ## [1.23.3] - 2026-11-23
 
 ### Changed
