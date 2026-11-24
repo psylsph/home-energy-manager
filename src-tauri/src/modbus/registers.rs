@@ -772,10 +772,9 @@ pub const GATEWAY_INPUT_BLOCK_4: RegisterBlock = RegisterBlock {
     register_type: RegisterType::Input,
     name: "input_1780_1830",
 };
-/// Block 5 starts at IR 1831 (not 1840) so that the V1 AIO serial addresses
-/// (aio1 @ 1831-1835, aio2 @ 1838-1842, aio3 @ 1845-1849) — which straddle the
-/// 1839/1840 boundary under plain 60-register chunking — are fully contained
-/// within a single block's data slice. V2 serials (1841+) fall here too.
+/// Block 5 starts at IR 1831 and holds the AIO serials the live Gateway
+/// reports in a five-register stride from IR 1841 (aio1 1841-1845, aio2
+/// 1846-1850, aio3 1851-1855), so all three fit in one block's data slice.
 pub const GATEWAY_INPUT_BLOCK_5: RegisterBlock = RegisterBlock {
     start: 1831,
     count: 29,

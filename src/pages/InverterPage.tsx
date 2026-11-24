@@ -142,9 +142,6 @@ export default function InverterPage() {
         <section className="bg-bg-surface rounded-2xl p-5">
           <div className="flex items-center gap-3 mb-4">
             <h2 className="text-text-primary font-semibold text-lg">Gateway</h2>
-            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-accent/20 text-accent">
-              {s.gateway_is_v2 ? 'V2' : 'V1'}
-            </span>
           </div>
           <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
             <span className="text-text-secondary">Software Version</span>

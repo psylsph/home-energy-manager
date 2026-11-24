@@ -151,8 +151,9 @@ async function main() {
     assert('Snapshot received', !!snap);
     assert('Device type code is 7001', snap.device_type_code === '7001', `Got ${snap.device_type_code}`);
     assert('Device display is Gateway', snap.device_type_display === 'Gateway', `Got ${snap.device_type_display}`);
-    assert('Software version present', /^GA\d{6}$/.test(snap.gateway_software_version ?? ''), `Got ${snap.gateway_software_version}`);
-    assert('V1 firmware (simulator)', snap.gateway_is_v2 === false, `Got ${snap.gateway_is_v2}`);
+    assert('Software version present', /^GA[A-Z0-9]{2}\d{4}$/.test(snap.gateway_software_version ?? ''), `Got ${snap.gateway_software_version}`);
+    assert('AIO1 serial decoded from IR 1841', snap.per_aio_serial?.[0] === 'SA24230001', `Got ${JSON.stringify(snap.per_aio_serial)}`);
+    assert('AIO2 and AIO3 serials empty for one AIO', !snap.per_aio_serial?.[1] && !snap.per_aio_serial?.[2], `Got ${JSON.stringify(snap.per_aio_serial)}`);
     assert('Parallel AIO count = 1', snap.parallel_aio_count === 1, `Got ${snap.parallel_aio_count}`);
     assert('Parallel AIO online = 1', snap.parallel_aio_online === 1, `Got ${snap.parallel_aio_online}`);
     assert('AIO1 SOC in range', (snap.per_aio_soc?.[0] ?? 0) > 0 && snap.per_aio_soc[0] <= 100, `Got ${snap.per_aio_soc?.[0]}`);

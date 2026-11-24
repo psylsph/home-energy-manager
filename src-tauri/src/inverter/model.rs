@@ -1552,15 +1552,12 @@ pub struct InverterSnapshot {
     /// Per-AIO battery discharge energy today (kWh) — IR(1750/1753/1756).
     #[serde(default)]
     pub per_aio_discharge_today_kwh: [f32; 3],
-    /// Per-AIO serial number (Latin-1) — IR(1831+/1841+, variant-dependent).
+    /// Per-AIO serial number (Latin-1) — IR(1841/1846/1851).
     #[serde(default)]
     pub per_aio_serial: [String; 3],
     /// Gateway firmware version string (e.g. "GA000009") — IR(1600-1603).
     #[serde(default)]
     pub gateway_software_version: String,
-    /// Gateway firmware variant flag: true when IR(1603) >= 10 (GA000010+).
-    #[serde(default)]
-    pub gateway_is_v2: bool,
     /// Gateway work mode enum (2 = On Grid) — IR(1604).
     #[serde(default)]
     pub gateway_work_mode: u16,
@@ -1732,7 +1729,6 @@ impl InverterSnapshot {
             per_aio_discharge_today_kwh: [0.0; 3],
             per_aio_serial: std::array::from_fn(|_| String::new()),
             gateway_software_version: String::new(),
-            gateway_is_v2: false,
             gateway_work_mode: 0,
             gateway_fault_codes: Vec::new(),
             first_inverter_serial: String::new(),

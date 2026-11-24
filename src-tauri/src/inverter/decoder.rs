@@ -2093,10 +2093,12 @@ pub fn validate_hv_bcu(data: &[u16]) -> bool {
 // The GivEnergy Gateway is a system controller / AC hub for one or more
 // All-in-One (AIO) units. ALL of its live measurements live in a dedicated
 // Input Register bank (IR 1600-1859), distinct from every other GivEnergy
-// device. Register map, scalings and the V1/V2 variant contract are from
-// `dewet22/givenergy-modbus` `model/gateway.py`; see
-// `gateway-design/gateway-register-reference.md` for the authoritative
-// byte-level reference.
+// device. Register map and scalings follow `dewet22/givenergy-modbus`
+// `model/gateway.py`, EXCEPT the layout: dewet22's `select_gateway` has the
+// IR(1603) >= 10 variant test that misfires on every real Gateway, so the
+// layout follows the britkat1980 fork GivTCP pins (a556333) and live captures.
+// See `gateway-design/gateway-register-reference.md` for the byte-level
+// reference.
 //
 // Sign conventions:
 //   * Battery / AIO power (`p_aio_total`, `p_aio*_inverter`) is signed, but
@@ -2108,11 +2110,13 @@ pub fn validate_hv_bcu(data: &[u16]) -> bool {
 //   * Grid power is metered at IR(1616) `p_ac1`, + = export (HEM's convention,
 //     decoded verbatim; GivTCP `read.py:1550`: `Grid_Power = GEInv.p_ac1`).
 //
-// V1/V2 variant: selected by IR(1603) (the last register of the version
-// string). `< 10` → V1 (uint32 totals high-register-first, AIO serials @
-// 1831+); `>= 10` → V2 (totals low-register-first / swapped, serials @ 1841+).
-// The simulator emits V1 only; the V2 path is shipped for real hardware on
-// GA000010+ firmware.
+// Layout: one only. Lifetime totals are uint32 high-register-first and the AIO
+// serials sit in a five-register stride from IR(1841). IR(1603) is the last
+// two version digits as bytes (`GAAA0014` is 0x0104), so it must never be read
+// as a layout selector: every real Gateway is >= 10. GivTCP's pinned library
+// dropped that test after its first live capture and always decodes this way.
+// The older serial positions (1831/1838/1845) were never seen on hardware and
+// were dropped on purpose.
 
 /// Whether a decoded gateway software-version string indicates a real,
 /// present gateway.
@@ -2126,18 +2130,9 @@ pub fn gateway_is_valid(version: &str) -> bool {
     !trimmed.is_empty() && !trimmed.chars().all(|c| c == '0')
 }
 
-/// Decode a variant-aware uint32 energy total from two registers.
-///
-/// `hi_off` / `lo_off` are the V1 (high, low) register offsets within the
-/// block. V2 swaps the interpretation (low register is the high word).
-fn gw_u32(data: &[u16], hi_off: usize, lo_off: usize, is_v2: bool) -> u32 {
-    let hi = get_reg(data, hi_off);
-    let lo = get_reg(data, lo_off);
-    if is_v2 {
-        uint32(lo, hi) // V2: low register first (byte order swapped)
-    } else {
-        uint32(hi, lo) // V1: high register first
-    }
+/// Decode a uint32 energy total from two registers, high register first.
+fn gw_u32(data: &[u16], hi_off: usize, lo_off: usize) -> u32 {
+    uint32(get_reg(data, hi_off), get_reg(data, lo_off))
 }
 
 /// Gateway fault-bitmask → human-readable names.
@@ -2197,10 +2192,8 @@ fn decode_gateway_faults(raw: u32) -> Vec<String> {
 /// IR 1600-1659: identity, version/variant, instantaneous power, faults,
 /// daily + lifetime energy totals.
 fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
-    // --- Identity & variant ---
+    // --- Identity ---
     snap.gateway_software_version = decode_gateway_version(data, 0); // IR 1600-1603
-    let is_v2 = get_reg(data, 3) >= 10; // IR(1603): last version reg selects V1/V2
-    snap.gateway_is_v2 = is_v2;
     snap.gateway_work_mode = get_reg(data, 4); // IR 1604
     snap.first_inverter_serial = decode_serial(data, 27, 5); // IR 1627-1631
 
@@ -2268,12 +2261,12 @@ fn decode_gateway_1600_1659(data: &[u16], snap: &mut InverterSnapshot) {
                                                                  // regardless of inverter type.
     snap.home_energy_today_kwh = snap.today_consumption_kwh;
 
-    // --- Lifetime energy totals (uint32 ÷10 kWh, V1/V2 byte order) ---
-    // Decode with V1/V2 awareness, then apply plausibility check on the result.
-    let total_import_u32 = gw_u32(data, 41, 42, is_v2);
-    let total_export_u32 = gw_u32(data, 47, 48, is_v2);
-    let total_charge_u32 = gw_u32(data, 50, 51, is_v2);
-    let total_discharge_u32 = gw_u32(data, 53, 54, is_v2);
+    // --- Lifetime energy totals (uint32 ÷10 kWh, high register first) ---
+    // Decode, then apply a plausibility check on the result.
+    let total_import_u32 = gw_u32(data, 41, 42);
+    let total_export_u32 = gw_u32(data, 47, 48);
+    let total_charge_u32 = gw_u32(data, 50, 51);
+    let total_discharge_u32 = gw_u32(data, 53, 54);
     // Plausibility: the hi word of a genuine residential lifetime total never
     // exceeds ~30 (200 MWh). hi > 1000 (>6.5 GWh) is impossible corruption.
     snap.total_import_kwh = if (total_import_u32 >> 16) > 1000 {
@@ -2376,23 +2369,17 @@ fn decode_gateway_1780_1830(data: &[u16], snap: &mut InverterSnapshot) {
     ];
 }
 
-/// IR 1831-1859: per-AIO serial numbers (addresses differ by firmware variant).
+/// IR 1831-1859: per-AIO serial numbers.
+///
+/// Live layout: a contiguous five-register stride from IR(1841): aio1 1841-1845,
+/// aio2 1846-1850, aio3 1851-1855. The block starts at 1831, so those are
+/// offsets 10, 15 and 20.
 fn decode_gateway_1831_1859(data: &[u16], snap: &mut InverterSnapshot) {
-    if snap.gateway_is_v2 {
-        // V2 (GA000010+): aio1 @ 1841-1845, aio2 @ 1848-1852, aio3 @ 1855-1859.
-        snap.per_aio_serial = [
-            decode_serial(data, 10, 5),
-            decode_serial(data, 17, 5),
-            decode_serial(data, 24, 5),
-        ];
-    } else {
-        // V1 (GA000009 and earlier): aio1 @ 1831-1835, aio2 @ 1838-1842, aio3 @ 1845-1849.
-        snap.per_aio_serial = [
-            decode_serial(data, 0, 5),
-            decode_serial(data, 7, 5),
-            decode_serial(data, 14, 5),
-        ];
-    }
+    snap.per_aio_serial = [
+        decode_serial(data, 10, 5),
+        decode_serial(data, 15, 5),
+        decode_serial(data, 20, 5),
+    ];
 }
 
 /// HR 2040-2075: EMS / Gateway plant-level holding registers.

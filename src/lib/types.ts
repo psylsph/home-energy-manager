@@ -182,7 +182,6 @@ export interface InverterSnapshot {
   per_aio_discharge_today_kwh?: number[];
   per_aio_serial?: string[];
   gateway_software_version?: string;
-  gateway_is_v2?: boolean;
   gateway_work_mode?: number;
   gateway_fault_codes?: string[];
   first_inverter_serial?: string;
