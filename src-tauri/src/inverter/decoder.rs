@@ -7372,12 +7372,12 @@ mod tests {
         b4[36] = 800i16 as u16; // p_aio1_inverter raw +800 (GE wire: + = charging) → per_aio_power = -800
 
         let mut b5 = [0u16; 29];
-        // V1: aio1 serial @ 1831-1835 (offsets 0-4)
-        b5[0] = 0x5341; // 'S','A'
-        b5[1] = 0x3234; // '2','4'
-        b5[2] = 0x3233; // '2','3'
-        b5[3] = 0x3030; // '0','0'
-        b5[4] = 0x3031; // '0','1'
+        // aio1 serial @ 1841-1845 (offsets 10-14)
+        b5[10] = 0x5341; // 'S','A'
+        b5[11] = 0x3234; // '2','4'
+        b5[12] = 0x3233; // '2','3'
+        b5[13] = 0x3030; // '0','0'
+        b5[14] = 0x3031; // '0','1'
 
         vec![
             gateway_holding_block(),
@@ -7406,7 +7406,7 @@ mod tests {
         b1[0] = 0x4741; // 'G','A'
         b1[1] = 0x3030; // '0','0'
         b1[2] = 0x0000;
-        b1[3] = 0x000A; // 10 = V2 (GA000010)
+        b1[3] = 0x000A; // GA0000010
         b1[4] = 2; // work_mode = On Grid
 
         // Set a fault bitmask with bit 0 (Relay 1&2 bonding) and bit 31 (Grid mode Off).
@@ -7427,7 +7427,6 @@ mod tests {
         let snap = decode_snapshot(&blocks);
 
         assert_eq!(snap.gateway_software_version, "GA0000010");
-        assert!(snap.gateway_is_v2);
         assert_eq!(snap.gateway_work_mode, 2);
         assert!(snap
             .gateway_fault_codes
@@ -7530,42 +7529,104 @@ mod tests {
         assert_eq!(snap.first_inverter_serial, "SA24230001");
     }
 
-    #[test]
-    fn gateway_decode_v2_uint32_byte_order() {
+    /// IR 1600-1659 words from the first live capture of a real Gateway
+    /// (`GAAA0014`): IR(1600-1603) and IR(1640-1657).
+    fn live_gateway_block1(version_last: u16) -> [u16; 60] {
         let mut b1 = [0u16; 60];
         b1[0] = 0x4741; // 'G','A'
-        b1[1] = 0x3030;
+        b1[1] = 0x4141; // 'A','A'
         b1[2] = 0x0000;
-        b1[3] = 0x000A; // 10 → V2 (GA000010)
-                        // V2 byte order: uint32 is (low << 16) | high, so hi_off and lo_off swap.
-                        // For e_grid_import_total: V2 expects IR(1642) as high, IR(1641) as low.
-                        // The fixture has hi=1@41, lo=0@42. gw_u32 swaps: uint32(lo=0, hi=1) = (0<<16)|1 = 1.
-        b1[41] = 1;
-        b1[42] = 0; // hi@41=1, lo@42=0 → V2 reads lo=0 as hi → (0<<16)|1 = 1
+        b1[3] = version_last; // 0x0104 = "14": every real Gateway is >= 10
+        let words: [u16; 18] = [
+            276, 1, 61291, 178, 0, 50839, 176, 0, 21918, 249, 1, 40000, 156, 1, 4231, 185, 1, 54443,
+        ];
+        b1[40..58].copy_from_slice(&words);
+        b1
+    }
 
-        let mut b5 = [0u16; 29];
-        // V2: aio1 serial @ 1841-1845 (offsets 10-14)
-        b5[10] = 0x5632; // 'V','2'  — to distinguish from V1 serial position
-        b5[11] = 0x4149;
-        b5[12] = 0x4F31;
-        b5[13] = 0x3030;
-        b5[14] = 0x3031;
-
-        let blocks = vec![
+    fn decode_gateway_block1(b1: [u16; 60]) -> InverterSnapshot {
+        decode_snapshot(&[
             gateway_holding_block(),
             gateway_block1(b1),
             gateway_block2([0u16; 60]),
             gateway_block3([0u16; 60]),
             gateway_block4([0u16; 51]),
-            gateway_block5_v1(b5),
-        ];
-        let snap = decode_snapshot(&blocks);
+            gateway_block5_v1([0u16; 29]),
+        ])
+    }
 
-        assert!(snap.gateway_is_v2);
-        // V2: (0<<16)|1 = 1, /10 = 0.1
-        assert!((snap.total_import_kwh - 0.1).abs() < 0.01);
-        // Serial should be at V2 offsets: "V2AIO10001"
-        assert_eq!(snap.per_aio_serial[0], "V2AIO10001");
+    #[test]
+    fn gateway_lifetime_totals_decode_on_a_live_capture() {
+        // A real Gateway reports IR(1603) = 0x0104 (version digits as bytes),
+        // which is >= 10. Totals are high register first regardless.
+        let snap = decode_gateway_block1(live_gateway_block1(0x0104));
+        assert_eq!(snap.gateway_software_version, "GAAA0014");
+        assert!((snap.total_import_kwh - 12682.7).abs() < 0.1);
+        assert!((snap.total_export_kwh - 2191.8).abs() < 0.1);
+        assert!((snap.total_charge_kwh - 10553.6).abs() < 0.1);
+        assert!((snap.total_discharge_kwh - 6976.7).abs() < 0.1);
+    }
+
+    #[test]
+    fn gateway_lifetime_totals_decode_on_gaaa0013() {
+        // John's Gateway (#456) is GAAA0013: IR(1603) = 0x0103.
+        let snap = decode_gateway_block1(live_gateway_block1(0x0103));
+        assert_eq!(snap.gateway_software_version, "GAAA0013");
+        assert!(snap.total_import_kwh > 12000.0);
+        assert!(snap.total_export_kwh > 2000.0);
+        assert!(snap.total_charge_kwh > 10000.0);
+        assert!(snap.total_discharge_kwh > 6000.0);
+    }
+
+    #[test]
+    fn gateway_lifetime_total_with_a_corrupt_high_word_reads_zero() {
+        let mut b1 = live_gateway_block1(0x0104);
+        b1[41] = 2000; // import high word beyond any real total
+        let snap = decode_gateway_block1(b1);
+        assert_eq!(snap.total_import_kwh, 0.0);
+        // The other totals are untouched.
+        assert!((snap.total_export_kwh - 2191.8).abs() < 0.1);
+    }
+
+    #[test]
+    fn gateway_all_zero_identity_block_is_not_valid_and_totals_read_zero() {
+        let snap = decode_gateway_block1([0u16; 60]);
+        assert!(!gateway_is_valid(&snap.gateway_software_version));
+        assert_eq!(snap.total_import_kwh, 0.0);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
+    }
+
+    #[test]
+    fn gateway_aio_serials_come_from_the_live_five_register_stride() {
+        // Live layout: aio1 IR 1841-1845, aio2 1846-1850, aio3 1851-1855.
+        let mut b5 = [0u16; 29];
+        let put = |b5: &mut [u16; 29], at: usize, s: &str| {
+            for (i, pair) in s.as_bytes().chunks(2).enumerate() {
+                b5[at + i] = u16::from_be_bytes([pair[0], pair[1]]);
+            }
+        };
+        put(&mut b5, 10, "CH2414G000");
+        put(&mut b5, 15, "CH2542G000");
+        let snap = decode_snapshot(&[
+            gateway_holding_block(),
+            gateway_block1(live_gateway_block1(0x0104)),
+            gateway_block2([0u16; 60]),
+            gateway_block3([0u16; 60]),
+            gateway_block4([0u16; 51]),
+            gateway_block5_v1(b5),
+        ]);
+        assert_eq!(snap.per_aio_serial, ["CH2414G000", "CH2542G000", ""]);
+
+        put(&mut b5, 20, "CH2600G000");
+        let snap = decode_snapshot(&[
+            gateway_holding_block(),
+            gateway_block1(live_gateway_block1(0x0104)),
+            gateway_block2([0u16; 60]),
+            gateway_block3([0u16; 60]),
+            gateway_block4([0u16; 51]),
+            gateway_block5_v1(b5),
+        ]);
+        assert_eq!(snap.per_aio_serial[2], "CH2600G000");
     }
 
     #[test]
