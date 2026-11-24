@@ -177,6 +177,33 @@ fn armed_target_after(plan: &SlotPlan) -> Option<Option<u8>> {
     }
 }
 
+/// The slot whose outcome is reported (issue #507) after queuing `plan`: a
+/// hold below 100 is the Planner's own, any other successful write leaves it
+/// owning none, and a plan that wrote nothing changes nothing.
+fn planned_slot_after(
+    plan: &SlotPlan,
+) -> Option<Option<crate::inverter::plan_outcome::PlannedSlot>> {
+    use crate::inverter::plan_outcome::PlannedSlot;
+    match plan {
+        SlotPlan::WriteHold {
+            start_hhmm,
+            end_hhmm,
+            target_soc,
+            writes: Ok(_),
+            ..
+        } => Some((*target_soc < 100).then_some(PlannedSlot {
+            start_hhmm: *start_hhmm,
+            end_hhmm: *end_hhmm,
+            target: *target_soc,
+        })),
+        SlotPlan::Write { writes: Ok(_), .. } | SlotPlan::Clear { writes: Ok(_) } => Some(None),
+        SlotPlan::Write { writes: Err(_), .. }
+        | SlotPlan::WriteHold { writes: Err(_), .. }
+        | SlotPlan::Clear { writes: Err(_) }
+        | SlotPlan::NoPlan { .. } => None,
+    }
+}
+
 /// Translate a recommendation into the writes for charge slot 1 on this
 /// inverter. Pure.
 pub(crate) fn plan_slot_plan(rec: &PlanRecommendation, snapshot: &InverterSnapshot) -> SlotPlan {
@@ -413,6 +440,9 @@ pub(crate) async fn queue_slot_plan(
                 );
             }
         },
+    }
+    if let Some(planned) = planned_slot_after(plan) {
+        crate::inverter::plan_outcome::note_planned_slot(state, planned).await;
     }
     if let Some(next) = armed_target_after(plan) {
         if next != planner_armed {
@@ -1801,6 +1831,68 @@ mod tests {
             let last = batches.last().expect("queued");
             assert_eq!(writes_to(last, 116), vec![100], "{last:?}");
             assert_eq!(Settings::load().forecast_plan_armed_target_pct, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_planner_notes_the_slot_whose_outcome_is_reported() {
+        use crate::inverter::plan_outcome::PlannedSlot;
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let planned = || async { state.plan_outcome.lock().await.planned() };
+
+            apply_plan_recommendation(
+                &state,
+                &armed(DeviceType::AllInOne6kW, 100),
+                &hold(false),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert_eq!(
+                planned().await,
+                Some(PlannedSlot {
+                    start_hhmm: 2300,
+                    end_hhmm: 600,
+                    target: 62
+                })
+            );
+
+            // A plan that writes nothing leaves it as it was.
+            apply_plan_recommendation(
+                &state,
+                &armed(DeviceType::AllInOne6kW, 62),
+                &no_plan("why"),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert!(planned().await.is_some());
+
+            // A full charge, or a cleared slot, is not a hold to report on.
+            apply_plan_recommendation(
+                &state,
+                &armed(DeviceType::AllInOne6kW, 62),
+                &charge(120, 300, false, 3.2),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert_eq!(planned().await, None);
+            apply_plan_recommendation(
+                &state,
+                &armed(DeviceType::AllInOne6kW, 100),
+                &hold(false),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert!(planned().await.is_some());
+            apply_plan_recommendation(
+                &state,
+                &armed(DeviceType::AllInOne6kW, 62),
+                &no_charge(),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert_eq!(planned().await, None);
         })
         .await;
     }

@@ -4598,6 +4598,18 @@ pub async fn set_charge_slot(
             }
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
+            if slot == 1 {
+                // The slot whose outcome is reported (issue #507): the
+                // Planner's hold, never a user's own save over it.
+                let planned = (planner_apply && target_soc < 100).then_some(
+                    crate::inverter::plan_outcome::PlannedSlot {
+                        start_hhmm: start,
+                        end_hhmm: end,
+                        target: target_soc,
+                    },
+                );
+                crate::inverter::plan_outcome::note_planned_slot(&state, planned).await;
+            }
             if planner_apply {
                 let next = (target_soc < 100).then_some(target_soc);
                 if let Err(error) = crate::settings::Settings::update_async(move |settings| {
@@ -12415,6 +12427,61 @@ pub(crate) mod tests {
             let (status, _) = set_charge_slot(State(state.clone()), Json(apply(100))).await;
             assert_eq!(status, StatusCode::OK);
             assert!(targets(&drain_pending_writes(&state).await).is_empty());
+        })
+        .await;
+    }
+
+    /// Issue #507: the slot the Planner's Apply writes with a hold target is
+    /// the one whose outcome is reported; a full charge, or anything the
+    /// user saves over slot 1, is not.
+    #[tokio::test]
+    async fn planner_apply_records_the_slot_whose_outcome_is_reported() {
+        use crate::inverter::plan_outcome::PlannedSlot;
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let save = |target: u64, rate: Option<u64>, start_hour: u64| {
+                let mut body = serde_json::json!({
+                    "slot": 1,
+                    "start_hour": start_hour, "start_minute": 0,
+                    "end_hour": 6, "end_minute": 0,
+                    "enabled": true,
+                    "target_soc": target,
+                });
+                if let Some(rate) = rate {
+                    body["charge_rate_percent"] = rate.into();
+                }
+                body
+            };
+            let planned = |state: &Arc<AppState>| {
+                let state = state.clone();
+                async move { state.plan_outcome.lock().await.planned() }
+            };
+
+            let (status, _) =
+                set_charge_slot(State(state.clone()), Json(save(62, Some(100), 23))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                planned(&state).await,
+                Some(PlannedSlot {
+                    start_hhmm: 2300,
+                    end_hhmm: 600,
+                    target: 62
+                })
+            );
+
+            // The user saves their own slot 1 over it.
+            let (status, _) = set_charge_slot(State(state.clone()), Json(save(62, None, 23))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(planned(&state).await, None);
+
+            // A full charge from the Planner arms no hold target.
+            let (status, _) =
+                set_charge_slot(State(state.clone()), Json(save(62, Some(100), 23))).await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, _) =
+                set_charge_slot(State(state.clone()), Json(save(100, Some(100), 23))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(planned(&state).await, None);
         })
         .await;
     }

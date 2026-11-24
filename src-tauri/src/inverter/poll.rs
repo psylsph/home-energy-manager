@@ -670,6 +670,9 @@ pub struct AppState {
     /// can be re-planned when Octopus moves a dispatch (issue #404).
     /// In-memory only: after a restart the next daily write starts afresh.
     pub(crate) forecast_plan_cycle: Arc<Mutex<Option<crate::inverter::plan_replan::PlanCycle>>>,
+    /// Follows a planned hold charge through its window to report the level
+    /// it reached (issue #507). In-memory only.
+    pub(crate) plan_outcome: Arc<Mutex<crate::inverter::plan_outcome::PlanOutcomeWatch>>,
     /// The last battery runtime answer (issue #472), reused for a few
     /// minutes so the Status page's poll doesn't rebuild the forecast.
     pub(crate) battery_runtime: Arc<Mutex<Option<crate::server::api::BatteryRuntimeCache>>>,
@@ -903,6 +906,7 @@ impl AppState {
             forecast_plan_apply_window: Arc::new(Mutex::new(None)),
             forecast_plan_snapshot_window: Arc::new(Mutex::new(None)),
             forecast_plan_cycle: Arc::new(Mutex::new(None)),
+            plan_outcome: Arc::new(Mutex::new(Default::default())),
             battery_runtime: Arc::new(Mutex::new(None)),
             forecast_plan_apply_warned: Arc::new(Mutex::new(None)),
             latest_evc: Arc::new(Mutex::new(None)),
@@ -4789,6 +4793,16 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // cheap window for the plan history (issue #361),
                                 // unless an automation above already did today.
                                 crate::inverter::forecast_plan::run_plan_snapshot(
+                                    &state,
+                                    &poll_settings,
+                                    &snapshot,
+                                    plan_now,
+                                )
+                                .await;
+                                // Report the level a planned hold charge
+                                // reached when its window ends (issue #507).
+                                // Read-only, so it never sits out.
+                                crate::inverter::plan_outcome::run_plan_outcome(
                                     &state,
                                     &poll_settings,
                                     &snapshot,
