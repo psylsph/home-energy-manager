@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.24.1] - 2026-11-24
+
+### Fixed
+
+- **Gateway lifetime totals show real figures.** On a Gateway, the lifetime import, export, charge and discharge totals read 0 because HEM decoded the wrong register layout. They now show the real values, and each All-in-One's serial number appears on the Inverter page. The Gateway card no longer shows a "V1" or "V2" badge, because there is only one layout.
+
 ## [1.24.0] - 2026-11-24
 
 ### Added
