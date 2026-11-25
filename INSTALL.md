@@ -1030,6 +1030,8 @@ GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-server ./givenergy-local --headless --por
 
 If two instances share the same port, the second one will fail to start. Change the port before launching.
 
+On Windows, [How do I run two copies of the app on Windows and start both at boot?](FAQ.md#how-do-i-run-two-copies-of-the-app-on-windows-and-start-both-at-boot) in the FAQ has the step-by-step version, including starting both at login.
+
 ---
 
 ## Restoring a History Backup

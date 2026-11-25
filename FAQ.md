@@ -630,6 +630,72 @@ click **Write Changes**.
 
 ---
 
+### How do I run two copies of the app on Windows and start both at boot?
+
+Use this if you have two inverters (for example an All-in-One and an AC-coupled
+inverter) and want each one to have its own copy of the app, both starting when
+Windows does. Each copy needs its own **settings folder** and its own **HTTP
+port**, otherwise they overwrite each other's settings and history, and the
+second can't start.
+
+The first copy is the normal install and starts with the **Start on Login**
+switch. The second copy can't use that switch, because Windows would start it
+with the first copy's settings folder. It starts from a small batch file in the
+Windows Startup folder instead.
+
+1. **Set up the first copy.** Open the app, go to **Settings → App** and turn on
+   **Start on Login**. Leave its HTTP Port at `7337`. Optionally turn on
+   **Minimise to Tray** and **Start Hidden in Tray** so it boots quietly.
+
+2. **Find where the app is installed.** Click the Start menu, find **Home
+   Energy Manager**, right-click it and choose **Open file location**. If that
+   opens a shortcut folder, right-click the shortcut and choose **Open file
+   location** again. Click the address bar and copy the folder path. The
+   program inside is `givenergy-local.exe`.
+
+3. **Open the Startup folder.** Press **Windows key + R**, type
+   `shell:startup` and press Enter.
+
+4. **Make the batch file.** In that folder, right-click, choose **New → Text
+   Document** and name it `Home Energy Manager 2.bat`. Make sure it ends in
+   `.bat`, not `.bat.txt` (in File Explorer choose **View → Show → File name
+   extensions**). Right-click it, choose **Edit** and paste this, replacing the
+   path on the last line with the folder from step 2:
+
+   ```bat
+   @echo off
+   set GIVENERGY_LOCAL_CONFIG_DIR=%USERPROFILE%\.givenergy-local-2
+   start "" "C:\path\from\step2\givenergy-local.exe"
+   ```
+
+   The first line after `@echo off` is the second copy's settings folder. HEM
+   creates it on first start. If you already run a second copy by hand with a
+   different settings folder, use that folder here instead so your settings and
+   history carry on.
+
+5. **Start the second copy once to set it up.** Double-click the batch file. A
+   black window flashes and the app opens. Enter the second inverter's address
+   in **Settings → Inverter**, then go to **Settings → App**, set **HTTP Port**
+   to `7338` and save. This setting stays with the second copy's folder, so it
+   is only needed once. Close the app from the tray icon or the window.
+
+6. **Leave Start on Login alone in the second copy.** That switch belongs to
+   Windows, not to the settings folder, so changing it in the second copy
+   changes it for both.
+
+7. **Restart Windows and check.** Both copies should start. Open
+   `http://localhost:7337` for the first and `http://localhost:7338` for the
+   second. From a phone or tablet, use the PC's IP address instead of
+   `localhost`, as in [I can't access the dashboard from my phone or tablet](#i-cant-access-the-dashboard-from-my-phone-or-tablet).
+
+If the second copy doesn't appear, open `shell:startup` again and double-click
+the batch file to see what it says. A wrong path in step 4 or a port that two
+copies share are the usual causes. For the same thing on Linux and macOS, see
+[Running Multiple Instances](INSTALL.md#running-multiple-instances) in
+INSTALL.md.
+
+---
+
 ### Something else?
 
 Open an issue on [GitHub](https://github.com/psylsph/home-energy-manager/issues) and we'll help you out.
