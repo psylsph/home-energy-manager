@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-11-25
+
+### Added
+
+- **Houses with two inverters can show the whole house.** If no single inverter sees everything, such as an All-in-One behind a Gateway beside an AC-coupled inverter that carries the solar meter, run a second copy of the app on the other inverter and enter its address under Settings → Inverter Connection → Second HEM Address. The main app then adds the other unit's solar to its own and takes grid and import/export from it, so solar, grid and home power add up for the whole house. Battery level, schedules and every control stay with the inverter the main app steers, and the other unit is only ever read. If the second app stops answering, the figures fall back to the main inverter's own and the settings page says why. The field is shown only in Developer Mode for now. (#456)
+
 ## [1.25.0] - 2026-11-25
 
 ### Added
