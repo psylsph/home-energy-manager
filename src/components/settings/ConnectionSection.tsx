@@ -6,6 +6,7 @@ import { isValidIpv4Host } from '../../lib/validators';
 import { useInverterStore } from '../../store/useInverterStore';
 import Toggle from '../Toggle';
 import { DiscoveredList, HostField } from './HostField';
+import SecondHemField from './SecondHemField';
 import { SettingsSection } from './SettingsSection';
 import { TEXT_INPUT } from './styles';
 import { errorText, useSettingsSave, type Flash } from './useSettingsSave';
@@ -181,6 +182,10 @@ export default function ConnectionSection({
           },
         }))}
       />
+
+      {developerMode && (
+        <SecondHemField initialUrl={initial.second_hem_url ?? ''} flash={flash} />
+      )}
 
       <div className="flex items-center justify-between bg-bg-elevated rounded-xl px-4 py-3 border border-white/5">
         <div className="flex flex-col gap-0.5">

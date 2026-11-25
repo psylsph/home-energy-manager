@@ -2,6 +2,21 @@ import type { ChargeCapStateName } from './chargeCap';
 import type { PlanStrategy } from './forecast';
 import type { ScheduleResetInfo } from './scheduleReset';
 
+/** What the house figures did with the second HEM on the last reading (#456). */
+export type SecondUnitState = 'merged' | 'unreachable' | 'stale' | 'invalid';
+
+export interface SecondUnitInfo {
+  state: SecondUnitState;
+  /** Seconds since the second unit's reading; absent before its first answer. */
+  age_secs?: number;
+  solar_power: number;
+  battery_power: number;
+  soc: number;
+  battery_capacity_kwh: number;
+  today_charge_kwh: number;
+  today_discharge_kwh: number;
+}
+
 export interface InverterSnapshot {
   timestamp: number;
   solar_power: number;
@@ -119,6 +134,8 @@ export interface InverterSnapshot {
   dispatch_charge_active?: boolean;
   /** Set while a dongle factory reset is flagged and not yet restored or dismissed (issue #397). */
   schedule_reset?: ScheduleResetInfo | null;
+  /** The second inverter folded into the house figures; absent unless a second HEM is set (#456). */
+  second_unit?: SecondUnitInfo | null;
   cosy_active: boolean;
   cosy_enabled: boolean;
   /** Why Cosy is not running: 'pause', 'force', 'calibration', 'dispatch_hold' or 'safety'; empty or absent when nothing blocks it. */
@@ -338,6 +355,8 @@ export interface PollSettings {
   evc_host: string;
   evc_port: number;
   disable_auto_discovery: boolean;
+  /** Address of a second HEM read for the house figures; empty when none (#456). */
+  second_hem_url?: string;
   /** Whether the user has opted in to launching the app on system login.
    *  Wired through tauri-plugin-autostart (HKCU\…\Run on Windows,
    *  LaunchAgent on macOS, ~/.config/autostart/*.desktop on Linux).
