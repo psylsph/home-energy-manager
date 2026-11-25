@@ -519,6 +519,70 @@ async fn auto_apply_lead_minutes_above_120_is_rejected() {
 }
 
 // ====================================================================
+// Second HEM address (issue #456)
+// ====================================================================
+
+#[tokio::test]
+async fn second_hem_url_defaults_empty_saves_tidied_and_clears() {
+    let router = fresh_router();
+    let (_, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(body["data"]["second_hem_url"], "", "off by default");
+
+    let (status, body) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "second_hem_url": " http://192.168.1.50:7338/ " }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(body["data"]["second_hem_url"], "http://192.168.1.50:7338");
+
+    // A save that doesn't mention it leaves it alone.
+    let (status, _) = post_json(
+        &router,
+        "/api/settings",
+        &json!({ "check_for_updates": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(body["data"]["second_hem_url"], "http://192.168.1.50:7338");
+
+    let (status, _) = post_json(&router, "/api/settings", &json!({ "second_hem_url": "" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(body["data"]["second_hem_url"], "");
+}
+
+#[tokio::test]
+async fn a_bad_second_hem_url_is_rejected_and_nothing_else_in_the_save_lands() {
+    let router = fresh_router();
+    for bad in [
+        json!("192.168.1.50:7338"),
+        json!("http://host/api/snapshot"),
+        json!("http://user:pw@host"),
+        json!("http://host:0"),
+        json!(42),
+    ] {
+        let (status, body) = post_json(
+            &router,
+            "/api/settings",
+            &json!({ "second_hem_url": bad, "forecast_plan_auto_apply_lead_minutes": 90 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert_eq!(body["ok"], Value::Bool(false));
+    }
+    let (_, body) = get_json(&router, "/api/settings").await;
+    assert_eq!(body["data"]["second_hem_url"], "");
+    assert_eq!(
+        body["data"]["forecast_plan_auto_apply_lead_minutes"], 30,
+        "a rejected save is all-or-nothing"
+    );
+}
+
+// ====================================================================
 // GET /api/logs and PUT /api/log-level
 // ====================================================================
 

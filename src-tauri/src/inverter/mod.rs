@@ -28,6 +28,7 @@ pub mod power_limit;
 pub mod reconnect;
 pub mod sanitizer;
 pub mod schedule_reset;
+pub mod second_unit;
 pub mod soc_watch;
 pub(crate) mod solar_position;
 pub mod state_machines;

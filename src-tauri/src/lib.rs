@@ -785,6 +785,11 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     run_poll_loop(poll_state).await;
                 });
+                // Issue #456: read the second HEM, if one is configured.
+                let second_unit_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    inverter::second_unit::run_fetch_loop(second_unit_state).await;
+                });
             });
 
             Ok(())
@@ -1130,6 +1135,12 @@ pub fn run_headless(args: &[String]) {
         let poll_state = state.clone();
         tokio::spawn(async move {
             run_poll_loop(poll_state).await;
+        });
+
+        // Issue #456: read the second HEM, if one is configured.
+        let second_unit_state = state.clone();
+        tokio::spawn(async move {
+            inverter::second_unit::run_fetch_loop(second_unit_state).await;
         });
 
         // Spawn the EV charger poll loop

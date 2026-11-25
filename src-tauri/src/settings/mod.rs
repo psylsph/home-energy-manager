@@ -1505,6 +1505,12 @@ pub struct Settings {
     #[serde(default = "default_disable_auto_discovery")]
     pub disable_auto_discovery: bool,
 
+    /// Address of a second HEM whose inverter is read, never written, and
+    /// folded into the house figures (issue #456), e.g.
+    /// `http://192.168.1.50:7338`. Empty (the default) means none.
+    #[serde(default)]
+    pub second_hem_url: String,
+
     /// Full import tariff config with peak/off-peak rates and times.
     /// Falls back to legacy `import_tariff` if `None`.
     #[serde(default)]
@@ -2365,6 +2371,7 @@ impl Default for Settings {
             octopus_economy7_start: default_octopus_economy7_start(),
             octopus_economy7_end: default_octopus_economy7_end(),
             disable_auto_discovery: true,
+            second_hem_url: String::new(),
             autostart_enabled: false,
             minimise_to_tray: false,
             start_minimised: false,
@@ -3119,6 +3126,7 @@ mod tests {
             octopus_economy7_start: "00:30".to_string(),
             octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
+            second_hem_url: String::new(),
             autostart_enabled: true,
             minimise_to_tray: false,
             start_minimised: false,
@@ -4011,6 +4019,7 @@ mod tests {
             octopus_economy7_start: "00:30".to_string(),
             octopus_economy7_end: "07:30".to_string(),
             disable_auto_discovery: true,
+            second_hem_url: String::new(),
             autostart_enabled: false,
             minimise_to_tray: false,
             start_minimised: false,

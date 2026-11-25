@@ -1862,6 +1862,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "evc_host": settings.evc_host,
             "evc_port": settings.evc_port,
             "disable_auto_discovery": settings.disable_auto_discovery,
+            "second_hem_url": settings.second_hem_url,
             "autostart_enabled": settings.autostart_enabled,
             // "New version available" banner gate.
             "check_for_updates": settings.check_for_updates,
@@ -2146,6 +2147,14 @@ pub async fn update_settings(
         }
         if let Some(d) = body.get("disable_auto_discovery").and_then(|v| v.as_bool()) {
             persist.disable_auto_discovery = d;
+        }
+        // Issue #456: the second HEM whose inverter is read for the house
+        // figures. Validated here so a bad address rejects the whole save.
+        if let Some(raw) = body.get("second_hem_url") {
+            let raw = raw
+                .as_str()
+                .ok_or_else(|| "second_hem_url must be a string".to_string())?;
+            persist.second_hem_url = crate::inverter::second_unit::normalize_url(raw)?;
         }
         // "New version available" banner gate. Disabling stops the background
         // loop's GitHub fetches and makes the banner hide on next poll.

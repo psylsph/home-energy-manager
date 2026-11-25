@@ -1445,6 +1445,10 @@ pub struct InverterSnapshot {
     /// to restore was taken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_reset: Option<crate::inverter::schedule_reset::ScheduleResetInfo>,
+    /// The second, read-only inverter folded into the house figures, when a
+    /// second HEM is configured (issue #456). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_unit: Option<crate::inverter::second_unit::SecondUnitInfo>,
     /// Whether the inverter's built-in battery calibration (HR 29) is offered:
     /// single-phase LV models, whatever the BMS firmware (issue #477).
     #[serde(default)]
@@ -1688,6 +1692,7 @@ impl InverterSnapshot {
             cosy_blocked_by: String::new(),
             cosy_slot_at_risk: false,
             schedule_reset: None,
+            second_unit: None,
             agile_blocked_by: String::new(),
             cosy_enabled: false,
             agile_active: false,

@@ -456,6 +456,15 @@ pub struct PendingWriteBatch {
 pub struct AppState {
     /// Most recently decoded snapshot (or `None` if never polled).
     pub latest_snapshot: Arc<Mutex<Option<InverterSnapshot>>>,
+    /// The primary inverter's own latest snapshot, before any second unit is
+    /// folded in (issue #456). The sanitizer's "previous reading" and the
+    /// carry-forward logic read this one, so a merged total is never fed back
+    /// in and counted twice. Equal to `latest_snapshot` when no second HEM is
+    /// configured.
+    pub primary_snapshot: Arc<Mutex<Option<InverterSnapshot>>>,
+    /// The second HEM's latest answer (issue #456). Written by
+    /// `second_unit::run_fetch_loop`, read when a snapshot is published.
+    pub second_unit: std::sync::Mutex<crate::inverter::second_unit::RemoteSource>,
     /// Current connection state (read by the status endpoint).
     pub connection_state: Arc<Mutex<ConnectionState>>,
     /// Broadcast sender - every poll cycle sends a [`PollMessage::Snapshot`]
@@ -768,6 +777,10 @@ impl AppState {
         let (tx, _) = broadcast::channel(32);
         Self {
             latest_snapshot: Arc::new(Mutex::new(None)),
+            primary_snapshot: Arc::new(Mutex::new(None)),
+            second_unit: std::sync::Mutex::new(
+                crate::inverter::second_unit::RemoteSource::default(),
+            ),
             connection_state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
             tx,
             ws_keepalive: Arc::new(Mutex::new(crate::server::ws::KeepaliveConfig::default())),
@@ -3679,6 +3692,28 @@ async fn publish_snapshot(state: &Arc<AppState>, snapshot: InverterSnapshot) {
     stamp_solar_array_fields(&mut snapshot, &fresh_settings);
     crate::inverter::charge_cap::stamp_snapshot(&mut snapshot, &*state.charge_cap.lock().await);
 
+    // The primary's own reading, kept apart from the published one so the
+    // sanitizer's next "previous" never contains merged totals (issue #456).
+    *state.primary_snapshot.lock().await = Some(snapshot.clone());
+    {
+        let configured = !fresh_settings.second_hem_url.is_empty();
+        let remote = if configured {
+            state
+                .second_unit
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        } else {
+            crate::inverter::second_unit::RemoteSource::default()
+        };
+        crate::inverter::second_unit::apply(
+            &mut snapshot,
+            configured,
+            &remote,
+            chrono::Utc::now().timestamp(),
+        );
+    }
+
     {
         let mut latest = state.latest_snapshot.lock().await;
         *latest = Some(snapshot.clone());
@@ -3927,6 +3962,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     let mut latest = state.latest_snapshot.lock().await;
                     *latest = None;
                 }
+                *state.primary_snapshot.lock().await = None;
                 // Writes queued for the previous TCP session are unsafe to
                 // replay against whatever inverter answered this reconnect.
                 // Drop them before publishing Connected; callers can retry
@@ -3958,6 +3994,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     let mut latest = state.latest_snapshot.lock().await;
                     *latest = None;
                 }
+                *state.primary_snapshot.lock().await = None;
 
                 // Broadcast connected state.
                 {
@@ -4063,6 +4100,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     let mut latest = state.latest_snapshot.lock().await;
                     *latest = None;
                 }
+                *state.primary_snapshot.lock().await = None;
 
                 // New session: reset the connect back-off to the floor and
                 // clear the per-session sustained-timeout streak + the
@@ -4396,7 +4434,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         }
                                     }
                                     if !read_ok {
-                                        let prev = state.latest_snapshot.lock().await;
+                                        let prev = state.primary_snapshot.lock().await;
                                         if let Some(p) = prev.as_ref() {
                                             carry_forward_pause_display(&mut snapshot, p);
                                         }
@@ -4596,7 +4634,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // Skip delta checks during the grace period after connect.
                                 let in_grace = readings_since_connect < GRACE_READINGS;
                                 let (sanitized, prev_modules) = {
-                                    let prev = state.latest_snapshot.lock().await;
+                                    let prev = state.primary_snapshot.lock().await;
                                     // Only sanitize_snapshot's verdict may mark
                                     // the cycle corrupt and trigger the
                                     // immediate re-poll. Review H3: carry-forward
@@ -6588,6 +6626,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     let mut latest = state.latest_snapshot.lock().await;
                     *latest = None;
                 }
+                *state.primary_snapshot.lock().await = None;
 
                 tracing::debug!("Disconnected - entering reconnect cycle");
 
@@ -15615,6 +15654,160 @@ mod tests {
                 latest.pv1_pct,
                 Some(66.42),
                 "no settings save mid-cycle → publish must not disturb the cycle's stamps"
+            );
+        })
+        .await;
+    }
+
+    /// A primary reading and a second HEM's answer for the merge tests
+    /// (issue #456): an AIO charging from the grid, and an AC-coupled unit
+    /// carrying the panels.
+    fn second_unit_pair() -> (InverterSnapshot, crate::inverter::second_unit::RemoteSource) {
+        let now = chrono::Utc::now().timestamp();
+        let primary = InverterSnapshot {
+            timestamp: now,
+            inverter_serial: "AIO0000001".into(),
+            soc: 60,
+            battery_power: -400,
+            grid_power: -400,
+            today_import_kwh: 35.5,
+            today_export_kwh: 18.4,
+            today_charge_kwh: 13.5,
+            today_discharge_kwh: 2.1,
+            ..InverterSnapshot::default()
+        };
+        let second = InverterSnapshot {
+            timestamp: now,
+            inverter_serial: "AC0000001".into(),
+            solar_power: 3000,
+            battery_power: 1800,
+            grid_power: 0,
+            soc: 80,
+            today_solar_kwh: 13.6,
+            today_import_kwh: 35.5,
+            today_export_kwh: 18.4,
+            today_charge_kwh: 15.6,
+            today_discharge_kwh: 10.6,
+            ..InverterSnapshot::default()
+        };
+        (
+            primary,
+            crate::inverter::second_unit::RemoteSource {
+                snapshot: Some(second),
+                received_at: now,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn publish_folds_in_the_second_unit_and_keeps_the_primarys_own_reading() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            Settings::update(|s| s.second_hem_url = "http://127.0.0.1:7338".into())
+                .expect("seed settings");
+            let (primary, remote) = second_unit_pair();
+            let state = Arc::new(AppState::new());
+            *state.second_unit.lock().unwrap() = remote;
+            let mut rx = state.tx.subscribe();
+
+            publish_snapshot(&state, primary.clone()).await;
+
+            let latest = state.latest_snapshot.lock().await.clone().expect("latest");
+            assert_eq!(latest.solar_power, 3000);
+            assert_eq!(latest.home_power, 4400);
+            assert_eq!(latest.soc, 60, "the primary's own battery stays the AIO's");
+            assert_eq!(
+                latest.second_unit.as_ref().map(|u| u.state),
+                Some(crate::inverter::second_unit::SecondUnitState::Merged)
+            );
+            let own = state
+                .primary_snapshot
+                .lock()
+                .await
+                .clone()
+                .expect("primary");
+            assert_eq!(
+                own.solar_power, 0,
+                "sanitizer's previous must stay un-merged"
+            );
+            assert_eq!(own.home_power, primary.home_power);
+            assert!(own.second_unit.is_none());
+            match rx.try_recv().expect("broadcast frame") {
+                PollMessage::Snapshot(b) => assert_eq!(b.home_power, 4400),
+                _ => panic!("expected snapshot frame"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn publishing_again_does_not_count_the_second_unit_twice() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            Settings::update(|s| s.second_hem_url = "http://127.0.0.1:7338".into())
+                .expect("seed settings");
+            let (primary, remote) = second_unit_pair();
+            let state = Arc::new(AppState::new());
+            *state.second_unit.lock().unwrap() = remote;
+
+            for _ in 0..3 {
+                publish_snapshot(&state, primary.clone()).await;
+            }
+            let latest = state.latest_snapshot.lock().await.clone().expect("latest");
+            assert_eq!(latest.solar_power, 3000);
+            assert_eq!(latest.home_power, 4400);
+            assert!((latest.today_solar_kwh - 13.6).abs() < 1e-4);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn publish_without_a_second_hem_is_unchanged() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (primary, remote) = second_unit_pair();
+            let state = Arc::new(AppState::new());
+            // An answer is held, but no address is configured.
+            *state.second_unit.lock().unwrap() = remote;
+
+            publish_snapshot(&state, primary.clone()).await;
+
+            let latest = state.latest_snapshot.lock().await.clone().expect("latest");
+            assert_eq!(latest.solar_power, primary.solar_power);
+            assert_eq!(latest.home_power, primary.home_power);
+            assert!(latest.second_unit.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_second_unit_that_goes_stale_stops_contributing() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            Settings::update(|s| s.second_hem_url = "http://127.0.0.1:7338".into())
+                .expect("seed settings");
+            let (primary, mut remote) = second_unit_pair();
+            let state = Arc::new(AppState::new());
+            *state.second_unit.lock().unwrap() = remote.clone();
+            publish_snapshot(&state, primary.clone()).await;
+            assert_eq!(
+                state
+                    .latest_snapshot
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .home_power,
+                4400
+            );
+
+            // The fetch loop stopped getting answers: the old one ages out.
+            remote.received_at -= crate::inverter::second_unit::MAX_AGE_SECS + 5;
+            *state.second_unit.lock().unwrap() = remote;
+            publish_snapshot(&state, primary.clone()).await;
+
+            let latest = state.latest_snapshot.lock().await.clone().expect("latest");
+            assert_eq!(latest.home_power, primary.home_power);
+            assert_eq!(latest.solar_power, primary.solar_power);
+            assert_eq!(
+                latest.second_unit.as_ref().map(|u| u.state),
+                Some(crate::inverter::second_unit::SecondUnitState::Stale)
             );
         })
         .await;
