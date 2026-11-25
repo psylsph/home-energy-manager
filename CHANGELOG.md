@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-11-25
+
+### Added
+
+- **Spread Charge now lowers the charge limit for you.** With Spread Charge switched on in Plan Settings, an applied plan (the Apply button or Auto-Apply) charges across the whole cheap window at the lower rate the Planner advised, so the battery fills near the end of the window instead of in the first hour. HEM lowers your charge limit only once the charge is actually running, and puts it back when the window ends, even if HEM was restarted in between. It puts the limit back early if Force Charge, a smart-charge top-up, a calibration or Adaptive Charge needs full power, and leaves it alone if you change the limit yourself. The Control page says when the limit returns, and if HEM can't put it back after fifteen minutes you get a notification saying what to set by hand. (#508)
+
+### Changed
+
+- **The Planner card only promises a slower charge when it can deliver one.** Where HEM can't lower the limit for a plan, such as on a Gateway or while Adaptive Charge is in charge of it, the card now says the plan charges at full power instead of describing a spread that won't happen.
+
 ## [1.24.1] - 2026-11-24
 
 ### Fixed
