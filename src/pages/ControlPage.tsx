@@ -19,6 +19,7 @@ import {
 import { waitForSnapshotReadback } from '../lib/readback';
 import { describeLiveReadout, liveReadout } from '../lib/liveReadback';
 import { describeChargeSlotLimit, type ChargeSlotLimitContext } from '../lib/chargeSlotLimit';
+import { formatClock } from '../lib/format';
 import { formatPowerLimitLabel, percentToRawLimit, percentToWatts, rawLimitToPercent, resolveLimitDraft, snapLimitPercent } from '../lib/powerLimit';
 import type { LimitDraft, LimitScale } from '../lib/powerLimit';
 import type { InverterSnapshot, PollSettings, ScheduleSlot } from '../lib/types';
@@ -4009,6 +4010,10 @@ export default function ControlPage() {
                   socPercent: snapshot?.soc,
                   nowMinute: currentInverterMinute,
                   otherSlots: chargeSlots.filter((other, j) => j !== i && isSlotConfigured(other)),
+                  // Spread Charge lowers the limit for the plan's slot only.
+                  limitBackAt: i === 0 && snapshot?.plan_charge_limit_back_at
+                    ? formatClock(snapshot.plan_charge_limit_back_at * 1000)
+                    : null,
                   managedBy: adaptiveOwnsChargeRate
                     ? 'Adaptive Charge'
                     : (snapshot?.forecast_plan_auto_refresh === true

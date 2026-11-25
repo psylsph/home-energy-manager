@@ -738,6 +738,16 @@ export default function ForecastPage() {
       await apiPost('/api/control/charge-slot', plan.apply.charge_slot);
       chargeSlotWritten = true;
       await apiPost('/api/control/timed-charge', plan.apply.timed_charge);
+      if (plan.apply.spread) {
+        // Spread Charge (issue #508): the slot is written, so arm the lower
+        // limit for it. Not worth undoing the slot over: without it the
+        // window simply charges at full power.
+        try {
+          await apiPost('/api/forecast/plan/arm-spread', plan.apply.spread);
+        } catch {
+          /* the charge runs at full power */
+        }
+      }
       // Both POSTs only queue the writes; keep the progress up until a newer
       // snapshot shows the slot, as the Control page does.
       if (snapshotBeforeApply) {
@@ -1317,8 +1327,8 @@ export default function ForecastPage() {
               <HelpTip label="Charging Strategy">{STRATEGY_HELP[planStrategy].detail}</HelpTip>
             </p>
           </div>
-          {/* Spread the charge across the window (issue #483): advice only for
-              now, so the numbers can be checked before HEM writes a lower limit.
+          {/* Spread the charge across the window (issues #483, #508): HEM
+              lowers the charge limit once the slot runs and puts it back.
               Not on a Gateway, whose charge limit never reaches the battery. */}
           {batteryControls && (
           <div className="pt-3 flex flex-col gap-1" data-testid="forecast-plan-spread-setting">
@@ -1340,18 +1350,18 @@ export default function ForecastPage() {
               )}
             </div>
             <p className="text-[11px] text-text-secondary font-sans">
-              Shows the slower rate that would fill the battery near the window's end.{' '}
+              Lowers the charge limit so the battery fills near the window's end.{' '}
               <HelpTip label="Spread Charge Across Window">
-                The plan charges at full power from the start of the cheap period, then stops. With
-                this on, the plan also shows the lower rate that would deliver the same charge and
-                finish about 90% of the way through the window (80% when charging above 90%, where
-                the battery slows down), as one slot across the whole window
-                with a target, so it can't overshoot. For now this is advice only: Apply and the
-                automatic plan still charge at full power. Short windows, and charges that already
-                fill 65% or more of the window at full power, stay at full power. The charge limit
-                also caps solar charging, so a daytime window keeps full power when a lower limit
-                would leave the battery lower later. While Adaptive Charge sets the limit, the plan
-                keeps full power and says so.
+                The plan writes one slot across the whole cheap window with a target, so it can't
+                overshoot, and HEM lowers the charge limit once the charge starts. That makes the
+                battery fill about 90% of the way through the window (80% when charging above 90%,
+                where the battery slows down). HEM puts the limit back when the window ends, or
+                sooner if Force Charge, an Octopus top-up, calibration or a safety limit needs it,
+                and alerts you if it can't. If you change the limit yourself, HEM leaves it alone.
+                Short windows, and charges that already fill 65% or more of the window at full
+                power, stay at full power. The charge limit also caps solar charging, so a daytime
+                window keeps full power when a lower limit would leave the battery lower later.
+                While Adaptive Charge sets the limit, the plan keeps full power and says so.
               </HelpTip>
             </p>
           </div>

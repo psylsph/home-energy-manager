@@ -1586,8 +1586,9 @@ pub struct Settings {
     #[serde(default)]
     pub forecast_plan_every_cheap_window: bool,
     /// Spread the planned charge across the cheap window at a lower rate
-    /// (issue #483). Advice only for now: the Planner shows the rate it
-    /// would use, but every write still charges at full power. Off by
+    /// (issue #483). On, an applied plan writes the whole window and HEM
+    /// lowers the charge limit while it runs and puts it back after (issue
+    /// #508); the Planner shows the rate it would use either way. Off by
     /// default.
     #[serde(default)]
     pub forecast_plan_spread_charge: bool,
@@ -1845,6 +1846,10 @@ pub struct Settings {
     /// always put the charge settings back.
     #[serde(default, deserialize_with = "deserialize_or_default")]
     pub dispatch_charge_run: Option<crate::inverter::dispatch_charge::DispatchChargeRun>,
+    /// A charge limit lowered for a Spread Charge window (issue #508), saved
+    /// before it is written so a restart can always put it back.
+    #[serde(default, deserialize_with = "deserialize_or_default")]
+    pub plan_charge_rate_run: Option<crate::inverter::plan_rate::PlanRateRun>,
 
     // -- Guided battery calibration (issue #418) --
     /// The running calibration cycle, owned by the poll loop and persisted
@@ -2396,6 +2401,7 @@ impl Default for Settings {
             status_show_flow_status_words: true,
             status_home_excludes_car: false,
             dispatch_charge_run: None,
+            plan_charge_rate_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),
@@ -3166,6 +3172,7 @@ mod tests {
             status_show_flow_status_words: true,
             status_home_excludes_car: false,
             dispatch_charge_run: None,
+            plan_charge_rate_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),
@@ -4040,6 +4047,7 @@ mod tests {
             status_show_flow_status_words: true,
             status_home_excludes_car: false,
             dispatch_charge_run: None,
+            plan_charge_rate_run: None,
             battery_calibration_run: None,
             battery_calibration_last: None,
             charge_cap: Default::default(),

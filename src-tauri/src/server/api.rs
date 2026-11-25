@@ -1219,8 +1219,14 @@ async fn capture_force_charge_revert(
     state: &Arc<AppState>,
     device_type: DeviceType,
 ) -> Option<ForceChargeRevert> {
-    let snap = state.latest_snapshot.lock().await;
-    force_charge_revert_from_snapshot(snap.as_ref()?, device_type)
+    let snap = state.latest_snapshot.lock().await.clone()?;
+    // While Spread Charge holds the limit down, the baseline to put back is
+    // the user's own value, not the lowered one (issue #508).
+    let snap = crate::inverter::plan_rate::with_baseline_limit(
+        state.plan_rate.lock().await.run.as_ref(),
+        &snap,
+    );
+    force_charge_revert_from_snapshot(&snap, device_type)
 }
 
 /// The Force Charge restore baseline for `snap`, or `None` without a known
@@ -1921,7 +1927,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             "forecast_plan_strategy": settings.forecast_plan_strategy,
             // Plan before every cheap period, not just the cheapest (#453).
             "forecast_plan_every_cheap_window": settings.forecast_plan_every_cheap_window,
-            // Spread the charge across the window, advice only (#483).
+            // Spread the charge across the window, lowering the limit while it runs (#483, #508).
             "forecast_plan_spread_charge": settings.forecast_plan_spread_charge,
         }
         })),
@@ -9541,33 +9547,120 @@ pub(crate) async fn get_forecast_plan_at(
         crate::forecast::planner::cheap_import_windows(tariff, 0, 30).len()
     });
     let timed_export = timed_export_slots(&state).await;
-    let (charge, export_advice, spread) = match tokio::task::spawn_blocking(move || {
-        let forecast = crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
-            db: history.as_deref(),
-            settings: &settings,
-            snapshot: snapshot.as_ref(),
-            weather_enabled,
-            weather_coords: coords,
-            now,
-            dispatches: &dispatches,
-            // As the daily write plans it, so Apply and auto-apply agree.
-            include_current_hour: crate::forecast::planner::plan_needs_current_hour(
-                settings.import_tariff_config.as_ref(),
-                now,
-                settings.forecast_plan_every_cheap_window,
-            ),
-            timed_export_slots: &timed_export,
-        });
-        compute_full_plan_advice(&forecast, &settings, snapshot.as_ref(), now.timestamp())
-    })
-    .await
-    {
-        Ok(plan) => plan,
-        Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
-    };
+    let (charge, export_advice, spread, spread_apply) =
+        match tokio::task::spawn_blocking(move || {
+            let forecast =
+                crate::forecast::build_forecast_payload(&crate::forecast::ForecastInputs {
+                    db: history.as_deref(),
+                    settings: &settings,
+                    snapshot: snapshot.as_ref(),
+                    weather_enabled,
+                    weather_coords: coords,
+                    now,
+                    dispatches: &dispatches,
+                    // As the daily write plans it, so Apply and auto-apply agree.
+                    include_current_hour: crate::forecast::planner::plan_needs_current_hour(
+                        settings.import_tariff_config.as_ref(),
+                        now,
+                        settings.forecast_plan_every_cheap_window,
+                    ),
+                    timed_export_slots: &timed_export,
+                });
+            let (charge, export_advice, spread) =
+                compute_full_plan_advice(&forecast, &settings, snapshot.as_ref(), now.timestamp());
+            let spread_apply = snapshot.as_ref().and_then(|snapshot| {
+                spread_apply_json(&charge, spread.as_ref(), snapshot, &settings, now)
+            });
+            (charge, export_advice, spread, spread_apply)
+        })
+        .await
+        {
+            Ok(plan) => plan,
+            Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
+        };
     let mut data = plan_response_json(&charge, export_advice.as_ref(), spread.as_ref());
+    // Spread Charge (issue #508): Apply writes what the automatic plan would,
+    // the whole window held at the advised target, and says which limit to
+    // arm for it.
+    match spread_apply {
+        Some(apply) => data["apply"] = apply,
+        None => unapplied_spread_summary(&mut data),
+    }
     data["cheap_window_count"] = json!(cheap_window_count);
     (StatusCode::OK, Json(json!({ "ok": true, "data": data })))
+}
+
+/// The Apply payload when the Spread Charge setting applies to `charge`
+/// (issue #508): the whole-window hold the automatic plan writes, with
+/// `spread` naming the window and the limit to arm for it. `None` leaves the
+/// plain Apply payload: setting off, Adaptive Charge owning the rate, no
+/// advice, or a window that can't be placed in time.
+pub(crate) fn spread_apply_json(
+    charge: &crate::forecast::planner::PlanRecommendation,
+    spread: Option<&crate::forecast::planner::SpreadAdvice>,
+    snapshot: &crate::inverter::model::InverterSnapshot,
+    settings: &crate::settings::Settings,
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<Value> {
+    use crate::forecast::planner::PlanRecommendation;
+    use crate::inverter::forecast_plan::{adaptive_owns_rate, spread_plan, window_bounds};
+    if !settings.forecast_plan_spread_charge || adaptive_owns_rate(settings) {
+        return None;
+    }
+    let plan = spread_plan(charge, spread, snapshot)?;
+    let PlanRecommendation::ChargeAndHold { window, .. } = &plan.rec else {
+        return None;
+    };
+    let (window_start, window_end) = window_bounds(window, now)?;
+    let mut apply = plan_to_json_value(&plan.rec).get("apply").cloned()?;
+    apply["spread"] = json!({
+        "window_start": window_start.to_rfc3339(),
+        "window_end": window_end.to_rfc3339(),
+        "lowered_percent": plan.rate_percent,
+    });
+    Some(apply)
+}
+
+/// POST /api/forecast/plan/arm-spread — arm the charge limit for a cheap
+/// window the Planner's Apply button has just written (issue #508). Writes
+/// nothing: the poll loop lowers the limit once the slot runs and puts it
+/// back after, exactly as for an automatic plan.
+pub async fn arm_plan_spread(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let parse = |key: &str| {
+        body[key]
+            .as_str()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc))
+    };
+    let (Some(window_start), Some(window_end)) = (parse("window_start"), parse("window_end"))
+    else {
+        return error_response("Missing or invalid 'window_start' / 'window_end'");
+    };
+    let Some(lowered_percent) = body["lowered_percent"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+    else {
+        return error_response("Missing or invalid 'lowered_percent'");
+    };
+    let snapshot = state.latest_snapshot.lock().await.clone();
+    let settings = crate::settings::Settings::load_async().await;
+    match crate::inverter::forecast_plan::armed_from_request(
+        window_start,
+        window_end,
+        lowered_percent,
+        snapshot.as_ref(),
+        &settings,
+        chrono::Utc::now(),
+    ) {
+        Ok(armed) => {
+            crate::inverter::forecast_plan::arm_spread(&state, Some(armed)).await;
+            (StatusCode::OK, Json(json!({ "ok": true })))
+        }
+        Err(reason) => error_response(reason),
+    }
 }
 
 /// How long until the write, and how many calendar days ahead it falls, for
@@ -9674,9 +9767,9 @@ pub(crate) fn plan_response_json(
 ///
 /// The spread advice is what the Planner would do with the charge limit if
 /// it spread the charge across the window: `None` unless the setting is on
-/// and there is a charge to spread. Advice only: the plan and its Apply
-/// payload are the same either way. The Planner card and plan history show
-/// it; nothing acts on it.
+/// and there is a charge to spread. The plan itself is the same either way;
+/// the Planner card and plan history show the advice, and Apply and
+/// auto-apply act on it when the setting is on (issue #508).
 pub(crate) fn compute_full_plan_advice(
     forecast: &crate::forecast::ForecastPayload,
     settings: &crate::settings::Settings,
@@ -10303,6 +10396,31 @@ pub(crate) fn plan_to_json_value(
     }
 }
 
+/// The card's summary says the limit will be lowered and put back. When the
+/// plan can't do that here (a Gateway, a pack size HEM doesn't know, Adaptive
+/// Charge owning the limit, a window that can't be placed in time), say what
+/// the advice would do and that this plan charges at full power.
+fn unapplied_spread_summary(data: &mut Value) {
+    let spread = &data["spread"];
+    if spread["kind"] != "spread" {
+        return;
+    }
+    let (Some(kw), Some(percent), Some(target), Some(finish), Some(full)) = (
+        spread["rate_kw"].as_f64(),
+        spread["rate_percent"].as_u64(),
+        spread["target_soc_pct"].as_u64(),
+        spread["finish"].as_str(),
+        spread["full_rate_finish"].as_str(),
+    ) else {
+        return;
+    };
+    let summary = format!(
+        "Would charge at {kw:.2} kW ({percent}%) to {target}%, finishing about {finish} instead \
+         of {full} at full power. Not applied here, so this plan charges at full power."
+    );
+    data["spread"]["summary"] = Value::String(summary);
+}
+
 /// Serialise the spread-charge advice (issue #483) for the Planner card:
 /// the numbers, plus a one-line `summary` in the rationale's voice.
 fn spread_advice_to_json(advice: &crate::forecast::planner::SpreadAdvice) -> Value {
@@ -10318,12 +10436,13 @@ fn spread_advice_to_json(advice: &crate::forecast::planner::SpreadAdvice) -> Val
             full_rate_minutes,
             window_minutes,
             after_min_soc_pct,
+            window: _,
         } => {
             let full_finish = hhmm(*full_rate_finish_min);
             let summary = format!(
-                "Would charge at {rate_kw:.2} kW ({rate_percent}%) to {target_soc_pct}%, \
-                 finishing about {} instead of {full_finish} at full power. Advice only: the \
-                 plan still charges at full power.",
+                "Charges at {rate_kw:.2} kW ({rate_percent}%) to {target_soc_pct}%, \
+                 finishing about {} instead of {full_finish} at full power. The limit goes \
+                 back when the window ends.",
                 hhmm(*finish_min),
             );
             json!({
@@ -18868,6 +18987,36 @@ pub(crate) mod tests {
                 revert.three_phase_force_charge_enable.is_none(),
                 "single-phase should not capture three-phase flags"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_puts_back_the_limit_spread_charge_would_not_the_lowered_one() {
+        // Issue #508: Force Charge started while a spread run holds the charge
+        // limit down must restore the user's value when it stops.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_charging_pre_state(&state).await;
+            let snap = {
+                let mut guard = state.latest_snapshot.lock().await;
+                let snap = guard.as_mut().unwrap();
+                snap.charge_rate = 20;
+                snap.clone()
+            };
+            let mut run = crate::inverter::plan_rate::start(&snap, 20, chrono::Utc::now()).unwrap();
+            run.baseline_raw = 50;
+            state.plan_rate.lock().await.run = Some(run);
+
+            let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let _ = drain_pending_writes(&state).await;
+            let revert = state
+                .force_charge_revert
+                .lock()
+                .await
+                .clone()
+                .expect("revert");
+            assert_eq!(revert.charge_rate, Some(50));
         })
         .await;
     }
@@ -28574,6 +28723,59 @@ pub(crate) mod tests {
     /// builder carries the recommendation, its Apply payload and the export
     /// advice.
     #[test]
+    fn a_spread_the_plan_cannot_apply_says_it_charges_at_full_power() {
+        use crate::forecast::planner::{PlanRecommendation, SpreadAdvice, SpreadSkip};
+        let rec = PlanRecommendation::NoChargeNeeded {
+            current_soc_pct: 80.0,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 45.0,
+        };
+        let spread = SpreadAdvice::Spread {
+            rate_percent: 35,
+            rate_kw: 1.75,
+            target_soc_pct: 65,
+            kwh: 4.2,
+            finish_min: 2 * 60 + 54,
+            full_rate_finish_min: 20,
+            full_rate_minutes: 50,
+            window_minutes: 360,
+            window: crate::forecast::planner::ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 5 * 60,
+                tomorrow: false,
+                rate: 0.075,
+            },
+            after_min_soc_pct: 25.0,
+        };
+        let mut data = plan_response_json(&rec, None, Some(&spread));
+        assert!(data["spread"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("The limit goes back when the window ends"));
+        unapplied_spread_summary(&mut data);
+        assert_eq!(
+            data["spread"]["summary"],
+            "Would charge at 1.75 kW (35%) to 65%, finishing about 02:54 instead of 00:20 \
+             at full power. Not applied here, so this plan charges at full power."
+        );
+        // Advice that is already "full power" says so on its own.
+        let mut skipped = plan_response_json(
+            &rec,
+            None,
+            Some(&SpreadAdvice::FullRate(SpreadSkip::WindowTooShort {
+                window_minutes: 90,
+            })),
+        );
+        let before = skipped["spread"]["summary"].clone();
+        unapplied_spread_summary(&mut skipped);
+        assert_eq!(skipped["spread"]["summary"], before);
+        // No spread block at all: nothing to rewrite.
+        let mut none = plan_response_json(&rec, None, None);
+        unapplied_spread_summary(&mut none);
+        assert!(none.get("spread").is_none());
+    }
+
+    #[test]
     fn plan_response_json_has_the_planner_pages_shape() {
         use crate::forecast::planner::{ExportAdvice, PlanRecommendation};
         let rec = PlanRecommendation::NoChargeNeeded {
@@ -28601,7 +28803,189 @@ pub(crate) mod tests {
         assert_eq!(data["spread"]["reason"], "worse_trough");
     }
 
-    /// Issue #483: the spread advice block, both kinds, with times on the
+    fn spread_test_advice() -> crate::forecast::planner::SpreadAdvice {
+        crate::forecast::planner::SpreadAdvice::Spread {
+            rate_percent: 40,
+            rate_kw: 1.4,
+            target_soc_pct: 70,
+            kwh: 4.0,
+            finish_min: 4 * 60 + 30,
+            full_rate_finish_min: 60,
+            full_rate_minutes: 90,
+            window_minutes: 7 * 60,
+            window: crate::forecast::planner::ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 6 * 60,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            after_min_soc_pct: 18.0,
+        }
+    }
+
+    fn spread_test_charge() -> crate::forecast::planner::PlanRecommendation {
+        crate::forecast::planner::PlanRecommendation::Charge {
+            window: crate::forecast::planner::ChargeWindow {
+                start_min: 120,
+                end_min: 150,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            kwh: 3.2,
+            min_soc_pct: 10.0,
+            observed_min_soc_pct: 4.0,
+            after_min_soc_pct: 12.0,
+            current_soc_pct: 30.0,
+            rationale: "test".into(),
+            with_charge_series: Vec::new(),
+            import_tomorrow_with_charge_kwh: 0.0,
+            export_tomorrow_with_charge_kwh: 0.0,
+        }
+    }
+
+    fn spread_test_snapshot() -> crate::inverter::model::InverterSnapshot {
+        crate::inverter::model::InverterSnapshot {
+            device_type: DeviceType::Gen2Hybrid,
+            battery_capacity_kwh: 9.5,
+            max_battery_power_w: 3600,
+            ..Default::default()
+        }
+    }
+
+    fn spread_test_now() -> chrono::DateTime<chrono::Local> {
+        chrono::Local
+            .with_ymd_and_hms(2026, 8, 31, 21, 0, 0)
+            .earliest()
+            .unwrap()
+    }
+
+    /// Issue #508: with Spread Charge on, Apply writes the whole window at the
+    /// advised target and names the limit to arm; with it off the payload is
+    /// the plain one.
+    #[test]
+    fn the_apply_payload_is_the_whole_window_hold_with_the_limit_to_arm_when_spreading() {
+        let settings = crate::settings::Settings {
+            forecast_plan_spread_charge: true,
+            ..Default::default()
+        };
+        let advice = spread_test_advice();
+        let apply = spread_apply_json(
+            &spread_test_charge(),
+            Some(&advice),
+            &spread_test_snapshot(),
+            &settings,
+            spread_test_now(),
+        )
+        .expect("spread apply");
+        assert_eq!(apply["charge_slot"]["start_hour"], 23);
+        assert_eq!(apply["charge_slot"]["end_hour"], 6);
+        assert_eq!(apply["charge_slot"]["target_soc"], 70);
+        assert_eq!(apply["timed_charge"]["enabled"], true);
+        assert_eq!(apply["spread"]["lowered_percent"], 40);
+        let start =
+            chrono::DateTime::parse_from_rfc3339(apply["spread"]["window_start"].as_str().unwrap())
+                .unwrap();
+        let end =
+            chrono::DateTime::parse_from_rfc3339(apply["spread"]["window_end"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            start.with_timezone(&chrono::Utc),
+            chrono::Local
+                .with_ymd_and_hms(2026, 8, 31, 23, 0, 0)
+                .earliest()
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        );
+        assert_eq!((end - start).num_hours(), 7);
+
+        // Off, or no advice, or Adaptive Charge owning the limit: nothing.
+        let off = crate::settings::Settings::default();
+        assert!(spread_apply_json(
+            &spread_test_charge(),
+            Some(&advice),
+            &spread_test_snapshot(),
+            &off,
+            spread_test_now()
+        )
+        .is_none());
+        assert!(spread_apply_json(
+            &spread_test_charge(),
+            None,
+            &spread_test_snapshot(),
+            &settings,
+            spread_test_now()
+        )
+        .is_none());
+        let adaptive = crate::settings::Settings {
+            adaptive_charge_enabled: true,
+            ..settings
+        };
+        assert!(spread_apply_json(
+            &spread_test_charge(),
+            Some(&advice),
+            &spread_test_snapshot(),
+            &adaptive,
+            spread_test_now()
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn the_arm_endpoint_arms_a_good_window_and_refuses_the_rest() {
+        with_isolated_config_dir_async(|| async {
+            crate::settings::Settings::update(|s| s.forecast_plan_spread_charge = true).unwrap();
+            let state = test_state();
+            *state.latest_snapshot.lock().await = Some(spread_test_snapshot());
+            let start = chrono::Utc::now() + chrono::Duration::hours(2);
+            let end = start + chrono::Duration::hours(7);
+            let body = json!({
+                "window_start": start.to_rfc3339(),
+                "window_end": end.to_rfc3339(),
+                "lowered_percent": 40,
+            });
+            let (status, _) = arm_plan_spread(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let armed = state.plan_rate.lock().await.armed.clone().expect("armed");
+            assert_eq!(armed.lowered_percent, 40);
+            assert_eq!(armed.window_end.timestamp(), end.timestamp());
+
+            // A rate of 0, a missing field and garbage times are refused and
+            // leave the armed window alone.
+            for bad in [
+                json!({"window_start": start.to_rfc3339(), "window_end": end.to_rfc3339(), "lowered_percent": 0}),
+                json!({"window_start": start.to_rfc3339(), "window_end": end.to_rfc3339()}),
+                json!({"window_start": "soon", "window_end": "later", "lowered_percent": 40}),
+            ] {
+                let (status, _) = arm_plan_spread(State(state.clone()), Json(bad)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+            }
+            assert_eq!(
+                state.plan_rate.lock().await.armed.as_ref().map(|a| a.lowered_percent),
+                Some(40)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_arm_endpoint_does_nothing_with_the_setting_off() {
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            *state.latest_snapshot.lock().await = Some(spread_test_snapshot());
+            let start = chrono::Utc::now() + chrono::Duration::hours(2);
+            let body = json!({
+                "window_start": start.to_rfc3339(),
+                "window_end": (start + chrono::Duration::hours(7)).to_rfc3339(),
+                "lowered_percent": 40,
+            });
+            let (status, _) = arm_plan_spread(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(state.plan_rate.lock().await.armed.is_none());
+        })
+        .await;
+    }
+
+    /// Issues #483 and #508: the spread advice block, both kinds, with times on the
     /// window's own clock (across midnight too) and one-line summaries.
     #[test]
     fn spread_advice_json_has_the_numbers_and_a_summary() {
@@ -28615,6 +28999,12 @@ pub(crate) mod tests {
             full_rate_finish_min: 20,
             full_rate_minutes: 50,
             window_minutes: 360,
+            window: crate::forecast::planner::ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 5 * 60,
+                tomorrow: false,
+                rate: 0.075,
+            },
             after_min_soc_pct: 25.0,
         };
         let json = spread_advice_to_json(&spread);
@@ -28625,8 +29015,8 @@ pub(crate) mod tests {
         assert_eq!(json["full_rate_finish"], "00:20");
         assert_eq!(
             json["summary"],
-            "Would charge at 1.75 kW (35%) to 65%, finishing about 02:54 instead of 00:20 \
-             at full power. Advice only: the plan still charges at full power."
+            "Charges at 1.75 kW (35%) to 65%, finishing about 02:54 instead of 00:20 \
+             at full power. The limit goes back when the window ends."
         );
 
         let cases = [

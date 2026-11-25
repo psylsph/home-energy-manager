@@ -566,6 +566,9 @@ pub struct AppState {
     /// The battery top-up during a smart charge (issue #434); its run
     /// mirrors `Settings::dispatch_charge_run`.
     pub dispatch_charge: Arc<Mutex<crate::inverter::dispatch_charge::DispatchChargeShared>>,
+    /// A charge limit lowered for a Spread Charge window (issue #508); its
+    /// run mirrors `Settings::plan_charge_rate_run`.
+    pub plan_rate: Arc<Mutex<crate::inverter::plan_rate::PlanRateShared>>,
     /// Guided battery calibration cycle (issue #418); mirrors
     /// `Settings::battery_calibration_run`.
     pub calibration_run: Arc<Mutex<Option<crate::inverter::calibration::CalibrationRun>>>,
@@ -830,6 +833,7 @@ impl AppState {
             dispatch_hold_retry: Arc::new(Mutex::new(DispatchHoldRetry::default())),
             dispatch_hold_native: Arc::new(Mutex::new(None)),
             dispatch_charge: Arc::new(Mutex::new(Default::default())),
+            plan_rate: Arc::new(Mutex::new(Default::default())),
             calibration_run: Arc::new(Mutex::new(None)),
             charge_cap: Arc::new(Mutex::new(Default::default())),
             full_charge_check: Arc::new(Mutex::new(Default::default())),
@@ -3007,6 +3011,133 @@ async fn absorb_into_dispatch_charge(state: &Arc<AppState>, writes: &[RegisterWr
     }
 }
 
+/// A charge-limit write that isn't HEM's own, made while a Spread Charge
+/// limit is lowered, is the user's (issue #508): their value stands and the
+/// run ends without a restore. Only writes the inverter acknowledged count.
+async fn absorb_into_plan_rate(state: &Arc<AppState>, writes: &[RegisterWrite]) {
+    use crate::inverter::plan_rate::{absorb, persist_run, Absorb};
+    let mut guard = state.plan_rate.lock().await;
+    // After shutdown has queued the restore, its own writes come through
+    // here; saving again would undo the shutdown's clear.
+    if guard.stopped {
+        return;
+    }
+    let Some(run) = guard.run.as_ref() else {
+        return;
+    };
+    if !writes
+        .iter()
+        .any(|write| absorb(run, write) == Absorb::UserWon)
+    {
+        return;
+    }
+    tracing::info!(
+        "Spread Charge: the charge limit was changed by the user; leaving it as they set it"
+    );
+    guard.run = None;
+    if let Err(e) = persist_run(None).await {
+        tracing::warn!("Spread Charge: couldn't clear its saved run: {e}");
+    }
+}
+
+/// When Spread Charge puts a lowered charge limit back (Unix seconds), for the
+/// Control page; `None` unless the limit is lowered now.
+async fn plan_charge_limit_back_at(state: &Arc<AppState>) -> Option<i64> {
+    state
+        .plan_rate
+        .lock()
+        .await
+        .run
+        .as_ref()
+        .filter(|run| run.phase == crate::inverter::plan_rate::PlanRatePhase::Lowered)
+        .map(|run| run.window_end.timestamp())
+}
+
+/// Whether Spread Charge has anything to do this poll. Turning the setting
+/// off before the window starts means full power, so it clears an armed
+/// window; a limit already lowered still goes back at the window's end.
+async fn plan_rate_has_work(state: &Arc<AppState>, settings: &crate::settings::Settings) -> bool {
+    let mut guard = state.plan_rate.lock().await;
+    if !settings.forecast_plan_spread_charge {
+        guard.armed = None;
+    }
+    guard.run.is_some() || guard.armed.is_some()
+}
+
+/// Anything else that needs full power or owns the limit: Force Charge, the
+/// smart-charge top-up, calibration, Adaptive Charge, a safety limiter. A
+/// lowered limit is put back, and none is started.
+async fn plan_rate_blocked(
+    state: &Arc<AppState>,
+    settings: &crate::settings::Settings,
+    calibrating: bool,
+) -> bool {
+    calibrating
+        || state.force_charge_revert.lock().await.is_some()
+        || state.force_charge_restoration.lock().await.is_some()
+        || state.dispatch_charge.lock().await.run.is_some()
+        || state.load_limiter_state.lock().await.is_actively_pausing()
+        || state
+            .temperature_limiter_state
+            .lock()
+            .await
+            .is_actively_pausing()
+        || crate::inverter::forecast_plan::adaptive_owns_rate(settings)
+}
+
+/// One poll of the Spread Charge restore (issue #508): put the charge limit
+/// back when the cheap window has ended, retrying, and alerting once if the
+/// inverter won't take it.
+async fn run_plan_rate(
+    state: &Arc<AppState>,
+    client: &mut ModbusClient,
+    snapshot: &InverterSnapshot,
+    settings: &crate::settings::Settings,
+    calibrating: bool,
+    inverter_minute: u16,
+    write_gap: Duration,
+) {
+    use crate::inverter::plan_rate::{persist_run, step, Inputs};
+    if !plan_rate_has_work(state, settings).await {
+        return;
+    }
+    let blocked = plan_rate_blocked(state, settings, calibrating).await;
+    let inputs = Inputs {
+        now: chrono::Utc::now(),
+        slot_running: crate::inverter::state_machines::charge_slot_1_running(
+            snapshot,
+            inverter_minute,
+        ),
+        blocked,
+    };
+    let mut guard = state.plan_rate.lock().await;
+    let mut outcome = step(&mut guard, snapshot, inputs);
+    if outcome.persist {
+        // Saved before any write goes out; see `settle_persist` for what a
+        // failed save means for the writes.
+        let saved = persist_run(guard.run.clone()).await;
+        crate::inverter::plan_rate::settle_persist(&mut guard, &mut outcome, saved);
+    }
+    let gave_up = guard.gave_up.take();
+    drop(guard);
+
+    if !outcome.writes.is_empty() {
+        write_registers_fail_fast_with_gap(client, &outcome.writes, "Spread Charge", write_gap)
+            .await;
+    }
+    if let Some(detail) = gave_up {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let text = crate::alerts::build_plan_rate_gave_up_message(&detail);
+            crate::alerts::deliver_hold_failing_alert(
+                || crate::alerts::send_text_notification(&state, &text, "plan-rate-gave-up"),
+                || async { true },
+            )
+            .await;
+        });
+    }
+}
+
 /// One poll of the battery top-up during a smart charge (issue #434).
 async fn run_dispatch_charge(
     state: &Arc<AppState>,
@@ -3081,6 +3212,13 @@ async fn run_dispatch_charge(
         cap_soc: cap.enabled.then_some(cap.cap_soc),
         host_minute: facts.host_minute,
         inverter_minute: facts.inverter_minute,
+        charge_rate_baseline: state
+            .plan_rate
+            .lock()
+            .await
+            .run
+            .as_ref()
+            .map(|run| crate::inverter::plan_rate::baseline_charge_rate(Some(run), snapshot)),
     };
 
     let mut guard = state.dispatch_charge.lock().await;
@@ -4138,6 +4276,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                         let landed =
                             drain_write_batches(&state, &mut client, pending, write_gap).await;
                         absorb_into_dispatch_charge(&state, &landed).await;
+                        absorb_into_plan_rate(&state, &landed).await;
                     }
 
                     // The consumer task handles stale frames - unmatched
@@ -4629,6 +4768,10 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // charge slot 1.
                                     snapshot.forecast_plan_auto_refresh =
                                         poll_settings.forecast_plan_auto_refresh;
+                                    // Where Spread Charge has lowered the charge
+                                    // limit, and until when (issue #508).
+                                    snapshot.plan_charge_limit_back_at =
+                                        plan_charge_limit_back_at(&state).await;
                                     // Same for the user-configured auto-apply
                                     // trigger — the Control page's "slot 1 is
                                     // planner-owned" banner treats either as
@@ -4693,8 +4836,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             desired_rate_percent: None,
                                         }
                                     } else {
+                                        // While Spread Charge holds the limit down,
+                                        // Adaptive Charge's baseline is the user's value,
+                                        // not the lowered one (issue #508).
                                         check_adaptive_charge(
-                                            &snapshot,
+                                            &crate::inverter::plan_rate::with_baseline_limit(
+                                                state.plan_rate.lock().await.run.as_ref(),
+                                                &snapshot,
+                                            ),
                                             &poll_settings.adaptive_charge_config,
                                             poll_settings.adaptive_charge_enabled,
                                             &mut adaptive_state,
@@ -5989,6 +6138,18 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         host_minute,
                                         inverter_minute,
                                     },
+                                    write_gap,
+                                )
+                                .await;
+
+                                // ---- Spread Charge restore (issue #508) ----
+                                run_plan_rate(
+                                    &state,
+                                    &mut client,
+                                    &snapshot,
+                                    &poll_settings,
+                                    calibrating,
+                                    inverter_minute,
                                     write_gap,
                                 )
                                 .await;
@@ -11592,6 +11753,318 @@ mod tests {
             assert!(crate::settings::Settings::load()
                 .dispatch_charge_run
                 .is_none());
+        })
+        .await;
+    }
+
+    /// A lowered Spread Charge run for the tests below: raw 50 baseline,
+    /// raw 20 lowered, saved to settings.json as the poll loop would.
+    async fn lowered_plan_rate_run(state: &Arc<AppState>) {
+        let snap = InverterSnapshot {
+            inverter_serial: "SN1".to_string(),
+            device_type: DeviceType::Gen3Hybrid,
+            charge_rate: 50,
+            ..Default::default()
+        };
+        let run = crate::inverter::plan_rate::start(
+            &snap,
+            20,
+            chrono::Utc::now() + chrono::Duration::hours(3),
+        )
+        .unwrap();
+        crate::inverter::plan_rate::persist_run(Some(run.clone()))
+            .await
+            .unwrap();
+        state.plan_rate.lock().await.run = Some(run);
+    }
+
+    fn rate_write(value: u16) -> RegisterWrite {
+        RegisterWrite {
+            address: crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT,
+            value,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_charge_limit_the_user_sets_during_a_spread_ends_the_run_without_a_restore() {
+        // Issue #508: their value wins, and the cleared run is on disk so a
+        // restart doesn't put the old limit back over it.
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            lowered_plan_rate_run(&state).await;
+            super::absorb_into_plan_rate(&state, &[rate_write(35)]).await;
+            assert!(state.plan_rate.lock().await.run.is_none());
+            assert!(crate::settings::Settings::load()
+                .plan_charge_rate_run
+                .is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hems_own_lowered_write_and_unrelated_writes_leave_the_run_alone() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            lowered_plan_rate_run(&state).await;
+            let unrelated = RegisterWrite {
+                address: crate::modbus::registers::HR_BATTERY_SOC_RESERVE,
+                value: 10,
+            };
+            super::absorb_into_plan_rate(&state, &[rate_write(20), unrelated]).await;
+            assert!(state.plan_rate.lock().await.run.is_some());
+            assert!(crate::settings::Settings::load()
+                .plan_charge_rate_run
+                .is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn after_shutdown_has_queued_the_restore_its_own_write_does_not_clear_the_run() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            lowered_plan_rate_run(&state).await;
+            state.plan_rate.lock().await.stopped = true;
+            super::absorb_into_plan_rate(&state, &[rate_write(50), rate_write(35)]).await;
+            assert!(state.plan_rate.lock().await.run.is_some());
+        })
+        .await;
+    }
+
+    /// Answer the next queued write batch as the poll loop would, returning
+    /// its writes.
+    async fn answer_next_batch(state: &Arc<AppState>) -> Vec<RegisterWrite> {
+        loop {
+            let batch = {
+                let mut queue = state.pending_writes.lock().await;
+                (!queue.is_empty()).then(|| queue.remove(0))
+            };
+            if let Some(batch) = batch {
+                if let Some(done) = batch.completion {
+                    let _ = done.send(crate::inverter::encoder::WriteOutcome::Ok);
+                }
+                return batch.writes;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn spread_charge_has_nothing_to_do_without_a_run_or_an_armed_window() {
+        let state = Arc::new(AppState::new());
+        let settings = crate::settings::Settings::default();
+        assert!(!plan_rate_has_work(&state, &settings).await);
+    }
+
+    #[tokio::test]
+    async fn turning_the_setting_off_clears_an_armed_window_but_not_a_lowered_run() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let mut settings = crate::settings::Settings {
+                forecast_plan_spread_charge: true,
+                ..Default::default()
+            };
+            state.plan_rate.lock().await.armed = Some(crate::inverter::plan_rate::ArmedSpread {
+                window_start: chrono::Utc::now(),
+                window_end: chrono::Utc::now() + chrono::Duration::hours(3),
+                lowered_percent: 20,
+                slot: (0, 0),
+            });
+            assert!(plan_rate_has_work(&state, &settings).await, "armed and on");
+            settings.forecast_plan_spread_charge = false;
+            assert!(!plan_rate_has_work(&state, &settings).await);
+            assert!(state.plan_rate.lock().await.armed.is_none());
+
+            lowered_plan_rate_run(&state).await;
+            assert!(
+                plan_rate_has_work(&state, &settings).await,
+                "a lowered limit still goes back"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_only_reported_as_held_while_it_is_lowered() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            assert_eq!(plan_charge_limit_back_at(&state).await, None);
+            lowered_plan_rate_run(&state).await;
+            let end = state
+                .plan_rate
+                .lock()
+                .await
+                .run
+                .as_ref()
+                .unwrap()
+                .window_end;
+            assert_eq!(
+                plan_charge_limit_back_at(&state).await,
+                Some(end.timestamp())
+            );
+            state.plan_rate.lock().await.run.as_mut().unwrap().phase =
+                crate::inverter::plan_rate::PlanRatePhase::Restoring;
+            assert_eq!(plan_charge_limit_back_at(&state).await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn each_thing_that_needs_full_power_blocks_spread_charge() {
+        let settings = crate::settings::Settings::default();
+        let state = Arc::new(AppState::new());
+        assert!(!plan_rate_blocked(&state, &settings, false).await);
+        assert!(
+            plan_rate_blocked(&state, &settings, true).await,
+            "calibration"
+        );
+
+        *state.force_charge_restoration.lock().await = Some(ForceRestorationRequest {
+            requested_at_ms: 0,
+            device_type: DeviceType::Gen3Hybrid,
+            inverter_serial: "SN1".to_string(),
+            firmware_version: String::new(),
+        });
+        assert!(
+            plan_rate_blocked(&state, &settings, false).await,
+            "force charge"
+        );
+
+        let state = Arc::new(AppState::new());
+        *state.load_limiter_state.lock().await = LoadLimiterState::Paused;
+        assert!(
+            plan_rate_blocked(&state, &settings, false).await,
+            "load limiter"
+        );
+
+        let state = Arc::new(AppState::new());
+        *state.temperature_limiter_state.lock().await = TemperatureLimiterState::Paused;
+        assert!(
+            plan_rate_blocked(&state, &settings, false).await,
+            "temperature limiter"
+        );
+
+        let state = Arc::new(AppState::new());
+        let mut adaptive = settings.clone();
+        adaptive.adaptive_charge_enabled = true;
+        assert!(
+            plan_rate_blocked(&state, &adaptive, false).await,
+            "Adaptive Charge"
+        );
+    }
+
+    fn a_revert() -> ForceChargeRevert {
+        let snap = InverterSnapshot {
+            inverter_serial: "SN1".to_string(),
+            device_type: DeviceType::Gen3Hybrid,
+            charge_rate: 50,
+            ..Default::default()
+        };
+        crate::server::api::force_charge_revert_from_snapshot(&snap, DeviceType::Gen3Hybrid)
+            .expect("a revert for a snapshot with an identity")
+    }
+
+    #[tokio::test]
+    async fn a_force_charge_or_a_running_top_up_blocks_spread_charge() {
+        let settings = crate::settings::Settings::default();
+        let state = Arc::new(AppState::new());
+        *state.force_charge_revert.lock().await = Some(a_revert());
+        assert!(
+            plan_rate_blocked(&state, &settings, false).await,
+            "force charge"
+        );
+
+        let state = Arc::new(AppState::new());
+        state.dispatch_charge.lock().await.run =
+            Some(crate::inverter::dispatch_charge::DispatchChargeRun {
+                phase: crate::inverter::dispatch_charge::DispatchChargePhase::Charging,
+                revert: a_revert(),
+                target_soc: 100,
+                writes: Vec::new(),
+                dispatch_end: chrono::Utc::now() + chrono::Duration::hours(1),
+                skew_minutes: 0,
+                last_sent: 0,
+                unconfirmed: 0,
+                restore_started: None,
+            });
+        assert!(plan_rate_blocked(&state, &settings, false).await, "top-up");
+    }
+
+    #[tokio::test]
+    async fn shutdown_puts_the_limit_back_and_clears_the_saved_run() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            lowered_plan_rate_run(&state).await;
+            let (_, writes) = tokio::join!(
+                crate::inverter::plan_rate::restore_on_shutdown(&state, Duration::from_secs(5)),
+                answer_next_batch(&state),
+            );
+            assert_eq!(writes, vec![rate_write(50)]);
+            let guard = state.plan_rate.lock().await;
+            assert!(guard.run.is_none() && guard.stopped);
+            assert!(crate::settings::Settings::load()
+                .plan_charge_rate_run
+                .is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_an_unreachable_inverter_keeps_the_run_for_the_next_start() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            lowered_plan_rate_run(&state).await;
+            // Nobody answers the queued restore.
+            crate::inverter::plan_rate::restore_on_shutdown(&state, Duration::from_millis(50))
+                .await;
+            let guard = state.plan_rate.lock().await;
+            assert!(
+                guard.run.is_some() && guard.stopped,
+                "nothing more is written"
+            );
+            assert!(crate::settings::Settings::load()
+                .plan_charge_rate_run
+                .is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_no_run_only_stops_the_loop() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            crate::inverter::plan_rate::restore_on_shutdown(&state, Duration::from_millis(50))
+                .await;
+            assert!(state.plan_rate.lock().await.stopped);
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_poll_clearing_the_run_and_an_api_save_do_not_lose_each_others_changes() {
+        // The race AGENTS.md asks for: the poll loop's write of the cleared
+        // run against a settings save from the API. Both must land.
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            lowered_plan_rate_run(&state).await;
+            crate::settings::Settings::update(|s| s.forecast_plan_spread_charge = true).unwrap();
+            let poll = {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    super::absorb_into_plan_rate(&state, &[rate_write(35)]).await;
+                })
+            };
+            let api = tokio::spawn(async {
+                crate::settings::Settings::update_async(|s| s.forecast_plan_spread_charge = false)
+                    .await
+                    .unwrap();
+            });
+            poll.await.unwrap();
+            api.await.unwrap();
+            let saved = crate::settings::Settings::load();
+            assert!(saved.plan_charge_rate_run.is_none(), "the cleared run");
+            assert!(!saved.forecast_plan_spread_charge, "the API's change");
         })
         .await;
     }

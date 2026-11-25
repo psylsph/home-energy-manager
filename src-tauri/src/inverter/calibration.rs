@@ -206,7 +206,7 @@ fn full_rates(bank: PowerLimitBank) -> (u16, u16) {
     }
 }
 
-fn rate_writes(
+pub(crate) fn rate_writes(
     bank: PowerLimitBank,
     charge: Option<u16>,
     discharge: Option<u16>,

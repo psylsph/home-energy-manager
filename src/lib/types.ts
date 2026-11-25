@@ -143,6 +143,9 @@ export interface InverterSnapshot {
    * period. Stamped by the poll loop from settings.
    */
   forecast_plan_auto_refresh?: boolean;
+  /** Unix seconds when HEM puts the charge limit back, while a spread charge
+   * holds it down (issue #508); null or absent otherwise. */
+  plan_charge_limit_back_at?: number | null;
   /** True when the Forecast plan's auto-apply trigger is enabled: the
    * backend applies the plan the configured minutes before each cheap
    * tariff window and notifies the user. Stamped by the poll loop. */

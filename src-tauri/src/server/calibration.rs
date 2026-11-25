@@ -184,7 +184,13 @@ pub async fn start_calibration(
     if let Some(reason) = blocker(&state, &snap).await {
         return reply(StatusCode::CONFLICT, reason);
     }
-    let plan = match calibration::build_plan(&snap) {
+    // While Spread Charge holds the charge limit down, the cycle restores the
+    // user's own value, not the lowered one (issue #508).
+    let plan_snap = crate::inverter::plan_rate::with_baseline_limit(
+        state.plan_rate.lock().await.run.as_ref(),
+        &snap,
+    );
+    let plan = match calibration::build_plan(&plan_snap) {
         Ok(plan) => plan,
         Err(e) => return reply(StatusCode::BAD_REQUEST, &e),
     };

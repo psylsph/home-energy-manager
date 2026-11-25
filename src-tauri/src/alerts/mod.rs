@@ -1186,6 +1186,16 @@ pub fn build_dispatch_charge_gave_up_message(detail: &str) -> String {
     )
 }
 
+/// Notification text for a Spread Charge limit the inverter didn't take back
+/// in 15 minutes, which HEM has given up on (issue #508). `detail` is what to
+/// put back.
+pub fn build_plan_rate_gave_up_message(detail: &str) -> String {
+    format!(
+        "⚠️ HEM lowered the battery's charge limit for tonight's planned charge but couldn't \
+         put it back, and has stopped trying. {detail}."
+    )
+}
+
 /// How often an undelivered dispatch-hold alert is resent, and for how long.
 pub(crate) const HOLD_ALERT_RESEND_SECS: u64 = 5 * 60;
 pub(crate) const HOLD_ALERT_RESEND_ATTEMPTS: u32 = 12;
@@ -2498,6 +2508,15 @@ pub fn spawn_telegram_poller(state: std::sync::Arc<crate::inverter::poll::AppSta
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_spread_charge_alert_says_what_to_put_back() {
+        let text = super::build_plan_rate_gave_up_message(
+            "Set the battery charge limit back to 100% on the Control page",
+        );
+        assert!(text.contains("couldn't put it back"));
+        assert!(text.ends_with("Set the battery charge limit back to 100% on the Control page."));
+    }
 
     mod hold_alert_resend {
         use super::super::{deliver_hold_failing_alert, AlertDelivery, HOLD_ALERT_RESEND_ATTEMPTS};

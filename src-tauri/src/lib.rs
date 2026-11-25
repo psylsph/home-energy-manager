@@ -279,6 +279,9 @@ async fn initialize_app_state(
     // A battery top-up running at shutdown (issue #434) carries on or is put
     // back by the first poll; its baseline is on disk.
     state.dispatch_charge.lock().await.run = app_settings.dispatch_charge_run.clone();
+    // A Spread Charge limit still lowered at shutdown (issue #508) is put
+    // back by the first poll; its baseline is on disk.
+    state.plan_rate.lock().await.run = app_settings.plan_charge_rate_run.clone();
     if app_settings.dispatch_hold_active_persisted {
         *state.dispatch_hold_state.lock().await =
             crate::inverter::poll::DispatchHoldState::Releasing;
@@ -817,6 +820,10 @@ pub fn run() {
                                 &state,
                                 crate::inverter::dispatch_charge::SHUTDOWN_RESTORE_LIMIT,
                             ),
+                            crate::inverter::plan_rate::restore_on_shutdown(
+                                &state,
+                                crate::inverter::plan_rate::SHUTDOWN_RESTORE_LIMIT,
+                            ),
                             flush_history_on_shutdown(&state),
                         );
                     });
@@ -1207,6 +1214,10 @@ pub fn run_headless(args: &[String]) {
             crate::inverter::dispatch_charge::restore_on_shutdown(
                 &state,
                 crate::inverter::dispatch_charge::SHUTDOWN_RESTORE_LIMIT,
+            ),
+            crate::inverter::plan_rate::restore_on_shutdown(
+                &state,
+                crate::inverter::plan_rate::SHUTDOWN_RESTORE_LIMIT,
             ),
             flush_history_on_shutdown(&state),
         );

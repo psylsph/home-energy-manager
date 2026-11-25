@@ -29,8 +29,10 @@ export default defineConfig({
   globalSetup: './e2e/local-global-setup.ts',
   // Timed Export / Eco round-trips now await real write confirmation, so a
   // full-schedule restore legitimately holds its request for 45-60 s; the
-  // whole suite needs more than the old 15-minute ceiling.
-  globalTimeout: 2_700_000,
+  // whole suite needs more than the old 15-minute ceiling. The Spread Charge
+  // spec follows real cheap windows (and one across a simulated midnight) in
+  // real time, about 25 minutes on its own.
+  globalTimeout: 4_500_000,
   use: {
     headless: true,
     browserName: 'chromium',

@@ -409,6 +409,8 @@ fn create_router_at(
         .route("/api/forecast/plan", forecast_plan_route)
         // Issue #481: when the Planner next writes charge slot 1 on its own.
         .route("/api/forecast/plan/upcoming", forecast_plan_upcoming_route)
+        // Issue #508: arm the charge limit for a window Apply just wrote.
+        .route("/api/forecast/plan/arm-spread", post(api::arm_plan_spread))
         // Issue #472: when the battery reaches its reserve.
         .route("/api/battery/runtime", get(api::get_battery_runtime))
         .route("/api/forecast/plan-history", get(api::get_plan_history))

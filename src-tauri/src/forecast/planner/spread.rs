@@ -85,6 +85,9 @@ pub enum SpreadAdvice {
         full_rate_minutes: u16,
         /// The cheap window's length, minutes.
         window_minutes: u16,
+        /// The cheap window the slot spans, as the Planner has it (local
+        /// minutes of day; `tomorrow` says which day it starts on).
+        window: ChargeWindow,
         /// The lowest SOC before the next cheap period with the spread, %.
         after_min_soc_pct: f64,
     },
@@ -236,6 +239,7 @@ pub fn spread_charge_advice(
         full_rate_finish_min,
         full_rate_minutes,
         window_minutes,
+        window: ctx.window.clone(),
         after_min_soc_pct: outcome.trough_pct(),
     })
 }

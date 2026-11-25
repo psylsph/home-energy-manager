@@ -155,6 +155,8 @@ export interface ChargeSlotLimitContext extends Omit<ChargeSlotAssessmentInput, 
   limitPercent: number | null | undefined;
   /** Name of an automation that rewrites the limit itself, if one is active. */
   managedBy?: string | null;
+  /** When Spread Charge puts the limit back (HH:MM), while it holds it down (issue #508). */
+  limitBackAt?: string | null;
   /** False when the schedule's master switch is off, so no slot will run. Defaults to true. */
   armed?: boolean;
 }
@@ -180,6 +182,14 @@ export function describeChargeSlotLimit(input: ChargeSlotLimitDescriptionInput):
     return { limitLine: null, shortfall: null };
   }
   const label = formatPowerLimitLabel(input.limitPercent, input.limitWatts ?? null);
+  if (input.limitBackAt) {
+    // Lowered on purpose until the window ends: a warning about it would be
+    // wrong, and so would calling it the user's setting.
+    return {
+      limitLine: `Charge limit: ${label}. Spread Charge holds it there until ${input.limitBackAt}.`,
+      shortfall: null,
+    };
+  }
   if (input.managedBy) {
     // The automation will move the limit, so a warning about today's value
     // would be wrong by the time the slot runs.

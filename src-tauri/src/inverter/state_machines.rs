@@ -1725,6 +1725,17 @@ pub(crate) fn charge_slot_running(snap: &InverterSnapshot, inverter_minute: u16)
     snap.enable_charge && export_window_contains(&snap.charge_slots, inverter_minute)
 }
 
+/// Whether charge slot 1 specifically is running now: the slot a Planner
+/// plan writes. Spread Charge lowers the charge limit for that slot only, not
+/// because an unrelated slot 2 or 3 happens to be running.
+pub(crate) fn charge_slot_1_running(snap: &InverterSnapshot, inverter_minute: u16) -> bool {
+    snap.enable_charge
+        && export_window_contains(
+            &snap.charge_slots[..snap.charge_slots.len().min(1)],
+            inverter_minute,
+        )
+}
+
 /// Whether the dispatch hold can leave a starting smart charge alone because
 /// a charge slot is charging the battery, so it can't empty into the car. Not
 /// while HR 318 pauses charging (the charge cap, a remote pause): the slot
@@ -11796,5 +11807,37 @@ mod tests {
         assert!(writes.is_empty(), "{writes:?}");
         assert_eq!(owners.dispatch_state, DispatchHoldState::Idle);
         assert_eq!(owners.saved, Some(LoadLimiterSaved { reserve: 23 }));
+    }
+
+    #[test]
+    fn spread_charge_follows_charge_slot_1_not_an_unrelated_slot() {
+        let slot = |start_hour, end_hour| ScheduleSlot {
+            enabled: true,
+            start_hour,
+            start_minute: 0,
+            end_hour,
+            end_minute: 0,
+            ..Default::default()
+        };
+        // Slot 1 is the planned 23:30-ish window (here 02:00-05:00); slot 2 is
+        // the user's own midday slot, running now.
+        let mut snap = InverterSnapshot {
+            enable_charge: true,
+            ..Default::default()
+        };
+        snap.charge_slots[0] = slot(2, 5);
+        snap.charge_slots[1] = slot(12, 14);
+        let noon = 12 * 60 + 30;
+        assert!(charge_slot_running(&snap, noon), "some slot is running");
+        assert!(!charge_slot_1_running(&snap, noon), "but not slot 1");
+        assert!(charge_slot_1_running(&snap, 3 * 60));
+        let off = InverterSnapshot {
+            enable_charge: false,
+            ..snap
+        };
+        assert!(
+            !charge_slot_1_running(&off, 3 * 60),
+            "charging is switched off"
+        );
     }
 }

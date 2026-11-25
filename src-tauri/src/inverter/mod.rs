@@ -21,6 +21,7 @@ mod givtcp_contract;
 pub(crate) mod meter_discovery;
 pub mod model;
 pub(crate) mod plan_outcome;
+pub(crate) mod plan_rate;
 pub(crate) mod plan_replan;
 pub mod poll;
 pub mod power_limit;

@@ -222,6 +222,21 @@ describe('describeChargeSlotLimit', () => {
     expect(d.shortfall).toBeNull();
   });
 
+  it('says when a spread charge puts the limit back, and suppresses the warning', () => {
+    // Issue #508: the limit is low on purpose until the cheap window ends.
+    const d = describeChargeSlotLimit({
+      ...input,
+      managedBy: 'The Forecast plan',
+      limitBackAt: '06:00',
+    });
+    expect(d.limitLine).toBe('Charge limit: 17% (0.4 kW). Spread Charge holds it there until 06:00.');
+    expect(d.shortfall).toBeNull();
+    // Without a restore time the other wording stands.
+    expect(describeChargeSlotLimit({ ...input, limitBackAt: null }).limitLine).toBe(
+      describeChargeSlotLimit(input).limitLine,
+    );
+  });
+
   it('shows nothing when the limit itself is unknown', () => {
     expect(describeChargeSlotLimit({ ...input, limitPercent: null })).toEqual({ limitLine: null, shortfall: null });
   });

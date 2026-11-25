@@ -1410,6 +1410,10 @@ pub struct InverterSnapshot {
     /// settings save — harmless for a hint banner.
     #[serde(default)]
     pub forecast_plan_auto_refresh: bool,
+    /// When HEM puts the battery charge limit back (unix seconds), while a
+    /// spread charge holds it down (issue #508). Stamped by the poll loop.
+    #[serde(default)]
+    pub plan_charge_limit_back_at: Option<i64>,
     /// True when the Forecast plan's auto-apply trigger is enabled: the
     /// backend applies the plan `lead_minutes` before each cheap window
     /// and notifies the user. Stamped by the poll loop from settings.
@@ -1691,6 +1695,7 @@ impl InverterSnapshot {
             agile_enabled: false,
             agile_scope: crate::settings::AgileScope::default(),
             forecast_plan_auto_refresh: false,
+            plan_charge_limit_back_at: None,
             forecast_plan_auto_apply_enabled: false,
             battery_calibration_stage: 0,
             load_limiter_active: false,

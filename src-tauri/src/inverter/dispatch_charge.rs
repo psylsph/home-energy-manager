@@ -219,6 +219,10 @@ pub struct Inputs {
     pub cap_soc: Option<u8>,
     pub host_minute: u16,
     pub inverter_minute: u16,
+    /// The charge limit to put back at the end: the user's own value while
+    /// Spread Charge holds the limit down (issue #508), else `None` and the
+    /// reading stands.
+    pub charge_rate_baseline: Option<u8>,
 }
 
 /// One poll's result.
@@ -404,6 +408,9 @@ pub fn step(shared: &mut DispatchChargeShared, snap: &InverterSnapshot, inputs: 
             return Step::default();
         };
         revert.started_at_ms = now.saturating_mul(1000);
+        if let Some(rate) = inputs.charge_rate_baseline {
+            revert.charge_rate = Some(rate);
+        }
         let skew_minutes = skew(inputs.inverter_minute, inputs.host_minute);
         let start = hhmm(i32::from(inputs.inverter_minute));
         let end = hhmm(i32::from(window.end_host_minute) + skew_minutes);
@@ -768,6 +775,7 @@ mod tests {
             cap_soc: None,
             host_minute: 14 * 60,
             inverter_minute: 14 * 60,
+            charge_rate_baseline: None,
         }
     }
 
@@ -826,6 +834,26 @@ mod tests {
         }
         assert!(shared.charging());
         assert_eq!(shared.state_code(), "charging");
+    }
+
+    #[test]
+    fn the_charge_limit_baseline_is_the_one_spread_charge_will_put_back() {
+        // Issue #508: a top-up starting while a spread run holds the limit
+        // down must put the user's value back, not the lowered one.
+        let mut shared = DispatchChargeShared::default();
+        let held_inputs = Inputs {
+            charge_rate_baseline: Some(50),
+            ..inputs()
+        };
+        assert!(step(&mut shared, &held(), held_inputs).started);
+        let revert = &shared.run.as_ref().unwrap().revert;
+        assert_eq!(revert.charge_rate, Some(50));
+        // Without a run, the reading is the baseline, as before.
+        let (plain, _) = charging();
+        assert_eq!(
+            plain.run.as_ref().unwrap().revert.charge_rate,
+            Some(held().charge_rate)
+        );
     }
 
     #[test]

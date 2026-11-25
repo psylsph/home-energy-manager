@@ -618,6 +618,101 @@ describe('ForecastPage plan card', () => {
     expect(timedCall).toBeTruthy();
   });
 
+  describe('Spread Charge (issue #508)', () => {
+    const spreadPlan = () => {
+      const plan = planPayload('charge') as { data: { apply: Record<string, unknown> } };
+      plan.data.apply = {
+        ...plan.data.apply,
+        charge_slot: {
+          slot: 1,
+          enabled: true,
+          start_hour: 23,
+          start_minute: 0,
+          end_hour: 6,
+          end_minute: 0,
+          target_soc: 70,
+          charge_rate_percent: 100,
+        },
+        spread: {
+          window_start: '2026-08-31T22:00:00+00:00',
+          window_end: '2026-09-01T05:00:00+00:00',
+          lowered_percent: 40,
+        },
+      };
+      return plan;
+    };
+
+    it('arms the lower limit after writing the whole-window slot', async () => {
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+        if (path === '/api/forecast/plan') return spreadPlan();
+        return { ok: true, data: {} };
+      });
+      render(<ForecastPage />);
+      fireEvent.click(await screen.findByTestId('forecast-plan-apply'));
+      await waitFor(() =>
+        expect(apiPostMocked).toHaveBeenCalledWith('/api/forecast/plan/arm-spread', {
+          window_start: '2026-08-31T22:00:00+00:00',
+          window_end: '2026-09-01T05:00:00+00:00',
+          lowered_percent: 40,
+        }),
+      );
+      const paths = apiPostMocked.mock.calls.map((c) => c[0]);
+      expect(paths).toEqual([
+        '/api/control/charge-slot',
+        '/api/control/timed-charge',
+        '/api/forecast/plan/arm-spread',
+      ]);
+    });
+
+    it('arms nothing when the plan has no spread, or when the slot fails to write', async () => {
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+        if (path === '/api/forecast/plan') return planPayload('charge');
+        return { ok: true, data: {} };
+      });
+      render(<ForecastPage />);
+      fireEvent.click(await screen.findByTestId('forecast-plan-apply'));
+      await waitFor(() =>
+        expect(apiPostMocked).toHaveBeenCalledWith('/api/control/timed-charge', { enabled: true }),
+      );
+      expect(apiPostMocked.mock.calls.map((c) => c[0])).not.toContain('/api/forecast/plan/arm-spread');
+      cleanup();
+      vi.clearAllMocks();
+
+      apiPostMocked.mockRejectedValueOnce(new Error('inverter busy'));
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+        if (path === '/api/forecast/plan') return spreadPlan();
+        return { ok: true, data: {} };
+      });
+      render(<ForecastPage />);
+      fireEvent.click(await screen.findByTestId('forecast-plan-apply'));
+      expect(await screen.findByRole('alert')).toHaveTextContent('inverter busy');
+      expect(apiPostMocked.mock.calls.map((c) => c[0])).not.toContain('/api/forecast/plan/arm-spread');
+    });
+
+    it('still says applied when arming the limit is refused', async () => {
+      apiPostMocked.mockImplementation(async (path: string) => {
+        if (path === '/api/forecast/plan/arm-spread') throw new Error('Spread Charge is off');
+        return { ok: true };
+      });
+      apiGetMock.mockImplementation(async (path: string) => {
+        if (path === '/api/forecast') return { ok: true, data: fullPayload() };
+        if (path === '/api/forecast/plan') return spreadPlan();
+        return { ok: true, data: {} };
+      });
+      render(<ForecastPage />);
+      const apply = await screen.findByTestId('forecast-plan-apply');
+      fireEvent.click(apply);
+      await waitFor(() => expect(apiPostMocked).toHaveBeenCalledWith('/api/forecast/plan/arm-spread', expect.anything()));
+      await waitFor(() => expect(apply).toHaveTextContent('Applied ✓'));
+      expect(screen.queryByRole('alert')).toBeNull();
+      // Rolled back nothing.
+      expect(apiPostMocked.mock.calls.filter((c) => c[0] === '/api/control/charge-slot')).toHaveLength(1);
+    });
+  });
+
   it('offers neither Apply nor automatic apply on a Gateway', async () => {
     // Issue #428: the Gateway doesn't pass a charge slot on to the AIO, and
     // the backend refuses it, so the plan is shown but can't be applied.
@@ -1644,7 +1739,7 @@ describe('ForecastPage planner strategy (issue #359)', () => {
 
   it('shows the spread advice on the plan card, and nothing without it', async () => {
     const summary =
-      'Would charge at 1.75 kW (35%) to 65%, finishing about 04:24 instead of 02:50 at full power. Advice only: the plan still charges at full power.';
+      'Charges at 1.75 kW (35%) to 65%, finishing about 04:24 instead of 02:50 at full power. The limit goes back when the window ends.';
     mockPage(
       withSpread(planPayload('charge'), {
         kind: 'spread',
@@ -1664,7 +1759,7 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     const { unmount } = render(<ForecastPage />);
     const line = await screen.findByTestId('forecast-plan-spread');
     expect(line).toHaveTextContent(`Spread Charge: ${summary}`);
-    // Advice only: Apply still sends the plan's own full-rate slot.
+    // A plan with no spread block still sends its own full-rate slot.
     fireEvent.click(screen.getByTestId('forecast-plan-apply'));
     await waitFor(() => {
       const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');

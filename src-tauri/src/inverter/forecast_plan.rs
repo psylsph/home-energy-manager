@@ -338,21 +338,239 @@ pub(crate) fn first_report_today(last: &mut Option<NaiveDate>, today: NaiveDate)
     true
 }
 
+/// A spread plan (issue #508): the recommendation to write and the limit to
+/// arm for its window.
+pub(crate) struct SpreadPlan {
+    /// The whole-window hold the slot is written as: the inverter charges to
+    /// the target and holds it, so a slower rate can't leave it short.
+    pub rec: PlanRecommendation,
+    /// The charge limit to lower to once the slot runs, % of the maximum.
+    pub rate_percent: u16,
+}
+
+/// What `rec` becomes when the Planner's spread advice applies: the slot
+/// spans the whole cheap window with the advice's target SOC, and the
+/// rate is armed to be lowered once the slot runs. `None` leaves the plan as
+/// it is (full rate), and is also the answer whenever the limit can't be
+/// written and put back on this inverter. Pure.
+pub(crate) fn spread_plan(
+    rec: &PlanRecommendation,
+    spread: Option<&crate::forecast::planner::SpreadAdvice>,
+    snapshot: &InverterSnapshot,
+) -> Option<SpreadPlan> {
+    use crate::forecast::planner::SpreadAdvice;
+    let SpreadAdvice::Spread {
+        rate_percent,
+        target_soc_pct,
+        window,
+        after_min_soc_pct,
+        ..
+    } = spread?
+    else {
+        return None;
+    };
+    if !snapshot.device_type.battery_controls_reach_battery()
+        || crate::inverter::power_limit::ChargeRateRequest::for_snapshot(*rate_percent, snapshot)
+            .needs_pack_size()
+    {
+        return None;
+    }
+    let rec = match rec {
+        PlanRecommendation::ChargeAndHold { .. } => rec.clone(),
+        PlanRecommendation::Charge {
+            kwh,
+            min_soc_pct,
+            observed_min_soc_pct,
+            current_soc_pct,
+            rationale,
+            with_charge_series,
+            import_tomorrow_with_charge_kwh,
+            export_tomorrow_with_charge_kwh,
+            ..
+        } => PlanRecommendation::ChargeAndHold {
+            window: window.clone(),
+            target_soc_pct: *target_soc_pct,
+            strategy: crate::settings::PlanStrategy::HoldWindow,
+            kwh: *kwh,
+            min_soc_pct: *min_soc_pct,
+            observed_min_soc_pct: *observed_min_soc_pct,
+            after_min_soc_pct: *after_min_soc_pct,
+            current_soc_pct: *current_soc_pct,
+            rationale: rationale.clone(),
+            with_charge_series: with_charge_series.clone(),
+            import_tomorrow_with_charge_kwh: *import_tomorrow_with_charge_kwh,
+            export_tomorrow_with_charge_kwh: *export_tomorrow_with_charge_kwh,
+        },
+        PlanRecommendation::NoChargeNeeded { .. } | PlanRecommendation::NoPlan { .. } => {
+            return None
+        }
+    };
+    Some(SpreadPlan {
+        rec,
+        rate_percent: *rate_percent,
+    })
+}
+
+/// The cheap window as absolute times, from the Planner's local minutes of
+/// day: a window that ends at or before its start ends the next day, and a
+/// 23:59 end counts as midnight. `None` where a local time doesn't exist
+/// (a clock change), in which case nothing is armed. Pure.
+pub(crate) fn window_bounds(
+    window: &crate::forecast::planner::ChargeWindow,
+    now: DateTime<Local>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    use chrono::{Duration, TimeZone};
+    let day = now.date_naive() + Duration::days(i64::from(window.tomorrow));
+    let at = |date: NaiveDate, minute: u32| {
+        Local
+            .from_local_datetime(&date.and_hms_opt(minute / 60, minute % 60, 0)?)
+            .earliest()
+            .map(|t| t.with_timezone(&Utc))
+    };
+    let start = at(day, u32::from(window.start_min))?;
+    let end_min = if window.end_min == 23 * 60 + 59 {
+        24 * 60
+    } else {
+        u32::from(window.end_min)
+    };
+    let end = if end_min > u32::from(window.start_min) {
+        at_minute_of(day, end_min, at)?
+    } else {
+        at_minute_of(day + Duration::days(1), end_min, at)?
+    };
+    Some((start, end))
+}
+
+/// `at` for a minute that may be 24:00 (the next day's midnight).
+fn at_minute_of(
+    date: NaiveDate,
+    minute: u32,
+    at: impl Fn(NaiveDate, u32) -> Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    if minute >= 24 * 60 {
+        at(date + chrono::Duration::days(1), minute - 24 * 60)
+    } else {
+        at(date, minute)
+    }
+}
+
+/// Arm (or, with `None`, forget) the window whose limit is to be lowered once
+/// its slot runs. A new plan supersedes an earlier one; a limit already
+/// lowered is the poll loop's to put back and stays untouched.
+pub(crate) async fn arm_spread(
+    state: &Arc<AppState>,
+    armed: Option<crate::inverter::plan_rate::ArmedSpread>,
+) {
+    state.plan_rate.lock().await.armed = armed;
+}
+
+/// Check a request to arm a spread window (the Planner's Apply button, issue
+/// #508) and build the window it describes. The page asks only after it has
+/// written the whole-window slot, so this refuses whatever the automatic
+/// path would: the setting off, Adaptive Charge owning the limit, a battery
+/// the limit doesn't reach, a rate that needs the pack size, a window that
+/// is over or longer than a day, or a rate outside 1 to 100. Pure.
+pub(crate) fn armed_from_request(
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    lowered_percent: u16,
+    snapshot: Option<&InverterSnapshot>,
+    settings: &Settings,
+    now: DateTime<Utc>,
+) -> Result<crate::inverter::plan_rate::ArmedSpread, &'static str> {
+    if !settings.forecast_plan_spread_charge {
+        return Err("Spread Charge is off");
+    }
+    if adaptive_owns_rate(settings) {
+        return Err("Adaptive Charge owns the charge limit");
+    }
+    let Some(snapshot) = snapshot else {
+        return Err("The inverter hasn't been read yet");
+    };
+    if !snapshot.device_type.battery_controls_reach_battery() {
+        return Err("This inverter's battery settings don't reach the battery");
+    }
+    if !(1..=100).contains(&lowered_percent)
+        || crate::inverter::power_limit::ChargeRateRequest::for_snapshot(lowered_percent, snapshot)
+            .needs_pack_size()
+    {
+        return Err("The charge limit can't be set on this inverter");
+    }
+    if window_end <= window_start
+        || window_end <= now
+        || window_end - window_start > chrono::Duration::hours(24)
+    {
+        return Err("The charge window isn't a future window of a day or less");
+    }
+    let local_minute = |at: DateTime<Utc>| {
+        let local = at.with_timezone(&Local);
+        (local.hour() * 60 + local.minute()) as u16
+    };
+    Ok(crate::inverter::plan_rate::ArmedSpread {
+        window_start,
+        window_end,
+        lowered_percent,
+        slot: (local_minute(window_start), local_minute(window_end)),
+    })
+}
+
 /// Queue the writes for a recommendation (through the shared write pump, so
 /// the ~1.5 s Modbus round-trips drain off the read path and the loop keeps
 /// broadcasting snapshots) and notify the user if the trigger calls for it.
 /// Returns what charge slot 1 was set to and its time writes, when writes
 /// were queued.
+#[cfg(test)]
 pub(crate) async fn apply_plan_recommendation(
     state: &Arc<AppState>,
     snapshot: &InverterSnapshot,
     rec: &PlanRecommendation,
     trigger: PlanTrigger,
 ) -> Option<QueuedSlot> {
+    apply_plan_recommendation_with_spread(state, snapshot, rec, None, Local::now(), trigger).await
+}
+
+/// [`apply_plan_recommendation`] with the Planner's spread advice (issue
+/// #508) and the time the plan was made at.
+pub(crate) async fn apply_plan_recommendation_with_spread(
+    state: &Arc<AppState>,
+    snapshot: &InverterSnapshot,
+    rec: &PlanRecommendation,
+    spread: Option<&crate::forecast::planner::SpreadAdvice>,
+    now: DateTime<Local>,
+    trigger: PlanTrigger,
+) -> Option<QueuedSlot> {
     let settings = Settings::load_async().await;
     let planner_armed = settings.forecast_plan_armed_target_pct;
+    // Spread Charge (issue #508): write the whole window with its target,
+    // exactly as a hold plan, and arm the lower limit for when it runs. Off,
+    // or with Adaptive Charge owning the limit, nothing changes.
+    let spread_plan = (settings.forecast_plan_spread_charge && !adaptive_owns_rate(&settings))
+        .then(|| spread_plan(rec, spread, snapshot))
+        .flatten();
+    let armed = spread_plan.as_ref().and_then(|plan| {
+        let PlanRecommendation::ChargeAndHold { window, .. } = &plan.rec else {
+            return None;
+        };
+        let (window_start, window_end) = window_bounds(window, now)?;
+        Some(crate::inverter::plan_rate::ArmedSpread {
+            window_start,
+            window_end,
+            lowered_percent: plan.rate_percent,
+            slot: (window.start_min, window.end_min),
+        })
+    });
+    // A window that can't be placed in time is written as the plan stands.
+    let rec = match (&spread_plan, &armed) {
+        (Some(plan), Some(_)) => &plan.rec,
+        _ => rec,
+    };
     let plan = plan_slot_plan_for(rec, snapshot, planner_armed);
     queue_slot_plan(state, &plan, trigger, planner_armed).await;
+    // After the slot's writes are queued: a new plan supersedes any window
+    // armed for an earlier one, and none is armed when this plan writes
+    // nothing.
+    let writes_slot = matches!(plan, SlotPlan::WriteHold { writes: Ok(_), .. });
+    arm_spread(state, armed.filter(|_| writes_slot)).await;
     if let Some(text) = plan_notification(&plan, trigger, settings.forecast_plan_every_cheap_window)
     {
         crate::alerts::send_plan_notification(state, &text).await;
@@ -516,8 +734,9 @@ async fn compute_plan(
             include_current_hour,
             timed_export_slots: &timed_export,
         });
-        // The spread advice (issue #483) rides along for plan history only:
-        // nothing here acts on it. None inside a running window.
+        // The spread advice (issue #483) is what an Apply or auto-apply acts
+        // on when Spread Charge is on (issue #508), and rides along in plan
+        // history. None inside a running window.
         let (rec, export, spread) = match running_window_start {
             Some(start) => (
                 crate::server::api::compute_running_window_plan(
@@ -815,9 +1034,15 @@ pub(crate) async fn run_plan_refresh(
             match planned {
                 Ok(plan) => {
                     record_plan_snapshot(state, settings, "refresh", &plan, now).await;
-                    let slot =
-                        apply_plan_recommendation(state, snapshot, &plan.rec, PlanTrigger::Refresh)
-                            .await;
+                    let slot = apply_plan_recommendation_with_spread(
+                        state,
+                        snapshot,
+                        &plan.rec,
+                        plan.spread.as_ref(),
+                        now,
+                        PlanTrigger::Refresh,
+                    )
+                    .await;
                     let cycle = CycleFor {
                         trigger: PlanTrigger::Refresh,
                         now,
@@ -919,10 +1144,12 @@ pub(crate) async fn run_plan_auto_apply(
             match planned {
                 Ok(plan) => {
                     record_plan_snapshot(state, settings, "auto_apply", &plan, now).await;
-                    let slot = apply_plan_recommendation(
+                    let slot = apply_plan_recommendation_with_spread(
                         state,
                         snapshot,
                         &plan.rec,
+                        plan.spread.as_ref(),
+                        now,
                         PlanTrigger::AutoApply,
                     )
                     .await;
@@ -1136,6 +1363,12 @@ async fn run_plan_replan_with<F, Fut>(
                 return;
             }
             queue_slot_plan(state, &plan, PlanTrigger::Replan, planner_armed).await;
+            // A replan plans at the full rate: a window armed for the slot it
+            // replaced no longer fits, and a limit already lowered goes back.
+            crate::inverter::plan_rate::release_for_replan(
+                &mut *state.plan_rate.lock().await,
+                now.with_timezone(&Utc),
+            );
             record_plan_snapshot(state, settings, "replan", &computed, now).await;
             if cycle.trigger == PlanTrigger::AutoApply {
                 let text = replan_message(
@@ -2820,6 +3053,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_replan_releases_the_spread_window_armed_for_the_slot_it_replaced() {
+        // The replan plans at the full rate, so a limit armed (or already
+        // lowered) for the earlier slot must not throttle the new one.
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_history().await;
+            let now = local_dt(2026, 8, 31, 1, 40);
+            let first = fresh_list(&state, local_dt(2026, 8, 31, 1, 30)).await;
+            applied_cycle(&state, local_dt(2026, 8, 31, 1, 30), first).await;
+            state.plan_rate.lock().await.armed = Some(crate::inverter::plan_rate::ArmedSpread {
+                window_start: now.with_timezone(&Utc),
+                window_end: now.with_timezone(&Utc) + chrono::Duration::hours(3),
+                lowered_percent: 20,
+                slot: (0, 0),
+            });
+            fresh_list(&state, now).await;
+            replan(&state, now, charge(120, 310, false, 4.5)).await;
+            assert!(state.plan_rate.lock().await.armed.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn inside_the_window_the_rest_of_it_is_replanned() {
         with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
@@ -3597,5 +3852,451 @@ mod tests {
             );
         })
         .await;
+    }
+
+    // ---- Spread Charge arming (issue #508) --------------------------------------
+
+    fn spread_advice(percent: u16) -> crate::forecast::planner::SpreadAdvice {
+        crate::forecast::planner::SpreadAdvice::Spread {
+            rate_percent: percent,
+            rate_kw: 1.4,
+            target_soc_pct: 70,
+            kwh: 4.0,
+            finish_min: 4 * 60 + 30,
+            full_rate_finish_min: 60,
+            full_rate_minutes: 90,
+            window_minutes: 7 * 60,
+            window: ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 6 * 60,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            after_min_soc_pct: 18.0,
+        }
+    }
+
+    #[test]
+    fn a_spread_turns_a_minimum_soc_charge_into_a_whole_window_hold_at_the_advised_target() {
+        let advice = spread_advice(40);
+        let plan = spread_plan(&charge(120, 150, false, 3.2), Some(&advice), &gen2()).unwrap();
+        assert_eq!(plan.rate_percent, 40);
+        let PlanRecommendation::ChargeAndHold {
+            window,
+            target_soc_pct,
+            ..
+        } = &plan.rec
+        else {
+            panic!("expected a hold: {:?}", plan.rec);
+        };
+        assert_eq!((window.start_min, window.end_min), (23 * 60, 6 * 60));
+        assert_eq!(*target_soc_pct, 70);
+    }
+
+    #[test]
+    fn a_hold_plan_stays_the_same_hold_when_it_is_spread() {
+        let plan = spread_plan(&hold(false), Some(&spread_advice(40)), &gen2()).unwrap();
+        let PlanRecommendation::ChargeAndHold { target_soc_pct, .. } = &plan.rec else {
+            panic!("expected a hold");
+        };
+        assert_eq!(*target_soc_pct, 62, "the hold's own target is kept");
+    }
+
+    #[test]
+    fn no_spread_advice_or_a_full_rate_one_leaves_the_plan_alone() {
+        use crate::forecast::planner::{SpreadAdvice, SpreadSkip};
+        assert!(spread_plan(&charge(120, 300, false, 3.2), None, &gen2()).is_none());
+        let full = SpreadAdvice::FullRate(SpreadSkip::WorseTrough);
+        assert!(spread_plan(&charge(120, 300, false, 3.2), Some(&full), &gen2()).is_none());
+        assert!(spread_plan(&no_charge(), Some(&spread_advice(40)), &gen2()).is_none());
+    }
+
+    #[test]
+    fn a_gateway_and_an_unconvertible_rate_are_never_spread() {
+        let mut gateway = gen2();
+        gateway.device_type = DeviceType::Gateway;
+        assert!(spread_plan(&hold(false), Some(&spread_advice(40)), &gateway).is_none());
+        let mut no_pack = gen2();
+        no_pack.battery_capacity_kwh = 0.0;
+        assert!(spread_plan(&hold(false), Some(&spread_advice(40)), &no_pack).is_none());
+    }
+
+    fn utc(dt: DateTime<Local>) -> DateTime<Utc> {
+        dt.with_timezone(&Utc)
+    }
+
+    #[test]
+    fn a_window_inside_one_day_has_its_own_start_and_end() {
+        let w = ChargeWindow {
+            start_min: 2 * 60,
+            end_min: 5 * 60,
+            tomorrow: false,
+            rate: 0.09,
+        };
+        let (start, end) = window_bounds(&w, local_dt(2026, 8, 31, 1, 40)).unwrap();
+        assert_eq!(start, utc(local_dt(2026, 8, 31, 2, 0)));
+        assert_eq!(end, utc(local_dt(2026, 8, 31, 5, 0)));
+    }
+
+    #[test]
+    fn a_window_across_midnight_ends_the_next_day() {
+        let w = ChargeWindow {
+            start_min: 23 * 60 + 30,
+            end_min: 5 * 60 + 30,
+            tomorrow: false,
+            rate: 0.07,
+        };
+        let (start, end) = window_bounds(&w, local_dt(2026, 8, 31, 21, 30)).unwrap();
+        assert_eq!(start, utc(local_dt(2026, 8, 31, 23, 30)));
+        assert_eq!(end, utc(local_dt(2026, 9, 1, 5, 30)));
+    }
+
+    #[test]
+    fn tomorrows_window_starts_tomorrow_and_a_2359_end_is_midnight() {
+        let w = ChargeWindow {
+            start_min: 22 * 60,
+            end_min: 23 * 60 + 59,
+            tomorrow: true,
+            rate: 0.07,
+        };
+        let (start, end) = window_bounds(&w, local_dt(2026, 8, 31, 12, 0)).unwrap();
+        assert_eq!(start, utc(local_dt(2026, 9, 1, 22, 0)));
+        assert_eq!(end, utc(local_dt(2026, 9, 2, 0, 0)));
+    }
+
+    fn spread_snapshot() -> InverterSnapshot {
+        InverterSnapshot {
+            inverter_serial: "SA1234".to_string(),
+            ..gen2()
+        }
+    }
+
+    async fn lowered_percent(state: &Arc<AppState>) -> Option<u16> {
+        state
+            .plan_rate
+            .lock()
+            .await
+            .armed
+            .as_ref()
+            .map(|armed| armed.lowered_percent)
+    }
+
+    #[tokio::test]
+    async fn with_the_setting_on_a_spread_plan_writes_the_whole_window_at_full_rate_and_arms() {
+        with_isolated_config_dir_async(|| async {
+            Settings::update(|s| s.forecast_plan_spread_charge = true).unwrap();
+            let state = Arc::new(AppState::new());
+            let advice = spread_advice(40);
+            apply_plan_recommendation_with_spread(
+                &state,
+                &spread_snapshot(),
+                &charge(120, 150, false, 3.2),
+                Some(&advice),
+                local_dt(2026, 8, 31, 21, 0),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            let batches = queued(&state).await;
+            assert_eq!(batches.len(), 1);
+            // The whole window, with its target, and the limit still at the
+            // full rate: nothing is lowered until the slot runs.
+            assert_eq!(writes_to(&batches[0], 94), vec![2300], "{batches:?}");
+            assert_eq!(writes_to(&batches[0], 95), vec![600], "{batches:?}");
+            assert_eq!(writes_to(&batches[0], 116), vec![70], "{batches:?}");
+            assert_eq!(writes_to(&batches[0], 111), vec![50], "{batches:?}");
+            assert_eq!(lowered_percent(&state).await, Some(40));
+            let armed = state.plan_rate.lock().await.armed.clone().unwrap();
+            assert_eq!(armed.window_start, utc(local_dt(2026, 8, 31, 23, 0)));
+            assert_eq!(armed.window_end, utc(local_dt(2026, 9, 1, 6, 0)));
+            assert!(state.plan_rate.lock().await.run.is_none());
+        })
+        .await;
+    }
+
+    /// The real forecast and planner (a week of history, a 23:30-05:30
+    /// Intelligent Octopus Go window that crosses midnight, a battery at 20%)
+    /// end to end: the plan's own Spread advice, applied, then the poll loop's
+    /// step across midnight. Nothing here is hand-fed.
+    #[tokio::test]
+    async fn a_real_plan_across_midnight_spreads_arms_the_window_and_follows_it_over_midnight() {
+        use crate::forecast::planner::SpreadAdvice;
+        use crate::inverter::plan_rate::{step, Inputs, PlanRatePhase};
+        with_isolated_config_dir_async(|| async {
+            Settings::update(|s| s.forecast_plan_spread_charge = true).unwrap();
+            let now = local_dt(2026, 8, 31, 18, 0);
+            let (state, settings, snapshot) = seeded_plan_state(iog_tariff(), now, 20).await;
+            let settings = Settings {
+                forecast_plan_spread_charge: true,
+                ..settings
+            };
+            let computed = compute_plan(&state, &settings, &snapshot, now, None)
+                .await
+                .unwrap();
+            let Some(SpreadAdvice::Spread {
+                rate_percent,
+                window,
+                ..
+            }) = computed.spread.clone()
+            else {
+                panic!(
+                    "a six-hour window and a mostly empty battery spread: {:?} / {:?}",
+                    computed.spread, computed.rec
+                );
+            };
+            assert_eq!(
+                (window.start_min, window.end_min),
+                (23 * 60 + 30, 5 * 60 + 30),
+                "the window crosses midnight"
+            );
+
+            apply_plan_recommendation_with_spread(
+                &state,
+                &snapshot,
+                &computed.rec,
+                computed.spread.as_ref(),
+                now,
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            let batches = queued(&state).await;
+            assert_eq!(batches.len(), 1, "{batches:?}");
+            // The whole window at the full rate: nothing lowered yet.
+            assert_eq!(writes_to(&batches[0], 94), vec![2330], "{batches:?}");
+            assert_eq!(writes_to(&batches[0], 95), vec![530], "{batches:?}");
+            assert_eq!(writes_to(&batches[0], 111), vec![50], "{batches:?}");
+            let armed = state.plan_rate.lock().await.armed.clone().unwrap();
+            assert_eq!(armed.window_start, utc(local_dt(2026, 8, 31, 23, 30)));
+            assert_eq!(armed.window_end, utc(local_dt(2026, 9, 1, 5, 30)));
+            assert_eq!(armed.lowered_percent, rate_percent);
+
+            // The slot as the inverter reports it, then the poll loop's view
+            // of the night. The inverter's own clock is minutes of the day.
+            let mut inverter = InverterSnapshot {
+                inverter_serial: "SN1".to_string(),
+                enable_charge: true,
+                ..snapshot
+            };
+            inverter.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+                enabled: true,
+                start_hour: 23,
+                start_minute: 30,
+                end_hour: 5,
+                end_minute: 30,
+                ..Default::default()
+            };
+            let running = |hour: u16, minute: u16| {
+                crate::inverter::state_machines::charge_slot_1_running(
+                    &inverter,
+                    hour * 60 + minute,
+                )
+            };
+            assert!(!running(23, 0) && !running(12, 0), "outside the window");
+            assert!(running(23, 45), "before midnight");
+            assert!(running(0, 15), "after midnight");
+            assert!(running(5, 0), "late in the window");
+            assert!(!running(5, 30), "the slot has ended");
+
+            let mut shared = state.plan_rate.lock().await.clone();
+            let at = |when: DateTime<Utc>, slot_running: bool| Inputs {
+                now: when,
+                slot_running,
+                blocked: false,
+            };
+            // The slot hasn't started: nothing is lowered.
+            let early = step(
+                &mut shared,
+                &inverter,
+                at(armed.window_start - chrono::Duration::minutes(10), false),
+            );
+            assert!(early.writes.is_empty() && shared.run.is_none());
+            // Before midnight the slot runs: the limit is lowered, saved first.
+            let lowered = step(
+                &mut shared,
+                &inverter,
+                at(armed.window_start + chrono::Duration::minutes(15), true),
+            );
+            assert!(lowered.started && lowered.persist && !lowered.writes.is_empty());
+            assert_eq!(shared.run.as_ref().unwrap().window_end, armed.window_end);
+            // Past midnight it is still held, not restored by the date change.
+            let after_midnight = utc(local_dt(2026, 9, 1, 0, 15));
+            let mut reading = inverter.clone();
+            reading.charge_rate = shared.run.as_ref().unwrap().lowered_raw as u8;
+            reading.timestamp = after_midnight.timestamp();
+            let held = step(&mut shared, &reading, at(after_midnight, true));
+            assert!(held.writes.is_empty(), "{held:?}");
+            assert_eq!(shared.run.as_ref().unwrap().phase, PlanRatePhase::Lowered);
+            // At the window's end the baseline goes back.
+            reading.timestamp = armed.window_end.timestamp();
+            let restore = step(&mut shared, &reading, at(armed.window_end, false));
+            assert!(!restore.writes.is_empty(), "{restore:?}");
+            assert_eq!(shared.run.as_ref().unwrap().phase, PlanRatePhase::Restoring);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn with_the_setting_off_the_plan_is_exactly_what_it_was_and_nothing_is_armed() {
+        with_isolated_config_dir_async(|| async {
+            let advice = spread_advice(40);
+            let rec = charge(120, 150, false, 3.2);
+            let plain = Arc::new(AppState::new());
+            apply_plan_recommendation(&plain, &spread_snapshot(), &rec, PlanTrigger::AutoApply)
+                .await;
+            let spread_off = Arc::new(AppState::new());
+            apply_plan_recommendation_with_spread(
+                &spread_off,
+                &spread_snapshot(),
+                &rec,
+                Some(&advice),
+                local_dt(2026, 8, 31, 21, 0),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert_eq!(queued(&spread_off).await, queued(&plain).await);
+            assert_eq!(lowered_percent(&spread_off).await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn adaptive_charge_owning_the_limit_means_nothing_is_spread() {
+        with_isolated_config_dir_async(|| async {
+            Settings::update(|s| {
+                s.forecast_plan_spread_charge = true;
+                s.adaptive_charge_enabled = true;
+            })
+            .unwrap();
+            let state = Arc::new(AppState::new());
+            apply_plan_recommendation_with_spread(
+                &state,
+                &spread_snapshot(),
+                &charge(120, 150, false, 3.2),
+                Some(&spread_advice(40)),
+                local_dt(2026, 8, 31, 21, 0),
+                PlanTrigger::AutoApply,
+            )
+            .await;
+            assert_eq!(lowered_percent(&state).await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_later_full_rate_plan_forgets_a_window_armed_for_an_earlier_one() {
+        with_isolated_config_dir_async(|| async {
+            Settings::update(|s| s.forecast_plan_spread_charge = true).unwrap();
+            let state = Arc::new(AppState::new());
+            let now = local_dt(2026, 8, 31, 21, 0);
+            let advice = spread_advice(40);
+            apply_plan_recommendation_with_spread(
+                &state,
+                &spread_snapshot(),
+                &charge(120, 150, false, 3.2),
+                Some(&advice),
+                now,
+                PlanTrigger::Refresh,
+            )
+            .await;
+            assert_eq!(lowered_percent(&state).await, Some(40));
+            apply_plan_recommendation_with_spread(
+                &state,
+                &spread_snapshot(),
+                &charge(120, 150, false, 3.2),
+                None,
+                now,
+                PlanTrigger::Refresh,
+            )
+            .await;
+            assert_eq!(lowered_percent(&state).await, None);
+        })
+        .await;
+    }
+
+    // ---- Arming from the Apply button (issue #508) ------------------------------
+
+    fn spread_settings() -> Settings {
+        Settings {
+            forecast_plan_spread_charge: true,
+            ..Settings::default()
+        }
+    }
+
+    fn arm_request(
+        settings: &Settings,
+        snapshot: Option<&InverterSnapshot>,
+        percent: u16,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<crate::inverter::plan_rate::ArmedSpread, &'static str> {
+        armed_from_request(
+            start,
+            end,
+            percent,
+            snapshot,
+            settings,
+            utc(local_dt(2026, 8, 31, 21, 0)),
+        )
+    }
+
+    #[test]
+    fn a_future_window_on_a_reachable_battery_is_armed_as_asked() {
+        let start = utc(local_dt(2026, 8, 31, 23, 0));
+        let end = utc(local_dt(2026, 9, 1, 6, 0));
+        let armed = arm_request(&spread_settings(), Some(&spread_snapshot()), 40, start, end)
+            .expect("armed");
+        assert_eq!(armed.window_start, start);
+        assert_eq!(armed.window_end, end);
+        assert_eq!(armed.lowered_percent, 40);
+    }
+
+    #[test]
+    fn arming_is_refused_where_the_automatic_plan_would_not_spread() {
+        let start = utc(local_dt(2026, 8, 31, 23, 0));
+        let end = utc(local_dt(2026, 9, 1, 6, 0));
+        let snap = spread_snapshot();
+        // Setting off.
+        assert!(arm_request(&Settings::default(), Some(&snap), 40, start, end).is_err());
+        // Adaptive Charge owns the limit.
+        let adaptive = Settings {
+            adaptive_charge_enabled: true,
+            ..spread_settings()
+        };
+        assert!(arm_request(&adaptive, Some(&snap), 40, start, end).is_err());
+        // No reading yet.
+        assert!(arm_request(&spread_settings(), None, 40, start, end).is_err());
+        // A Gateway's battery settings don't reach the battery.
+        let gateway = InverterSnapshot {
+            device_type: DeviceType::Gateway,
+            ..snap.clone()
+        };
+        assert!(arm_request(&spread_settings(), Some(&gateway), 40, start, end).is_err());
+    }
+
+    #[test]
+    fn arming_is_refused_for_a_silly_rate_or_a_window_that_is_over_backwards_or_huge() {
+        let settings = spread_settings();
+        let snap = spread_snapshot();
+        let start = utc(local_dt(2026, 8, 31, 23, 0));
+        let end = utc(local_dt(2026, 9, 1, 6, 0));
+        assert!(arm_request(&settings, Some(&snap), 0, start, end).is_err());
+        assert!(arm_request(&settings, Some(&snap), 101, start, end).is_err());
+        // Ends before it starts, or is already over, or runs past a day.
+        assert!(arm_request(&settings, Some(&snap), 40, end, start).is_err());
+        assert!(arm_request(
+            &settings,
+            Some(&snap),
+            40,
+            utc(local_dt(2026, 8, 31, 1, 0)),
+            utc(local_dt(2026, 8, 31, 6, 0)),
+        )
+        .is_err());
+        assert!(arm_request(
+            &settings,
+            Some(&snap),
+            40,
+            start,
+            utc(local_dt(2026, 9, 2, 23, 30)),
+        )
+        .is_err());
     }
 }

@@ -620,6 +620,14 @@ export type PlanApply = {
     charge_rate_percent: 100;
   };
   timed_charge: { enabled: true };
+  /** Present when Spread Charge applies (issue #508): the slot above is the
+   *  whole cheap window, and this is the limit to arm for it once Apply has
+   *  written the slot. */
+  spread?: {
+    window_start: string;
+    window_end: string;
+    lowered_percent: number;
+  };
 } | null;
 
 /** Export-slot advice (issue #283 stage 2): whether the battery can
@@ -645,8 +653,9 @@ export type ExportAdvice =
   | { kind: 'no_export'; reason: string };
 
 /** What the Planner would do with the charge limit if it spread the charge
- *  across the cheap window (issue #483). Advice only: Apply still charges at
- *  full power. Absent with the setting off, also in plan history rows. */
+ *  across the cheap window (issue #483). With the setting on, Apply and the
+ *  automatic plan lower the limit once the charge starts (issue #508).
+ *  Absent with the setting off, also in plan history rows. */
 export type SpreadAdvice =
   | {
       kind: 'spread';

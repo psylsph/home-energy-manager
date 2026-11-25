@@ -156,6 +156,7 @@ fn spread(advice: Option<SpreadAdvice>) -> (u16, f64, u8, f64, u16, u16, u16, f6
             full_rate_minutes,
             window_minutes,
             after_min_soc_pct,
+            window: _,
         }) => (
             rate_percent,
             rate_kw,

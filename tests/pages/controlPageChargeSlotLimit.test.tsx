@@ -262,6 +262,36 @@ describe('Control page: charge limit on the charge slot card', () => {
     expect(section.queryByTestId('charge-slot-limit-shortfall')).toBeNull();
   });
 
+  it('says when Spread Charge puts the limit back, whoever applied the plan', async () => {
+    // Issue #508: a lowered limit is on purpose; the time is in local time.
+    const backAt = new Date(2026, 9, 12, 6, 0).getTime() / 1000;
+    renderWith(withSlot({ charge_rate: 5, plan_charge_limit_back_at: backAt }));
+    const section = await chargeSection();
+    expect(
+      section.getByText('Charge limit: 18% (0.5 kW). Spread Charge holds it there until 06:00.'),
+    ).toBeTruthy();
+    expect(section.queryByTestId('charge-slot-limit-shortfall')).toBeNull();
+  });
+
+  it('says when Spread Charge puts the limit back on slot 1 only', async () => {
+    // The plan lowers the limit for its own slot; an unrelated slot 2 keeps
+    // its ordinary note and warning.
+    const backAt = new Date(2026, 9, 12, 6, 0).getTime() / 1000;
+    renderWith(withSlot({
+      max_charge_slots: 2,
+      charge_rate: 5,
+      plan_charge_limit_back_at: backAt,
+      charge_slots: [
+        OVERNIGHT,
+        { start_hour: 13, start_minute: 0, end_hour: 18, end_minute: 0, enabled: true, target_soc: 100 },
+      ],
+    } as Partial<InverterSnapshot>));
+    const section = await chargeSection();
+    expect(section.getAllByText(/Spread Charge holds it there until 06:00/)).toHaveLength(1);
+    expect(section.getAllByText(/^Charge limit: 18% \(0\.5 kW\)/)).toHaveLength(2);
+    expect(section.getAllByText(/set under Battery and Power Controls/)).toHaveLength(1);
+  });
+
   it('leaves the warning off slot 1 while the Forecast plan owns it', async () => {
     renderWith(withSlot({ charge_rate: 5, forecast_plan_auto_apply_enabled: true } as Partial<InverterSnapshot>));
     const section = await chargeSection();
