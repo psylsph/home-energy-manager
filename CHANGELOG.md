@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-11-27
+
+### Changed
+
+- **Auto Winter Mode now warms a cold battery with short charges.** When the battery drops below your Cold Threshold, HEM charges it for 30 minutes at a time, one after another, until it has warmed back to the Recovery Threshold, much like GivEnergy Cloud's own winter mode. It borrows charge slot 1 for each charge and puts your slot back when it finishes, even across a restart. If you change slot 1 yourself in the meantime, your new setting is the one it puts back. It stays out of the way of Force Charge, a calibration, a smart-charge top-up, Cosy, Agile and Adaptive Charge, and of a charge window of yours that is already running. It isn't available on three-phase inverters yet. (#515)
+- **The Auto Winter Target SOC setting is gone.** Charges now stop at your normal charge target, the same place your own charging would. The new defaults are 2 °C to start and 3 °C to stop, and the sliders run from 2 to 10 °C. If you were still on the old 8 °C and 12 °C defaults, you move to the new ones automatically; any other values you chose are kept, brought inside the new ranges.
+
+### Fixed
+
+- **Auto Winter Mode no longer leaves your charge target lowered.** It used to set the charge target to its own Target SOC while the battery was cold, so a cold night could stop your cheap-rate charge at 20%. It no longer touches the charge target at all, and a target it set before this update is put back once.
+- **A repeating warning no longer pushes everything else out of the Logs page.** An alert waiting out its cooldown, such as a cold-battery warning, was written to the log on every poll, crowding out the lines that explained what happened.
+
 ## [1.26.0] - 2026-11-25
 
 ### Added
