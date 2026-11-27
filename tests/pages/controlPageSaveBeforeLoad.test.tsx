@@ -22,7 +22,7 @@ const held = vi.hoisted(() => ({
 const bodies: Record<string, () => unknown> = {
   '/api/auto-winter': () => ({
     ok: true,
-    data: { config: { enabled: true, cold_threshold: 6, recovery_threshold: 14, target_soc: 70, debounce_readings: 4 } },
+    data: { config: { enabled: true, cold_threshold: 6, recovery_threshold: 9, debounce_readings: 4 } },
   }),
   '/api/load-limiter': () => ({
     ok: true,
@@ -134,7 +134,7 @@ const cases: SectionCase[] = [
     path: '/api/auto-winter',
     save: () => within(screen.getByRole('heading', { name: 'Auto Winter Mode' }).closest('section') as HTMLElement).getByRole('button', { name: SAVE }),
     posts: '/api/auto-winter',
-    loaded: { enabled: true, cold_threshold: 6, target_soc: 70 },
+    loaded: { enabled: true, cold_threshold: 6, recovery_threshold: 9, debounce_readings: 4 },
   },
   {
     name: 'Load Discharge Limiter',

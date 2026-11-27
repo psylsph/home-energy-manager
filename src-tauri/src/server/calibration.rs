@@ -190,6 +190,12 @@ pub async fn start_calibration(
         state.plan_rate.lock().await.run.as_ref(),
         &snap,
     );
+    // Likewise slot 1 under a winter burst (issue #515): the cycle restores
+    // what the burst replaced, and the poll hands the burst over.
+    let plan_snap = crate::inverter::auto_winter::with_baseline_slot(
+        &*state.auto_winter_run.lock().await,
+        &plan_snap,
+    );
     let plan = match calibration::build_plan(&plan_snap) {
         Ok(plan) => plan,
         Err(e) => return reply(StatusCode::BAD_REQUEST, &e),
@@ -311,6 +317,54 @@ mod tests {
             // The poll loop applies the writes, under the arbiter.
             assert!(state.pending_writes.lock().await.is_empty());
             assert!(calibration_running(&state).await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_cycle_started_during_a_winter_burst_restores_the_user_s_slot_one() {
+        // Issue #515: slot 1 holds a 30-minute burst; the cycle must put back
+        // what the burst replaced, not HEM's window.
+        use crate::modbus::registers::{
+            HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_ENABLE_CHARGE,
+        };
+        with_isolated_config_dir_async(|| async {
+            let state = state_with(DeviceType::Gen2Hybrid).await;
+            if let Some(snap) = state.latest_snapshot.lock().await.as_mut() {
+                snap.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 14,
+                    start_minute: 10,
+                    end_hour: 14,
+                    end_minute: 40,
+                    ..Default::default()
+                };
+            }
+            state.auto_winter_run.lock().await.burst =
+                Some(crate::inverter::auto_winter::AutoWinterBurst {
+                    serial: "HEM-TEST-001".into(),
+                    baseline_start: 2330,
+                    baseline_end: 530,
+                    baseline_enable_charge: false,
+                    start: 1410,
+                    end: 1440,
+                    ends_at: chrono::Utc::now().timestamp() + 600,
+                    resends: 0,
+                    previous: None,
+                });
+            let (code, body) = start(&state, None).await;
+            assert_eq!(code, StatusCode::OK, "{body}");
+            let run = state.calibration_run.lock().await.clone().expect("running");
+            let restored = |address: u16| {
+                run.restore_writes
+                    .iter()
+                    .rev()
+                    .find(|w| w.address == address)
+                    .map(|w| w.value)
+            };
+            assert_eq!(restored(HR_CHARGE_SLOT_1_START), Some(2330));
+            assert_eq!(restored(HR_CHARGE_SLOT_1_END), Some(530));
+            assert_eq!(restored(HR_ENABLE_CHARGE), Some(0));
         })
         .await;
     }

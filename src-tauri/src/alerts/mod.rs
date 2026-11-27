@@ -640,15 +640,18 @@ pub(crate) fn evaluate_alert_cycle(
             _ => true,
         })
         .collect();
-    if !triggered.is_empty() {
-        tracing::warn!("Alerts: triggered={:?}", triggered);
-    }
     let (to_send, suppressed): (Vec<_>, Vec<_>) = triggered
         .iter()
         .copied()
         .partition(|a| debounce.should_fire(*a, config.cooldown_minutes));
+    // Warn when an alert fires. One still waiting out its cooldown is only
+    // debug: it repeats every poll for as long as the condition lasts, and
+    // it once filled the developer console's whole log buffer (issue #515).
+    if !to_send.is_empty() {
+        tracing::warn!("Alerts: triggered={:?}", to_send);
+    }
     if !suppressed.is_empty() {
-        tracing::warn!(
+        tracing::debug!(
             "Alerts: {:?} triggered but suppressed by cooldown",
             suppressed
         );
@@ -4638,6 +4641,44 @@ mod tests {
             battery_temperature: 50.0, // above the 45 C limit
             ..make_snapshot()
         }
+    }
+
+    /// A breach that is still going on must not fill the log: the developer
+    /// console keeps 2000 lines, and ~1,850 of them were this one alert
+    /// repeating every poll while it sat in its cooldown (issue #515), which
+    /// pushed out the lines that showed what Auto Winter Mode had done.
+    #[test]
+    fn an_alert_in_its_cooldown_does_not_flood_the_log() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = std::sync::Arc::new(crate::server::logs::LogRing::new(200));
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(crate::server::logs::LogCaptureLayer::new(ring.clone()));
+        let _guard =
+            tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(subscriber));
+
+        let mut config = alerts_config();
+        config.batt_temp_min = 10.0;
+        let cold = InverterSnapshot {
+            battery_temperature: 5.0,
+            ..make_snapshot()
+        };
+        let mut debounce = AlertDebounce::new();
+        let mut sent = 0;
+        for _ in 0..20 {
+            sent += cycle(&cold, &config, &mut debounce).to_send.len();
+        }
+
+        assert_eq!(sent, 1, "the alert itself still fires once");
+        let lines: Vec<String> = ring
+            .read_all()
+            .into_iter()
+            .filter(|line| line.contains("BatteryTempLow"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "one line when it fires, none while it waits: {lines:?}"
+        );
     }
 
     #[test]

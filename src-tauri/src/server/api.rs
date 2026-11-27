@@ -1226,6 +1226,12 @@ async fn capture_force_charge_revert(
         state.plan_rate.lock().await.run.as_ref(),
         &snap,
     );
+    // Likewise a winter burst in slot 1: the slot and flag to put back are
+    // the ones it replaced (issue #515). The poll then hands the burst over.
+    let snap = crate::inverter::auto_winter::with_baseline_slot(
+        &*state.auto_winter_run.lock().await,
+        &snap,
+    );
     force_charge_revert_from_snapshot(&snap, device_type)
 }
 
@@ -2983,9 +2989,25 @@ fn parse_optional_clamped_integer(
     Ok(Some(value.min(max) as u8))
 }
 
+/// Auto Winter Mode's slider ranges (°C). The cold threshold starts at 2 because
+/// the BMS stops charging below 0 °C, so a charge started there couldn't warm
+/// the battery; recovery sits at least a degree above it.
+const AUTO_WINTER_COLD_RANGE: (f64, f64) = (
+    crate::inverter::auto_winter::COLD_RANGE.0 as f64,
+    crate::inverter::auto_winter::COLD_RANGE.1 as f64,
+);
+const AUTO_WINTER_RECOVERY_RANGE: (f64, f64) = (
+    crate::inverter::auto_winter::RECOVERY_RANGE.0 as f64,
+    crate::inverter::auto_winter::RECOVERY_RANGE.1 as f64,
+);
+
+/// The ranges apply to the thresholds a request sends (see `set_auto_winter`),
+/// so settings saved before they narrowed can still be switched on and off.
+/// This checks only what must hold for any pair: both finite, recovery above cold.
 fn validate_auto_winter_thresholds(cold: f32, recovery: f32) -> Result<(), String> {
-    let cold = validate_finite_range(cold as f64, "cold_threshold", 0.0, 20.0)?;
-    let recovery = validate_finite_range(recovery as f64, "recovery_threshold", 1.0, 25.0)?;
+    let cold = validate_finite_range(cold as f64, "cold_threshold", f64::MIN, f64::MAX)?;
+    let recovery =
+        validate_finite_range(recovery as f64, "recovery_threshold", f64::MIN, f64::MAX)?;
     if recovery <= cold {
         return Err("recovery_threshold must be above cold_threshold".to_string());
     }
@@ -7462,20 +7484,30 @@ pub async fn get_auto_winter(State(state): State<Arc<AppState>>) -> (StatusCode,
 /// POST /api/auto-winter — update auto winter config.
 ///
 /// Body fields are optional — only provided fields are updated.
-/// Fields: `enabled`, `cold_threshold`, `recovery_threshold`, `target_soc`, `debounce_readings`.
+/// Fields: `enabled`, `cold_threshold`, `recovery_threshold`, `debounce_readings`. A
+/// `target_soc` from an older client is ignored: the standard target is the cap.
 pub async fn set_auto_winter(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let cold_threshold = match parse_optional_finite_threshold(&body, "cold_threshold", 0.0, 20.0) {
+    let cold_threshold = match parse_optional_finite_threshold(
+        &body,
+        "cold_threshold",
+        AUTO_WINTER_COLD_RANGE.0,
+        AUTO_WINTER_COLD_RANGE.1,
+    ) {
         Ok(value) => value,
         Err(error) => return error_response(&error),
     };
-    let recovery_threshold =
-        match parse_optional_finite_threshold(&body, "recovery_threshold", 1.0, 25.0) {
-            Ok(value) => value,
-            Err(error) => return error_response(&error),
-        };
+    let recovery_threshold = match parse_optional_finite_threshold(
+        &body,
+        "recovery_threshold",
+        AUTO_WINTER_RECOVERY_RANGE.0,
+        AUTO_WINTER_RECOVERY_RANGE.1,
+    ) {
+        Ok(value) => value,
+        Err(error) => return error_response(&error),
+    };
     let mut config_guard = state.auto_winter_config.lock().await;
     let mut candidate = config_guard.clone();
 
@@ -7487,9 +7519,6 @@ pub async fn set_auto_winter(
     }
     if let Some(v) = recovery_threshold {
         candidate.recovery_threshold = v;
-    }
-    if let Some(v) = body.get("target_soc").and_then(|v| v.as_u64()) {
-        candidate.target_soc = v.clamp(4, 100) as u8;
     }
     if let Some(v) = body.get("debounce_readings").and_then(|v| v.as_u64()) {
         candidate.debounce_readings = v.max(1) as u32;
@@ -7512,7 +7541,6 @@ pub async fn set_auto_winter(
         app_settings.auto_winter_enabled = candidate_for_persist.enabled;
         app_settings.auto_winter_cold_threshold = candidate_for_persist.cold_threshold;
         app_settings.auto_winter_recovery_threshold = candidate_for_persist.recovery_threshold;
-        app_settings.auto_winter_target_soc = candidate_for_persist.target_soc;
         app_settings.auto_winter_debounce_readings = candidate_for_persist.debounce_readings;
     })
     .await
@@ -15766,7 +15794,7 @@ pub(crate) mod tests {
                         "start_minute": 0,
                         "end_hour": 19,
                         "end_minute": 0,
-                        "target_soc": 50,
+                        "debounce_readings": 4,
                     }],
                 }),
                 serde_json::json!({
@@ -19031,6 +19059,55 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn force_charge_during_a_winter_burst_puts_back_the_user_s_slot_one() {
+        // Issue #515: slot 1 holds a 30-minute burst, so capturing it as read
+        // would make Stop Charge put HEM's window back, every day.
+        with_isolated_config_dir_async(|| async {
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_charging_pre_state(&state).await;
+            let serial = {
+                let mut guard = state.latest_snapshot.lock().await;
+                let snap = guard.as_mut().unwrap();
+                snap.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 14,
+                    start_minute: 10,
+                    end_hour: 14,
+                    end_minute: 40,
+                    ..Default::default()
+                };
+                snap.enable_charge = true;
+                snap.inverter_serial.clone()
+            };
+            state.auto_winter_run.lock().await.burst =
+                Some(crate::inverter::auto_winter::AutoWinterBurst {
+                    serial,
+                    baseline_start: 2330,
+                    baseline_end: 530,
+                    baseline_enable_charge: false,
+                    start: 1410,
+                    end: 1440,
+                    ends_at: chrono::Utc::now().timestamp() + 600,
+                    resends: 0,
+                    previous: None,
+                });
+
+            let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let _ = drain_pending_writes(&state).await;
+            let revert = state
+                .force_charge_revert
+                .lock()
+                .await
+                .clone()
+                .expect("revert");
+            assert_eq!(revert.charge_slot_1_start, Some((23, 30)));
+            assert_eq!(revert.charge_slot_1_end, Some((5, 30)));
+            assert!(!revert.enable_charge, "the flag the burst switched on");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn force_charge_takes_over_a_smart_charge_top_up_s_baseline() {
         // Issue #434: the inverter is charging for the top-up, so capturing
         // now would make Stop Charge put the top-up back, not the user's own
@@ -22267,12 +22344,106 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn auto_winter_thresholds_follow_the_slider_ranges() {
+        // Cold Threshold 2-10 °C, Recovery Threshold 3-10 °C: GivEnergy's own
+        // winter mode starts at about 2 °C, and the BMS stops charging below
+        // 0 °C, so a trigger there could never warm the battery.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let disk_before = crate::settings::Settings::load();
+
+            for body in [
+                json!({ "cold_threshold": 1.9, "recovery_threshold": 5.0 }),
+                json!({ "cold_threshold": 0.0, "recovery_threshold": 5.0 }),
+                json!({ "cold_threshold": 10.1, "recovery_threshold": 10.0 }),
+                json!({ "cold_threshold": 2.0, "recovery_threshold": 2.9 }),
+                json!({ "cold_threshold": 2.0, "recovery_threshold": 10.1 }),
+            ] {
+                let (status, response) =
+                    set_auto_winter(State(state.clone()), Json(body.clone())).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{body} must be refused");
+                assert_eq!(response["ok"], false);
+            }
+            assert_eq!(
+                serde_json::to_value(crate::settings::Settings::load()).unwrap(),
+                serde_json::to_value(&disk_before).unwrap(),
+                "a refused save must not touch the settings on disk"
+            );
+
+            for (cold, recovery) in [(2.0, 3.0), (9.0, 10.0), (5.0, 8.0)] {
+                let (status, response) = set_auto_winter(
+                    State(state.clone()),
+                    Json(json!({ "cold_threshold": cold, "recovery_threshold": recovery })),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{cold}/{recovery}: {:?}",
+                    response.0
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn auto_winter_ignores_a_target_soc_from_an_older_client() {
+        // The mode no longer has a target of its own (the standard target is
+        // the cap), so a browser tab still running the old page can't fail
+        // or change anything by sending one.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            let (status, _) = set_auto_winter(
+                State(state.clone()),
+                Json(json!({ "enabled": true, "target_soc": 20 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (_, response) = get_auto_winter(State(state.clone())).await;
+            assert_eq!(response["data"]["config"]["enabled"], true);
+            assert!(
+                response["data"]["config"].get("target_soc").is_none(),
+                "the config has no target of its own: {:?}",
+                response.0
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn auto_winter_toggle_still_saves_with_older_out_of_range_thresholds() {
+        // Settings saved before the ranges narrowed (8 / 12 was the old
+        // default) must not stop the user switching the mode on or off: only
+        // the thresholds a request actually sends are range-checked.
+        with_isolated_config_dir_async(|| async {
+            let state = test_state();
+            {
+                let mut config = state.auto_winter_config.lock().await;
+                config.cold_threshold = 8.0;
+                config.recovery_threshold = 12.0;
+            }
+
+            let (status, response) =
+                set_auto_winter(State(state.clone()), Json(json!({ "enabled": true }))).await;
+
+            assert_eq!(status, StatusCode::OK, "{:?}", response.0);
+            let config = state.auto_winter_config.lock().await.clone();
+            assert!(config.enabled);
+            assert_eq!(config.cold_threshold, 8.0);
+            assert_eq!(config.recovery_threshold, 12.0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn automation_thresholds_accept_valid_boundary_pairs() {
         with_isolated_config_dir_async(|| async {
             let state = test_state();
             let (status, _) = set_auto_winter(
                 State(state.clone()),
-                Json(json!({ "cold_threshold": 0.0, "recovery_threshold": 1.0 })),
+                Json(json!({ "cold_threshold": 2.0, "recovery_threshold": 3.0 })),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -22297,8 +22468,8 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::OK);
 
             let auto = state.auto_winter_config.lock().await.clone();
-            assert_eq!(auto.cold_threshold, 0.0);
-            assert_eq!(auto.recovery_threshold, 1.0);
+            assert_eq!(auto.cold_threshold, 2.0);
+            assert_eq!(auto.recovery_threshold, 3.0);
             let settings = crate::settings::Settings::load();
             assert_eq!(settings.agile_charge_threshold, 0.0);
             assert_eq!(settings.agile_discharge_threshold, 5.0);
@@ -22366,8 +22537,9 @@ pub(crate) mod tests {
             // remain untouched (guards against accidental clobber).
             let mut baseline = crate::settings::Settings::load();
             baseline.auto_winter_enabled = false;
-            baseline.auto_winter_target_soc = 80;
+            baseline.auto_winter_debounce_readings = 10;
             baseline.auto_winter_cold_threshold = 5.0;
+            baseline.auto_winter_recovery_threshold = 8.0;
             baseline.alerts_config.enabled = false;
             baseline.alerts_config.cooldown_minutes = 30;
             baseline.alerts_config.inverter_trip_enabled = false;
@@ -22382,8 +22554,9 @@ pub(crate) mod tests {
             {
                 let mut aw = state.auto_winter_config.lock().await;
                 aw.enabled = false;
-                aw.target_soc = 80;
+                aw.debounce_readings = 10;
                 aw.cold_threshold = 5.0;
+                aw.recovery_threshold = 8.0;
             }
             {
                 let mut cfg = state.alert_config.lock().await;
@@ -22394,7 +22567,7 @@ pub(crate) mod tests {
 
             let barrier = StdArc::new(std::sync::Barrier::new(3));
 
-            // set_auto_winter: bump target_soc to 50 + flip enabled to true.
+            // set_auto_winter: bump debounce_readings to 4 + flip enabled to true.
             // The barrier must be hit BEFORE the handler runs — otherwise
             // both handlers would complete sequentially and never race.
             let state_aw = state.clone();
@@ -22405,7 +22578,7 @@ pub(crate) mod tests {
                     State(state_aw.clone()),
                     Json(serde_json::json!({
                         "enabled": true,
-                        "target_soc": 50,
+                        "debounce_readings": 4,
                     })),
                 )
                 .await
@@ -22435,16 +22608,16 @@ pub(crate) mod tests {
             assert_eq!(status_al, StatusCode::OK);
 
             // Both updates must survive. A lost-update bug shows up as one
-            // field here holding the baseline value (e.g. target_soc=80
-            // instead of 50) — the second save overwrote the first's field.
+            // field here holding the baseline value (e.g. debounce_readings=10
+            // instead of 4) — the second save overwrote the first's field.
             let saved = crate::settings::Settings::load();
             assert!(
                 saved.auto_winter_enabled,
                 "auto_winter_enabled must be true after concurrent set_auto_winter"
             );
             assert_eq!(
-                saved.auto_winter_target_soc, 50,
-                "auto_winter_target_soc must reflect the concurrent update (not be clobbered by set_alerts' save)"
+                saved.auto_winter_debounce_readings, 4,
+                "auto_winter_debounce_readings must reflect the concurrent update (not be clobbered by set_alerts' save)"
             );
             assert!(
                 saved.alerts_config.enabled,

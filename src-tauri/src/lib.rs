@@ -232,7 +232,6 @@ async fn initialize_app_state(
         aw.enabled = app_settings.auto_winter_enabled;
         aw.cold_threshold = app_settings.auto_winter_cold_threshold;
         aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
-        aw.target_soc = app_settings.auto_winter_target_soc;
         aw.debounce_readings = app_settings.auto_winter_debounce_readings;
     }
 
@@ -321,15 +320,31 @@ async fn initialize_app_state(
         tracing::info!("Restored load limiter saved reserve: {}%", reserve,);
     }
 
-    // Load persisted auto-winter saved values (original register values
-    // captured before winter mode activated).
+    // Load what Auto Winter Mode has on the inverter: the charge slot 1 it
+    // borrowed for a burst (to put back), and a charge target saved by the
+    // version before issue #515 (put back once).
     {
-        let mut saved = state.auto_winter_saved.lock().await;
+        let mut run = state.auto_winter_run.lock().await;
+        if let Some(burst) = app_settings.auto_winter_burst.clone() {
+            tracing::info!(
+                "Restored auto-winter burst baseline: slot 1 was {:04}-{:04}",
+                burst.baseline_start,
+                burst.baseline_end,
+            );
+            run.burst = Some(burst);
+            // The cold spell was still running when we stopped. Pick it up
+            // as such: from Idle the burst would read as "not warming" and
+            // the user's slot would be put straight back while the battery
+            // is still cold. If it has warmed meanwhile, the usual warm
+            // debounce puts it back, and a disabled mode puts it back at once.
+            *state.auto_winter_state.lock().await =
+                crate::inverter::auto_winter::AutoWinterState::Warming;
+        }
         if let (Some(enable_target), Some(target_soc)) = (
             app_settings.auto_winter_saved_enable_target,
             app_settings.auto_winter_saved_target_soc,
         ) {
-            *saved = Some(crate::inverter::poll::AutoWinterSaved {
+            run.legacy = Some(crate::inverter::auto_winter::AutoWinterSaved {
                 enable_charge_target: enable_target,
                 target_soc: target_soc as u8,
             });
@@ -829,6 +844,10 @@ pub fn run() {
                                 &state,
                                 crate::inverter::plan_rate::SHUTDOWN_RESTORE_LIMIT,
                             ),
+                            crate::inverter::auto_winter::restore_on_shutdown(
+                                &state,
+                                crate::inverter::auto_winter::SHUTDOWN_RESTORE_LIMIT,
+                            ),
                             flush_history_on_shutdown(&state),
                         );
                     });
@@ -1230,6 +1249,10 @@ pub fn run_headless(args: &[String]) {
                 &state,
                 crate::inverter::plan_rate::SHUTDOWN_RESTORE_LIMIT,
             ),
+            crate::inverter::auto_winter::restore_on_shutdown(
+                &state,
+                crate::inverter::auto_winter::SHUTDOWN_RESTORE_LIMIT,
+            ),
             flush_history_on_shutdown(&state),
         );
     });
@@ -1402,9 +1425,8 @@ mod tests {
             s.evc_host = "evc.local".to_string();
             s.evc_port = 5020;
             s.auto_winter_enabled = true;
-            s.auto_winter_cold_threshold = 1.0;
+            s.auto_winter_cold_threshold = 4.0;
             s.auto_winter_recovery_threshold = 9.0;
-            s.auto_winter_target_soc = 55;
             s.auto_winter_debounce_readings = 7;
             s.load_limiter_enabled = true;
             s.load_limiter_threshold_w = 3000;
@@ -1420,6 +1442,17 @@ mod tests {
             s.octopus_account_number = "A-TEST1".to_string();
             s.auto_winter_saved_enable_target = Some(true);
             s.auto_winter_saved_target_soc = Some(77);
+            s.auto_winter_burst = Some(crate::inverter::auto_winter::AutoWinterBurst {
+                serial: "SN-INIT-TEST".into(),
+                baseline_start: 2330,
+                baseline_end: 530,
+                baseline_enable_charge: true,
+                start: 1410,
+                end: 1440,
+                ends_at: 1_800_000_000,
+                resends: 0,
+                previous: None,
+            });
             s.alerts_config.enabled = true;
             // Issue #117: the autostart preference should be saved/restored.
             s.autostart_enabled = true;
@@ -1450,9 +1483,8 @@ mod tests {
             {
                 let aw = state.auto_winter_config.lock().await;
                 assert!(aw.enabled);
-                assert_eq!(aw.cold_threshold, 1.0);
+                assert_eq!(aw.cold_threshold, 4.0);
                 assert_eq!(aw.recovery_threshold, 9.0);
-                assert_eq!(aw.target_soc, 55);
                 assert_eq!(aw.debounce_readings, 7);
             }
 
@@ -1490,15 +1522,27 @@ mod tests {
                 .await
                 .holding_for_restart(chrono::Utc::now()));
 
-            // Auto-winter saved register values
+            // Auto-winter: the target from before the update, and the burst
+            // baseline
             {
-                let saved = state.auto_winter_saved.lock().await;
-                let saved = saved
+                let run = state.auto_winter_run.lock().await;
+                let saved = run
+                    .legacy
                     .as_ref()
                     .expect("auto-winter saved should be restored");
                 assert!(saved.enable_charge_target);
                 assert_eq!(saved.target_soc, 77);
+                let burst = run.burst.as_ref().expect("burst baseline restored");
+                assert_eq!((burst.baseline_start, burst.baseline_end), (2330, 530));
             }
+            // A burst that was running resumes as a cold spell in progress.
+            // From Idle it would read as "not warming" and put the user's
+            // slot straight back while the battery is still cold, then start
+            // another burst a few polls later.
+            assert_eq!(
+                *state.auto_winter_state.lock().await,
+                crate::inverter::auto_winter::AutoWinterState::Warming
+            );
 
             // Alert config applied
             {
@@ -1631,10 +1675,11 @@ mod tests {
                 .await
                 .expect("history db should open");
 
-            assert!(
-                state.auto_winter_saved.lock().await.is_none(),
-                "auto-winter saved should stay None"
-            );
+            {
+                let run = state.auto_winter_run.lock().await;
+                assert!(run.legacy.is_none(), "auto-winter saved should stay None");
+                assert!(run.burst.is_none(), "no burst baseline without a saved one");
+            }
             let ll_state = state.load_limiter_state.lock().await;
             assert!(
                 matches!(*ll_state, LoadLimiterState::Idle),

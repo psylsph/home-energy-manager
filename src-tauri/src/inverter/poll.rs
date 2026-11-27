@@ -72,10 +72,10 @@ use crate::inverter::sanitizer::{
 };
 use crate::inverter::solar_position::calculate_solar_position;
 use crate::inverter::state_machines::{
-    build_timed_export_disable_writes, check_adaptive_charge, check_auto_winter_with_outcome,
-    check_discharge_floor, evaluate_pause_limiters, should_repair_timed_export,
-    write_registers_to_inverter, AgileSlotAction, AutoWinterWriteOutcome, DischargeControlArbiter,
-    DischargeControlOwner, PauseLimiters, DISPATCH_HOLD_LABEL,
+    build_timed_export_disable_writes, check_adaptive_charge, check_discharge_floor,
+    evaluate_pause_limiters, should_repair_timed_export, write_registers_to_inverter,
+    AgileSlotAction, DischargeControlArbiter, DischargeControlOwner, PauseLimiters,
+    DISPATCH_HOLD_LABEL,
 };
 pub use crate::inverter::state_machines::{
     AdaptiveChargeState, AutoWinterConfig, AutoWinterSaved, AutoWinterState, DischargeFloorConfig,
@@ -549,8 +549,9 @@ pub struct AppState {
     pub auto_winter_config: Arc<Mutex<AutoWinterConfig>>,
     /// Auto winter mode state machine.
     pub auto_winter_state: Arc<Mutex<AutoWinterState>>,
-    /// Saved register values to restore when winter mode deactivates.
-    pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
+    /// What Auto Winter Mode has on the inverter (the charge slot 1 it borrowed
+    /// for a burst, and a pre-#515 target to put back), kept under one lock.
+    pub auto_winter_run: Arc<Mutex<crate::inverter::auto_winter::AutoWinterRun>>,
     /// Runtime state for Adaptive Charge SOC/time hysteresis.
     pub adaptive_charge_state: Arc<Mutex<AdaptiveChargeState>>,
     /// Raw pre-Adaptive charge limit retained until restoration is confirmed.
@@ -832,7 +833,9 @@ impl AppState {
             connected_clients: Arc::new(parking_lot::Mutex::new(ConnectedClients::new())),
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
-            auto_winter_saved: Arc::new(Mutex::new(None)),
+            auto_winter_run: Arc::new(Mutex::new(
+                crate::inverter::auto_winter::AutoWinterRun::default(),
+            )),
             adaptive_charge_state: Arc::new(Mutex::new(AdaptiveChargeState::default())),
             adaptive_charge_saved: Arc::new(Mutex::new(
                 crate::settings::Settings::load().adaptive_charge_saved_limit,
@@ -3232,6 +3235,10 @@ async fn run_dispatch_charge(
             .run
             .as_ref()
             .map(|run| crate::inverter::plan_rate::baseline_charge_rate(Some(run), snapshot)),
+        slot_one_baseline: crate::inverter::auto_winter::baseline_under_burst(
+            &*state.auto_winter_run.lock().await,
+            snapshot,
+        ),
     };
 
     let mut guard = state.dispatch_charge.lock().await;
@@ -3502,36 +3509,36 @@ async fn drain_write_batches_with_gap(
     landed
 }
 
-/// Persist the pre-winter register values (or clear them when winter mode
-/// deactivates) based on the state machine's `saved` output. Extracted for
-/// unit-testability of its concurrency contract.
+/// Persist what Auto Winter Mode has on the inverter: the baseline of the
+/// charge slot it borrowed (cleared once it is put back) and a target saved
+/// before issue #515 (cleared once it is put back). The poll loop writes the
+/// slot only after this has succeeded, so a restart always finds the baseline
+/// of a burst that may be on the inverter.
 ///
 /// The transactional `Settings::update` mutates the freshly-loaded settings
 /// under the settings lock, so a concurrent save of a disjoint field (e.g.
 /// rated kWp from the settings UI) can never be reverted by persist the way
 /// a save of the cycle's `poll_settings` clone did (lost update).
-fn persist_auto_winter_saved(saved: &Option<AutoWinterSaved>) {
-    let new_enable = saved.as_ref().map(|s| s.enable_charge_target);
-    let new_soc = saved.as_ref().map(|s| s.target_soc as u16);
+fn persist_auto_winter_run(
+    run: &crate::inverter::auto_winter::AutoWinterRun,
+) -> Result<(), String> {
+    let burst = run.burst.clone();
+    let new_enable = run.legacy.as_ref().map(|s| s.enable_charge_target);
+    let new_soc = run.legacy.as_ref().map(|s| s.target_soc as u16);
     // Fast-path: avoid taking the settings lock + touching the file when
-    // winter mode isn't transitioning (steady-state call every poll).
+    // nothing changed (steady-state call every poll).
     let current = crate::settings::Settings::load();
-    if current.auto_winter_saved_enable_target == new_enable
+    if current.auto_winter_burst == burst
+        && current.auto_winter_saved_enable_target == new_enable
         && current.auto_winter_saved_target_soc == new_soc
     {
-        return;
+        return Ok(());
     }
-    let result = crate::settings::Settings::update(|disk| {
-        if disk.auto_winter_saved_enable_target != new_enable
-            || disk.auto_winter_saved_target_soc != new_soc
-        {
-            disk.auto_winter_saved_enable_target = new_enable;
-            disk.auto_winter_saved_target_soc = new_soc;
-        }
-    });
-    if let Err(e) = result {
-        tracing::warn!("Failed to persist auto winter saved values: {e}");
-    }
+    crate::settings::Settings::update(|disk| {
+        disk.auto_winter_burst = burst;
+        disk.auto_winter_saved_enable_target = new_enable;
+        disk.auto_winter_saved_target_soc = new_soc;
+    })
 }
 
 /// Persist the per-meter midnight baselines that drive CT-solar
@@ -4199,10 +4206,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // matching reads in a row (issue #501).
                 let mut timed_export_repair_reads =
                     crate::inverter::state_machines::RepairReads::default();
-                // Outcome of the auto-winter register batch issued on the
-                // previous poll. Pending activation/restoration stays
-                // unclaimed until a later snapshot confirms both values.
-                let mut last_auto_winter_write_outcome = AutoWinterWriteOutcome::NoneIssued;
                 // Whether we already warned that the inverter clock is
                 // unavailable (once per connection, not once per poll).
                 let mut inverter_time_fallback_logged = false;
@@ -4765,28 +4768,88 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     snapshot.device_type.battery_controls_reach_battery();
                                 let sit_out = calibrating || !reaches_battery;
 
-                                // ---- Auto winter mode ----
+                                // ---- Auto winter mode (issue #515) ----
                                 {
-                                    let config = state.auto_winter_config.lock().await;
-                                    let mut aw_state = state.auto_winter_state.lock().await;
-                                    let mut saved = state.auto_winter_saved.lock().await;
-                                    let writes = if sit_out {
-                                        None
+                                    use crate::inverter::auto_winter::{
+                                        self, AutoWinterBlocker, AutoWinterFacts,
+                                    };
+                                    let config = state.auto_winter_config.lock().await.clone();
+                                    let now = chrono::Utc::now().timestamp();
+                                    // Another owner of the battery, by priority. Cosy and
+                                    // Agile count only while they are charging (last poll's
+                                    // reading; they are set later in this one): between
+                                    // windows slot 1 is free.
+                                    let prior = state.latest_snapshot.lock().await.clone();
+                                    let blocker = if calibrating {
+                                        Some(AutoWinterBlocker::Calibration)
+                                    } else if state.force_charge_revert.lock().await.is_some()
+                                        || state.force_charge_restoration.lock().await.is_some()
+                                    {
+                                        Some(AutoWinterBlocker::ManualForce)
+                                    } else if state.load_limiter_state.lock().await.is_actively_pausing()
+                                        || state
+                                            .temperature_limiter_state
+                                            .lock()
+                                            .await
+                                            .is_actively_pausing()
+                                    {
+                                        Some(AutoWinterBlocker::Safety)
+                                    } else if poll_settings.adaptive_charge_enabled
+                                        && state
+                                            .adaptive_charge_state
+                                            .lock()
+                                            .await
+                                            .active_period()
+                                            .is_some()
+                                    {
+                                        Some(AutoWinterBlocker::Adaptive)
+                                    } else if prior
+                                        .as_ref()
+                                        .is_some_and(|s| s.cosy_active || s.agile_active)
+                                    {
+                                        Some(AutoWinterBlocker::TariffAutomation)
+                                    } else if state.dispatch_charge.lock().await.run.is_some() {
+                                        Some(AutoWinterBlocker::DispatchTopUp)
                                     } else {
-                                        check_auto_winter_with_outcome(
+                                        None
+                                    };
+                                    let mut aw_state = state.auto_winter_state.lock().await;
+                                    let mut run = state.auto_winter_run.lock().await;
+                                    let before = run.clone();
+                                    let mut writes = if sit_out {
+                                        // The calibration cycle captured slot 1 under a
+                                        // burst as its baseline (`with_baseline_slot`)
+                                        // and puts it back itself.
+                                        if calibrating {
+                                            auto_winter::hand_over(
+                                                &mut run,
+                                                AutoWinterBlocker::Calibration,
+                                            );
+                                        }
+                                        Vec::new()
+                                    } else {
+                                        auto_winter::step(
                                             &snapshot,
                                             &config,
                                             &mut aw_state,
-                                            &mut saved,
-                                            last_auto_winter_write_outcome,
+                                            &mut run,
+                                            &AutoWinterFacts {
+                                                now,
+                                                inverter_minute,
+                                                blocker,
+                                            },
                                         )
+                                        .writes
                                     };
 
-                                    // Tag the snapshot so the frontend knows
-                                    // whether winter mode was triggered by
-                                    // this system vs. manually.
-                                    snapshot.auto_winter_active =
-                                        matches!(*aw_state, AutoWinterState::WinterActive);
+                                    // Tag the snapshot so the frontend knows whether a
+                                    // charge burst is warming the battery now.
+                                    snapshot.auto_winter_active = matches!(
+                                        *aw_state,
+                                        AutoWinterState::Warming
+                                            | AutoWinterState::WarmPending { .. }
+                                    ) && auto_winter::burst_running(&run, now);
+                                    drop(aw_state);
                                     // Load cosy_enabled from settings so the frontend
                                     // knows cosy is configured even between slots.
                                     // (cosy_active is set later, AFTER the cosy state
@@ -4825,40 +4888,38 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     snapshot.agile_scope =
                                         crate::settings::agile_scope_for_settings(&poll_settings);
 
-                                    // Persist saved values to disk so they survive a
-                                    // restart. When winter mode deactivates, saved
-                                    // becomes None - this clears the persisted values.
-                                    let persist_saved = saved.clone();
-                                    drop(config);
-                                    drop(aw_state);
-                                    drop(saved);
-
-                                    // File I/O (the fast-path load and, on a
-                                    // winter transition, `Settings::update`)
-                                    // runs on the blocking pool so it can't
-                                    // stall the poll task — same pattern as
-                                    // the cycle's own settings load above.
-                                    let _ = tokio::task::spawn_blocking(move || {
-                                        persist_auto_winter_saved(&persist_saved);
-                                    })
-                                    .await;
-
-                                    last_auto_winter_write_outcome =
-                                        if let Some(writes) = writes {
-                                            if write_registers_to_inverter(
-                                                &mut client,
-                                                &writes,
-                                                "Auto winter",
-                                            )
-                                            .await
-                                            {
-                                                AutoWinterWriteOutcome::Succeeded
-                                            } else {
-                                                AutoWinterWriteOutcome::Failed
+                                    // Save what is about to be on the inverter (or what
+                                    // has been put back) before any write goes out, on
+                                    // the blocking pool so file I/O can't stall the poll
+                                    // task. A window whose baseline can't be saved is not
+                                    // sent: a restart would find a slot it can't restore.
+                                    if run.burst != before.burst || run.legacy != before.legacy {
+                                        let to_save = run.clone();
+                                        let saved = tokio::task::spawn_blocking(move || {
+                                            persist_auto_winter_run(&to_save)
+                                        })
+                                        .await
+                                        .unwrap_or_else(|e| Err(e.to_string()));
+                                        if let Err(e) = saved {
+                                            tracing::warn!(
+                                                "Auto winter: couldn't save the charge slot to put back, not charging: {e}"
+                                            );
+                                            if run.burst.is_some() && run.burst != before.burst {
+                                                run.burst = before.burst.clone();
+                                                writes.clear();
                                             }
-                                        } else {
-                                            AutoWinterWriteOutcome::NoneIssued
-                                        };
+                                        }
+                                    }
+                                    drop(run);
+
+                                    if !writes.is_empty() {
+                                        write_registers_to_inverter(
+                                            &mut client,
+                                            &writes,
+                                            "Auto winter",
+                                        )
+                                        .await;
+                                    }
                                 }
 
                                 // ---- Adaptive Charge mode (issue #234) ----
@@ -12068,6 +12129,127 @@ mod tests {
         .await;
     }
 
+    /// A winter burst at 14:10-14:40 on SN1, over the user's 23:30-05:30
+    /// with the charge flag off, saved and on the inverter (issue #515).
+    async fn burst_on_slot_one(state: &Arc<AppState>, slot_one: (u8, u8, u8, u8)) {
+        let burst = crate::inverter::auto_winter::AutoWinterBurst {
+            serial: "SN1".into(),
+            baseline_start: 2330,
+            baseline_end: 530,
+            baseline_enable_charge: false,
+            start: 1410,
+            end: 1440,
+            ends_at: chrono::Utc::now().timestamp() + 600,
+            resends: 0,
+            previous: None,
+        };
+        let mut snap = InverterSnapshot {
+            inverter_serial: "SN1".into(),
+            device_type: DeviceType::ACCoupled,
+            enable_charge: true,
+            ..Default::default()
+        };
+        snap.charge_slots[0] = crate::inverter::model::ScheduleSlot {
+            enabled: true,
+            start_hour: slot_one.0,
+            start_minute: slot_one.1,
+            end_hour: slot_one.2,
+            end_minute: slot_one.3,
+            ..Default::default()
+        };
+        *state.latest_snapshot.lock().await = Some(snap);
+        let to_save = burst.clone();
+        crate::settings::Settings::update_async(move |s| s.auto_winter_burst = Some(to_save))
+            .await
+            .unwrap();
+        state.auto_winter_run.lock().await.burst = Some(burst);
+    }
+
+    #[tokio::test]
+    async fn shutdown_puts_back_slot_one_a_winter_burst_borrowed() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            burst_on_slot_one(&state, (14, 10, 14, 40)).await;
+            let (_, writes) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(
+                    crate::inverter::auto_winter::restore_on_shutdown(
+                        &state,
+                        Duration::from_secs(5)
+                    ),
+                    answer_next_batch(&state),
+                )
+            })
+            .await
+            .expect("slot 1 is put back");
+            let value = |address: u16| {
+                writes
+                    .iter()
+                    .find(|w| w.address == address)
+                    .map(|w| w.value)
+            };
+            assert_eq!(
+                value(crate::modbus::registers::HR_CHARGE_SLOT_1_START),
+                Some(2330)
+            );
+            assert_eq!(
+                value(crate::modbus::registers::HR_CHARGE_SLOT_1_END),
+                Some(530)
+            );
+            assert_eq!(value(crate::modbus::registers::HR_ENABLE_CHARGE), Some(0));
+            let run = state.auto_winter_run.lock().await;
+            assert!(run.burst.is_none() && run.stopped);
+            assert!(crate::settings::Settings::load()
+                .auto_winter_burst
+                .is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_the_inverter_away_keeps_the_burst_for_the_next_start() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            burst_on_slot_one(&state, (14, 10, 14, 40)).await;
+            // Nobody answers the queued restore.
+            crate::inverter::auto_winter::restore_on_shutdown(&state, Duration::from_millis(50))
+                .await;
+            let run = state.auto_winter_run.lock().await;
+            assert!(
+                run.burst.is_some() && run.stopped,
+                "nothing more is written"
+            );
+            assert!(crate::settings::Settings::load()
+                .auto_winter_burst
+                .is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_leaves_a_slot_one_someone_else_changed_alone() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            burst_on_slot_one(&state, (1, 0, 2, 0)).await;
+            crate::inverter::auto_winter::restore_on_shutdown(&state, Duration::from_millis(50))
+                .await;
+            assert!(state.pending_writes.lock().await.is_empty());
+            assert!(state.auto_winter_run.lock().await.stopped);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_no_burst_only_stops_auto_winter() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            crate::inverter::auto_winter::restore_on_shutdown(&state, Duration::from_millis(50))
+                .await;
+            assert!(state.auto_winter_run.lock().await.stopped);
+            assert!(state.pending_writes.lock().await.is_empty());
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn shutdown_with_no_run_only_stops_the_loop() {
         with_isolated_config_dir_async(|| async {
@@ -15895,12 +16077,26 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // persist_auto_winter_saved must not clobber concurrent settings saves.
+    // persist_auto_winter_run must not clobber concurrent settings saves.
     // The poll loop passes its cycle-start settings clone; saving that whole
     // struct back after a disjoint field (e.g. pv1_rated_kw) changed on disk
     // mid-cycle is a lost update (same class as review finding #5, fixed for
     // Adaptive Charge by switching to a narrow Settings::update).
     // ------------------------------------------------------------------
+
+    fn winter_burst() -> crate::inverter::auto_winter::AutoWinterBurst {
+        crate::inverter::auto_winter::AutoWinterBurst {
+            serial: "SN1".into(),
+            baseline_start: 2330,
+            baseline_end: 530,
+            baseline_enable_charge: true,
+            start: 1410,
+            end: 1440,
+            ends_at: 1_800_000_000,
+            resends: 0,
+            previous: None,
+        }
+    }
 
     #[test]
     fn persist_auto_winter_does_not_clobber_disjoint_settings_save() {
@@ -15919,10 +16115,11 @@ mod tests {
             })
             .expect("concurrent save");
 
-            persist_auto_winter_saved(&Some(AutoWinterSaved {
-                enable_charge_target: true,
-                target_soc: 80,
-            }));
+            persist_auto_winter_run(&crate::inverter::auto_winter::AutoWinterRun {
+                burst: Some(winter_burst()),
+                ..Default::default()
+            })
+            .expect("persist");
 
             let after = Settings::load();
             assert_eq!(
@@ -15930,11 +16127,30 @@ mod tests {
                 "auto-winter persist clobbered the concurrent settings save"
             );
             assert_eq!(
-                after.auto_winter_saved_enable_target,
-                Some(true),
-                "winter pre-values must still be persisted"
+                after.auto_winter_burst,
+                Some(winter_burst()),
+                "the slot baseline must still be persisted"
             );
-            assert_eq!(after.auto_winter_saved_target_soc, Some(80));
+        });
+    }
+
+    #[test]
+    fn persist_auto_winter_clears_the_baseline_and_the_old_target_once_put_back() {
+        crate::test_util::with_isolated_config_dir(|| {
+            Settings::update(|s| {
+                s.auto_winter_burst = Some(winter_burst());
+                s.auto_winter_saved_enable_target = Some(true);
+                s.auto_winter_saved_target_soc = Some(80);
+            })
+            .expect("seed");
+
+            persist_auto_winter_run(&crate::inverter::auto_winter::AutoWinterRun::default())
+                .expect("persist");
+
+            let after = Settings::load();
+            assert_eq!(after.auto_winter_burst, None);
+            assert_eq!(after.auto_winter_saved_enable_target, None);
+            assert_eq!(after.auto_winter_saved_target_soc, None);
         });
     }
 

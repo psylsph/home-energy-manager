@@ -30,17 +30,18 @@ const defaultLimiter = vi.hoisted(() => ({
   end_minute: 0,
 }));
 
+const defaultWinter = vi.hoisted(() => ({
+  enabled: false,
+  cold_threshold: 2,
+  recovery_threshold: 3,
+  debounce_readings: 10,
+}));
+
 const state = vi.hoisted(() => ({
   cosy: { ok: true, enabled: false, slots: [] as unknown[] } as unknown,
   cosyFails: false,
   adaptive: null as unknown,
-  winter: {
-    enabled: false,
-    cold_threshold: 8,
-    recovery_threshold: 12,
-    target_soc: 80,
-    debounce_readings: 10,
-  },
+  winter: { ...defaultWinter },
   limiter: {
     enabled: false,
     threshold_w: 3000,
@@ -132,6 +133,7 @@ beforeEach(() => {
   state.cosyFails = false;
   state.adaptive = null;
   state.limiter = { ...defaultLimiter };
+  state.winter = { ...defaultWinter };
 });
 
 afterEach(() => {
@@ -160,11 +162,71 @@ describe('<ControlPage/> — Auto Winter save', () => {
     await waitFor(() => expect(save().textContent).toBe('✓ Saved'));
     expect(apiPost).toHaveBeenCalledWith('/api/auto-winter', {
       enabled: false,
-      cold_threshold: 8,
-      recovery_threshold: 12,
-      target_soc: 80,
+      cold_threshold: 2,
+      recovery_threshold: 3,
       debounce_readings: 10,
     });
+  });
+
+  it('has no Target SOC of its own: the standard target is the cap', async () => {
+    connect();
+    render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
+    switchOn();
+
+    expect(within(section('Auto Winter Mode')).queryByText('Target SOC')).toBeNull();
+    expect(sliders()).toHaveLength(3); // cold, recovery, debounce
+    expect(within(section('Auto Winter Mode')).getByText(/up to your normal charge target/i)).toBeInTheDocument();
+  });
+
+  const switchOn = () =>
+    fireEvent.click(within(section('Auto Winter Mode')).getByRole('switch', { name: 'Enable Auto Winter Mode' }));
+  const sliders = () =>
+    Array.from(section('Auto Winter Mode').querySelectorAll<HTMLInputElement>('input[type="range"]'));
+
+  it('limits the cold threshold to 2-10 and the recovery threshold to 3-10', async () => {
+    connect();
+    render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
+    switchOn();
+
+    const [cold, recovery] = sliders();
+    expect([cold.min, cold.max]).toEqual(['2', '10']);
+    expect([recovery.min, recovery.max]).toEqual(['3', '10']);
+  });
+
+  it('brings thresholds saved under the older, wider ranges inside the sliders', async () => {
+    // 8 and 12 were the defaults before the ranges narrowed; the backend now
+    // refuses a recovery threshold above 10, so a save must send a valid value.
+    state.winter = { ...state.winter, cold_threshold: 0, recovery_threshold: 12 };
+    connect();
+    render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
+
+    fireEvent.click(save());
+
+    await waitFor(() => expect(save().textContent).toBe('✓ Saved'));
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/auto-winter',
+      expect.objectContaining({ cold_threshold: 2, recovery_threshold: 10 }),
+    );
+  });
+
+  it('keeps recovery above cold when both older thresholds are clamped', async () => {
+    // 12/15 was valid before; clamped one by one it is 10/10, which the
+    // backend refuses ("recovery must be above cold").
+    state.winter = { ...state.winter, cold_threshold: 12, recovery_threshold: 15 };
+    connect();
+    render(<ControlPage />);
+    await waitFor(() => expect(save()).toBeEnabled());
+
+    fireEvent.click(save());
+
+    await waitFor(() => expect(save().textContent).toBe('✓ Saved'));
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/auto-winter',
+      expect.objectContaining({ cold_threshold: 9, recovery_threshold: 10 }),
+    );
   });
 
   it('saves the enabled flag after it is switched on', async () => {

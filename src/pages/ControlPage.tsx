@@ -602,12 +602,35 @@ function ScheduleSlotEditor({
 const LOAD_FAILED_NOTE =
   'The saved settings could not be loaded, so saving is turned off to avoid overwriting them. Reload the page to try again.';
 
+// GivEnergy's own winter mode starts below about 2 °C. The BMS refuses to charge below
+// 0 °C, so a trigger there could never warm the battery. The ranges match the backend's.
+const WINTER_COLD_DEFAULT = 2;
+const WINTER_RECOVERY_DEFAULT = 3;
+const WINTER_COLD_RANGE = { min: 2, max: 10 };
+const WINTER_RECOVERY_RANGE = { min: 3, max: 10 };
+
+/** Settings saved under the older, wider ranges are brought inside the sliders. */
+function clampWinterThreshold(value: number, range: { min: number; max: number }): number {
+  return Math.min(range.max, Math.max(range.min, Math.round(value)));
+}
+
+/**
+ * Both thresholds inside the sliders with recovery above cold, as the backend
+ * requires (clamped one by one, 12/15 would be a refused 10/10).
+ */
+function clampWinterThresholds(cold: number, recovery: number): { cold: number; recovery: number } {
+  const clampedCold = clampWinterThreshold(cold, WINTER_COLD_RANGE);
+  const clampedRecovery = clampWinterThreshold(recovery, WINTER_RECOVERY_RANGE);
+  return clampedRecovery > clampedCold
+    ? { cold: clampedCold, recovery: clampedRecovery }
+    : { cold: clampedRecovery - 1, recovery: clampedRecovery };
+}
+
 function AutoWinterSection() {
   const { snapshot } = useInverterStore();
   const [enabled, setEnabled] = useState(false);
-  const [coldThreshold, setColdThreshold] = useState(8);
-  const [recoveryThreshold, setRecoveryThreshold] = useState(12);
-  const [targetSoc, setTargetSoc] = useState(80);
+  const [coldThreshold, setColdThreshold] = useState(WINTER_COLD_DEFAULT);
+  const [recoveryThreshold, setRecoveryThreshold] = useState(WINTER_RECOVERY_DEFAULT);
 
   const [debounce, setDebounce] = useState(10);
   const [saving, setSaving] = useState(false);
@@ -620,12 +643,15 @@ function AutoWinterSection() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await apiGet<{ ok: boolean; data: { config: { enabled: boolean; cold_threshold: number; recovery_threshold: number; target_soc: number; debounce_readings: number } } }>('/api/auto-winter');
+        const res = await apiGet<{ ok: boolean; data: { config: { enabled: boolean; cold_threshold: number; recovery_threshold: number; debounce_readings: number } } }>('/api/auto-winter');
         if (res.ok) {
           setEnabled(res.data.config.enabled);
-          setColdThreshold(Math.round(res.data.config.cold_threshold));
-          setRecoveryThreshold(Math.round(res.data.config.recovery_threshold));
-          setTargetSoc(Math.max(4, res.data.config.target_soc));
+          const thresholds = clampWinterThresholds(
+            res.data.config.cold_threshold,
+            res.data.config.recovery_threshold,
+          );
+          setColdThreshold(thresholds.cold);
+          setRecoveryThreshold(thresholds.recovery);
           setDebounce(res.data.config.debounce_readings);
           setLoaded(true);
         } else {
@@ -645,7 +671,6 @@ function AutoWinterSection() {
         enabled,
         cold_threshold: coldThreshold,
         recovery_threshold: recoveryThreshold,
-        target_soc: targetSoc,
         debounce_readings: debounce,
       });
       setSaveFeedback('saved');
@@ -665,7 +690,7 @@ function AutoWinterSection() {
       <div className="bg-bg-surface rounded-xl p-4 space-y-4">
         {enabled && winterActive && (
           <div className="text-xs bg-blue-900/40 text-text-primary px-3 py-2 rounded-lg">
-            Winter mode active — battery is being charged to {snapshot?.target_soc ?? 80}%
+            Winter mode active — charging for 30 minutes to warm the battery
             {batteryTemp != null && ` (${batteryTemp.toFixed(1)}°C)`}
           </div>
         )}
@@ -691,15 +716,15 @@ function AutoWinterSection() {
               </div>
               <input
                 type="range"
-                min={0}
-                max={20}
+                min={WINTER_COLD_RANGE.min}
+                max={WINTER_COLD_RANGE.max}
                 step={1}
                 value={coldThreshold}
                 onChange={(e) => setColdThreshold(Number(e.target.value))}
                 className="w-full"
               />
               <p className="text-text-secondary text-xs">
-                Activate winter mode when battery drops below this temperature
+                Start charging when the battery drops below this temperature
               </p>
             </div>
 
@@ -711,33 +736,16 @@ function AutoWinterSection() {
               </div>
               <input
                 type="range"
-                min={1}
-                max={25}
+                min={WINTER_RECOVERY_RANGE.min}
+                max={WINTER_RECOVERY_RANGE.max}
                 step={1}
                 value={recoveryThreshold}
                 onChange={(e) => setRecoveryThreshold(Number(e.target.value))}
                 className="w-full"
               />
               <p className="text-text-secondary text-xs">
-                Disable winter mode when battery warms above this temperature
+                Stop once the battery has warmed to this temperature
               </p>
-            </div>
-
-            {/* Target SOC */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-text-secondary text-sm">Target SOC</span>
-                <span className="font-mono text-text-primary text-sm">{targetSoc}%</span>
-              </div>
-              <input
-                type="range"
-                min={4}
-                max={100}
-                step={1}
-                value={targetSoc}
-                onChange={(e) => setTargetSoc(Number(e.target.value))}
-                className="w-full"
-              />
             </div>
 
             {/* Debounce */}
@@ -762,8 +770,8 @@ function AutoWinterSection() {
 
             {/* Warning */}
             <div className="text-xs bg-yellow-900/30 text-text-primary px-3 py-2 rounded-lg">
-              Winter mode charges the battery using grid power when solar is insufficient.
-              Your existing charge schedule will be restored when the battery warms up.
+              Charges for 30 minutes at a time while the battery is cold, up to your normal
+              charge target. Charge slot 1 is put back when the battery warms up.
             </div>
           </>
         )}
@@ -773,8 +781,10 @@ function AutoWinterSection() {
             Runs in this app, not the GivEnergy cloud — keep it running.{' '}
             <HelpTip label="Cold Battery Protection">
               This is implemented locally within this app — it monitors battery temperature via
-              Modbus and forces charging when the battery gets cold. It does not use GivEnergy's
-              cloud-based winter mode. The app must stay running for it to work.
+              Modbus and charges the battery for 30 minutes at a time while it is cold, using
+              charge slot 1 and putting it back afterwards. It never changes your charge target.
+              It does not use GivEnergy's cloud-based winter mode. The app must stay running for
+              it to work.
             </HelpTip>
           </div>
         )}

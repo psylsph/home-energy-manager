@@ -223,6 +223,10 @@ pub struct Inputs {
     /// Spread Charge holds the limit down (issue #508), else `None` and the
     /// reading stands.
     pub charge_rate_baseline: Option<u8>,
+    /// Slot 1 and the charge flag to put back at the end: what a winter
+    /// burst replaced while one holds slot 1 (issue #515), else `None` and
+    /// the reading stands.
+    pub slot_one_baseline: Option<crate::inverter::auto_winter::SlotOneBaseline>,
 }
 
 /// One poll's result.
@@ -403,7 +407,11 @@ pub fn step(shared: &mut DispatchChargeShared, snap: &InverterSnapshot, inputs: 
             shared.reason = Some(reason);
             return Step::default();
         }
-        let Some(mut revert) = force_charge_revert_from_snapshot(snap, snap.device_type) else {
+        let capture = match inputs.slot_one_baseline {
+            Some(baseline) => baseline.apply(snap),
+            None => snap.clone(),
+        };
+        let Some(mut revert) = force_charge_revert_from_snapshot(&capture, snap.device_type) else {
             shared.reason = Some(Reason::NoIdentity);
             return Step::default();
         };
@@ -776,6 +784,7 @@ mod tests {
             host_minute: 14 * 60,
             inverter_minute: 14 * 60,
             charge_rate_baseline: None,
+            slot_one_baseline: None,
         }
     }
 
@@ -834,6 +843,26 @@ mod tests {
         }
         assert!(shared.charging());
         assert_eq!(shared.state_code(), "charging");
+    }
+
+    #[test]
+    fn the_slot_one_baseline_is_the_one_a_winter_burst_replaced() {
+        // Issue #515: slot 1 holds a 30-minute burst when the top-up starts;
+        // the end must put back the user's slot and flag, not HEM's window.
+        let mut shared = DispatchChargeShared::default();
+        let under_burst = Inputs {
+            slot_one_baseline: Some(crate::inverter::auto_winter::SlotOneBaseline {
+                start: 100,
+                end: 400,
+                enable_charge: false,
+            }),
+            ..inputs()
+        };
+        assert!(step(&mut shared, &held(), under_burst).started);
+        let revert = &shared.run.as_ref().unwrap().revert;
+        assert_eq!(revert.charge_slot_1_start, Some((1, 0)));
+        assert_eq!(revert.charge_slot_1_end, Some((4, 0)));
+        assert!(!revert.enable_charge);
     }
 
     #[test]

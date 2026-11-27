@@ -535,6 +535,10 @@ pub(crate) async fn hem_owns_schedule(
     if state.timed_export_config.lock().await.schedule_enabled {
         return Some("the Timed Export schedule");
     }
+    // A winter burst borrows charge slot 1 (issue #515) until it is put back.
+    if state.auto_winter_run.lock().await.burst.is_some() {
+        return Some("Auto Winter Mode");
+    }
     None
 }
 
@@ -1127,5 +1131,29 @@ mod tests {
         assert!(text.contains("Control"));
         assert!(text.contains("Dongle Security"));
         assert!(text.contains("November"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_winter_burst_owns_the_schedule_until_it_is_put_back() {
+        // Issue #515: three 30-minute bursts would otherwise be adopted as
+        // the user's slot 1, and a Restore after a reset would put them back.
+        let state = Arc::new(AppState::new());
+        assert_eq!(hem_owns_schedule(&state, None).await, None);
+        state.auto_winter_run.lock().await.burst =
+            Some(crate::inverter::auto_winter::AutoWinterBurst {
+                serial: "SN1".into(),
+                baseline_start: 2330,
+                baseline_end: 530,
+                baseline_enable_charge: true,
+                start: 1410,
+                end: 1440,
+                ends_at: 0,
+                resends: 0,
+                previous: None,
+            });
+        assert_eq!(
+            hem_owns_schedule(&state, None).await,
+            Some("Auto Winter Mode")
+        );
     }
 }

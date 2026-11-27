@@ -168,7 +168,7 @@ pub struct AppState {
     pub connected_clients: Arc<parking_lot::Mutex<ConnectedClients>>,
     pub auto_winter_config: Arc<Mutex<AutoWinterConfig>>,
     pub auto_winter_state: Arc<Mutex<AutoWinterState>>,
-    pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
+    pub auto_winter_run: Arc<Mutex<AutoWinterRun>>,
 }
 ```
 

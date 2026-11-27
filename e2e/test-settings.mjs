@@ -99,9 +99,8 @@ export async function writeTestSettings(overrides) {
 
     // -- Auto winter / load limiter (off — we test these explicitly) --
     auto_winter_enabled: false,
-    auto_winter_cold_threshold: 8.0,
-    auto_winter_recovery_threshold: 12.0,
-    auto_winter_target_soc: 80,
+    auto_winter_cold_threshold: 2.0,
+    auto_winter_recovery_threshold: 3.0,
     auto_winter_debounce_readings: 10,
     auto_winter_saved_enable_target: null,
     auto_winter_saved_target_soc: null,

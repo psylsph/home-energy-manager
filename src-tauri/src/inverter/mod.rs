@@ -5,6 +5,7 @@
 
 pub(crate) mod agile;
 pub(crate) mod auto_discovery;
+pub mod auto_winter;
 pub(crate) mod battery_reads;
 pub mod calibration;
 pub mod charge_cap;

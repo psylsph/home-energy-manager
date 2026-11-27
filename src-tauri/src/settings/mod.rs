@@ -1355,9 +1355,6 @@ pub struct Settings {
     /// Temperature above which winter mode deactivates (°C).
     #[serde(default = "default_aw_recovery_threshold")]
     pub auto_winter_recovery_threshold: f32,
-    /// Target SOC for winter mode charging (4-100%).
-    #[serde(default = "default_aw_target_soc")]
-    pub auto_winter_target_soc: u8,
     /// Consecutive readings before state transitions.
     #[serde(default = "default_aw_debounce")]
     pub auto_winter_debounce_readings: u32,
@@ -1427,13 +1424,19 @@ pub struct Settings {
     #[serde(default)]
     pub agile_state_persisted: String,
 
-    /// Persisted `enable_charge_target` saved before winter mode activated.
-    /// `Some` means winter mode was active when the last state was saved.
+    /// The charge target Auto Winter Mode saved before issue #515, when it
+    /// raised the target instead of charging in bursts. Read once after an
+    /// update, to put an active run's target back, then cleared. Never
+    /// written by the current mode.
     #[serde(default)]
     pub auto_winter_saved_enable_target: Option<bool>,
-    /// Persisted `target_soc` saved before winter mode activated.
     #[serde(default)]
     pub auto_winter_saved_target_soc: Option<u16>,
+    /// Charge slot 1 and the charge flag as they were before Auto Winter
+    /// Mode's first charge burst, to put back. `Some` while a burst may be
+    /// on the inverter.
+    #[serde(default)]
+    pub auto_winter_burst: Option<crate::inverter::auto_winter::AutoWinterBurst>,
 
     // -- Load discharge limiter --
     /// Whether the load discharge limiter is enabled.
@@ -1980,14 +1983,15 @@ fn default_export_tariff() -> f64 {
     0.15
 }
 
+/// GivEnergy's own winter mode starts below about 2 °C. It has to start above
+/// 0 °C: the BMS refuses to charge below that, so a charge could not warm it.
 fn default_aw_cold_threshold() -> f32 {
-    8.0
+    2.0
 }
+/// A night's charge warms the battery well past this, so one degree above the
+/// cold threshold is enough to stand down.
 fn default_aw_recovery_threshold() -> f32 {
-    12.0
-}
-fn default_aw_target_soc() -> u8 {
-    80
+    3.0
 }
 fn default_aw_debounce() -> u32 {
     10
@@ -2306,10 +2310,10 @@ impl Default for Settings {
             auto_winter_enabled: false,
             auto_winter_cold_threshold: default_aw_cold_threshold(),
             auto_winter_recovery_threshold: default_aw_recovery_threshold(),
-            auto_winter_target_soc: default_aw_target_soc(),
             auto_winter_debounce_readings: default_aw_debounce(),
             auto_winter_saved_enable_target: None,
             auto_winter_saved_target_soc: None,
+            auto_winter_burst: None,
             load_limiter_enabled: false,
             load_limiter_threshold_w: default_ll_threshold(),
             load_limiter_trigger_delay_minutes: default_ll_trigger_delay(),
@@ -2531,6 +2535,26 @@ impl Settings {
     /// scrubbed: `.bak` is rewritten with the migrated content so the
     /// rollback point survives without the secret, and `.corrupt`/`.tmp`
     /// copies are deleted.
+    /// Auto Winter thresholds saved by an older version, brought into the
+    /// slider ranges (issue #515). In memory: the file catches up on the next
+    /// save, and every reader goes through [`Self::load`].
+    fn normalise_auto_winter_thresholds(&mut self) {
+        let saved = (
+            self.auto_winter_cold_threshold,
+            self.auto_winter_recovery_threshold,
+        );
+        let (cold, recovery) = crate::inverter::auto_winter::normalise_thresholds(saved.0, saved.1);
+        if (cold, recovery) != saved {
+            tracing::info!(
+                "Auto winter: thresholds {}/{} °C from an older version are now {cold}/{recovery} °C",
+                saved.0,
+                saved.1
+            );
+            self.auto_winter_cold_threshold = cold;
+            self.auto_winter_recovery_threshold = recovery;
+        }
+    }
+
     pub fn migrate_legacy_api_key(&mut self) -> Result<(), String> {
         let legacy = self.authenticating_secret();
         self.apply_legacy_migration();
@@ -2643,9 +2667,10 @@ impl Settings {
     pub fn load() -> Self {
         let path = Self::settings_path();
         match fs::read_to_string(&path) {
-            Ok(content) => match serde_json::from_str(&content) {
-                Ok(settings) => {
+            Ok(content) => match serde_json::from_str::<Self>(&content) {
+                Ok(mut settings) => {
                     tracing::debug!("Loaded settings from {}", path.display());
+                    settings.normalise_auto_winter_thresholds();
                     settings
                 }
                 Err(e) => {
@@ -2792,7 +2817,7 @@ impl Settings {
         let mut settings = Self::load();
         // Snapshot before mutation so a no-op closure doesn't touch the
         // file (mtime churn, backup churn, extra fsync). This covers the
-        // `persist_auto_winter_saved` steady-state poll where winter mode
+        // `persist_auto_winter_run` steady-state poll where winter mode
         // isn't transitioning but `update()` is still called — the file
         // must stay untouched unless the two winter fields actually change.
         let before = serde_json::to_string(&settings)
@@ -2880,12 +2905,15 @@ mod tests {
         assert!(s.evc_host.is_empty());
         assert_eq!(s.evc_port, 502);
         assert!(!s.auto_winter_enabled);
-        assert_eq!(s.auto_winter_cold_threshold, 8.0);
-        assert_eq!(s.auto_winter_recovery_threshold, 12.0);
-        assert_eq!(s.auto_winter_target_soc, 80);
+        // GivEnergy's own winter mode starts below about 2 degrees; recovery
+        // is a degree above, since a night's charge warms the battery well
+        // past it.
+        assert_eq!(s.auto_winter_cold_threshold, 2.0);
+        assert_eq!(s.auto_winter_recovery_threshold, 3.0);
         assert_eq!(s.auto_winter_debounce_readings, 10);
         assert_eq!(s.auto_winter_saved_enable_target, None);
         assert_eq!(s.auto_winter_saved_target_soc, None);
+        assert_eq!(s.auto_winter_burst, None);
         assert!(!s.load_limiter_enabled);
         assert_eq!(s.load_limiter_threshold_w, 3000);
         assert_eq!(s.load_limiter_trigger_delay_minutes, 5);
@@ -3035,6 +3063,67 @@ mod tests {
     }
 
     #[test]
+    fn auto_winter_thresholds_from_older_versions_load_in_range() {
+        // Issue #515: with bursts, the old 8/12 defaults would grid-charge
+        // all day below 8 °C, and the sliders can't show 12.
+        crate::test_util::with_isolated_config_dir(|| {
+            for (saved, loaded) in [
+                ((8.0, 12.0), (2.0, 3.0)),
+                ((5.0, 12.0), (5.0, 10.0)),
+                ((12.0, 15.0), (9.0, 10.0)),
+                ((4.0, 6.0), (4.0, 6.0)),
+            ] {
+                let s = Settings {
+                    auto_winter_cold_threshold: saved.0,
+                    auto_winter_recovery_threshold: saved.1,
+                    ..Default::default()
+                };
+                s.save().expect("save");
+                let s = Settings::load();
+                assert_eq!(
+                    (
+                        s.auto_winter_cold_threshold,
+                        s.auto_winter_recovery_threshold
+                    ),
+                    loaded,
+                    "saved {saved:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn settings_saved_with_the_old_auto_winter_target_still_load() {
+        // Before issue #515 the mode kept a Target SOC of its own. Old
+        // settings files still carry it; it is ignored, and the saved
+        // register values it left behind are kept for the one-off put-back.
+        let legacy = r#"{
+            "host": "192.168.1.50",
+            "port": 8899,
+            "serial": "",
+            "poll_interval": 60,
+            "auto_connect": true,
+            "import_tariff": 0.285,
+            "export_tariff": 0.15,
+            "hidden_panels": [],
+            "evc_host": "",
+            "disable_auto_discovery": true,
+            "auto_winter_enabled": true,
+            "auto_winter_cold_threshold": 8.0,
+            "auto_winter_recovery_threshold": 12.0,
+            "auto_winter_target_soc": 20,
+            "auto_winter_saved_enable_target": false,
+            "auto_winter_saved_target_soc": 100
+        }"#;
+        let decoded: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.auto_winter_enabled);
+        assert_eq!(decoded.auto_winter_cold_threshold, 8.0);
+        assert_eq!(decoded.auto_winter_saved_enable_target, Some(false));
+        assert_eq!(decoded.auto_winter_saved_target_soc, Some(100));
+        assert_eq!(decoded.auto_winter_burst, None);
+    }
+
+    #[test]
     fn settings_roundtrip() {
         let s = Settings {
             host: "10.0.0.50".to_string(),
@@ -3050,10 +3139,20 @@ mod tests {
             auto_winter_enabled: true,
             auto_winter_cold_threshold: 5.0,
             auto_winter_recovery_threshold: 10.0,
-            auto_winter_target_soc: 90,
             auto_winter_debounce_readings: 5,
             auto_winter_saved_enable_target: Some(true),
             auto_winter_saved_target_soc: Some(80),
+            auto_winter_burst: Some(crate::inverter::auto_winter::AutoWinterBurst {
+                serial: "SN1".into(),
+                baseline_start: 2330,
+                baseline_end: 530,
+                baseline_enable_charge: true,
+                start: 1410,
+                end: 1440,
+                ends_at: 1_800_000_000,
+                resends: 1,
+                previous: Some((1340, 1410)),
+            }),
             load_limiter_enabled: true,
             load_limiter_threshold_w: 5000,
             load_limiter_trigger_delay_minutes: 10,
@@ -3227,10 +3326,10 @@ mod tests {
         assert!(decoded.auto_winter_enabled);
         assert_eq!(decoded.auto_winter_cold_threshold, 5.0);
         assert_eq!(decoded.auto_winter_recovery_threshold, 10.0);
-        assert_eq!(decoded.auto_winter_target_soc, 90);
         assert_eq!(decoded.auto_winter_debounce_readings, 5);
         assert_eq!(decoded.auto_winter_saved_enable_target, Some(true));
         assert_eq!(decoded.auto_winter_saved_target_soc, Some(80));
+        assert_eq!(decoded.auto_winter_burst, s.auto_winter_burst);
         assert!(decoded.load_limiter_enabled);
         assert_eq!(decoded.load_limiter_threshold_w, 5000);
         assert_eq!(decoded.load_limiter_trigger_delay_minutes, 10);
@@ -3952,10 +4051,10 @@ mod tests {
             auto_winter_enabled: false,
             auto_winter_cold_threshold: 8.0,
             auto_winter_recovery_threshold: 12.0,
-            auto_winter_target_soc: 80,
             auto_winter_debounce_readings: 10,
             auto_winter_saved_enable_target: None,
             auto_winter_saved_target_soc: None,
+            auto_winter_burst: None,
             load_limiter_enabled: false,
             load_limiter_threshold_w: 3000,
             load_limiter_trigger_delay_minutes: 5,
